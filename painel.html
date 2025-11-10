@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>CryptoGPT Painel - Scalping / 5min</title>
+<style>
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden; /* remove rolagem */
+  background-color: #111;
+  color: #fff;
+  font-family: Arial, sans-serif;
+}
+
+h2 {
+  margin: 8px;
+  font-weight: 400;
+}
+
+#menu {
+  padding: 8px;
+}
+
+button {
+  background-color: #222;
+  color: #0ff;
+  border: 1px solid #0ff;
+  padding: 8px 16px;
+  margin-right: 8px;
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 14px;
+}
+button:hover {
+  background-color: #0ff;
+  color: #111;
+}
+
+#chart-area {
+  width: 100vw;
+  height: calc(100vh - 90px); /* usa a tela inteira */
+}
+</style>
+</head>
+<body>
+
+<h2>📊 CryptoGPT — Gráfico ao vivo (Scalping / 5min)</h2>
+
+<div id="menu">
+  <button onclick="changeSymbol('BINANCE:BTCUSDT')">BTC</button>
+  <button onclick="changeSymbol('BINANCE:ETHUSDT')">ETH</button>
+  <button onclick="changeSymbol('BINANCE:ADAUSDT')">ADA</button>
+  <button onclick="changeSymbol('BINANCE:SOLUSDT')">SOL</button>
+  <button onclick="changeSymbol('BINANCE:XRPUSDT')">XRP</button>
+</div>
+
+<div id="chart-area"></div>
+
+<script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+<script>
+let widget;
+
+function changeSymbol(symbol) {
+  if (widget) widget.remove();
+
+  widget = new TradingView.widget({
+    "container_id": "chart-area",
+    "width": "100%",
+    "height": "100%",
+    "symbol": symbol,
+    "interval": "5",
+    "timezone": "America/Sao_Paulo",
+    "theme": "dark",
+    "style": "1",
+    "locale": "br",
+    "hide_side_toolbar": false,
+    "allow_symbol_change": true,
+    "enable_publishing": false,
+  });
+}
+
+// carrega BTC primeiro
+changeSymbol("BINANCE:BTCUSDT");
+</script>
+
+</body>
+</html>
