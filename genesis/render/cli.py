@@ -52,8 +52,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fps", type=int, default=24, help="frames por segundo (MP4)")
     p.add_argument("--fov", type=float, default=32.0, help="FOV vertical da camera (graus)")
     p.add_argument(
+        "--exposure", type=float, default=0.0,
+        help="exposicao em stops (EV); negativo escurece (ex.: -2.0 se estourar branco)",
+    )
+    p.add_argument(
         "--frame-fraction", type=float, default=0.45,
-        help="fracao da altura do sujeito no enquadramento (busto ~0.45)",
+        help="fracao da altura do sujeito no enquadramento (busto ~0.45; 1.0 = objeto inteiro)",
     )
     p.add_argument("--transparent", action="store_true", help="fundo transparente (film transparent)")
     p.add_argument(
@@ -76,6 +80,7 @@ def _config_from_args(args: argparse.Namespace) -> RenderConfig:
         frame_end=args.frame_end,
         fps=args.fps,
         film_transparent=args.transparent,
+        exposure=args.exposure,
         camera_vertical_fov_deg=args.fov,
         frame_height_fraction=args.frame_fraction,
         allow_placeholder=args.placeholder,
