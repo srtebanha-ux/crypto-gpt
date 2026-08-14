@@ -186,13 +186,32 @@ class MitsubaRenderer:
 
     @staticmethod
     def select_variant(mi) -> str:
-        """Escolhe a melhor variante disponível: LLVM (CPU) → escalar → CUDA."""
-        available = set(mi.variants())
+        """Ativa a melhor variante que **realmente inicializa**: LLVM → escalar → CUDA.
+
+        Estar listada em ``mi.variants()`` não garante que a variante ativa: o
+        backend ``llvm`` só inicializa se a ``libLLVM`` estiver presente, e o
+        ``cuda`` exige GPU NVIDIA. Por isso tentamos ``set_variant`` de fato e, se
+        a ativação falhar (ex.: ``libLLVM.dylib`` ausente no macOS), caímos para a
+        próxima — ``scalar_rgb`` sempre funciona (CPU, sem JIT), só é mais lento.
+        """
+        available = mi.variants()
+        errors: list[str] = []
         for variant in ("llvm_ad_rgb", "scalar_rgb", "cuda_ad_rgb"):
-            if variant in available:
+            if variant not in available:
+                continue
+            try:
                 mi.set_variant(variant)
+                if variant == "scalar_rgb":
+                    LOG.warning(
+                        "[NEXUS-MITSUBA] usando 'scalar_rgb' (CPU escalar) — o "
+                        "backend LLVM não pôde iniciar; o render será mais lento."
+                    )
                 return variant
-        raise MitsubaRenderError(f"nenhuma variante suportada em {sorted(available)}")
+            except Exception as exc:  # noqa: BLE001 - tenta a próxima variante
+                errors.append(f"{variant}: {str(exc).splitlines()[0]}")
+        raise MitsubaRenderError(
+            "nenhuma variante do Mitsuba pôde ser ativada — " + " | ".join(errors)
+        )
 
     def _to_mitsuba_dict(self, mi, desc: dict) -> dict:
         """Converte a descrição pura no dicionário de cena do Mitsuba."""
