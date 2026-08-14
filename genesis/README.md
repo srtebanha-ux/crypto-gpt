@@ -1,9 +1,20 @@
-# Pipeline Gênesis — Módulo 2: Retopologia Genética
+# Pipeline Gênesis
 
-Módulo **autônomo** de cura de malhas 3D (`.obj`) para o pipeline de animação da
-banda virtual MoonSilver. Cura a geometria caótica que motores generativos
-produzem — vértices duplicados, faces degeneradas, buracos — transformando-a em
-uma malha **water-tight** e **manifold**, pronta para rigging.
+Infraestrutura de animação 3D da banda virtual **MoonSilver** (Zane, Vance, Leo).
+Cada módulo é **autônomo** (só `numpy` obrigatório) e não importa os demais.
+
+| Módulo | O quê | Onde |
+|--------|-------|------|
+| **2 — Retopologia Genética** | cura a malha bruta → water-tight/manifold | este diretório |
+| **3 — Esqueletização (Rigging/IK)** | injeta esqueleto e articula com IK | [`rig/`](rig/README.md) |
+
+---
+
+## Módulo 2: Retopologia Genética
+
+Módulo **autônomo** de cura de malhas 3D (`.obj`). Cura a geometria caótica que
+motores generativos produzem — vértices duplicados, faces degeneradas, buracos —
+transformando-a em uma malha **water-tight** e **manifold**, pronta para rigging.
 
 ## Autonomia e dependências
 
