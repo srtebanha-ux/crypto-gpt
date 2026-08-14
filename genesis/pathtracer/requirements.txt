@@ -1,0 +1,3 @@
+# Etapa 4 (Motor de Luz Puro) — render por path-tracing, sem Blender
+numpy>=1.24
+mitsuba>=3.5    # motor de render cientifico em Python (CPU LLVM / GPU CUDA)

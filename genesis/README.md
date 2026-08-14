@@ -10,6 +10,7 @@ Cada módulo é **autônomo** (só `numpy` obrigatório) e não importa os demai
 | **Acoplador Matemático** | cola props (guitarra) via matriz afim, sem Blender | [`coupler/`](coupler/README.md) |
 | **5 — Motor Fantasma (Render headless)** | Cycles/Metal headless → PNG/MP4 | [`render/`](render/README.md) |
 | **Cenário Procedural (Palco)** | palco de show em bpy → render | [`stage/`](stage/README.md) |
+| **Etapa 4 — Motor de Luz (Mitsuba 3)** | path-tracing puro, sem Blender → PNG | [`pathtracer/`](pathtracer/README.md) |
 
 ---
 
