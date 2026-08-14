@@ -15,6 +15,12 @@ from .normalize import (
     recenter_and_floor,
     scale_to_height,
 )
+from .visual_hull import (
+    build_actor_from_images,
+    carve,
+    extract_silhouette,
+    voxels_to_mesh,
+)
 
 __all__ = [
     "normalize_actor",
@@ -24,4 +30,9 @@ __all__ = [
     "ingest_actor",
     "load_any",
     "IngestResult",
+    # Visual Hull (código bruto, imagem→3D sem terceiros)
+    "build_actor_from_images",
+    "extract_silhouette",
+    "carve",
+    "voxels_to_mesh",
 ]

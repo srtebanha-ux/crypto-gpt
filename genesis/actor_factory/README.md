@@ -33,15 +33,31 @@ python -m genesis.coupler.cli --character exports/zane.obj --prop exports/guitar
 python -m genesis.pathtracer.cli --input exports/zane_com_guitarra.obj --out renders/zane.png
 ```
 
-## Como conseguir o modelo bruto (a partir das imagens 2D)
+## Imagem→3D em código bruto (Visual Hull) — sem terceiros
 
-Os geradores imagem→3D reconstroem melhor com **fundo neutro** e **múltiplas
-vistas** (frente, lado, costas). Suba as imagens do personagem no Tripo/Meshy
-(web, com plano gratuito), baixe o `.glb`/`.obj`, e passe pela Fábrica.
+Para reconstruir sem rede neural nem serviço externo, use o **Shape-from-Silhouette**
+(`hull_cli`): esculpe a malha das silhuetas (frente/lado/costas) por interseção de
+cones de visão (voxel carving) — só `numpy` + `Pillow` (este último só lê pixels).
 
-> A integração automática por **API** (a "Fábrica" hands-off) exige uma chave paga
-> do provedor; este módulo já cobre a parte de ingestão/normalização, que é a
-> mesma independentemente de como o modelo bruto foi obtido.
+```bash
+python -m genesis.actor_factory.hull_cli \
+    --front img/zane_frente.png --side img/zane_lado.png --back img/zane_costas.png \
+    --out exports/zane.obj --resolution 128
+```
+
+**Requisitos das imagens:** fundo **neutro/liso** (a silhueta é extraída por
+distância de cor) e as vistas na **mesma altura de personagem**.
+
+**Limite honesto:** o visual hull captura o *envelope* das silhuetas — não escava
+concavidades (vão entre braço e tronco) nem detalha o rosto. Sai um manequim com
+a proporção certa (ótimo como base de rig), **não** o render fotorealista.
+
+### Alternativa polida (rede neural de terceiro)
+
+Se quiser qualidade fotorealista, os geradores imagem→3D (Tripo/Meshy) usam redes
+treinadas; suba as imagens no site deles, baixe o `.glb`/`.obj`, e passe pela
+ingestão (`cli`, acima). Custo: depende de serviço externo — o oposto do
+Visual Hull, que é 100% nosso.
 
 ## Testes
 
