@@ -7,6 +7,7 @@ Cada módulo é **autônomo** (só `numpy` obrigatório) e não importa os demai
 |--------|-------|------|
 | **2 — Retopologia Genética** | cura a malha bruta → water-tight/manifold | este diretório |
 | **3 — Esqueletização (Rigging/IK)** | injeta esqueleto e articula com IK | [`rig/`](rig/README.md) |
+| **5 — Motor Fantasma (Render headless)** | Cycles/Metal headless → PNG/MP4 | [`render/`](render/README.md) |
 
 ---
 

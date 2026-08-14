@@ -1,0 +1,4 @@
+# Modulo 5 (Motor Fantasma / Renderizador Headless)
+# Blender como biblioteca Python. O wheel casa com a versao do interpretador
+# (ex.: bpy para CPython 3.11). Em Apple Silicon traz o backend Metal embutido.
+bpy>=4.0
