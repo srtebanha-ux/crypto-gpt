@@ -12,17 +12,38 @@ set -euo pipefail
 
 ASSET="${1:-exports/moonsilver_zane_purificado.obj}"
 VENV=".venv-genesis"
-PY="${PYTHON:-python3.11}"
 
-echo "[setup] verificando Python 3.11 (necessário para o wheel do bpy)..."
-if ! command -v "$PY" >/dev/null 2>&1; then
-  echo "[setup] ERRO: '$PY' não encontrado."
+echo "[setup] procurando Python 3.11 (necessário para o wheel do bpy)..."
+# Procura o interpretador 3.11 em: variável PYTHON, no PATH, e nos caminhos
+# padrão do Homebrew (Apple Silicon em /opt/homebrew, Intel em /usr/local).
+CANDIDATES=(
+  "${PYTHON:-}"
+  "python3.11"
+  "/opt/homebrew/opt/python@3.11/bin/python3.11"
+  "/usr/local/opt/python@3.11/bin/python3.11"
+)
+if command -v brew >/dev/null 2>&1; then
+  CANDIDATES+=("$(brew --prefix 2>/dev/null)/opt/python@3.11/bin/python3.11")
+fi
+
+PY=""
+for cand in "${CANDIDATES[@]}"; do
+  [[ -z "$cand" ]] && continue
+  if command -v "$cand" >/dev/null 2>&1 \
+     && "$cand" -c 'import sys; sys.exit(0 if sys.version_info[:2]==(3,11) else 1)' 2>/dev/null; then
+    PY="$cand"
+    break
+  fi
+done
+
+if [[ -z "$PY" ]]; then
+  echo "[setup] ERRO: Python 3.11 não encontrado (o bpy 4.x exige exatamente 3.11)."
   echo "        Instale com:  brew install python@3.11"
-  echo "        Ou aponte outro:  PYTHON=/caminho/para/python3.11 bash $0"
+  echo "        Depois é só rodar de novo:  bash $0"
+  echo "        (Ou aponte manualmente:  PYTHON=/caminho/para/python3.11 bash $0)"
   exit 1
 fi
-"$PY" -c 'import sys; assert sys.version_info[:2]==(3,11), sys.version' \
-  || { echo "[setup] ERRO: o bpy 4.x precisa exatamente de Python 3.11."; exit 1; }
+echo "[setup] usando: $PY  ($("$PY" --version 2>&1))"
 
 echo "[setup] criando venv em $VENV ..."
 "$PY" -m venv "$VENV"
