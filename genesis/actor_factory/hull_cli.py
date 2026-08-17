@@ -20,7 +20,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from .visual_hull import build_actor_from_images
+from pathlib import Path as _Path
+
+from .visual_hull import build_actor_from_images, extract_silhouette, save_mask
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -39,6 +41,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--flip-depth", action="store_true", help="inverte a profundidade (lado espelhado)")
     p.add_argument("--close", type=int, default=1, help="iteracoes de fechamento morfologico")
     p.add_argument("--keep-all", action="store_true", help="nao descarta cacos (mantem todos componentes)")
+    p.add_argument(
+        "--save-masks", action="store_true",
+        help="salva as silhuetas extraidas em renders/mask_*.png e sai (diagnostico)",
+    )
     return p
 
 
@@ -49,6 +55,21 @@ def main(argv: list[str] | None = None) -> int:
         if path and not Path(path).exists():
             print(f"erro: {label} não encontrado: {path}", file=sys.stderr)
             return 2
+
+    if args.save_masks:
+        out_dir = _Path("renders")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for label, path in (("frente", args.front), ("lado", args.side), ("costas", args.back)):
+            if not path:
+                continue
+            mask = extract_silhouette(path, threshold=args.threshold)
+            dest = out_dir / f"mask_{label}.png"
+            save_mask(mask, dest)
+            cover = 100.0 * mask.mean()
+            print(f"[MASK] {label}: {dest}  (frente cobre {cover:.1f}% da imagem)")
+        print(">> abra renders/mask_*.png — o personagem deve ser branco em fundo preto")
+        return 0
+
     try:
         mesh = build_actor_from_images(
             front_path=args.front,

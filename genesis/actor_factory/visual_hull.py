@@ -62,6 +62,13 @@ def extract_silhouette(
     return mask
 
 
+def save_mask(mask: BoolMask, path: str | Path) -> None:
+    """Grava uma silhueta booleana como PNG (branco=frente) para diagnóstico."""
+    from PIL import Image
+
+    Image.fromarray((np.asarray(mask) * 255).astype(np.uint8), mode="L").save(path)
+
+
 def _largest_component(mask: BoolMask) -> BoolMask:
     """Mantém o componente conexo (4-conectividade) que mais cobre a coluna central.
 
