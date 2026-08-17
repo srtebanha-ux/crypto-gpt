@@ -287,7 +287,17 @@ class MitsubaRenderer:
         LOG.info("[NEXUS-MITSUBA] medindo sujeito (%s)", cfg.input_mesh.name)
         mesh = Mesh.load_obj(cfg.input_mesh)
         center, dims = measure_mesh(mesh)
+        LOG.info(
+            "[NEXUS-MITSUBA]   bbox: centro=(%.2f, %.2f, %.2f) dims=(%.2f larg, %.2f prof, %.2f alt)",
+            center[0], center[1], center[2], dims[0], dims[1], dims[2],
+        )
         desc = describe_scene(cfg, center, dims)
+        s = desc["sensor"]
+        LOG.info(
+            "[NEXUS-MITSUBA]   câmera=(%.2f, %.2f, %.2f) alvo=(%.2f, %.2f, %.2f)",
+            s["origin"][0], s["origin"][1], s["origin"][2],
+            s["target"][0], s["target"][1], s["target"][2],
+        )
 
         mi = self._import_mitsuba()
         variant = self.select_variant(mi)
