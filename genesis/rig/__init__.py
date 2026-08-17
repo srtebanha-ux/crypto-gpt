@@ -26,10 +26,16 @@ from .quaternion import (
 )
 from .skeleton import Joint, Skeleton
 from .skinning import dual_quaternion_skinning, linear_blend_skinning, build_test_cylinder
+from .autorig import POSES, Rig, build_rig, humanoid_skeleton, pose
 
 __all__ = [
     "Joint",
     "Skeleton",
+    "humanoid_skeleton",
+    "build_rig",
+    "pose",
+    "Rig",
+    "POSES",
     "solve_two_bone",
     "solve_fabrik",
     "solve_ccd",

@@ -50,9 +50,32 @@ res = solve_two_bone(p[0], p[1], p[2], np.array([0.6, 0.2, 0.3]), pole=[0, 0, 1]
 print(np.degrees(res.interior_angle), "graus no cotovelo")
 ```
 
+## Auto-rig: esqueletar e posar uma malha real
+
+`autorig.py` liga os primitivos acima a um personagem inteiro (ex.: o manequim do
+visual hull): monta um **esqueleto humanoide** ajustado à altura, calcula **pesos
+de skinning** por proximidade aos ossos, e **posa** a malha deformando-a por DQS.
+
+```bash
+# lista as poses (a-pose, wave, guitar)
+python -m genesis.rig.pose_cli --input exports/zane.obj --list
+
+# posa o Zane acenando e exporta a malha deformada
+python -m genesis.rig.pose_cli --input exports/zane.obj --pose wave \
+    --out exports/zane_wave.obj
+
+# renderiza a pose no nosso motor
+python -m genesis.pathtracer.cli --input exports/zane_wave.obj \
+    --out renders/zane_wave.png --samples 24 --exposure -0.5
+```
+
+Pesos: `w_ij ∝ 1/dist(vértice, osso)^p` (os `keep` ossos mais próximos,
+normalizados). Posagem: rotações locais → FK → transformação rígida bind→pose por
+osso → DQS (preserva volume nas juntas dobradas).
+
 ## Testes
 
 ```bash
-python -m genesis.tests.test_rig     # 11 testes, sem pytest
-pytest genesis/tests/test_rig.py
+python -m genesis.tests.test_rig       # 11 testes (primitivos)
+python -m genesis.tests.test_autorig   # 5 testes (esqueleto, skinning, pose)
 ```
