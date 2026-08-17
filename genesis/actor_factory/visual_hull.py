@@ -38,13 +38,17 @@ BoolMask = NDArray[np.bool_]
 
 # ------------------------------------------------------- extração de silhueta
 def extract_silhouette(
-    image_path: str | Path, threshold: float = 0.18, keep_largest: bool = True
+    image_path: str | Path,
+    threshold: float = 0.18,
+    keep_largest: bool = True,
+    drop_ground: bool = True,
 ) -> BoolMask:
     """Máscara booleana do personagem (True=frente) por distância do fundo.
 
     O fundo é estimado pela mediana dos 4 cantos; um pixel é frente se sua cor
     dista mais que ``threshold`` (0..1) do fundo. ``keep_largest`` mantém só o
-    maior blob conexo — remove faixas de título, marca d'água e ruído de fundo.
+    maior blob conexo (remove título/marca d'água); ``drop_ground`` remove a poça
+    de chão/sombra na base.
     """
     from PIL import Image
 
@@ -57,9 +61,35 @@ def extract_silhouette(
     bg = np.median(corners, axis=0)
     dist = np.linalg.norm(rgb - bg, axis=2)
     mask = dist > threshold
+    if drop_ground and mask.any():
+        mask = remove_ground(mask)
     if keep_largest and mask.any():
         mask = _largest_component(mask)
     return mask
+
+
+def remove_ground(mask: BoolMask) -> BoolMask:
+    """Remove a 'poça' do chão/sombra na base da silhueta.
+
+    O piso capturado espalha-se muito mais largo que o corpo nas linhas de baixo.
+    Cortamos as linhas do terço inferior cuja largura excede ~2.5× a largura
+    típica do tronco — some o chão, ficam os pés (estreitos).
+    """
+    widths = mask.sum(axis=1).astype(np.float64)
+    rows = np.nonzero(widths)[0]
+    if len(rows) < 4:
+        return mask
+    top, bottom = int(rows[0]), int(rows[-1])
+    body_h = max(bottom - top, 1)
+    mid = widths[top + int(0.30 * body_h): top + int(0.70 * body_h)]
+    typical = float(np.median(mid[mid > 0])) if np.any(mid > 0) else 0.0
+    if typical <= 0:
+        return mask
+    wide = widths > 2.5 * typical
+    wide[: bottom - int(0.20 * body_h)] = False  # protege o corpo (braços abertos)
+    out = mask.copy()
+    out[wide, :] = False
+    return out
 
 
 def save_mask(mask: BoolMask, path: str | Path) -> None:
@@ -271,6 +301,7 @@ def build_actor_from_images(
     flip_depth: bool = False,
     close_iterations: int = 1,
     keep_largest: bool = True,
+    drop_ground: bool = True,
     output_path: str | Path | None = None,
 ) -> Mesh:
     """Pipeline completo: silhuetas → visual hull → limpeza → Taubin → ``.obj``.
@@ -283,9 +314,9 @@ def build_actor_from_images(
     from ..retopology import laplacian_smooth
     from .normalize import normalize_actor
 
-    front = extract_silhouette(front_path, threshold)
-    side = extract_silhouette(side_path, threshold)
-    back = extract_silhouette(back_path, threshold) if back_path else None
+    front = extract_silhouette(front_path, threshold, drop_ground=drop_ground)
+    side = extract_silhouette(side_path, threshold, drop_ground=drop_ground)
+    back = extract_silhouette(back_path, threshold, drop_ground=drop_ground) if back_path else None
 
     occ = carve(front, side, back, resolution=resolution, flip_depth=flip_depth)
     if not occ.any():

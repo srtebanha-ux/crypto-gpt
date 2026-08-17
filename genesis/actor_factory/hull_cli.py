@@ -41,6 +41,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--flip-depth", action="store_true", help="inverte a profundidade (lado espelhado)")
     p.add_argument("--close", type=int, default=1, help="iteracoes de fechamento morfologico")
     p.add_argument("--keep-all", action="store_true", help="nao descarta cacos (mantem todos componentes)")
+    p.add_argument("--keep-ground", action="store_true", help="nao remove a poca de chao na base")
     p.add_argument(
         "--save-masks", action="store_true",
         help="salva as silhuetas extraidas em renders/mask_*.png e sai (diagnostico)",
@@ -82,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
             flip_depth=args.flip_depth,
             close_iterations=args.close,
             keep_largest=not args.keep_all,
+            drop_ground=not args.keep_ground,
             output_path=args.out,
         )
     except (ValueError, RuntimeError) as exc:

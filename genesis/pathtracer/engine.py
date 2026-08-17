@@ -62,13 +62,17 @@ class LightSpec:
         return np.array(self.color, dtype=np.float64) * I
 
 
-# Três-pontos quente de rock folk, calibrado para intensidade radiante do Mitsuba.
+# Iluminação para figura em pé: KEY/FILL/RIM + uma FRONTAL baixa que garante o
+# lado voltado à câmera sempre iluminado (sem ela, luzes altas passam rente ao
+# corpo vertical e o deixam escuro, iluminando só o chão).
 DEFAULT_LIGHTS: tuple[LightSpec, ...] = (
-    LightSpec("KEY", azimuth=40.0, elevation=25.0, distance=2.2, irradiance=45.0,
+    LightSpec("KEY", azimuth=35.0, elevation=22.0, distance=2.2, irradiance=42.0,
               color=(1.0, 0.85, 0.65)),
-    LightSpec("FILL", azimuth=-55.0, elevation=10.0, distance=2.6, irradiance=12.0,
+    LightSpec("FILL", azimuth=-50.0, elevation=14.0, distance=2.6, irradiance=16.0,
               color=(1.0, 0.9, 0.8)),
-    LightSpec("RIM", azimuth=195.0, elevation=45.0, distance=2.4, irradiance=60.0,
+    LightSpec("FRONT", azimuth=0.0, elevation=8.0, distance=2.7, irradiance=24.0,
+              color=(1.0, 0.95, 0.88)),  # frontal baixa: banha o lado da câmera
+    LightSpec("RIM", azimuth=195.0, elevation=42.0, distance=2.4, irradiance=55.0,
               color=(0.7, 0.8, 1.0)),
 )
 
@@ -86,8 +90,8 @@ class RenderConfig:
     frame_height_fraction: float = 0.9
     exposure: float = 0.0
     reflectance: Vec3 = (0.65, 0.62, 0.58)  # albedo difuso do sujeito
-    ambient: float = 0.02         # luz constante de fundo (evita preto puro)
-    add_floor: bool = True
+    ambient: float = 0.03         # luz constante de fundo (evita preto puro)
+    add_floor: bool = False       # o piso da cena competia com o sujeito; off por padrão
     lights: Sequence[LightSpec] = field(default_factory=lambda: DEFAULT_LIGHTS)
 
     def __post_init__(self) -> None:

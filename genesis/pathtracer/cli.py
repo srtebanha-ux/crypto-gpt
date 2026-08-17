@@ -39,7 +39,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fov", type=float, default=32.0, help="FOV vertical (graus)")
     p.add_argument("--exposure", type=float, default=0.0, help="exposicao em stops (EV)")
     p.add_argument("--frame-fraction", type=float, default=0.9, help="fracao da altura enquadrada")
-    p.add_argument("--no-floor", action="store_true", help="nao adiciona o piso")
+    p.add_argument("--floor", action="store_true", help="adiciona um piso na cena (off por padrao)")
     p.add_argument("--quiet", action="store_true")
     return p
 
@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             fov_deg=args.fov,
             exposure=args.exposure,
             frame_height_fraction=args.frame_fraction,
-            add_floor=not args.no_floor,
+            add_floor=args.floor,
         )
         out = MitsubaRenderer(config).render()
         print(f"[NEXUS-MITSUBA] render concluído: {out}")

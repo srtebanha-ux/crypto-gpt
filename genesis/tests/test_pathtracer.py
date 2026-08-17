@@ -65,7 +65,7 @@ def test_describe_scene_has_all_lights_and_floor() -> None:
     desc = describe_scene(cfg, np.zeros(3), np.array([1.0, 1.0, 2.0]))
     assert len(desc["lights"]) == len(DEFAULT_LIGHTS)
     names = {l["name"] for l in desc["lights"]}
-    assert names == {"KEY", "FILL", "RIM"}
+    assert {"KEY", "FILL", "RIM"} <= names  # três-pontos presentes (+ FRONT)
     assert desc["floor"] is not None
     # cada luz tem posição 3D e intensidade RGB positiva
     for light in desc["lights"]:
