@@ -1,0 +1,6 @@
+# Modulo 2 (Retopologia Genetica) — dependencia obrigatoria
+numpy>=1.24
+
+# Aceleradores OPCIONAIS (o modulo funciona sem eles, caindo para numpy puro):
+# scipy>=1.10      # KD-tree cKDTree para vizinhanca exata
+# open3d>=0.17     # Reconstrucao de Superficie de Poisson

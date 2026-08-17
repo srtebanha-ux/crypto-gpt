@@ -1,0 +1,4 @@
+# Fabrica de Atores
+numpy>=1.24
+Pillow>=10.0     # apenas para decodificar os pixels das imagens (Visual Hull)
+# trimesh>=4.0   # opcional: ler modelos .glb/.gltf/.ply/.fbx na ingestao
