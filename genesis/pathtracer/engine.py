@@ -239,10 +239,16 @@ class MitsubaRenderer:
             "subject": {
                 "type": "obj",
                 "filename": desc["subject"]["filename"],
+                # 'twosided' reflete dos dois lados da face: blinda contra malhas
+                # com winding/normais invertidas (comum no visual hull), que de
+                # outro modo apareceriam pretas (Mitsuba não ilumina o verso).
                 "bsdf": {
-                    "type": "principled",
-                    "base_color": {"type": "rgb", "value": desc["subject"]["reflectance"]},
-                    "roughness": 0.5,
+                    "type": "twosided",
+                    "material": {
+                        "type": "principled",
+                        "base_color": {"type": "rgb", "value": desc["subject"]["reflectance"]},
+                        "roughness": 0.5,
+                    },
                 },
             },
         }
