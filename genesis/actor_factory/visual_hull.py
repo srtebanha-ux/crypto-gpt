@@ -151,16 +151,29 @@ def carve(
     resolution: int = 96,
     flip_depth: bool = False,
 ) -> NDArray[np.bool_]:
-    """Esculpe o visual hull. Retorna ocupação booleana ``(N,N,N)`` em (X,Y,Z).
+    """Esculpe o visual hull preservando as proporções reais.
 
-    front/back restringem (X,Z); side restringe (Y,Z). O grid é o cubo unitário
-    de voxels; um voxel sobrevive se seu centro projeta dentro de todas as vistas.
+    A **altura** é a referência comum das três vistas (o personagem tem a mesma
+    altura em todas). O grid tem ``nz = resolution`` voxels na altura e
+    ``nx = nz · (larg_frente/alt)`` , ``ny = nz · (prof_lado/alt)`` nos outros
+    eixos — assim largura e profundidade ocupam só a fração real da altura, e não
+    o cubo inteiro (o que inflava o corpo). front/back restringem (X,Z); side
+    restringe (Y,Z).
     """
-    n = resolution
-    frac = (np.arange(n) + 0.5) / n
-    fx = frac[:, None, None]
-    fy = frac[None, :, None]
-    fz = frac[None, None, :]
+    fh = _bbox(front)
+    front_h = max(fh[1] - fh[0], 1)
+    aspect_x = (fh[3] - fh[2]) / front_h            # largura relativa à altura
+    sh = _bbox(side)
+    side_h = max(sh[1] - sh[0], 1)
+    aspect_y = (sh[3] - sh[2]) / side_h             # profundidade relativa à altura
+
+    nz = int(resolution)
+    nx = max(2, round(nz * aspect_x))
+    ny = max(2, round(nz * aspect_y))
+
+    fx = ((np.arange(nx) + 0.5) / nx)[:, None, None]
+    fy = ((np.arange(ny) + 0.5) / ny)[None, :, None]
+    fz = ((np.arange(nz) + 0.5) / nz)[None, None, :]
     fx, fy, fz = np.broadcast_arrays(fx, fy, fz)
 
     occ = _sample(front, fx, fz)
