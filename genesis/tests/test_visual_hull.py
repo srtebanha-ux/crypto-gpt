@@ -11,8 +11,26 @@ from genesis.actor_factory.visual_hull import (
     build_actor_from_images,
     carve,
     extract_silhouette,
+    largest_component,
+    morphological_close,
     voxels_to_mesh,
 )
+
+
+def test_largest_component_drops_floating_islands() -> None:
+    occ = np.zeros((20, 20, 20), bool)
+    occ[2:10, 2:10, 2:10] = True   # bloco grande
+    occ[15, 15, 15] = True         # caco solto
+    kept = largest_component(occ)
+    assert kept[5, 5, 5] and not kept[15, 15, 15]
+    assert kept.sum() == 8 ** 3
+
+
+def test_morphological_close_fills_small_gap() -> None:
+    occ = np.ones((10, 10, 10), bool)
+    occ[5, 5, 5] = False           # buraco de 1 voxel no interior
+    closed = morphological_close(occ, iterations=1)
+    assert closed[5, 5, 5]         # o vão foi tapado
 
 
 def test_single_voxel_is_closed_cube() -> None:

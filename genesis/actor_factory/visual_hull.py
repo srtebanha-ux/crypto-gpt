@@ -134,6 +134,69 @@ def carve(
     return occ
 
 
+# -------------------------------------------------- limpeza de voxels (nossa)
+def _dilate(occ: NDArray[np.bool_]) -> NDArray[np.bool_]:
+    """Dilatação morfológica 6-conexa (OR com os 6 vizinhos)."""
+    p = np.pad(occ, 1, constant_values=False)
+    return (
+        p[1:-1, 1:-1, 1:-1] | p[:-2, 1:-1, 1:-1] | p[2:, 1:-1, 1:-1]
+        | p[1:-1, :-2, 1:-1] | p[1:-1, 2:, 1:-1]
+        | p[1:-1, 1:-1, :-2] | p[1:-1, 1:-1, 2:]
+    )
+
+
+def _erode(occ: NDArray[np.bool_]) -> NDArray[np.bool_]:
+    """Erosão morfológica 6-conexa (AND com os 6 vizinhos; borda conta como vazio)."""
+    p = np.pad(occ, 1, constant_values=False)
+    return (
+        p[1:-1, 1:-1, 1:-1] & p[:-2, 1:-1, 1:-1] & p[2:, 1:-1, 1:-1]
+        & p[1:-1, :-2, 1:-1] & p[1:-1, 2:, 1:-1]
+        & p[1:-1, 1:-1, :-2] & p[1:-1, 1:-1, 2:]
+    )
+
+
+def morphological_close(occ: NDArray[np.bool_], iterations: int = 1) -> NDArray[np.bool_]:
+    """Fechamento (dilata N, depois erode N): tapa vãos finos e funde pontes.
+
+    Remove os buracos de 1 voxel e as pontes frágeis que quebram o sólido em
+    componentes — o que deixa a casca mais próxima de manifold/water-tight.
+    """
+    if iterations <= 0:
+        return occ
+    m = occ
+    for _ in range(iterations):
+        m = _dilate(m)
+    for _ in range(iterations):
+        m = _erode(m)
+    return m
+
+
+def largest_component(occ: NDArray[np.bool_]) -> NDArray[np.bool_]:
+    """Mantém só o maior componente conexo (6-conectividade) do volume.
+
+    Rotulação por propagação do menor índice entre vizinhos ocupados até
+    estabilizar — descarta cacos flutuantes que a escultura deixa soltos.
+    """
+    if not occ.any():
+        return occ
+    inf = occ.size
+    lab = np.where(occ, np.arange(occ.size).reshape(occ.shape), inf).astype(np.int64)
+    while True:
+        p = np.pad(lab, 1, constant_values=inf)
+        m = lab.copy()
+        m = np.minimum(m, p[:-2, 1:-1, 1:-1]); m = np.minimum(m, p[2:, 1:-1, 1:-1])
+        m = np.minimum(m, p[1:-1, :-2, 1:-1]); m = np.minimum(m, p[1:-1, 2:, 1:-1])
+        m = np.minimum(m, p[1:-1, 1:-1, :-2]); m = np.minimum(m, p[1:-1, 1:-1, 2:])
+        m = np.where(occ, m, inf)
+        if np.array_equal(m, lab):
+            break
+        lab = m
+    vals = lab[occ]
+    uniq, counts = np.unique(vals, return_counts=True)
+    biggest = uniq[np.argmax(counts)]
+    return occ & (lab == biggest)
+
+
 # ------------------------------------------------------ voxels → malha (nossa)
 # Deslocamentos dos 4 cantos de cada face e o eixo/direção, com winding p/ normal
 # apontando para fora. Cada face vira 2 triângulos.
@@ -199,13 +262,16 @@ def build_actor_from_images(
     target_height: float = 1.8,
     threshold: float = 0.18,
     flip_depth: bool = False,
+    close_iterations: int = 1,
+    keep_largest: bool = True,
     output_path: str | Path | None = None,
 ) -> Mesh:
-    """Pipeline completo: silhuetas → visual hull → Taubin → normaliza → ``.obj``.
+    """Pipeline completo: silhuetas → visual hull → limpeza → Taubin → ``.obj``.
 
     Reconstrói a malha do ator só com nossa matemática (Pillow apenas lê pixels).
-    A saída é suavizada (Taubin, preserva volume) e normalizada (Z-up já nativo,
-    escala para ``target_height``, pé no chão), pronta para rig/acoplador/render.
+    A escultura passa por fechamento morfológico e extração do maior componente
+    (junta o corpo num sólido só), depois suavização Taubin e normalização
+    (Z-up nativo, escala para ``target_height``, pé no chão).
     """
     from ..retopology import laplacian_smooth
     from .normalize import normalize_actor
@@ -220,6 +286,9 @@ def build_actor_from_images(
             "escultura vazia — silhuetas não se cruzam. Verifique o fundo (neutro?) "
             "e o alinhamento das vistas (mesma altura de personagem)."
         )
+    occ = morphological_close(occ, close_iterations)  # tapa vãos, funde pontes
+    if keep_largest:
+        occ = largest_component(occ)                  # descarta cacos flutuantes
     mesh = voxels_to_mesh(occ)
     if smooth_iterations > 0:
         mesh = laplacian_smooth(mesh, iterations=smooth_iterations, lam=0.5, mu=-0.53)

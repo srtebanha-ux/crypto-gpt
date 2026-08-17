@@ -37,6 +37,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--height", type=float, default=1.8, help="altura-alvo em metros")
     p.add_argument("--threshold", type=float, default=0.18, help="limiar de silhueta (0..1)")
     p.add_argument("--flip-depth", action="store_true", help="inverte a profundidade (lado espelhado)")
+    p.add_argument("--close", type=int, default=1, help="iteracoes de fechamento morfologico")
+    p.add_argument("--keep-all", action="store_true", help="nao descarta cacos (mantem todos componentes)")
     return p
 
 
@@ -57,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
             target_height=args.height,
             threshold=args.threshold,
             flip_depth=args.flip_depth,
+            close_iterations=args.close,
+            keep_largest=not args.keep_all,
             output_path=args.out,
         )
     except (ValueError, RuntimeError) as exc:
