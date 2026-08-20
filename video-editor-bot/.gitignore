@@ -14,3 +14,7 @@ venv/
 *.webm
 _temp_audio.*
 clipes/
+# Studio: banco de dados e mídia enviada
+*.db
+beatsync_studio.db
+beatsync_data/

@@ -231,6 +231,7 @@ def assemble_and_render(
     bitrate: Optional[str] = None,
     threads: int = 4,
     preset: str = "medium",
+    logger=None,
 ) -> str:
     """
     Concatena os subclipes, casa a trilha de áudio e renderiza o MP4 final.
@@ -259,6 +260,7 @@ def assemble_and_render(
         bitrate=bitrate,
         threads=threads,
         preset=preset,
+        logger=logger if logger is not None else "bar",
         temp_audiofile=os.path.join(
             os.path.dirname(os.path.abspath(output_path)) or ".", "_temp_audio.m4a"
         ),

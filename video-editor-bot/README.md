@@ -1,9 +1,41 @@
-# 🎬 beatsync — Bot de Edição de Vídeo Sincronizada com a Batida
+# 🎬 beatsync — Studio de Edição de Vídeo Sincronizada com a Batida
 
-Agente de edição de vídeo **automatizado**. Você entrega uma **música** e um
-**diretório de clipes brutos**; ele analisa o áudio (BPM, picos de batida,
-cadência da letra) e monta um **videoclipe com cortes sincronizados no ritmo**,
-pronto para render em MP4.
+Agente de edição de vídeo **automatizado**, com **CLI** e um **Studio web**
+(o "IDE"): interface bonita e elegante, **banco de dados completo** e render em
+background. Você entrega uma **música** e um **diretório de clipes brutos**; ele
+analisa o áudio (BPM, picos de batida, cadência da letra) e monta um
+**videoclipe com cortes sincronizados no ritmo**, pronto para render em MP4.
+
+## 🖥️ Studio web (interface visual)
+
+```bash
+pip install -r video-editor-bot/requirements.txt   # + FFmpeg no sistema
+cd video-editor-bot
+beatsync-studio            # abre em http://127.0.0.1:8000
+# ou: python -m beatsync.server
+```
+
+No Studio você: cria **projetos**, arrasta a **música** e os **clipes**, roda a
+**análise** (com visualização das batidas/downbeats/picos/cortes numa timeline),
+escolhe o **preset**, dispara o **render** com barra de progresso ao vivo e
+**baixa** o MP4 — tudo pelo navegador. Estado persistido em **banco de dados**
+(SQLite por padrão; configurável via `DATABASE_URL`).
+
+**Camadas:**
+
+| Camada | Arquivo | Tecnologia |
+|--------|---------|-----------|
+| Banco de dados | `beatsync/db.py` | SQLAlchemy 2.0 — `projects`, `assets`, `analyses`, `render_jobs`, `presets` |
+| Regras de negócio | `beatsync/service.py` | armazenamento de mídia, análise, fila de render em background (progresso) |
+| API web | `beatsync/server/app.py` | FastAPI (REST + upload multipart + download) |
+| Frontend | `beatsync/server/static/` | SPA vanilla (HTML/CSS/JS), tema escuro, timeline de batidas em canvas |
+
+Variáveis de ambiente: `DATABASE_URL`, `BEATSYNC_STORAGE` (mídia/renders),
+`BEATSYNC_HOST`, `BEATSYNC_PORT`, `BEATSYNC_WORKERS`.
+
+---
+
+## ⌨️ Uso via CLI (sem interface)
 
 - **Análise de áudio** com [`librosa`](https://librosa.org): tempo (BPM), beat
   tracking, downbeats (compassos 4/4), onsets/transientes e envelope de energia RMS.
@@ -116,8 +148,16 @@ video-editor-bot/
 │   ├── editor.py    # motor de corte: junta tudo e monta a timeline
 │   ├── config.py    # RenderConfig + presets
 │   ├── cli.py       # interface de linha de comando
-│   └── __main__.py  # `python -m beatsync`
-├── tests/test_audio.py   # testes do núcleo de áudio (sinal sintético)
+│   ├── db.py        # banco de dados do Studio (SQLAlchemy)
+│   ├── service.py   # regras de negócio: mídia, análise, fila de render
+│   ├── server/
+│   │   ├── app.py       # API web (FastAPI)
+│   │   ├── __main__.py  # `python -m beatsync.server`
+│   │   └── static/      # frontend do Studio (index.html, style.css, app.js)
+│   └── __main__.py  # `python -m beatsync` (CLI)
+├── tests/
+│   ├── test_audio.py     # núcleo de áudio (sinal sintético)
+│   └── test_studio.py    # DB + serviço + API web (FastAPI TestClient)
 ├── examples/run_example.sh
 ├── requirements.txt
 └── pyproject.toml

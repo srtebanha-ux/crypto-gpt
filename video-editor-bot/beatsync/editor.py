@@ -188,7 +188,7 @@ class VideoEditor:
         return 0.95 + 0.30 * e
 
     # ------------------------------------------------------------------ #
-    def render(self, output_path: str) -> str:
+    def render(self, output_path: str, logger=None) -> str:
         if not self.timeline:
             self.build_timeline()
         self.log("Construindo subclipes...")
@@ -221,6 +221,7 @@ class VideoEditor:
             bitrate=self.cfg.bitrate,
             threads=self.cfg.threads,
             preset=self.cfg.preset,
+            logger=logger,
         )
         self.log(f"✓ Concluído: {out}")
         return out
