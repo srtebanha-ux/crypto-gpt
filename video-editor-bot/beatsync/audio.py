@@ -17,6 +17,7 @@ de vídeo, para poder ser testado isoladamente.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -146,7 +147,7 @@ def analyze_audio(
     hop_length : granularidade temporal da análise.
     onset_percentile : só onsets acima deste percentil de força viram picos.
     """
-    y, sr = librosa.load(path, sr=sr, mono=True)
+    y, sr = _robust_load(path, sr=sr)
     duration = float(librosa.get_duration(y=y, sr=sr))
 
     # --- Tempo + beat tracking ------------------------------------------------
@@ -195,6 +196,59 @@ def analyze_audio(
         rms=rms,
         _y=y,
     )
+
+
+def _robust_load(path: str, sr: int):
+    """
+    Carrega áudio de forma robusta a formatos/codecs.
+
+    Tenta o carregamento normal do librosa (soundfile). Se falhar — comum no
+    macOS com MP3/M4A quando o libsndfile não decodifica o codec — cai para o
+    FFmpeg, convertendo para WAV PCM temporário e recarregando. Requer FFmpeg
+    no PATH (é uma dependência do projeto de qualquer forma).
+    """
+    try:
+        return librosa.load(path, sr=sr, mono=True)
+    except Exception as exc:  # noqa: BLE001 — degrada para o fallback via FFmpeg
+        wav = _ffmpeg_to_wav(path, sr)
+        if wav is None:
+            raise RuntimeError(
+                f"não foi possível ler o áudio {path!r}. "
+                f"Instale o FFmpeg (brew install ffmpeg) e tente de novo. "
+                f"Causa original: {exc}"
+            ) from exc
+        try:
+            return librosa.load(wav, sr=sr, mono=True)
+        finally:
+            try:
+                os.remove(wav)
+            except OSError:
+                pass
+
+
+def _ffmpeg_to_wav(path: str, sr: int):
+    """Converte qualquer arquivo de áudio para WAV PCM mono via FFmpeg."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("ffmpeg") is None:
+        return None
+    fd, out = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", path, "-ac", "1", "-ar", str(sr),
+             "-vn", "-f", "wav", out],
+            check=True, capture_output=True,
+        )
+        return out
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        return None
 
 
 def _normalize(x: np.ndarray) -> np.ndarray:
