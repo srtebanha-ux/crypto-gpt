@@ -1,0 +1,12 @@
+# Núcleo — obrigatório
+librosa>=0.10.2
+soundfile>=0.12.1
+numpy>=1.24
+moviepy>=2.1.1
+
+# Opcional — análise de letra (cadência) via Whisper.
+# Instale UM dos dois. faster-whisper é mais leve/rápido (recomendado):
+#   pip install faster-whisper
+#   pip install openai-whisper
+# faster-whisper>=1.0.0
+# openai-whisper>=20231117
