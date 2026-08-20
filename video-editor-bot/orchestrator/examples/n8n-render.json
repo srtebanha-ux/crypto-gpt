@@ -1,0 +1,16 @@
+{
+  "_comment": "Corpo de exemplo para o nó HTTP Request do n8n → POST http://host:8787/render",
+  "audioPath": "/data/musica.mp3",
+  "clipsDir": "/data/clipes",
+  "outPath": "/data/out/videoclipe.mp4",
+  "mood": ["neon", "city", "night", "cinematic"],
+  "fetchScenes": 6,
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "cutMode": "hybrid",
+  "subdivision": 1,
+  "engine": "remotion",
+  "grade": "cinematic",
+  "useAutoEditor": true
+}

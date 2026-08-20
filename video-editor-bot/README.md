@@ -35,6 +35,34 @@ Variáveis de ambiente: `DATABASE_URL`, `BEATSYNC_STORAGE` (mídia/renders),
 
 ---
 
+## 🎛️ Orquestrador cinematográfico (Node.js/TypeScript + Remotion)
+
+Além do núcleo Python, há uma camada de **orquestração de nível Premiere** em
+[`orchestrator/`](orchestrator/README.md) que **integra repositórios OSS de
+ponta** (não reimplementa motores):
+
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — captação dinâmica de cenas
+  (b-roll/filmes) a partir do "mood" da música.
+- **[auto-editor](https://github.com/WyattBlue/auto-editor)** — trechos úteis de
+  cada clipe (remove silêncio/partes paradas).
+- **`beatsync` (librosa)** — timestamps musicais (BPM/batidas), exportados por
+  `python -m beatsync.export_analysis`.
+- **[Remotion](https://github.com/remotion-dev/remotion)** (React/TS, primário)
+  ou **[editly](https://github.com/mifi/editly)** (alternativo) — composição/render.
+- **Node.js** — pipeline + **webhook para n8n** (`POST /render`).
+
+```bash
+cd orchestrator && npm install
+npm run dev -- render --audio musica.mp3 --clips ./clips --fetch 6 \
+    --mood "neon,city,night" --engine remotion --auto-editor
+npm run serve         # webhook n8n em :8787
+```
+
+Detalhes, fluxo e o componente Remotion (`Composition`/`Sequence`) em
+[`orchestrator/README.md`](orchestrator/README.md).
+
+---
+
 ## ⌨️ Uso via CLI (sem interface)
 
 - **Análise de áudio** com [`librosa`](https://librosa.org): tempo (BPM), beat
