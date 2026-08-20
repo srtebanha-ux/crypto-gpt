@@ -3,6 +3,7 @@ librosa>=0.10.2
 soundfile>=0.12.1
 numpy>=1.24
 moviepy>=2.1.1
+imageio-ffmpeg>=0.4.9        # FFmpeg embutido (fallback de decodificação de áudio)
 
 # Studio — banco de dados + API web + frontend
 sqlalchemy>=2.0

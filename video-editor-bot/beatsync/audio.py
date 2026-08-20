@@ -210,12 +210,11 @@ def _robust_load(path: str, sr: int):
     try:
         return librosa.load(path, sr=sr, mono=True)
     except Exception as exc:  # noqa: BLE001 — degrada para o fallback via FFmpeg
-        wav = _ffmpeg_to_wav(path, sr)
+        wav, why = _ffmpeg_to_wav(path, sr)
         if wav is None:
             raise RuntimeError(
-                f"não foi possível ler o áudio {path!r}. "
-                f"Instale o FFmpeg (brew install ffmpeg) e tente de novo. "
-                f"Causa original: {exc}"
+                f"não foi possível ler o áudio {path!r}. Detalhe: {why} "
+                f"(causa original: {exc})"
             ) from exc
         try:
             return librosa.load(wav, sr=sr, mono=True)
@@ -226,29 +225,60 @@ def _robust_load(path: str, sr: int):
                 pass
 
 
-def _ffmpeg_to_wav(path: str, sr: int):
-    """Converte qualquer arquivo de áudio para WAV PCM mono via FFmpeg."""
+def _find_ffmpeg():
+    """
+    Localiza um binário do FFmpeg de forma robusta:
+      1) o FFmpeg do sistema (PATH);
+      2) o binário embutido do imageio-ffmpeg (dependência do MoviePy) —
+         funciona mesmo quando o PATH do processo não inclui o FFmpeg.
+    """
     import shutil
+
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _ffmpeg_to_wav(path: str, sr: int):
+    """
+    Converte qualquer arquivo de áudio para WAV PCM mono via FFmpeg.
+    Retorna (caminho_wav, None) em sucesso ou (None, motivo) em falha.
+    """
     import subprocess
     import tempfile
 
-    if shutil.which("ffmpeg") is None:
-        return None
+    exe = _find_ffmpeg()
+    if exe is None:
+        return None, ("FFmpeg não encontrado. Instale com 'brew install ffmpeg' "
+                      "ou 'pip install imageio-ffmpeg'.")
     fd, out = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-i", path, "-ac", "1", "-ar", str(sr),
+            [exe, "-y", "-i", path, "-ac", "1", "-ar", str(sr),
              "-vn", "-f", "wav", out],
             check=True, capture_output=True,
         )
-        return out
-    except (subprocess.CalledProcessError, FileNotFoundError):
+        return out, None
+    except subprocess.CalledProcessError as e:
         try:
             os.remove(out)
         except OSError:
             pass
-        return None
+        tail = (e.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        return None, ("FFmpeg falhou ao converter: "
+                      + (tail[-1] if tail else "erro desconhecido"))
+    except FileNotFoundError:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        return None, f"binário do FFmpeg inválido: {exe}"
 
 
 def _normalize(x: np.ndarray) -> np.ndarray:
