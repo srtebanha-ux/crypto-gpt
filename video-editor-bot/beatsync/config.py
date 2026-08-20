@@ -53,25 +53,33 @@ class RenderConfig:
 
 
 PRESETS = {
+    # Modo leve — feito para notebooks (ex.: MacBook Air): 720p, encoding
+    # ultrarrápido e poucas threads para NÃO travar a máquina no render.
+    "leve": RenderConfig(
+        width=1280, height=720, fps=30,
+        cut_mode="beat", subdivision=1, min_cut=0.4,
+        crossfade=0.0, zoom_punch=True, preset="ultrafast", threads=2,
+    ),
     "reels": RenderConfig(
         width=1080, height=1920, fps=30,
         cut_mode="beat", subdivision=1, min_cut=0.28,
-        crossfade=0.0, zoom_punch=True, preset="fast",
+        crossfade=0.0, zoom_punch=True, preset="veryfast", threads=2,
     ),
     "cinematic": RenderConfig(
         width=1920, height=1080, fps=24,
         cut_mode="downbeat", subdivision=1, min_cut=0.8,
-        crossfade=0.35, fade=0.05, zoom_punch=False, preset="slow",
+        crossfade=0.35, fade=0.05, zoom_punch=False, preset="medium", threads=2,
     ),
     "hype": RenderConfig(
         width=1920, height=1080, fps=30,
         cut_mode="hybrid", subdivision=2, min_cut=0.22,
-        crossfade=0.0, zoom_punch=True, beat_speed_ramp=True, preset="medium",
+        crossfade=0.0, zoom_punch=True, beat_speed_ramp=True,
+        preset="veryfast", threads=2,
     ),
     "clean": RenderConfig(
         width=1920, height=1080, fps=30,
         cut_mode="beat", subdivision=1, min_cut=0.5,
-        crossfade=0.12, zoom_punch=False, preset="medium",
+        crossfade=0.12, zoom_punch=False, preset="fast", threads=2,
     ),
 }
 

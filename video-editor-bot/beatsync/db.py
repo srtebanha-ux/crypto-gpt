@@ -347,6 +347,8 @@ def _seed_presets() -> None:
     from .config import PRESETS
 
     labels = {
+        "leve": ("⚡ Leve (recomendado p/ notebook)",
+                 "720p, encoding rápido, pouco processador — não trava o Mac."),
         "reels": ("Reels / Vertical", "Vertical 9:16, corte em cada batida — redes sociais."),
         "cinematic": ("Cinemático", "16:9 24fps, cortes por compasso + crossfade suave."),
         "hype": ("Hype", "Híbrido agressivo: downbeats + picos, meias-batidas, speed-ramp."),

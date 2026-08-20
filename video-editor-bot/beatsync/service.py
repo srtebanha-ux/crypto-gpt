@@ -38,7 +38,7 @@ STORAGE_ROOT = os.environ.get(
     "BEATSYNC_STORAGE", os.path.join(os.getcwd(), "beatsync_data")
 )
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.environ.get("BEATSYNC_WORKERS", "2")))
+_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.environ.get("BEATSYNC_WORKERS", "1")))
 _CANCEL = set()  # ids de jobs marcados para cancelamento
 
 
