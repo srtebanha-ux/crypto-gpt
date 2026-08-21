@@ -1,0 +1,22 @@
+# =====================================================================
+# NEXUS-ÔMEGA — Cognitive Semantic Editor  ·  dependências
+# =====================================================================
+
+# --- Step 1: extração semântica do áudio -----------------------------
+openai-whisper>=20231117      # transcrição + word-level timestamps
+librosa>=0.10.2               # BPM, beat tracking, onsets/drops
+soundfile>=0.12.1             # backend de I/O de áudio para o librosa
+
+# --- Step 2: visão computacional -------------------------------------
+transformers>=4.38            # modelo CLIP (openai/clip-vit-base-patch32)
+torch>=2.1                    # backend dos modelos (Whisper + CLIP)
+scenedetect[opencv]>=0.6.4    # segmentação automática de vídeos longos
+opencv-python>=4.9            # extração de frames representativos
+Pillow>=10.0                  # imagens para o processador do CLIP
+
+# --- Step 3/4: matching + render -------------------------------------
+numpy>=1.24                   # álgebra vetorial (cosine similarity)
+moviepy>=2.1.1                # composição da timeline + export MP4 (FFmpeg)
+
+# FFmpeg deve estar instalado no sistema (apt-get install ffmpeg / brew install ffmpeg).
+# GPU opcional: instale o torch com CUDA para acelerar Whisper e CLIP.

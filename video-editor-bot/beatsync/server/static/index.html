@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>beatsync Studio</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%AC%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+  <div id="app">
+    <!-- ===== Sidebar ===== -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="logo">🎬</span>
+        <div>
+          <h1>beatsync</h1>
+          <p>Studio</p>
+        </div>
+      </div>
+
+      <button class="btn btn-primary btn-block" id="new-project-btn">
+        <span class="plus">+</span> Novo projeto
+      </button>
+
+      <div class="section-label">Projetos</div>
+      <ul class="project-list" id="project-list"></ul>
+
+      <div class="caps" id="caps"></div>
+    </aside>
+
+    <!-- ===== Main ===== -->
+    <main class="main" id="main">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-art">🎧🎞️✂️</div>
+        <h2>Crie um projeto para começar</h2>
+        <p>Envie uma música e seus clipes brutos. O beatsync analisa o áudio
+           (BPM, batidas, picos) e monta um videoclipe com cortes sincronizados
+           no ritmo.</p>
+        <button class="btn btn-primary" id="empty-new-btn">+ Novo projeto</button>
+      </div>
+
+      <div class="workspace hidden" id="workspace"></div>
+    </main>
+  </div>
+
+  <!-- ===== Modal: novo projeto ===== -->
+  <div class="modal-backdrop hidden" id="modal">
+    <div class="modal">
+      <h3>Novo projeto</h3>
+      <label>Nome
+        <input type="text" id="np-name" placeholder="Ex.: Clipe de verão" />
+      </label>
+      <label>Descrição <span class="opt">(opcional)</span>
+        <textarea id="np-desc" rows="2" placeholder="Uma nota sobre o projeto…"></textarea>
+      </label>
+      <label>Preset inicial
+        <select id="np-preset"></select>
+      </label>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="np-cancel">Cancelar</button>
+        <button class="btn btn-primary" id="np-create">Criar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-wrap" id="toast-wrap"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

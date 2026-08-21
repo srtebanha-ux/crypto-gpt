@@ -1,0 +1,19 @@
+# Núcleo — análise/edição
+librosa>=0.10.2
+soundfile>=0.12.1
+numpy>=1.24
+moviepy>=2.1.1
+imageio-ffmpeg>=0.4.9        # FFmpeg embutido (fallback de decodificação de áudio)
+
+# Studio — banco de dados + API web + frontend
+sqlalchemy>=2.0
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9
+
+# Opcional — análise de letra (cadência) via Whisper.
+# Instale UM dos dois. faster-whisper é mais leve/rápido (recomendado):
+#   pip install faster-whisper
+#   pip install openai-whisper
+# faster-whisper>=1.0.0
+# openai-whisper>=20231117

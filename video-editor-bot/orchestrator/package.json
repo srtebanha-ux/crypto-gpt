@@ -1,0 +1,36 @@
+{
+  "name": "beatsync-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orquestrador Node.js/TypeScript: yt-dlp (captação) + auto-editor/beatsync (timestamps) + Remotion/editly (composição). Acionável via CLI e webhook (n8n).",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "serve": "tsx src/server.ts",
+    "render": "tsx src/index.ts render",
+    "fetch": "tsx src/index.ts fetch",
+    "remotion:studio": "remotion studio remotion/index.ts",
+    "remotion:render": "remotion render remotion/index.ts BeatVideo out/video.mp4",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@remotion/bundler": "^4.0.0",
+    "@remotion/renderer": "^4.0.0",
+    "editly": "^0.14.2",
+    "express": "^4.19.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  }
+}

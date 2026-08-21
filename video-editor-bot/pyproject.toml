@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beatsync"
+version = "0.1.0"
+description = "Bot de edição automática de vídeo sincronizado com a batida da música."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "beatsync" }]
+keywords = ["video", "editing", "beat", "sync", "librosa", "moviepy", "ffmpeg"]
+
+dependencies = [
+    "librosa>=0.10.2",
+    "soundfile>=0.12.1",
+    "numpy>=1.24",
+    "moviepy>=2.1.1",
+    "sqlalchemy>=2.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+lyrics = ["faster-whisper>=1.0.0"]
+lyrics-openai = ["openai-whisper>=20231117"]
+dev = ["pytest>=7.4", "httpx>=0.27"]
+
+[project.scripts]
+beatsync = "beatsync.cli:main"
+beatsync-studio = "beatsync.server.__main__:main"
+
+[tool.setuptools]
+packages = ["beatsync", "beatsync.server"]
+
+[tool.setuptools.package-data]
+"beatsync.server" = ["static/*"]
