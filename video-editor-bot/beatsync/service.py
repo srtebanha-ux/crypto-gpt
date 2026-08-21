@@ -68,7 +68,7 @@ def _config_from_project(p: Project) -> RenderConfig:
 # --------------------------------------------------------------------------- #
 # Projetos
 # --------------------------------------------------------------------------- #
-def create_project(name: str, description: str = "", preset: str = "hype") -> dict:
+def create_project(name: str, description: str = "", preset: str = "leve") -> dict:
     with db.get_session() as s:
         p = Project(name=name.strip() or "Sem título",
                     description=description, preset=preset)
@@ -154,6 +154,66 @@ def add_asset(project_id: int, kind: str, filename: str, data: bytes) -> dict:
                     s.delete(a)
         asset = Asset(project_id=project_id, kind=kind_enum, filename=safe,
                       path=dest, size_bytes=len(data), duration=duration,
+                      width=width, height=height, fps=fps)
+        s.add(asset)
+        p.status = ProjectStatus.draft
+        s.commit()
+        return asset.to_dict()
+
+
+def add_asset_stream(project_id: int, kind: str, filename: str, fileobj,
+                     chunk_size: int = 1 << 20) -> dict:
+    """
+    Igual a add_asset, mas grava o arquivo em disco em pedaços (streaming),
+    sem carregar o conteúdo inteiro na memória — essencial para vídeos grandes
+    em máquinas com pouca RAM.
+    """
+    kind_enum = AssetKind(kind)
+    d = project_dir(project_id)
+    safe = os.path.basename(filename).replace("/", "_")
+    dest = os.path.join(d, safe) if kind_enum == AssetKind.audio \
+        else os.path.join(d, "clips", safe)
+
+    size = 0
+    try:
+        fileobj.seek(0)
+    except Exception:
+        pass
+    with open(dest, "wb") as out:
+        while True:
+            chunk = fileobj.read(chunk_size)
+            if not chunk:
+                break
+            out.write(chunk)
+            size += len(chunk)
+    if size == 0:
+        _safe_remove(dest)
+        raise ValueError("arquivo vazio")
+
+    duration = width = height = 0
+    fps = 0.0
+    try:
+        from . import video as vid
+        if kind_enum == AssetKind.video:
+            probe = vid.probe_clip(dest)
+            if probe:
+                duration, width, height, fps = (
+                    probe.duration, probe.width, probe.height, probe.fps)
+    except Exception:
+        pass
+
+    with db.get_session() as s:
+        p = s.get(Project, project_id)
+        if not p:
+            _safe_remove(dest)
+            raise ValueError("projeto inexistente")
+        if kind_enum == AssetKind.audio:
+            for a in list(p.assets):
+                if a.kind == AssetKind.audio:
+                    _safe_remove(a.path)
+                    s.delete(a)
+        asset = Asset(project_id=project_id, kind=kind_enum, filename=safe,
+                      path=dest, size_bytes=size, duration=duration,
                       width=width, height=height, fps=fps)
         s.add(asset)
         p.status = ProjectStatus.draft
@@ -352,9 +412,8 @@ def _run_render(job_id: int) -> None:
         if job_id in _CANCEL:
             return _finish_canceled(job_id)
 
-        _set_job(job_id, stage="renderizando vídeo", progress=45.0)
-        logger = _make_progress_logger(job_id, floor=45.0, ceil=97.0)
-        editor.render(out_path, logger=logger)  # render usa MoviePy internamente
+        _set_job(job_id, stage="renderizando vídeo (leve)", progress=45.0)
+        _render_output(job_id, editor, timeline, out_path, cfg, log)
         # progresso final
         _set_job(job_id, status=JobStatus.done, stage="concluído",
                  progress=100.0, output_path=out_path,
@@ -368,6 +427,38 @@ def _run_render(job_id: int) -> None:
         _mark_project(job_id, ProjectStatus.error)
     finally:
         _CANCEL.discard(job_id)
+
+
+def _render_output(job_id, editor, timeline, out_path, cfg, log):
+    """
+    Render em duas estratégias:
+      1) LEVE (padrão) — FFmpeg segmento-a-segmento, memória constante e baixa
+         prioridade; não trava a máquina. Sem efeitos sofisticados.
+      2) MoviePy (fallback ou BEATSYNC_ENGINE=moviepy) — efeitos completos,
+         porém mais pesado.
+    """
+    engine = os.environ.get("BEATSYNC_ENGINE", "lite").lower()
+
+    def progress_cb(pct: float):
+        # fase de render ocupa a faixa 45..99%
+        _set_job(job_id, progress=round(45.0 + (pct / 100.0) * 54.0, 1))
+
+    if engine != "moviepy":
+        try:
+            from . import render_ffmpeg as rf
+            cuts = rf.cuts_from_timeline(timeline)
+            rf.render(
+                cuts, editor.audio_path, out_path,
+                width=cfg.width, height=cfg.height, fps=cfg.fps,
+                threads=max(1, min(cfg.threads, 2)),
+                on_progress=progress_cb, log=log,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — cai para o MoviePy
+            log(f"render leve falhou ({exc}); tentando MoviePy…")
+
+    logger = _make_progress_logger(job_id, floor=45.0, ceil=99.0)
+    editor.render(out_path, logger=logger)
 
 
 def _finish_canceled(job_id: int):

@@ -31,7 +31,21 @@ escolhe o **preset**, dispara o **render** com barra de progresso ao vivo e
 | Frontend | `beatsync/server/static/` | SPA vanilla (HTML/CSS/JS), tema escuro, timeline de batidas em canvas |
 
 Variáveis de ambiente: `DATABASE_URL`, `BEATSYNC_STORAGE` (mídia/renders),
-`BEATSYNC_HOST`, `BEATSYNC_PORT`, `BEATSYNC_WORKERS`.
+`BEATSYNC_HOST`, `BEATSYNC_PORT`, `BEATSYNC_WORKERS`, `BEATSYNC_ENGINE`
+(`lite`=FFmpeg leve, padrão · `moviepy`=efeitos completos), `BEATSYNC_NICE`
+(prioridade do FFmpeg), `BEATSYNC_FFMPEG`/`BEATSYNC_FFPROBE` (binários).
+
+### ⚡ Render leve (não trava a máquina)
+
+Por padrão o Studio usa um **motor de render leve** (`BEATSYNC_ENGINE=lite`)
+pensado para notebooks (ex.: MacBook Air): cada corte é processado por um
+processo FFmpeg **independente, um de cada vez** (uso de memória constante e
+baixo), com **prioridade reduzida** (`nice`), e os cortes são unidos pelo
+`concat` do FFmpeg **sem recompressão**. Isso evita o pico de CPU/RAM do
+caminho MoviePy (que abria todos os cortes na memória). O preset **⚡ Leve**
+(720p, x264 ultrafast, 2 threads) é o padrão de novos projetos. Uploads são
+gravados em disco em streaming (não carregam o vídeo inteiro na RAM). Para os
+efeitos sofisticados (crossfade/zoom-punch), use `BEATSYNC_ENGINE=moviepy`.
 
 ---
 

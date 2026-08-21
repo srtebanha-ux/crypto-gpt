@@ -75,8 +75,10 @@ def health() -> dict:
 
 @app.get("/api/presets")
 def presets() -> list:
+    order = {"leve": 0, "clean": 1, "hype": 2, "reels": 3, "cinematic": 4}
     with db.get_session() as s:
-        return [p.to_dict() for p in s.query(db.Preset).order_by(db.Preset.id).all()]
+        items = [p.to_dict() for p in s.query(db.Preset).all()]
+    return sorted(items, key=lambda p: order.get(p["name"], 99))
 
 
 # --------------------------------------------------------------------------- #
@@ -96,7 +98,7 @@ async def projects_create(request: Request) -> dict:
     return service.create_project(
         name=name,
         description=body.get("description", ""),
-        preset=body.get("preset", "hype"),
+        preset=body.get("preset", "leve"),
     )
 
 
@@ -135,13 +137,12 @@ async def asset_upload(
 ) -> dict:
     if kind not in ("audio", "video"):
         raise HTTPException(422, "kind deve ser 'audio' ou 'video'")
-    data = await file.read()
-    if not data:
-        raise HTTPException(422, "arquivo vazio")
     try:
-        return service.add_asset(project_id, kind, file.filename or "arquivo", data)
+        # streaming: grava em disco em pedaços (não carrega o vídeo todo na RAM)
+        return service.add_asset_stream(
+            project_id, kind, file.filename or "arquivo", file.file)
     except ValueError as exc:
-        raise HTTPException(404, str(exc))
+        raise HTTPException(400, str(exc))
 
 
 @app.delete("/api/projects/{project_id}/assets/{asset_id}")

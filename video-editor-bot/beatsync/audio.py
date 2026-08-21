@@ -226,22 +226,9 @@ def _robust_load(path: str, sr: int):
 
 
 def _find_ffmpeg():
-    """
-    Localiza um binário do FFmpeg de forma robusta:
-      1) o FFmpeg do sistema (PATH);
-      2) o binário embutido do imageio-ffmpeg (dependência do MoviePy) —
-         funciona mesmo quando o PATH do processo não inclui o FFmpeg.
-    """
-    import shutil
-
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
-    try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
+    """Localiza um binário do FFmpeg (sistema ou embutido)."""
+    from .ffmpeg_util import ffmpeg_exe
+    return ffmpeg_exe()
 
 
 def _ffmpeg_to_wav(path: str, sr: int):
