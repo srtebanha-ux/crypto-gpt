@@ -177,7 +177,23 @@ test('arredonda a quantidade para baixo conforme o stepSize antes de enviar', as
     assert.equal(sentQuantity, '0.001'); // 0.0019 truncado para o múltiplo de stepSize (0.001)
 });
 
-test('lança erro quando a ordem não é preenchida (ex.: IOC expirada)', async () => {
+test('LIMIT envia timeInForce=FOK (Fill-Or-Kill) — nunca fill parcial nas pernas de entrada', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.000001', minQty: '0.00001', minNotional: '1' });
+
+    let sentTimeInForce: string | null = null;
+    await withFetchStub(
+        async (url) => {
+            sentTimeInForce = new URL(url).searchParams.get('timeInForce');
+            return jsonResponse(200, { orderId: 6, status: 'FILLED', executedQty: '0.001', cummulativeQuoteQty: '60.01', fills: [] });
+        },
+        () => provider.executeOrder('BTC/USDT', 'BUY', 'LIMIT', new Decimal('0.001'), new Decimal('60010'))
+    );
+
+    assert.equal(sentTimeInForce, 'FOK');
+});
+
+test('lança erro quando a ordem FOK não é preenchida (liquidez insuficiente no preço-limite)', async () => {
     const provider = newProvider();
     seedFilters(provider, 'BTCUSDT', { stepSize: '0.000001', minQty: '0.00001', minNotional: '1' });
 

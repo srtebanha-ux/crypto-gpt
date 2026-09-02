@@ -271,16 +271,29 @@ export class TriangularArbitrageEngine extends EventEmitter {
         let leg2: ExecutionResult | undefined;
 
         try {
+            // As 3 pernas de ENTRADA usam LIMIT+FOK (Fill-Or-Kill) no preço
+            // já confirmado pelas 3 camadas de kill switch, não MARKET: uma
+            // ordem MARKET aceita qualquer preço disponível no momento do
+            // envio, sem nenhuma proteção contra o book ter se movido contra
+            // o esperado nos milissegundos entre a decisão e o envio — FOK
+            // preenche a quantidade inteira nesse preço (ou melhor) ou
+            // cancela por completo, convertendo "risco de preencher a um
+            // preço ruim" em "falha limpa e sem exposição, tenta de novo no
+            // próximo tick". Perna 2 e 3 já dimensionam pela quantidade
+            // líquida REAL recebida da perna anterior (netProceeds), então
+            // um FOK que preenche integralmente nunca deixa "poeira" de
+            // fill parcial não contabilizada.
+
             // Perna 1: Comprar o ativo-base com todo o capital disponível em USDT.
             const leg1QtyToRequest = this.currentCapital.dividedBy(p1Ask);
-            leg1 = await this.exchange.executeOrder(triangle.leg1, 'BUY', 'MARKET', leg1QtyToRequest, p1Ask);
+            leg1 = await this.exchange.executeOrder(triangle.leg1, 'BUY', 'LIMIT', leg1QtyToRequest, p1Ask);
 
             // Perna 2: Comprar o ativo intermediário com todo o líquido recebido na perna 1.
             const leg2QtyToRequest = leg1.netProceeds.dividedBy(p2Ask);
-            leg2 = await this.exchange.executeOrder(triangle.leg2, 'BUY', 'MARKET', leg2QtyToRequest, p2Ask);
+            leg2 = await this.exchange.executeOrder(triangle.leg2, 'BUY', 'LIMIT', leg2QtyToRequest, p2Ask);
 
             // Perna 3: Vender todo o líquido recebido na perna 2 de volta para USDT.
-            const leg3 = await this.exchange.executeOrder(triangle.leg3, 'SELL', 'MARKET', leg2.netProceeds, p3Bid);
+            const leg3 = await this.exchange.executeOrder(triangle.leg3, 'SELL', 'LIMIT', leg2.netProceeds, p3Bid);
 
             // leg3.netProceeds já é o USDT líquido final — o provider aplicou
             // a taxa real de cada perna, nada a descontar aqui de novo.
@@ -315,6 +328,13 @@ export class TriangularArbitrageEngine extends EventEmitter {
      * por USDT via `triangle.leg1`. Se o próprio unwind falhar, emite
      * 'critical-exposure' e o engine se HALTA PERMANENTEMENTE (para TODOS os
      * triângulos) — não há mais nada que ele possa fazer sozinho.
+     *
+     * Deliberadamente `MARKET`, não `LIMIT`+FOK como as pernas de entrada: o
+     * objetivo aqui é certeza de SAÍDA, não proteção de preço — um FOK que
+     * falha em preencher deixaria a exposição residual aberta por MAIS
+     * tempo esperando um preço melhor, o oposto do que um unwind de
+     * emergência deve fazer. Aceitar um preço pior agora é estritamente
+     * melhor do que continuar exposto.
      */
     private async emergencyUnwind(
         triangle: Triangle,

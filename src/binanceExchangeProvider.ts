@@ -423,9 +423,16 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         if (type === 'LIMIT') {
             if (!price) throw new Error('Ordens LIMIT exigem price.');
             params.price = price.toFixed();
-            // IOC: preenche o que puder imediatamente e cancela o resto — sem
-            // exposição residual de perna parcial em um ciclo delta-neutral.
-            params.timeInForce = 'IOC';
+            // FOK (Fill-Or-Kill): preenche a quantidade INTEIRA imediatamente
+            // ao preço informado (ou melhor) ou cancela por completo — nunca
+            // fill parcial. Usado pelo engine nas 3 pernas de ENTRADA do
+            // ciclo (ver executeArbitrageCycle): se o preço já se moveu
+            // contra o esperado entre a decisão e o envio, a ordem
+            // simplesmente não preenche (falha limpa, sem exposição) em vez
+            // de preencher a mercado a um preço pior que o que justificou o
+            // disparo. As pernas de UNWIND continuam MARKET de propósito —
+            // ver o comentário em engine.ts.emergencyUnwind.
+            params.timeInForce = 'FOK';
         }
 
         const query = this.signParams(params);

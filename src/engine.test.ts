@@ -82,6 +82,13 @@ test('dispara e completa um ciclo lucrativo quando o triângulo diverge', async 
     assert.equal(exchange.calls[1].symbol, 'ETH/BTC');
     assert.equal(exchange.calls[2].symbol, 'ETH/USDT');
     assert.equal(exchange.calls[2].side, 'SELL');
+    // As 3 pernas de ENTRADA usam LIMIT (a Binance real envia timeInForce=FOK
+    // pra elas — ver binanceExchangeProvider.ts) em vez de MARKET, pra nunca
+    // preencher a um preço pior que o já confirmado pelos kill switches.
+    assert.ok(
+        exchange.calls.every((c) => c.type === 'LIMIT'),
+        'as 3 pernas de entrada devem usar LIMIT (FOK na Binance real), não MARKET'
+    );
     // Perna 2 deve pedir exatamente netProceeds(leg1) / p2Ask — sem nenhum haircut de taxa
     // adicional aplicado pelo engine (a taxa já foi contabilizada pelo provider em netProceeds).
     assert.equal(exchange.calls[1].qty.toString(), new Decimal('0.000832').dividedBy('0.0501').toString());
@@ -139,6 +146,12 @@ test('unwind de emergência vende o ETH residual quando a perna 3 falha', async 
     assert.equal(exchange.calls.length, 4);
     assert.equal(exchange.calls[3].symbol, 'ETH/USDT');
     assert.equal(exchange.calls[3].side, 'SELL');
+    // Pernas de entrada usam LIMIT, mas o unwind é deliberadamente MARKET —
+    // prioriza certeza de saída sobre proteção de preço (ver comentário em
+    // emergencyUnwind).
+    assert.equal(exchange.calls[0].type, 'LIMIT');
+    assert.equal(exchange.calls[1].type, 'LIMIT');
+    assert.equal(exchange.calls[3].type, 'MARKET', 'o unwind deve usar MARKET, não LIMIT/FOK, para garantir a saída');
     assert.equal(engine.getCurrentCapital().toString(), '49.9');
 });
 

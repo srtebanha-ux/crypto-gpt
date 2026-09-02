@@ -59,7 +59,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 68 testes, todos sem acesso a rede).
+  `npm test` — 75 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -179,7 +179,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 68 testes, todos sem rede, devem passar.
+1. `npm test` — 75 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -214,7 +214,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 68 testes, sem rede
+npm test            # suíte de testes (node:test) — 75 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
@@ -282,17 +282,28 @@ oportunidades pelo número de triângulos.
   mensagem pertence quando múltiplos símbolos são assinados na mesma
   conexão. Reconexão automática e backoff exponencial (até 30s) em caso de
   queda.
-- **Execução**: ordens `MARKET`/`LIMIT` via `POST /api/v3/order`, assinadas
-  com HMAC-SHA256 (`apiSecret`) e enviadas com `X-MBX-APIKEY`. A quantidade
-  é arredondada para baixo conforme o filtro `LOT_SIZE` (`stepSize`) do
-  símbolo, e ordens abaixo do `minQty` ou do `MIN_NOTIONAL` estimado são
-  rejeitadas **antes** de sair para a rede.
+- **Execução**: as 3 pernas de ENTRADA do ciclo usam `LIMIT` com
+  `timeInForce=FOK` (Fill-Or-Kill) no preço já confirmado pelas três camadas
+  de kill switch — preenche a quantidade inteira nesse preço (ou melhor) ou
+  cancela por completo, sem fill parcial. Isso protege contra o book ter se
+  movido contra o esperado nos milissegundos entre a decisão e o envio: uma
+  ordem `MARKET` aceitaria qualquer preço disponível naquele instante (sem
+  nenhuma proteção), enquanto FOK simplesmente não preenche quando o preço
+  piorou — falha limpa e sem exposição, tenta de novo no próximo tick. As
+  pernas de UNWIND (ver abaixo) continuam deliberadamente `MARKET`: ali o
+  objetivo é certeza de saída, não proteção de preço — um FOK que falha
+  deixaria a exposição residual aberta por mais tempo, o oposto do que um
+  unwind de emergência deve fazer. Ordens via `POST /api/v3/order`,
+  assinadas com HMAC-SHA256 (`apiSecret`) e enviadas com `X-MBX-APIKEY`. A
+  quantidade é arredondada para baixo conforme o filtro `LOT_SIZE`
+  (`stepSize`) do símbolo, e ordens abaixo do `minQty` ou do `MIN_NOTIONAL`
+  estimado são rejeitadas **antes** de sair para a rede.
 - **Timestamp**: o offset de relógio contra o servidor da Binance é
   sincronizado via `/api/v3/time` na conexão, evitando erros
   `-1021 INVALID_TIMESTAMP`. As chamadas de setup usam retry com backoff —
   mas **nunca** `executeOrder`, que não pode ser reenviada às cegas (uma
-  ordem MARKET pode já ter preenchido do lado da corretora mesmo com a
-  resposta HTTP falhando).
+  ordem pode já ter preenchido do lado da corretora mesmo com a resposta
+  HTTP falhando).
 - **Taxa taker**: buscada via `/sapi/v1/asset/tradeFee` (com fallback para
   0.1% se o endpoint não estiver disponível, como no testnet).
 - **Saldo real**: `fetchAvailableBalance(asset)` consulta `/api/v3/account`;
