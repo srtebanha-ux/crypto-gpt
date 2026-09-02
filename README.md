@@ -299,16 +299,37 @@ O que ele faz:
 **Não envia nenhuma ordem** — é só leitura de mercado e estatística, por
 isso pode rodar com segurança mesmo sem `BINANCE_API_KEY`/`SECRET`.
 
-### Rodar
+### Rodar localmente
 
 ```bash
 npm run sniff
+# ou, pra já salvar o log com timestamp e um resumo ao final:
+./scripts/extract-sniffer-metrics.sh
 ```
 
 Variáveis opcionais: `SNIFFER_TAKER_FEE` (padrão `0.001`),
 `SNIFFER_TARGET_NET_PROFIT` (padrão `0.0002` = 0,02% líquido — o mesmo
 número usado na discussão sobre viabilidade da estratégia),
 `SNIFFER_BASES` (padrão `BTC,ETH,BNB,FDUSD`).
+
+### Rodar no Railway (coleta contínua, sem depender da sua máquina ligada)
+
+Não é preciso um `Dockerfile`/`railway.json` separado — a imagem que já
+builda `dist/live.js` (ver [Deploy 24/7 no Railway](#deploy-247-no-railway))
+também builda `dist/opportunitySniffer.js`, porque ambos vêm do mesmo
+`tsconfig.build.json`. Pra coletar dados sem mexer no serviço de trading:
+
+1. No mesmo projeto Railway, **New → GitHub Repo** apontando pro mesmo
+   repositório de novo (cria um segundo serviço, independente do serviço
+   de trading).
+2. Nesse novo serviço, aba **Settings → Deploy → Custom Start Command**,
+   defina `node dist/opportunitySniffer.js` — isso sobrescreve o `CMD` do
+   Dockerfile só para este serviço, sem tocar no `railway.json` nem no
+   serviço de trading.
+3. Não precisa de `BINANCE_API_KEY`/`SECRET` nesse serviço — o sniffer só
+   lê mercado.
+4. Acompanhe em **Deployments → View Logs**; o relatório periódico aparece
+   a cada 10s.
 
 ### Como interpretar o resultado — e o que ele NÃO prova
 
