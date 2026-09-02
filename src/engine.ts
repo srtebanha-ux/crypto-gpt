@@ -28,6 +28,18 @@ export interface EngineConfig {
     statMinSamples: number;
     /** Nº de desvios-padrão que R precisa exceder da média móvel para ser tratado como sinal, não ruído. */
     statZThreshold: Decimal;
+    /**
+     * Circuit breaker de perda máxima: fração do capital INICIAL que, se
+     * perdida, halta o engine permanentemente — mesmo que cada ciclo
+     * individual tenha passado nos três kill switches de disparo. Existe
+     * porque nenhum dos outros kill switches protege contra o cenário onde
+     * a ESTRATÉGIA em si perde dinheiro na prática (slippage real entre a
+     * decisão e a execução de 3 ordens sequenciais, competição de bots mais
+     * rápidos, etc.) mesmo disparando só em ciclos que pareciam corretos no
+     * momento da decisão. 0.10 = para se o capital cair 10% abaixo do
+     * inicial. Deve ser configurado ANTES de operar com capital real.
+     */
+    maxDrawdownFraction: Decimal;
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -35,6 +47,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     ratioEwmaAlpha: new Decimal('0.05'),
     statMinSamples: 20,
     statZThreshold: new Decimal('3'),
+    maxDrawdownFraction: new Decimal('0.10'),
 };
 
 // ============================================================================
@@ -57,12 +70,20 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
 //   'cycle-failure'     (payload: { error: unknown; unwound: boolean })
 //   'critical-exposure' (payload: { leg1?: ExecutionResult; leg2?: ExecutionResult; error: unknown })
 //     — o unwind de emergência também falhou; há posição direcional aberta
-//     na corretora que o engine não conseguiu neutralizar sozinho. A partir
-//     daqui o engine se HALTA PERMANENTEMENTE (isHalted() === true): nunca
-//     mais inicia um novo ciclo sozinho, mesmo que o processo continue de
-//     pé — decidido assim de propósito, para não competir com um restart
-//     automático de infraestrutura (ver src/live.ts) que reativaria o robô
-//     às cegas sobre uma posição não neutralizada.
+//     na corretora que o engine não conseguiu neutralizar sozinho.
+//   'circuit-breaker-triggered' (payload: { initialCapital: Decimal; currentCapital: Decimal; drawdownFraction: Decimal })
+//     — o capital caiu além de `config.maxDrawdownFraction` do valor
+//     inicial. Diferente dos outros kill switches (que decidem se um ciclo
+//     deve disparar), este observa o RESULTADO acumulado: protege contra a
+//     estratégia sendo sistematicamente perdedora na prática mesmo quando
+//     cada ciclo individual pareceu correto no momento da decisão.
+//
+// Em qualquer um dos dois eventos acima, o engine se HALTA PERMANENTEMENTE
+// (isHalted() === true): nunca mais inicia um novo ciclo sozinho, mesmo que
+// o processo continue de pé — decidido assim de propósito, para não competir
+// com um restart automático de infraestrutura (ver src/live.ts) que
+// reativaria o robô às cegas sobre uma posição não neutralizada ou uma
+// estratégia que está sistematicamente perdendo dinheiro.
 // ============================================================================
 export class TriangularArbitrageEngine extends EventEmitter {
     private readonly exchange: IExchangeProvider;
@@ -70,6 +91,7 @@ export class TriangularArbitrageEngine extends EventEmitter {
     private readonly config: EngineConfig;
     private readonly ratioTracker: EwmaTracker;
     private readonly orderBookState: Map<string, Ticker> = new Map();
+    private readonly initialCapital: Decimal;
     private isExecutingCycle = false;
     private haltedPermanently = false;
     private currentCapital: Decimal;
@@ -78,7 +100,8 @@ export class TriangularArbitrageEngine extends EventEmitter {
         super();
         this.exchange = exchange;
         this.riskManager = riskManager;
-        this.currentCapital = new Decimal(initialCapital);
+        this.initialCapital = new Decimal(initialCapital);
+        this.currentCapital = this.initialCapital;
         this.config = { ...DEFAULT_ENGINE_CONFIG, ...config };
         this.ratioTracker = new EwmaTracker(this.config.ratioEwmaAlpha);
 
@@ -89,8 +112,35 @@ export class TriangularArbitrageEngine extends EventEmitter {
         return this.currentCapital;
     }
 
+    public getInitialCapital(): Decimal {
+        return this.initialCapital;
+    }
+
     public isHalted(): boolean {
         return this.haltedPermanently;
+    }
+
+    /**
+     * Verifica o circuit breaker de perda máxima após qualquer atualização
+     * de capital (sucesso ou unwind). Chamar SEMPRE que `currentCapital`
+     * mudar — inclusive após um unwind, já que ele também pode terminar em
+     * prejuízo. Halta permanentemente e emite 'circuit-breaker-triggered'
+     * se o drawdown acumulado ultrapassar `config.maxDrawdownFraction`.
+     */
+    private checkDrawdownCircuitBreaker(): void {
+        if (this.haltedPermanently) return;
+        const floor = this.initialCapital.mul(new Decimal(1).minus(this.config.maxDrawdownFraction));
+        if (this.currentCapital.greaterThanOrEqualTo(floor)) return;
+
+        this.haltedPermanently = true;
+        const drawdownFraction = new Decimal(1).minus(this.currentCapital.dividedBy(this.initialCapital));
+        log.error('CIRCUIT BREAKER DE PERDA MÁXIMA ACIONADO — engine halted permanentemente. Intervenção manual necessária.', {
+            capitalInicial: this.initialCapital.toFixed(6),
+            capitalAtual: this.currentCapital.toFixed(6),
+            drawdown: drawdownFraction.mul(100).toFixed(2) + '%',
+            limiteConfigurado: this.config.maxDrawdownFraction.mul(100).toFixed(2) + '%',
+        });
+        this.emit('circuit-breaker-triggered', { initialCapital: this.initialCapital, currentCapital: this.currentCapital, drawdownFraction });
     }
 
     private initializeFeed() {
@@ -199,6 +249,7 @@ export class TriangularArbitrageEngine extends EventEmitter {
             const finalCapital = leg3.netProceeds;
             const actualProfit = finalCapital.minus(this.currentCapital);
             this.currentCapital = finalCapital;
+            this.checkDrawdownCircuitBreaker();
 
             log.info('Arbitragem concluída com sucesso.', {
                 executionTimeMs: Date.now() - startTime,
@@ -229,6 +280,7 @@ export class TriangularArbitrageEngine extends EventEmitter {
             if (leg2) {
                 const unwind = await this.exchange.executeOrder('ETH/USDT', 'SELL', 'MARKET', leg2.netProceeds, p3Bid);
                 this.currentCapital = unwind.netProceeds;
+                this.checkDrawdownCircuitBreaker();
                 log.warn('Unwind concluído: ETH residual vendido a mercado.', { capitalAposUnwind: this.currentCapital.toFixed(6) });
                 this.emit('cycle-failure', { error: originalError, unwound: true });
                 return;
@@ -236,6 +288,7 @@ export class TriangularArbitrageEngine extends EventEmitter {
             if (leg1) {
                 const unwind = await this.exchange.executeOrder('BTC/USDT', 'SELL', 'MARKET', leg1.netProceeds, p1Ask);
                 this.currentCapital = unwind.netProceeds;
+                this.checkDrawdownCircuitBreaker();
                 log.warn('Unwind concluído: BTC residual vendido a mercado.', { capitalAposUnwind: this.currentCapital.toFixed(6) });
                 this.emit('cycle-failure', { error: originalError, unwound: true });
                 return;

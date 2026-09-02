@@ -14,6 +14,7 @@
 //   STAT_MIN_SAMPLES        (padrão 20 — kill switch estatístico, ver engine.ts)
 //   STAT_Z_THRESHOLD        (padrão 3)
 //   RATIO_EWMA_ALPHA        (padrão 0.05)
+//   MAX_DRAWDOWN_FRACTION   (padrão 0.10 — circuit breaker de perda máxima, ver engine.ts)
 //   HEARTBEAT_INTERVAL_MIN  (padrão 5 — log periódico de "estou vivo" para observabilidade 24/7)
 //
 // Gate de segurança: para enviar ordens reais (dinheiro real) é preciso
@@ -63,6 +64,7 @@ function resolveEngineConfig(): Partial<EngineConfig> {
     if (process.env.STAT_MIN_SAMPLES) config.statMinSamples = Number(process.env.STAT_MIN_SAMPLES);
     if (process.env.STAT_Z_THRESHOLD) config.statZThreshold = new Decimal(process.env.STAT_Z_THRESHOLD);
     if (process.env.RATIO_EWMA_ALPHA) config.ratioEwmaAlpha = new Decimal(process.env.RATIO_EWMA_ALPHA);
+    if (process.env.MAX_DRAWDOWN_FRACTION) config.maxDrawdownFraction = new Decimal(process.env.MAX_DRAWDOWN_FRACTION);
     return config;
 }
 
@@ -116,6 +118,15 @@ async function bootstrap() {
             error: error instanceof Error ? error.message : String(error),
         });
         // Sem process.exit() aqui de propósito — ver o cabeçalho do arquivo.
+    });
+
+    engine.on('circuit-breaker-triggered', ({ initialCapital, currentCapital, drawdownFraction }) => {
+        log.error('*** CIRCUIT BREAKER DE PERDA MÁXIMA: engine parado permanentemente. A estratégia perdeu mais do que o limite configurado. ***', {
+            capitalInicial: initialCapital.toFixed(6),
+            capitalAtual: currentCapital.toFixed(6),
+            drawdown: drawdownFraction.mul(100).toFixed(2) + '%',
+        });
+        // Também sem process.exit() — mesma razão do critical-exposure acima.
     });
 
     if (heartbeatIntervalMin > 0) {

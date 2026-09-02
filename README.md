@@ -40,7 +40,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   explorar como a taxa de oportunidades varia com hipóteses de ruído de
   mercado — ver [Simulação de sensibilidade](#simulação-de-sensibilidade-montecarlosimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 56 testes, todos sem acesso a rede).
+  `npm test` — 57 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -132,6 +132,47 @@ neutralizada. Em vez disso, o processo fica de pé (WS conectado, heartbeat
 rodando) mas permanentemente parado de negociar, gritando no log até um
 humano investigar a conta manualmente.
 
+### Circuit breaker de perda máxima
+
+Os três kill switches de disparo (determinístico, estatístico, profundidade)
+só decidem **se um ciclo deve começar** — nenhum deles protege contra o
+cenário onde a estratégia, na prática, perde dinheiro de forma sistemática
+mesmo disparando só em ciclos que pareciam corretos no momento da decisão
+(slippage real entre a decisão e a execução de 3 ordens sequenciais,
+competição de bots mais rápidos e colocados, etc.). Depois de cada
+atualização de capital (ciclo bem-sucedido ou unwind), o engine confere se
+o capital caiu além de `maxDrawdownFraction` (padrão `0.10` = 10%) abaixo
+do capital **inicial** — se caiu, halta permanentemente e emite
+`'circuit-breaker-triggered'`, pelo mesmo motivo e do mesmo jeito que
+`'critical-exposure'` (sem `process.exit()`, ver acima). Configurável via
+`MAX_DRAWDOWN_FRACTION` em `src/live.ts`.
+
+Isso limita o prejuízo máximo possível a um valor conhecido e configurado
+de antemão — é a resposta direta para "não quero gastar dinheiro à toa sem
+retorno": mesmo que a estratégia se revele ruim na prática, o dano para
+antes de crescer.
+
+### Checklist antes de operar com dinheiro real
+
+1. `npm test` — 57 testes, todos sem rede, devem passar.
+2. `npm run sniff` (ou `./scripts/extract-sniffer-metrics.sh`) por várias
+   horas/dias contra a Binance real — sem isso, não há evidência de que
+   existe alguma ineficiência líquida de taxa capturável nos pares
+   escolhidos (ver [Medindo a oportunidade real](#medindo-a-oportunidade-real-opportunitysnifferts)).
+3. `npm run live` (ou o deploy no Railway) contra o **Spot Testnet**
+   (padrão — não precisa fazer nada extra) por um período — confirme nos
+   logs que não há crash, `uncaughtException`/`unhandledRejection`, nem
+   halts inesperados, e que `Conectado ao feed de book/profundidade da
+   Binance.` aparece sem erros de reconexão constantes.
+4. Só depois disso considere `BINANCE_LIVE=true` — comece com o menor
+   `CAPITAL_USD` que fizer sentido, e configure `MAX_DRAWDOWN_FRACTION`
+   deliberadamente (não confie só no padrão de 10% sem pensar se esse
+   valor faz sentido para o seu capital).
+5. Rodar 24/7 no Railway tem custo de infraestrutura independente do
+   resultado do trading (o worker fica ligado o tempo todo) — confira o
+   preço atual no próprio painel do Railway antes de fazer o deploy; este
+   projeto não tem como consultar isso.
+
 ### Rodar a demo (mock, sem rede/credenciais)
 
 ```bash
@@ -140,7 +181,8 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 38 testes, sem rede
+npm test            # suíte de testes (node:test) — 57 testes, sem rede
+npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
 ## Conector real da Binance (`src/binanceExchangeProvider.ts`)
@@ -263,6 +305,7 @@ Variáveis de ambiente aceitas por `src/live.ts` (ver também `.env.example`):
 | `STAT_MIN_SAMPLES` | `20` | Amostras mínimas de linha de base antes do kill switch #2 liberar disparo. |
 | `STAT_Z_THRESHOLD` | `3` | Desvios-padrão exigidos do kill switch #2. |
 | `RATIO_EWMA_ALPHA` | `0.05` | Memória do EWMA (`2/(N+1)` ≈ janela de N amostras). |
+| `MAX_DRAWDOWN_FRACTION` | `0.10` | Circuit breaker: para permanentemente se o capital cair essa fração abaixo do inicial. |
 | `HEARTBEAT_INTERVAL_MIN` | `5` | Intervalo do log de heartbeat; `0` desativa. |
 
 ## Medindo a oportunidade real (`opportunitySniffer.ts`)

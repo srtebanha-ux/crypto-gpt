@@ -249,3 +249,45 @@ test('kill switch de profundidade libera o disparo quando o book real sustenta o
     await successPromise;
     assert.equal(exchange.calls.length, 3);
 });
+
+test('circuit breaker de drawdown halta o engine após perdas acumuladas além do limite', async () => {
+    const exchange = new FakeExchangeProvider([
+        // Ciclo 1: capital 50 -> 47 (perda de 3, dentro do limite de 10% = piso 45)
+        () => fill('0.0008', '0.0008', '60010'),
+        () => fill('0.016', '0.016', '0.0501'),
+        () => fill('47', '0.016', '3050'),
+        // Ciclo 2: capital 47 -> 44 (< piso de 45 -> deve acionar o circuit breaker)
+        () => fill('0.0008', '0.0008', '60010'),
+        () => fill('0.016', '0.016', '0.0501'),
+        () => fill('44', '0.016', '3050'),
+    ]);
+    const riskManager = new RiskManager('50', '0.0005');
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0, maxDrawdownFraction: new Decimal('0.10') });
+
+    const firstSuccess = waitFor(engine, 'cycle-success');
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+    await firstSuccess;
+
+    assert.equal(engine.getCurrentCapital().toString(), '47');
+    assert.equal(engine.isHalted(), false, 'perda de 6% ainda está dentro do limite de 10% de drawdown');
+
+    const circuitBreakerPromise = waitFor(engine, 'circuit-breaker-triggered');
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+
+    const { initialCapital, currentCapital, drawdownFraction } = await circuitBreakerPromise;
+    assert.equal(initialCapital.toString(), '50');
+    assert.equal(currentCapital.toString(), '44');
+    assert.ok(drawdownFraction.greaterThan('0.10'));
+    assert.equal(engine.isHalted(), true);
+
+    // Halted permanentemente: uma nova ineficiência não deve disparar mais nada.
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(exchange.calls.length, 6, 'nenhuma nova ordem deveria ser enviada após o circuit breaker');
+});
