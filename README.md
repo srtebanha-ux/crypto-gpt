@@ -308,7 +308,7 @@ npm run sniff
 Variáveis opcionais: `SNIFFER_TAKER_FEE` (padrão `0.001`),
 `SNIFFER_TARGET_NET_PROFIT` (padrão `0.0002` = 0,02% líquido — o mesmo
 número usado na discussão sobre viabilidade da estratégia),
-`SNIFFER_BASES` (padrão `BTC,ETH,BNB`).
+`SNIFFER_BASES` (padrão `BTC,ETH,BNB,FDUSD`).
 
 ### Como interpretar o resultado — e o que ele NÃO prova
 

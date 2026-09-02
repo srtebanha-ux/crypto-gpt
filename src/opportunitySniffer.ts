@@ -26,7 +26,7 @@ const MAX_LEG_AGE_MS = 3000; // idade máxima aceita de CADA perna para uma aval
 
 const TAKER_FEE = new Decimal(process.env.SNIFFER_TAKER_FEE ?? '0.001');
 const TARGET_NET_PROFIT = new Decimal(process.env.SNIFFER_TARGET_NET_PROFIT ?? '0.0002'); // 0.02% líquido
-const INTERMEDIATE_BASES = (process.env.SNIFFER_BASES ?? 'BTC,ETH,BNB').split(',').map((s) => s.trim().toUpperCase());
+const INTERMEDIATE_BASES = (process.env.SNIFFER_BASES ?? 'BTC,ETH,BNB,FDUSD').split(',').map((s) => s.trim().toUpperCase());
 
 // ============================================================================
 // [1] FUNÇÕES PURAS (testadas isoladamente em opportunitySniffer.test.ts,
