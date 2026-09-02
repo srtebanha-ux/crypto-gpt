@@ -15,13 +15,24 @@
 // setar BINANCE_LIVE=true *e* BINANCE_LIVE_CONFIRM=I_UNDERSTAND_THE_RISK
 // simultaneamente. Sem isso, o processo se recusa a iniciar em modo live
 // e cai para o Spot Testnet (fills simulados, sem risco financeiro).
+//
+// Antes de operar, o capital configurado (CAPITAL_USD) é sempre reduzido
+// (nunca aumentado) até o saldo livre real de USDT na conta — evita erros
+// de "insufficient balance" e evita usar mais do que a conta realmente tem.
+//
+// Se um ciclo falhar e o unwind de emergência do engine também falhar
+// ('critical-exposure'), o processo para imediatamente: com posição
+// direcional aberta e não neutralizada, continuar operando é o pior curso
+// de ação possível — a decisão daqui pra frente exige um humano.
 import { Decimal } from 'decimal.js';
+import { createLogger } from './logger';
 import { RiskManager } from './riskManager';
 import { TriangularArbitrageEngine } from './engine';
 import { BinanceExchangeProvider } from './binanceExchangeProvider';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
+const log = createLogger('live');
 const LIVE_CONFIRM_PHRASE = 'I_UNDERSTAND_THE_RISK';
 
 function resolveLiveMode(): boolean {
@@ -37,6 +48,25 @@ function resolveLiveMode(): boolean {
     return true;
 }
 
+async function resolveStartingCapital(exchange: BinanceExchangeProvider, configuredCapital: Decimal): Promise<Decimal> {
+    try {
+        const freeUsdt = await exchange.fetchAvailableBalance('USDT');
+        if (freeUsdt.lessThan(configuredCapital)) {
+            log.warn('Saldo livre de USDT é menor que CAPITAL_USD configurado — reduzindo capital de partida.', {
+                configurado: configuredCapital.toString(),
+                saldoLivre: freeUsdt.toString(),
+            });
+            return freeUsdt;
+        }
+        return configuredCapital;
+    } catch (err) {
+        log.warn('Não foi possível consultar o saldo da conta; seguindo com CAPITAL_USD configurado.', {
+            error: err instanceof Error ? err.message : String(err),
+        });
+        return configuredCapital;
+    }
+}
+
 async function bootstrap() {
     const apiKey = process.env.BINANCE_API_KEY;
     const apiSecret = process.env.BINANCE_API_SECRET;
@@ -45,30 +75,40 @@ async function bootstrap() {
     }
 
     const live = resolveLiveMode();
-    const C0_BASE = process.env.CAPITAL_USD ?? '50.00';
+    const configuredCapital = new Decimal(process.env.CAPITAL_USD ?? '50.00');
     const MAX_SLIPPAGE = process.env.MAX_SLIPPAGE ?? '0.0005';
 
-    console.log(`[SYS] APEX-ZERO: HFT Triangular Arbitrage Engine (${live ? 'LIVE — DINHEIRO REAL' : 'TESTNET'}) Booting...`);
+    log.info(`APEX-ZERO: HFT Triangular Arbitrage Engine booting em modo ${live ? 'LIVE — DINHEIRO REAL' : 'TESTNET'}.`);
     if (live) {
-        console.warn('[SYS] *** MODO LIVE ATIVO: ordens reais serão enviadas à Binance. ***');
+        log.warn('*** MODO LIVE ATIVO: ordens reais serão enviadas à Binance. ***');
     }
 
     const exchange = new BinanceExchangeProvider({ apiKey, apiSecret, live });
-    const riskManager = new RiskManager(C0_BASE, MAX_SLIPPAGE);
-
     await exchange.connect();
-    new TriangularArbitrageEngine(exchange, riskManager, C0_BASE);
 
-    const shutdown = () => {
-        console.log('\n[SYS] Encerrando conexão com a Binance...');
+    const startingCapital = await resolveStartingCapital(exchange, configuredCapital);
+    const riskManager = new RiskManager(startingCapital.toString(), MAX_SLIPPAGE);
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, startingCapital.toString());
+
+    const shutdown = (exitCode: number) => {
+        log.info('Encerrando conexão com a Binance...');
         exchange.shutdown();
-        process.exit(0);
+        process.exit(exitCode);
     };
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+
+    engine.on('critical-exposure', ({ leg1, leg2, error }) => {
+        log.error('*** PARADA DE EMERGÊNCIA: exposição direcional não neutralizada. Intervenção manual necessária. ***', {
+            leg1Symbol: leg1 ? 'BTC/USDT' : undefined,
+            leg2Symbol: leg2 ? 'ETH/BTC' : undefined,
+            error: error instanceof Error ? error.message : String(error),
+        });
+        shutdown(1);
+    });
+    process.on('SIGINT', () => shutdown(0));
+    process.on('SIGTERM', () => shutdown(0));
 }
 
 bootstrap().catch((err) => {
-    console.error('[FATAL] Falha ao inicializar o engine contra a Binance:', err);
+    log.error('Falha ao inicializar o engine contra a Binance.', { error: err instanceof Error ? err.message : String(err) });
     process.exit(1);
 });

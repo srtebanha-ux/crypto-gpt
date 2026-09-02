@@ -5,6 +5,9 @@
 //     combined stream), com reconexão automática e backoff exponencial.
 //   - Execução de ordens via REST assinada (HMAC-SHA256), respeitando os
 //     filtros LOT_SIZE/MIN_NOTIONAL do par antes de enviar.
+//   - Contabilidade de taxa fiel à Binance: a taxa é debitada do ativo que
+//     você RECEBE na perna (base para BUY, cotação para SELL), então
+//     `netProceeds` já vem líquido — ver a nota em `types.ts`.
 //
 // Por padrão aponta para o Spot Testnet (https://testnet.binance.vision) —
 // nenhuma ordem real é enviada a menos que `live: true` seja passado
@@ -13,7 +16,10 @@ import { Decimal } from 'decimal.js';
 import * as crypto from 'crypto';
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
+import { createLogger } from './logger';
 import { ExecutionResult, IExchangeProvider, OrderSide, OrderType, Ticker } from './types';
+
+const log = createLogger('binance');
 
 // Mapeamento entre o símbolo interno do engine ("BTC/USDT") e o símbolo
 // nativo da Binance ("BTCUSDT"), usado tanto para assinar streams quanto
@@ -44,6 +50,33 @@ export interface BinanceExchangeProviderOptions {
 }
 
 const MAX_RECONNECT_DELAY_MS = 30_000;
+const STARTUP_RETRY_ATTEMPTS = 3;
+const STARTUP_RETRY_BASE_DELAY_MS = 500;
+
+/**
+ * Repete uma chamada GET idempotente com backoff exponencial. NUNCA usar
+ * para `executeOrder`: uma ordem MARKET pode já ter sido preenchida do lado
+ * da corretora mesmo que a resposta HTTP falhe, e reenviá-la cegamente
+ * arrisca duplicar a execução.
+ */
+async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= STARTUP_RETRY_ATTEMPTS; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastError = err;
+            if (attempt < STARTUP_RETRY_ATTEMPTS) {
+                const delayMs = STARTUP_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+                log.warn(`${label} falhou (tentativa ${attempt}/${STARTUP_RETRY_ATTEMPTS}), retentando em ${delayMs}ms.`, {
+                    error: err instanceof Error ? err.message : String(err),
+                });
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+            }
+        }
+    }
+    throw lastError;
+}
 
 export class BinanceExchangeProvider extends EventEmitter implements IExchangeProvider {
     private readonly apiKey: string;
@@ -76,9 +109,9 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
 
     /** Sincroniza relógio, carrega filtros de símbolo/fee e abre o WebSocket. Chamar antes de operar. */
     public async connect(): Promise<void> {
-        await this.syncServerTime();
-        await this.loadExchangeFilters();
-        await this.loadTradingFee();
+        await withRetry('Sincronização de horário', () => this.syncServerTime());
+        await withRetry('Carga de exchangeInfo', () => this.loadExchangeFilters());
+        await this.loadTradingFee(); // best-effort, não bloqueia o startup
         this.openWebSocket();
     }
 
@@ -99,7 +132,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
 
         this.ws.on('open', () => {
             this.reconnectAttempts = 0;
-            console.log('[WS] Conectado ao feed de book da Binance.');
+            log.info('Conectado ao feed de book da Binance.', { url: this.wsBaseUrl });
         });
 
         this.ws.on('message', (raw: WebSocket.RawData) => {
@@ -108,17 +141,17 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
                 const data = payload.data ?? payload; // combined stream envelopa em {stream, data}
                 this.handleBookTicker(data);
             } catch (err) {
-                console.error('[WS] Falha ao parsear mensagem do book:', err);
+                log.error('Falha ao parsear mensagem do book.', { error: err instanceof Error ? err.message : String(err) });
             }
         });
 
         this.ws.on('error', (err: Error) => {
-            console.error('[WS] Erro de conexão:', err.message);
+            log.error('Erro de conexão WebSocket.', { error: err.message });
         });
 
         this.ws.on('close', (code: number) => {
             if (this.isShuttingDown) return;
-            console.warn(`[WS] Conexão encerrada (code=${code}). Agendando reconexão...`);
+            log.warn('Conexão WebSocket encerrada. Agendando reconexão...', { code });
             this.scheduleReconnect();
         });
     }
@@ -149,7 +182,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     }
 
     // ------------------------------------------------------------------
-    // REST: metadados de exchange (filtros de quantidade e taxa)
+    // REST: metadados de exchange (filtros de quantidade, taxa, saldo)
     // ------------------------------------------------------------------
     private async syncServerTime(): Promise<void> {
         const res = await fetch(`${this.restBaseUrl}/api/v3/time`);
@@ -186,12 +219,30 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
             const btcUsdtFee = fees.find((f) => f.symbol === 'BTCUSDT');
             if (btcUsdtFee) this.feeRate = new Decimal(btcUsdtFee.takerCommission);
         } catch (err) {
-            console.warn('[REST] Não foi possível carregar a taxa taker real; usando fallback.', err);
+            log.warn('Não foi possível carregar a taxa taker real; usando fallback.', {
+                fallback: this.feeRate.toString(),
+                error: err instanceof Error ? err.message : String(err),
+            });
         }
     }
 
     public getFeeRate(): Decimal {
         return this.feeRate;
+    }
+
+    /** Saldo disponível (livre, não travado em ordens) de um ativo na conta Spot. */
+    public async fetchAvailableBalance(asset: string): Promise<Decimal> {
+        const query = this.signParams({ timestamp: this.serverTimestamp() });
+        const res = await fetch(`${this.restBaseUrl}/api/v3/account?${query}`, {
+            headers: { 'X-MBX-APIKEY': this.apiKey },
+        });
+        if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`Falha ao consultar saldo da conta: HTTP ${res.status} — ${body}`);
+        }
+        const account = (await res.json()) as { balances: Array<{ asset: string; free: string }> };
+        const balance = account.balances.find((b) => b.asset === asset);
+        return new Decimal(balance?.free ?? '0');
     }
 
     // ------------------------------------------------------------------
@@ -222,6 +273,14 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         if (filters && roundedQty.lessThan(filters.minQty)) {
             throw new Error(`Quantidade ${roundedQty.toString()} abaixo do minQty (${filters.minQty.toString()}) para ${symbol}.`);
         }
+        if (filters && price) {
+            const estimatedNotional = roundedQty.mul(price);
+            if (estimatedNotional.lessThan(filters.minNotional)) {
+                throw new Error(
+                    `Notional estimado ${estimatedNotional.toString()} abaixo do minNotional (${filters.minNotional.toString()}) para ${symbol}.`
+                );
+            }
+        }
 
         const params: Record<string, string> = {
             symbol,
@@ -249,7 +308,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
             executedQty?: string;
             cummulativeQuoteQty?: string;
             transactTime?: number;
-            fills?: Array<{ commission?: string }>;
+            fills?: Array<{ commission?: string; commissionAsset?: string }>;
             msg?: string;
             code?: number;
         };
@@ -261,20 +320,44 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         const executedQty = new Decimal(body.executedQty ?? '0');
         const cumulativeQuoteQty = new Decimal(body.cummulativeQuoteQty ?? '0');
         const executedPrice = executedQty.isZero() ? new Decimal(price ?? '0') : cumulativeQuoteQty.dividedBy(executedQty);
-        const feePaid = ((body.fills ?? []) as Array<{ commission?: string }>).reduce(
-            (acc: Decimal, fill) => acc.plus(new Decimal(fill.commission ?? '0')),
-            new Decimal(0)
-        );
+
+        // A Binance cobra a taxa no ativo que você RECEBE na perna: base
+        // asset para BUY, quote asset para SELL (exceto quando o desconto em
+        // BNB está ativo, caso em que commissionAsset === 'BNB' e não deve
+        // ser subtraído do que você recebeu no par negociado).
+        const [baseAsset, quoteAsset] = pairSymbol.split('/');
+        const receivedAsset = side === 'BUY' ? baseAsset : quoteAsset;
+        const grossReceived = side === 'BUY' ? executedQty : cumulativeQuoteQty;
+
+        let commissionInReceivedAsset = new Decimal(0);
+        let totalFeePaid = new Decimal(0);
+        let feePaidAsset = receivedAsset;
+        for (const fill of body.fills ?? []) {
+            const commission = new Decimal(fill.commission ?? '0');
+            totalFeePaid = totalFeePaid.plus(commission);
+            if (fill.commissionAsset === receivedAsset) {
+                commissionInReceivedAsset = commissionInReceivedAsset.plus(commission);
+            } else if (fill.commissionAsset) {
+                feePaidAsset = fill.commissionAsset;
+            }
+        }
+        const netProceeds = grossReceived.minus(commissionInReceivedAsset);
 
         const status: ExecutionResult['status'] =
             body.status === 'FILLED' ? 'FILLED' : body.status === 'EXPIRED' || body.status === 'CANCELED' ? 'REJECTED' : 'FAILED';
+
+        if (status !== 'FILLED') {
+            throw new Error(`Ordem não preenchida (${symbol} ${side}): status=${body.status}`);
+        }
 
         return {
             orderId: String(body.orderId ?? crypto.randomUUID()),
             status,
             executedPrice,
             executedQty,
-            feePaid,
+            netProceeds,
+            feePaid: totalFeePaid,
+            feePaidAsset,
             timestamp: body.transactTime ?? Date.now(),
         };
     }

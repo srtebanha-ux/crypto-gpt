@@ -23,6 +23,15 @@ export class RiskManager {
         if (initialCapital.greaterThan(this.maxCapitalAllocated)) {
             return { viable: false, expectedNetProfit: new Decimal(0) };
         }
+        // Kill switch de sanidade: preços não positivos (feed corrompido,
+        // símbolo desconhecido, book vazio) nunca devem passar para a divisão
+        // — sem isso, dividedBy(0) do decimal.js retorna Infinity em vez de
+        // lançar, e isViable acabaria "true" por um dado inválido. Nota:
+        // `Decimal.isPositive()` considera 0 positivo, por isso o teste
+        // explícito de "> 0" abaixo em vez de usá-lo.
+        if (!p1Ask.greaterThan(0) || !p2Ask.greaterThan(0) || !p3Bid.greaterThan(0)) {
+            return { viable: false, expectedNetProfit: new Decimal(0) };
+        }
 
         // Fator de retenção por perna = (1 - fee)
         const retentionRate = new Decimal(1).minus(feeRate);

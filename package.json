@@ -6,11 +6,12 @@
   "type": "commonjs",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p .",
+    "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "live": "ts-node src/live.ts",
-    "typecheck": "tsc -p . --noEmit"
+    "typecheck": "tsc -p . --noEmit",
+    "test": "node --require ts-node/register --test src/*.test.ts"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",

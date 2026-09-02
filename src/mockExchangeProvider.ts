@@ -29,17 +29,43 @@ export class MockExchangeProvider extends EventEmitter implements IExchangeProvi
         }, 50); // 50ms tick rate
     }
 
-    public async executeOrder(symbol: string, side: OrderSide, type: OrderType, qty: Decimal, price?: Decimal): Promise<ExecutionResult> {
+    /**
+     * Simula o preenchimento de uma ordem a mercado/limite, aplicando a taxa
+     * do lado em que a Binance realmente a cobra: para BUY, no ativo-base
+     * recebido; para SELL, no ativo-cotação recebido. `qty` é sempre
+     * interpretado como quantidade do ativo-base do par (convenção Binance).
+     */
+    public async executeOrder(symbol: string, side: OrderSide, _type: OrderType, qty: Decimal, price?: Decimal): Promise<ExecutionResult> {
         return new Promise((resolve) => {
             setTimeout(() => {
-                const fillPrice = price || new Decimal('0'); // Fallback simplificado
+                const fillPrice = price ?? new Decimal('0');
+                const [baseAsset, quoteAsset] = symbol.split('/');
+                const feeFactor = new Decimal(1).minus(this.feeRate);
+
+                let netProceeds: Decimal;
+                let feePaid: Decimal;
+                let feePaidAsset: string;
+
+                if (side === 'BUY') {
+                    netProceeds = qty.mul(feeFactor);
+                    feePaid = qty.mul(this.feeRate);
+                    feePaidAsset = baseAsset;
+                } else {
+                    const grossQuote = qty.mul(fillPrice);
+                    netProceeds = grossQuote.mul(feeFactor);
+                    feePaid = grossQuote.mul(this.feeRate);
+                    feePaidAsset = quoteAsset;
+                }
+
                 resolve({
                     orderId: crypto.randomUUID(),
                     status: 'FILLED',
                     executedPrice: fillPrice,
                     executedQty: qty,
-                    feePaid: qty.mul(fillPrice).mul(this.feeRate),
-                    timestamp: Date.now()
+                    netProceeds,
+                    feePaid,
+                    feePaidAsset,
+                    timestamp: Date.now(),
                 });
             }, this.LATENCY_MS);
         });

@@ -4,14 +4,17 @@
 // real, sem credenciais). Para operar contra a Binance de verdade, veja
 // src/live.ts + README.md.
 import { Decimal } from 'decimal.js';
+import { createLogger } from './logger';
 import { RiskManager } from './riskManager';
 import { TriangularArbitrageEngine } from './engine';
 import { MockExchangeProvider } from './mockExchangeProvider';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
+const log = createLogger('demo');
+
 function bootstrap() {
-    console.log('[SYS] APEX-ZERO: HFT Triangular Arbitrage Engine (DEMO/MOCK) Booting...');
+    log.info('APEX-ZERO: HFT Triangular Arbitrage Engine (DEMO/MOCK) booting...');
 
     // Capital de $50, tolerância de slippage rigorosa (0.0005 = 0.05%)
     const C0_BASE = '50.00';
