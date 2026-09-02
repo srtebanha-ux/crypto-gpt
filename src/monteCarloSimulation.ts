@@ -123,7 +123,10 @@ function main() {
         seed,
         ticks,
         horasSimuladas: (ticks / ticksPerSecond / 3600).toFixed(1),
-        metaRequerida: `${target.toFixed(6)}/hora (R$${startCapital} -> R$${targetMonthly}/mês)`,
+        // A razão alvo/capital é adimensional — mesma unidade monetária do
+        // resto do projeto (USD, ver CAPITAL_USD), não R$; a matemática não
+        // muda com a moeda, só a interpretação de quem lê.
+        metaRequerida: `${target.toFixed(6)}/hora (capital ${startCapital} -> meta ${targetMonthly}/mês)`,
     });
 
     for (const scenarioDef of DEFAULT_SCENARIOS) {
