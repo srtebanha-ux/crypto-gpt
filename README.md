@@ -33,8 +33,14 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   USDT→base→alt→USDT realmente listados na Binance e mede com que
   frequência e tamanho ineficiências líquidas de taxa aparecem de verdade
   — ver [Medindo a oportunidade real](#medindo-a-oportunidade-real-opportunitysnifferts).
+- `src/prng.ts` — PRNG com seed (mulberry32) + amostrador gaussiano, usado
+  pela simulação abaixo para ser reprodutível/testável.
+- `src/monteCarloSimulation.ts` — **simulação de sensibilidade** (sem
+  rede): reutiliza o `RiskManager` real contra preços sintéticos para
+  explorar como a taxa de oportunidades varia com hipóteses de ruído de
+  mercado — ver [Simulação de sensibilidade](#simulação-de-sensibilidade-montecarlosimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 45 testes, todos sem acesso a rede).
+  `npm test` — 56 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -348,6 +354,44 @@ O número de "oportunidades líquidas/hora" que essa ferramenta mede é um
 3. Ele mede o **presente/futuro a partir de agora**, não um histórico —
    rode por horas/dias para ter uma amostra estatisticamente honesta
    antes de tirar qualquer conclusão sobre viabilidade.
+
+## Simulação de sensibilidade (`monteCarloSimulation.ts`)
+
+Roda sem rede — reutiliza o `RiskManager` real do projeto contra séries de
+preço sintéticas (ruído de microestrutura + dislocamentos ocasionais) para
+explorar **como a taxa de oportunidades varia conforme hipóteses de quão
+"barulhento" é o mercado**. É um complemento ao `opportunitySniffer.ts`,
+não um substituto: os parâmetros de ruído são suposições explícitas, não
+dado real — só dizem "se o mercado se comportar assim, o resultado seria
+assado", nunca "o mercado se comporta assim".
+
+```bash
+npm run simulate
+```
+
+Variáveis opcionais: `SIM_SEED` (padrão `42` — mesma seed sempre reproduz
+os mesmos números), `SIM_TICKS` (padrão `500000`), `SIM_TICKS_PER_SECOND`
+(padrão `5`), `SIM_START_CAPITAL` / `SIM_TARGET_MONTHLY` (padrão `5000` /
+`20000` — para calcular a meta necessária de λ×lucro médio).
+
+### A métrica que importa: λ × lucro médio, não só "oportunidades/hora"
+
+Cada oportunidade tem seu próprio lucro líquido quando ocorre — duas
+oportunidades por hora valendo 40 pontos-base cada valem tanto quanto oito
+valendo 10 pontos-base. Por isso a comparação correta contra uma meta
+mensal é:
+
+```
+λ (oportunidades/hora) × p̄ (lucro líquido médio, fração) ≥ meta/capital/720h
+```
+
+`requiredLambdaTimesP(capitalInicial, metaMensal)` calcula o lado direito.
+Comparar só a contagem bruta de oportunidades contra uma taxa calibrada
+para *outro* valor de lucro médio por oportunidade mistura unidades — foi
+exatamente o erro que essa simulação já pegou uma vez nesta discussão (uma
+comparação anterior, feita à mão, deu "8x abaixo da meta" quando a conta
+correta dava "1,3x acima" — os testes em `monteCarloSimulation.test.ts`
+existem para não deixar esse tipo de erro voltar).
 
 > **Nota sobre testes em ambientes de rede restrita** (ex. sandboxes de CI
 > ou desenvolvimento sem egress liberado): a conexão com
