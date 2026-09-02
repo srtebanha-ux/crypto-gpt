@@ -15,6 +15,16 @@ export interface VwapFillEstimate {
     filledQty: Decimal;
     /** false quando a profundidade informada não é suficiente para cobrir targetQty. */
     fullyFilled: boolean;
+    /**
+     * Preço do nível mais desfavorável realmente consumido — NUNCA usar
+     * `avgPrice` como preço-limite de uma ordem LIMIT real: uma ordem LIMIT
+     * só combina contra níveis a esse preço ou melhor, e `avgPrice` (a média
+     * ponderada) é sempre melhor que o pior nível caminhado, então uma
+     * ordem limitada em `avgPrice` preencheria MENOS do que este resultado
+     * assume. `worstPriceTouched` é o preço-limite correto para reproduzir
+     * este mesmo preenchimento numa ordem real.
+     */
+    worstPriceTouched: Decimal;
 }
 
 /**
@@ -30,12 +40,13 @@ export interface VwapFillEstimate {
  */
 export function estimateVwapFill(levels: OrderBookLevel[], targetQty: Decimal): VwapFillEstimate {
     if (!targetQty.greaterThan(0)) {
-        return { avgPrice: new Decimal(0), filledQty: new Decimal(0), fullyFilled: true };
+        return { avgPrice: new Decimal(0), filledQty: new Decimal(0), fullyFilled: true, worstPriceTouched: new Decimal(0) };
     }
 
     let remaining = targetQty;
     let notional = new Decimal(0);
     let filled = new Decimal(0);
+    let worstPriceTouched = new Decimal(0);
 
     for (const level of levels) {
         if (remaining.lessThanOrEqualTo(0)) break;
@@ -45,11 +56,13 @@ export function estimateVwapFill(levels: OrderBookLevel[], targetQty: Decimal): 
         notional = notional.plus(consumed.mul(level.price));
         filled = filled.plus(consumed);
         remaining = remaining.minus(consumed);
+        worstPriceTouched = level.price;
     }
 
     return {
         avgPrice: filled.isZero() ? new Decimal(0) : notional.dividedBy(filled),
         filledQty: filled,
         fullyFilled: remaining.lessThanOrEqualTo(0),
+        worstPriceTouched,
     };
 }

@@ -220,9 +220,9 @@ class FakeDepthExchangeProvider extends FakeExchangeProvider {
     }
 }
 
-function snapshot(levels: Array<[string, string]>): OrderBookSnapshot {
+function snapshot(levels: Array<[string, string]>, ageMs = 0): OrderBookSnapshot {
     const book = levels.map(([price, qty]) => ({ price: new Decimal(price), qty: new Decimal(qty) }));
-    return { bids: book, asks: book, timestamp: Date.now() };
+    return { bids: book, asks: book, timestamp: Date.now() - ageMs };
 }
 
 test('kill switch de profundidade bloqueia quando o book real não sustenta o ciclo', async () => {
@@ -241,6 +241,29 @@ test('kill switch de profundidade bloqueia quando o book real não sustenta o ci
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(exchange.calls.length, 0, 'topo do book favorável não deveria disparar quando a profundidade real não sustenta o ciclo');
+});
+
+test('regressão: kill switch de profundidade bloqueia quando o snapshot de profundidade está obsoleto, mesmo com o bookTicker fresco', async () => {
+    // O stream de profundidade (@depth5) é independente do bookTicker que
+    // alimenta tick1/tick2/tick3 — pode desatualizar sozinho (hiccup do
+    // lado da Binance nesse sub-stream específico) mesmo com o topo do book
+    // fresco. Sem checar snapshot.timestamp, o kill switch #3 "confirmaria"
+    // ciclos contra profundidade arbitrariamente velha.
+    const exchange = new FakeDepthExchangeProvider([]);
+    // Profundidade de sobra, mas com 5s de idade — bem além do maxTickAgeMs padrão (100ms).
+    exchange.setSnapshot('BTC/USDT', snapshot([['60010', '10']], 5000));
+    exchange.setSnapshot('ETH/BTC', snapshot([['0.0501', '100']], 5000));
+    exchange.setSnapshot('ETH/USDT', snapshot([['3050', '10']], 5000));
+
+    const riskManager = new RiskManager('0.0005');
+    new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50', { statMinSamples: 0 });
+
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(exchange.calls.length, 0, 'profundidade obsoleta não deveria confirmar o disparo, mesmo com o bookTicker fresco');
 });
 
 test('kill switch de profundidade libera o disparo quando o book real sustenta o ciclo', async () => {
@@ -263,6 +286,50 @@ test('kill switch de profundidade libera o disparo quando o book real sustenta o
 
     await successPromise;
     assert.equal(exchange.calls.length, 3);
+});
+
+test('regressão: quando a profundidade real exige caminhar níveis piores, a ordem LIMIT+FOK usa o preço caminhado, não o topo do book', async () => {
+    // Bug real: a camada de profundidade (#3) confirma viabilidade com base
+    // no VWAP de múltiplos níveis, mas a ordem LIMIT+FOK enviada usava
+    // sempre o preço do TOPO do book (p3Bid) — nos casos em que a
+    // profundidade real só sustenta o ciclo caminhando um nível pior, uma
+    // FOK presa no topo do book falharia exatamente onde a camada de
+    // profundidade mais importa. Este teste usa um book de 2 níveis em
+    // ETH/USDT onde o nível 1 sozinho NÃO cobre a quantidade necessária,
+    // forçando o caminhamento até o nível 2 — e verifica que a ordem SELL
+    // realmente enviada usa o preço do nível 2 (o pior caminhado), não o
+    // preço do nível 1 (topo do book).
+    const exchange = new FakeDepthExchangeProvider([
+        () => fill('0.000832', '0.000833', '60010'),
+        () => fill('0.016597', '0.016614', '0.0501'),
+        () => fill('50.5', '0.016597', '3040'),
+    ]);
+    exchange.setSnapshot('BTC/USDT', snapshot([['60010', '10']]));
+    exchange.setSnapshot('ETH/BTC', snapshot([['0.0501', '100']]));
+    // Nível 1 (topo, 3050) tem profundidade insuficiente por si só — o
+    // engine precisa caminhar até o nível 2 (3040) para preencher a
+    // quantidade toda.
+    exchange.setSnapshot('ETH/USDT', snapshot([['3050', '0.01'], ['3040', '10']]));
+
+    const riskManager = new RiskManager('0.0005');
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50', { statMinSamples: 0 });
+
+    const successPromise = waitFor(engine, 'cycle-success');
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+
+    await successPromise;
+    assert.equal(exchange.calls.length, 3);
+    // Pernas 1 e 2 preenchem inteiramente no nível 1 (profundidade de
+    // sobra) — preço-limite continua o do topo do book, como antes.
+    assert.equal(exchange.calls[0].price?.toString(), '60010');
+    assert.equal(exchange.calls[1].price?.toString(), '0.0501');
+    // Perna 3 precisou caminhar até o nível 2 — o preço-limite da ordem
+    // real deve ser 3040 (o pior nível caminhado), NUNCA 3050 (o topo do
+    // book): uma FOK presa em 3050 teria apenas 0.01 de profundidade
+    // disponível contra os ~0.0166 necessários, e falharia na Binance real.
+    assert.equal(exchange.calls[2].price?.toString(), '3040', 'a ordem real deve usar o pior nível caminhado, não o topo do book');
 });
 
 test('circuit breaker de drawdown halta o engine após perdas acumuladas além do limite', async () => {

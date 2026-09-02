@@ -239,12 +239,39 @@ export class TriangularArbitrageEngine extends EventEmitter {
         // Kill switch #3 — confirmação por profundidade real do book, só
         // quando o provider a expõe (a Binance, via WS; o mock não, então
         // esta camada é pulada na demo — ver getOrderBookSnapshot em types.ts).
+        //
+        // As ordens de ENTRADA reais são LIMIT+FOK (ver executeArbitrageCycle)
+        // — por isso, quando esta camada participa da decisão, o preço usado
+        // para cada perna precisa ser o mesmo que ela validou
+        // (`depth.limitPriceLeg*`, o pior nível caminhado), NUNCA o preço do
+        // topo do book (`p1Ask`/`p2Ask`/`p3Bid`): se a profundidade real só
+        // sustenta o ciclo caminhando níveis piores, uma FOK presa no topo
+        // do book falharia exatamente nos casos em que esta camada mais
+        // importa, convertendo um ciclo corretamente confirmado como viável
+        // numa falha de FOK seguida de unwind — perda real por um bug de
+        // preço, não por o mercado ter de fato virado contra o ciclo.
         let projectedProfit = analysis.expectedNetProfit;
+        let entryPrice1 = p1Ask;
+        let entryPrice2 = p2Ask;
+        let entryPrice3 = p3Bid;
         if (this.exchange.getOrderBookSnapshot) {
             const snap1 = this.exchange.getOrderBookSnapshot(triangle.leg1);
             const snap2 = this.exchange.getOrderBookSnapshot(triangle.leg2);
             const snap3 = this.exchange.getOrderBookSnapshot(triangle.leg3);
             if (!snap1 || !snap2 || !snap3) return; // profundidade ainda não chegou — não dispara sem confirmação
+
+            // A profundidade tem seu próprio stream (@depth5), independente
+            // do @bookTicker que alimenta tick1/tick2/tick3 — pode
+            // desatualizar sozinha mesmo com o topo do book fresco. Mesmo
+            // limite de idade do kill switch #0, aplicado à profundidade.
+            if (
+                now - snap1.timestamp > maxAge ||
+                now - snap2.timestamp > maxAge ||
+                now - snap3.timestamp > maxAge
+            ) {
+                return;
+            }
+
             const depth = this.riskManager.isTriangularArbitrageViableWithDepth(
                 this.currentCapital,
                 snap1.asks,
@@ -254,13 +281,16 @@ export class TriangularArbitrageEngine extends EventEmitter {
             );
             if (!depth.viable) return;
             projectedProfit = depth.expectedNetProfit;
+            entryPrice1 = depth.limitPriceLeg1;
+            entryPrice2 = depth.limitPriceLeg2;
+            entryPrice3 = depth.limitPriceLeg3;
         }
 
         this.isExecutingCycle = true;
-        await this.executeArbitrageCycle(triangle, p1Ask, p2Ask, p3Bid, projectedProfit);
+        await this.executeArbitrageCycle(triangle, entryPrice1, entryPrice2, entryPrice3, projectedProfit);
     }
 
-    private async executeArbitrageCycle(triangle: Triangle, p1Ask: Decimal, p2Ask: Decimal, p3Bid: Decimal, projectedProfit: Decimal) {
+    private async executeArbitrageCycle(triangle: Triangle, entryPrice1: Decimal, entryPrice2: Decimal, entryPrice3: Decimal, projectedProfit: Decimal) {
         log.info('Ineficiência confirmada nas três camadas — iniciando ciclo.', {
             triangulo: triangle.id,
             projectedNetProfit: projectedProfit.toFixed(6),
@@ -282,18 +312,22 @@ export class TriangularArbitrageEngine extends EventEmitter {
             // próximo tick". Perna 2 e 3 já dimensionam pela quantidade
             // líquida REAL recebida da perna anterior (netProceeds), então
             // um FOK que preenche integralmente nunca deixa "poeira" de
-            // fill parcial não contabilizada.
+            // fill parcial não contabilizada. `entryPrice1/2/3` é o preço do
+            // topo do book quando só o kill switch #2 decidiu, ou o pior
+            // nível de profundidade caminhado (`limitPriceLeg*`) quando o
+            // kill switch #3 participou — nunca o topo do book nesse caso
+            // (ver o comentário em evaluateTriangle).
 
             // Perna 1: Comprar o ativo-base com todo o capital disponível em USDT.
-            const leg1QtyToRequest = this.currentCapital.dividedBy(p1Ask);
-            leg1 = await this.exchange.executeOrder(triangle.leg1, 'BUY', 'LIMIT', leg1QtyToRequest, p1Ask);
+            const leg1QtyToRequest = this.currentCapital.dividedBy(entryPrice1);
+            leg1 = await this.exchange.executeOrder(triangle.leg1, 'BUY', 'LIMIT', leg1QtyToRequest, entryPrice1);
 
             // Perna 2: Comprar o ativo intermediário com todo o líquido recebido na perna 1.
-            const leg2QtyToRequest = leg1.netProceeds.dividedBy(p2Ask);
-            leg2 = await this.exchange.executeOrder(triangle.leg2, 'BUY', 'LIMIT', leg2QtyToRequest, p2Ask);
+            const leg2QtyToRequest = leg1.netProceeds.dividedBy(entryPrice2);
+            leg2 = await this.exchange.executeOrder(triangle.leg2, 'BUY', 'LIMIT', leg2QtyToRequest, entryPrice2);
 
             // Perna 3: Vender todo o líquido recebido na perna 2 de volta para USDT.
-            const leg3 = await this.exchange.executeOrder(triangle.leg3, 'SELL', 'LIMIT', leg2.netProceeds, p3Bid);
+            const leg3 = await this.exchange.executeOrder(triangle.leg3, 'SELL', 'LIMIT', leg2.netProceeds, entryPrice3);
 
             // leg3.netProceeds já é o USDT líquido final — o provider aplicou
             // a taxa real de cada perna, nada a descontar aqui de novo.
@@ -314,7 +348,7 @@ export class TriangularArbitrageEngine extends EventEmitter {
                 triangulo: triangle.id,
                 error: error instanceof Error ? error.message : String(error),
             });
-            await this.emergencyUnwind(triangle, leg1, leg2, p1Ask, p3Bid, error);
+            await this.emergencyUnwind(triangle, leg1, leg2, entryPrice1, entryPrice3, error);
         } finally {
             this.isExecutingCycle = false;
         }
@@ -340,13 +374,13 @@ export class TriangularArbitrageEngine extends EventEmitter {
         triangle: Triangle,
         leg1: ExecutionResult | undefined,
         leg2: ExecutionResult | undefined,
-        p1Ask: Decimal,
-        p3Bid: Decimal,
+        entryPrice1: Decimal,
+        entryPrice3: Decimal,
         originalError: unknown
     ) {
         try {
             if (leg2) {
-                const unwind = await this.exchange.executeOrder(triangle.leg3, 'SELL', 'MARKET', leg2.netProceeds, p3Bid);
+                const unwind = await this.exchange.executeOrder(triangle.leg3, 'SELL', 'MARKET', leg2.netProceeds, entryPrice3);
                 this.currentCapital = unwind.netProceeds;
                 this.checkDrawdownCircuitBreaker();
                 log.warn('Unwind concluído: ativo intermediário residual vendido a mercado.', {
@@ -357,7 +391,7 @@ export class TriangularArbitrageEngine extends EventEmitter {
                 return;
             }
             if (leg1) {
-                const unwind = await this.exchange.executeOrder(triangle.leg1, 'SELL', 'MARKET', leg1.netProceeds, p1Ask);
+                const unwind = await this.exchange.executeOrder(triangle.leg1, 'SELL', 'MARKET', leg1.netProceeds, entryPrice1);
                 this.currentCapital = unwind.netProceeds;
                 this.checkDrawdownCircuitBreaker();
                 log.warn('Unwind concluído: ativo-base residual vendido a mercado.', {

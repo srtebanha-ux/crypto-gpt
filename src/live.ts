@@ -53,7 +53,25 @@ Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 const log = createLogger('live');
 const LIVE_CONFIRM_PHRASE = 'I_UNDERSTAND_THE_RISK';
 
-function resolveLiveMode(): boolean {
+/**
+ * `Number(raw)` retorna `NaN` para entrada malformada em vez de lançar —
+ * usado ingenuamente, isso deixaria configurações como
+ * `STAT_MIN_SAMPLES="20,000"` virarem `NaN` silenciosamente. Como o gate
+ * estatístico do engine é `sampleCountBeforeUpdate >= statMinSamples`, e
+ * qualquer comparação numérica contra `NaN` é sempre `false`, o resultado
+ * seria o robô nunca disparar um único ciclo — sem erro, sem warning, só
+ * heartbeats normais para sempre. Falhar alto no boot, como as variáveis
+ * `Decimal` já fazem, é muito melhor que essa falha silenciosa.
+ */
+export function parseRequiredNumberEnv(name: string, raw: string): number {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) {
+        throw new Error(`${name} inválido: "${raw}" não é um número. Corrija ou remova a variável para usar o padrão.`);
+    }
+    return parsed;
+}
+
+export function resolveLiveMode(): boolean {
     const wantsLive = process.env.BINANCE_LIVE === 'true';
     if (!wantsLive) return false;
 
@@ -66,7 +84,7 @@ function resolveLiveMode(): boolean {
     return true;
 }
 
-function resolveIntermediateBases(): string[] | undefined {
+export function resolveIntermediateBases(): string[] | undefined {
     const raw = process.env.TRIANGLE_BASES;
     if (!raw) return undefined; // undefined -> BinanceExchangeProvider usa seu próprio padrão (BTC,ETH,BNB,FDUSD)
     return raw
@@ -75,16 +93,16 @@ function resolveIntermediateBases(): string[] | undefined {
         .filter(Boolean);
 }
 
-function resolveEngineConfig(): Partial<EngineConfig> {
+export function resolveEngineConfig(): Partial<EngineConfig> {
     const config: Partial<EngineConfig> = {};
-    if (process.env.STAT_MIN_SAMPLES) config.statMinSamples = Number(process.env.STAT_MIN_SAMPLES);
+    if (process.env.STAT_MIN_SAMPLES) config.statMinSamples = parseRequiredNumberEnv('STAT_MIN_SAMPLES', process.env.STAT_MIN_SAMPLES);
     if (process.env.STAT_Z_THRESHOLD) config.statZThreshold = new Decimal(process.env.STAT_Z_THRESHOLD);
     if (process.env.RATIO_EWMA_ALPHA) config.ratioEwmaAlpha = new Decimal(process.env.RATIO_EWMA_ALPHA);
     if (process.env.MAX_DRAWDOWN_FRACTION) config.maxDrawdownFraction = new Decimal(process.env.MAX_DRAWDOWN_FRACTION);
     return config;
 }
 
-async function resolveStartingCapital(exchange: BinanceExchangeProvider, configuredCapital: Decimal): Promise<Decimal> {
+export async function resolveStartingCapital(exchange: BinanceExchangeProvider, configuredCapital: Decimal): Promise<Decimal> {
     try {
         const freeUsdt = await exchange.fetchAvailableBalance('USDT');
         if (freeUsdt.lessThan(configuredCapital)) {
@@ -113,7 +131,9 @@ async function bootstrap() {
     const live = resolveLiveMode();
     const configuredCapital = new Decimal(process.env.CAPITAL_USD ?? '50.00');
     const MAX_SLIPPAGE = process.env.MAX_SLIPPAGE ?? '0.0005';
-    const heartbeatIntervalMin = Number(process.env.HEARTBEAT_INTERVAL_MIN ?? '5');
+    const heartbeatIntervalMin = process.env.HEARTBEAT_INTERVAL_MIN
+        ? parseRequiredNumberEnv('HEARTBEAT_INTERVAL_MIN', process.env.HEARTBEAT_INTERVAL_MIN)
+        : 5;
 
     log.info(`APEX-ZERO: HFT Triangular Arbitrage Engine booting em modo ${live ? 'LIVE — DINHEIRO REAL' : 'TESTNET'}.`);
     if (live) {
@@ -184,7 +204,9 @@ async function bootstrap() {
     });
 }
 
-bootstrap().catch((err) => {
-    log.error('Falha ao inicializar o engine contra a Binance.', { error: err instanceof Error ? err.message : String(err) });
-    process.exit(1);
-});
+if (require.main === module) {
+    bootstrap().catch((err) => {
+        log.error('Falha ao inicializar o engine contra a Binance.', { error: err instanceof Error ? err.message : String(err) });
+        process.exit(1);
+    });
+}

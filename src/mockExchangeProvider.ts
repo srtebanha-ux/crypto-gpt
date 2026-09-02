@@ -3,6 +3,7 @@ import { Decimal } from 'decimal.js';
 import * as crypto from 'crypto';
 import { EventEmitter } from 'events';
 import { ExecutionResult, IExchangeProvider, OrderSide, OrderType } from './types';
+import { simulateNetFill } from './simulatedFill';
 
 // ============================================================================
 // MOCK: EXCHANGE PROVIDER (feed sintético, sem I/O de rede real)
@@ -39,23 +40,7 @@ export class MockExchangeProvider extends EventEmitter implements IExchangeProvi
         return new Promise((resolve) => {
             setTimeout(() => {
                 const fillPrice = price ?? new Decimal('0');
-                const [baseAsset, quoteAsset] = symbol.split('/');
-                const feeFactor = new Decimal(1).minus(this.feeRate);
-
-                let netProceeds: Decimal;
-                let feePaid: Decimal;
-                let feePaidAsset: string;
-
-                if (side === 'BUY') {
-                    netProceeds = qty.mul(feeFactor);
-                    feePaid = qty.mul(this.feeRate);
-                    feePaidAsset = baseAsset;
-                } else {
-                    const grossQuote = qty.mul(fillPrice);
-                    netProceeds = grossQuote.mul(feeFactor);
-                    feePaid = grossQuote.mul(this.feeRate);
-                    feePaidAsset = quoteAsset;
-                }
+                const { netProceeds, feePaid, feePaidAsset } = simulateNetFill(symbol, side, qty, fillPrice, this.feeRate);
 
                 resolve({
                     orderId: crypto.randomUUID(),

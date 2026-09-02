@@ -11,6 +11,20 @@ export interface ViabilityResult {
 export interface DepthViabilityResult extends ViabilityResult {
     /** false se a profundidade informada não sustentaria o ciclo inteiro ao preço estimado. */
     fullyFilled: boolean;
+    /**
+     * Preço-limite real que cada perna precisaria aceitar para sustentar o
+     * MESMO preenchimento assumido nesta confirmação — o pior nível
+     * efetivamente caminhado por `estimateVwapFill`, NUNCA o preço médio.
+     * Uma ordem LIMIT no preço médio só combina contra níveis a esse preço
+     * ou melhor (menos profundidade do que a usada para calcular a própria
+     * média) e preencheria MENOS do que este método validou como viável —
+     * o engine usa estes preços (não o topo do book) para a ordem
+     * LIMIT+FOK real quando a confirmação por profundidade participou da
+     * decisão. Indefinido (zero) quando `viable` é false.
+     */
+    limitPriceLeg1: Decimal;
+    limitPriceLeg2: Decimal;
+    limitPriceLeg3: Decimal;
 }
 
 // ============================================================================
@@ -108,7 +122,14 @@ export class RiskManager {
     ): DepthViabilityResult {
         const topAsk1 = asksLeg1[0]?.price;
         if (!topAsk1 || !topAsk1.greaterThan(0)) {
-            return { viable: false, expectedNetProfit: new Decimal(0), fullyFilled: false };
+            return {
+                viable: false,
+                expectedNetProfit: new Decimal(0),
+                fullyFilled: false,
+                limitPriceLeg1: new Decimal(0),
+                limitPriceLeg2: new Decimal(0),
+                limitPriceLeg3: new Decimal(0),
+            };
         }
 
         const feeFactor = new Decimal(1).minus(feeRate);
@@ -123,7 +144,14 @@ export class RiskManager {
         // Perna 2: BUY ETH/BTC — qty aproximada pelo topo do book usando o BTC líquido da perna 1.
         const topAsk2 = asksLeg2[0]?.price;
         if (!topAsk2 || !topAsk2.greaterThan(0) || netBtc.lessThanOrEqualTo(0)) {
-            return { viable: false, expectedNetProfit: new Decimal(0), fullyFilled: false };
+            return {
+                viable: false,
+                expectedNetProfit: new Decimal(0),
+                fullyFilled: false,
+                limitPriceLeg1: fill1.worstPriceTouched,
+                limitPriceLeg2: new Decimal(0),
+                limitPriceLeg3: new Decimal(0),
+            };
         }
         const qty2Approx = netBtc.dividedBy(topAsk2);
         const fill2 = estimateVwapFill(asksLeg2, qty2Approx);
@@ -140,6 +168,13 @@ export class RiskManager {
         const fullyFilled = fill1.fullyFilled && fill2.fullyFilled && fill3.fullyFilled && budgetOk1 && budgetOk2;
         const viable = fullyFilled && netUsdt.greaterThan(minAcceptableReturn);
 
-        return { viable, expectedNetProfit, fullyFilled };
+        return {
+            viable,
+            expectedNetProfit,
+            fullyFilled,
+            limitPriceLeg1: fill1.worstPriceTouched,
+            limitPriceLeg2: fill2.worstPriceTouched,
+            limitPriceLeg3: fill3.worstPriceTouched,
+        };
     }
 }

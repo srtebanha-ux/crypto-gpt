@@ -33,6 +33,10 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   triângulos diferentes — é isso que preserva "zero alavancagem" ao
   monitorar vários ao mesmo tempo. Quando uma perna falha no meio do
   caminho, dispara o unwind de emergência (ver abaixo).
+- `src/simulatedFill.ts` — `simulateNetFill`: contabilidade de taxa/netProceeds
+  compartilhada pelos dois providers sintéticos (`MockExchangeProvider` e
+  `SimulatedExchangeProvider`), pra não reimplementar a mesma fórmula duas
+  vezes e arriscar divergirem numa mudança futura de modelo de taxa.
 - `src/mockExchangeProvider.ts` — feed sintético para demo/dev, sem rede.
 - `src/binanceExchangeProvider.ts` — conector real: descobre dinamicamente
   (via `triangleTopology.ts`) todos os triângulos operáveis, assina o book
@@ -59,7 +63,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 75 testes, todos sem acesso a rede).
+  `npm test` — 89 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -107,7 +111,16 @@ erro diferente:
    retorno sobre o preço médio de execução resultante, não o preço do topo
    do book. Bloqueia se a profundidade real não sustentar a quantidade-alvo
    **ou** se caminhar níveis piores custar mais do que o orçamento
-   disponível em cada perna.
+   disponível em cada perna. O snapshot de profundidade tem seu próprio
+   limite de idade (mesmo `maxTickAgeMs` do kill switch de obsolescência,
+   aplicado ao stream `@depth5`, independente do `@bookTicker`) — pode
+   desatualizar sozinho mesmo com o topo do book fresco. Quando esta camada
+   participa da decisão, o engine usa `limitPriceLeg1/2/3` (o pior nível
+   efetivamente caminhado, não o preço médio nem o topo do book) como preço
+   da ordem `LIMIT`+FOK real — usar o preço médio ali preencheria menos
+   profundidade do que a validada aqui, e usar o topo do book faria a FOK
+   falhar exatamente quando esta camada mais importa (ver
+   `marketMicrostructure.ts`/`riskManager.ts`).
 
 Kill switches adicionais:
 - **Obsolescência de dado**: ordens são ignoradas se qualquer ticker
@@ -179,7 +192,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 75 testes, todos sem rede, devem passar.
+1. `npm test` — 89 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -214,7 +227,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 75 testes, sem rede
+npm test            # suíte de testes (node:test) — 89 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 

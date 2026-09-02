@@ -25,6 +25,7 @@ import { RiskManager } from './riskManager';
 import { EngineConfig, TriangularArbitrageEngine } from './engine';
 import { ExecutionResult, IExchangeProvider, OrderSide, OrderType, Triangle } from './types';
 import { createSeededRandom, gaussianSample, RandomSource } from './prng';
+import { simulateNetFill } from './simulatedFill';
 
 const log = createLogger('papertrading');
 
@@ -116,21 +117,7 @@ export class SimulatedExchangeProvider extends EventEmitter implements IExchange
 
     public async executeOrder(symbol: string, side: OrderSide, _type: OrderType, qty: Decimal, price?: Decimal): Promise<ExecutionResult> {
         const fillPrice = price ?? new Decimal('0');
-        const [baseAsset, quoteAsset] = symbol.split('/');
-        const feeFactor = new Decimal(1).minus(this.feeRate);
-        let netProceeds: Decimal;
-        let feePaid: Decimal;
-        let feePaidAsset: string;
-        if (side === 'BUY') {
-            netProceeds = qty.mul(feeFactor);
-            feePaid = qty.mul(this.feeRate);
-            feePaidAsset = baseAsset;
-        } else {
-            const grossQuote = qty.mul(fillPrice);
-            netProceeds = grossQuote.mul(feeFactor);
-            feePaid = grossQuote.mul(this.feeRate);
-            feePaidAsset = quoteAsset;
-        }
+        const { netProceeds, feePaid, feePaidAsset } = simulateNetFill(symbol, side, qty, fillPrice, this.feeRate);
         return { orderId: 'sim', status: 'FILLED', executedPrice: fillPrice, executedQty: qty, netProceeds, feePaid, feePaidAsset, timestamp: Date.now() };
     }
 
