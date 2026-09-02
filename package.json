@@ -9,13 +9,16 @@
     "build": "tsc -p .",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
+    "live": "ts-node src/live.ts",
     "typecheck": "tsc -p . --noEmit"
   },
   "dependencies": {
-    "decimal.js": "^10.4.3"
+    "decimal.js": "^10.4.3",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.12",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.4"
   }
