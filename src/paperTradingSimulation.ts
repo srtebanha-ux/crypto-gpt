@@ -28,11 +28,39 @@ import { createSeededRandom, gaussianSample, RandomSource } from './prng';
 
 const log = createLogger('papertrading');
 
-// SimulatedExchangeProvider só modela os preços sintéticos de UM triângulo
-// (ver advanceTick abaixo) — extensão para múltiplos triângulos sintéticos
-// fica fora do escopo desta simulação por ora (o engine real já suporta
-// vários; ver src/engine.ts e src/binanceExchangeProvider.ts).
-const SIMULATED_TRIANGLE: Triangle = { id: 'USDT-BTC-ETH', leg1: 'BTC/USDT', leg2: 'ETH/BTC', leg3: 'ETH/USDT' };
+/** Um triângulo sintético: preços "justos" (sem arbitragem embutida — p3 ≈ p1·p2) que o ruído do cenário distorce a cada tick. */
+export interface SyntheticTriangleSpec extends Triangle {
+    fairP1: number;
+    fairP2: number;
+    fairP3: number;
+}
+
+export const DEFAULT_SYNTHETIC_TRIANGLE: SyntheticTriangleSpec = {
+    id: 'USDT-BTC-ETH',
+    leg1: 'BTC/USDT',
+    leg2: 'ETH/BTC',
+    leg3: 'ETH/USDT',
+    fairP1: 60000,
+    fairP2: 0.05,
+    fairP3: 3000,
+};
+
+/**
+ * Conjunto de 5 triângulos sintéticos INDEPENDENTES (símbolos disjuntos entre
+ * si, de propósito — cada um recebe seu próprio ruído/dislocamento, nunca
+ * compartilhando preço com outro) para ilustrar qualitativamente o efeito de
+ * monitorar vários triângulos ao mesmo tempo (ver README, "Múltiplos
+ * triângulos"). O NÚMERO 5 é uma suposição ilustrativa, não uma contagem
+ * medida — quantos triângulos reais existem de fato e com que correlação só
+ * `opportunitySniffer.ts` rodando contra a Binance real pode responder.
+ */
+export const ILLUSTRATIVE_FIVE_TRIANGLES: SyntheticTriangleSpec[] = [
+    DEFAULT_SYNTHETIC_TRIANGLE,
+    { id: 'USDT-BNB-SOL', leg1: 'BNB/USDT', leg2: 'SOL/BNB', leg3: 'SOL/USDT', fairP1: 550, fairP2: 0.36, fairP3: 198 },
+    { id: 'USDT-FDUSD-XRP', leg1: 'FDUSD/USDT', leg2: 'XRP/FDUSD', leg3: 'XRP/USDT', fairP1: 1.0, fairP2: 0.57, fairP3: 0.57 },
+    { id: 'USDT-LTC-DOGE', leg1: 'LTC/USDT', leg2: 'DOGE/LTC', leg3: 'DOGE/USDT', fairP1: 95, fairP2: 0.00147, fairP3: 0.13965 },
+    { id: 'USDT-AVAX-ADA', leg1: 'AVAX/USDT', leg2: 'ADA/AVAX', leg3: 'ADA/USDT', fairP1: 32, fairP2: 0.01875, fairP3: 0.6 },
+];
 
 export interface NoiseScenario {
     baseNoiseBps: number;
@@ -46,7 +74,10 @@ export interface NoiseScenario {
  * fills líquidos de taxa como o MockExchangeProvider. Não modela rejeição
  * de ordem, fill parcial ou erro de rede — só o caminho feliz de execução;
  * a robustez a falhas já é coberta pelos testes do engine com um provider
- * que injeta erros propositalmente.
+ * que injeta erros propositalmente. Modela N triângulos sintéticos
+ * INDEPENDENTES (cada um com seu próprio ruído/dislocamento a cada tick) —
+ * por isso os `triangles` passados devem usar símbolos disjuntos entre si:
+ * o provider não modela nenhuma correlação entre eles.
  */
 export class SimulatedExchangeProvider extends EventEmitter implements IExchangeProvider {
     private feeRate = new Decimal('0.001');
@@ -54,33 +85,33 @@ export class SimulatedExchangeProvider extends EventEmitter implements IExchange
     constructor(
         private random: RandomSource,
         private scenario: NoiseScenario,
-        private fairP1 = 60000, // BTC/USDT
-        private fairP2 = 0.05, // ETH/BTC
-        private fairP3 = 3000 // ETH/USDT implícito
+        private triangles: SyntheticTriangleSpec[] = [DEFAULT_SYNTHETIC_TRIANGLE]
     ) {
         super();
     }
 
     public advanceTick(): void {
-        let p1 = this.fairP1 * (1 + gaussianSample(this.random, 0, this.scenario.baseNoiseBps / 10000));
-        let p2 = this.fairP2 * (1 + gaussianSample(this.random, 0, this.scenario.baseNoiseBps / 10000));
-        let p3 = this.fairP3 * (1 + gaussianSample(this.random, 0, this.scenario.baseNoiseBps / 10000));
-
-        if (this.random() < this.scenario.jumpProbability) {
-            const jumpBps = Math.abs(gaussianSample(this.random, this.scenario.jumpMeanBps, this.scenario.jumpMeanBps / 2));
-            const leg = Math.floor(this.random() * 3);
-            const direction = this.random() < 0.5 ? -1 : 1;
-            const factor = 1 + (direction * jumpBps) / 10000;
-            if (leg === 0) p1 *= factor;
-            else if (leg === 1) p2 *= factor;
-            else p3 *= factor;
-        }
-
         const now = Date.now();
         const spread = 0.0002; // spread bid/ask sintético de 2bp em cada perna
-        this.emit('ticker', { symbol: 'BTC/USDT', bid: new Decimal(p1 * (1 - spread)), ask: new Decimal(p1), timestamp: now });
-        this.emit('ticker', { symbol: 'ETH/BTC', bid: new Decimal(p2 * (1 - spread)), ask: new Decimal(p2), timestamp: now });
-        this.emit('ticker', { symbol: 'ETH/USDT', bid: new Decimal(p3), ask: new Decimal(p3 * (1 + spread)), timestamp: now });
+        for (const t of this.triangles) {
+            let p1 = t.fairP1 * (1 + gaussianSample(this.random, 0, this.scenario.baseNoiseBps / 10000));
+            let p2 = t.fairP2 * (1 + gaussianSample(this.random, 0, this.scenario.baseNoiseBps / 10000));
+            let p3 = t.fairP3 * (1 + gaussianSample(this.random, 0, this.scenario.baseNoiseBps / 10000));
+
+            if (this.random() < this.scenario.jumpProbability) {
+                const jumpBps = Math.abs(gaussianSample(this.random, this.scenario.jumpMeanBps, this.scenario.jumpMeanBps / 2));
+                const leg = Math.floor(this.random() * 3);
+                const direction = this.random() < 0.5 ? -1 : 1;
+                const factor = 1 + (direction * jumpBps) / 10000;
+                if (leg === 0) p1 *= factor;
+                else if (leg === 1) p2 *= factor;
+                else p3 *= factor;
+            }
+
+            this.emit('ticker', { symbol: t.leg1, bid: new Decimal(p1 * (1 - spread)), ask: new Decimal(p1), timestamp: now });
+            this.emit('ticker', { symbol: t.leg2, bid: new Decimal(p2 * (1 - spread)), ask: new Decimal(p2), timestamp: now });
+            this.emit('ticker', { symbol: t.leg3, bid: new Decimal(p3), ask: new Decimal(p3 * (1 + spread)), timestamp: now });
+        }
     }
 
     public async executeOrder(symbol: string, side: OrderSide, _type: OrderType, qty: Decimal, price?: Decimal): Promise<ExecutionResult> {
@@ -130,12 +161,14 @@ export async function runPaperTradingSimulation(
     totalTicks: number,
     seed: number,
     engineConfig: Partial<EngineConfig> = {},
-    maxSlippage = '0.0005'
+    maxSlippage = '0.0005',
+    triangleSpecs: SyntheticTriangleSpec[] = [DEFAULT_SYNTHETIC_TRIANGLE]
 ): Promise<PaperTradingResult> {
     const random = createSeededRandom(seed);
-    const provider = new SimulatedExchangeProvider(random, scenario);
+    const provider = new SimulatedExchangeProvider(random, scenario, triangleSpecs);
     const riskManager = new RiskManager(maxSlippage);
-    const engine = new TriangularArbitrageEngine(provider, riskManager, [SIMULATED_TRIANGLE], capitalUsd, engineConfig);
+    const triangles: Triangle[] = triangleSpecs.map(({ id, leg1, leg2, leg3 }) => ({ id, leg1, leg2, leg3 }));
+    const engine = new TriangularArbitrageEngine(provider, riskManager, triangles, capitalUsd, engineConfig);
 
     let totalCycles = 0;
     let haltReason: PaperTradingResult['haltReason'];
@@ -173,6 +206,12 @@ async function main() {
         jumpMeanBps: Number(process.env.PAPER_JUMP_MEAN_BPS ?? '32'),
     };
 
+    // 'single' (padrão) = comportamento original, 1 triângulo. 'illustrative5'
+    // = 5 triângulos sintéticos independentes (ver ILLUSTRATIVE_FIVE_TRIANGLES
+    // acima) — ilustra qualitativamente o efeito de monitorar vários
+    // triângulos, NÃO uma contagem real medida.
+    const triangleSet = process.env.PAPER_TRIANGLE_SET === 'illustrative5' ? ILLUSTRATIVE_FIVE_TRIANGLES : [DEFAULT_SYNTHETIC_TRIANGLE];
+
     log.info('Iniciando paper trading — cenário de ruído é hipótese, não dado real.', {
         capitalBRL,
         BRL_PER_USD,
@@ -181,9 +220,10 @@ async function main() {
         totalTicks,
         seed,
         scenario,
+        triangleSet: triangleSet.map((t) => t.id),
     });
 
-    const result = await runPaperTradingSimulation(capitalUsd, scenario, totalTicks, seed);
+    const result = await runPaperTradingSimulation(capitalUsd, scenario, totalTicks, seed, {}, '0.0005', triangleSet);
 
     log.info('=== RESULTADO FINAL ===', {
         capitalInicialUSD: result.initialCapital.toFixed(6),

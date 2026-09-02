@@ -1,7 +1,7 @@
 // Arquivo: src/paperTradingSimulation.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runPaperTradingSimulation } from './paperTradingSimulation';
+import { DEFAULT_SYNTHETIC_TRIANGLE, ILLUSTRATIVE_FIVE_TRIANGLES, runPaperTradingSimulation } from './paperTradingSimulation';
 
 // Cenário com dislocamentos frequentes o suficiente para gerar vários
 // ciclos numa amostra pequena de ticks (mantém o teste rápido).
@@ -42,4 +42,25 @@ test('resultado é determinístico para o mesmo seed', async () => {
     const b = await runPaperTradingSimulation('50', RICH_SCENARIO, 20000, 777);
     assert.equal(a.finalCapital.toString(), b.finalCapital.toString());
     assert.equal(a.totalCycles, b.totalCycles);
+});
+
+test('múltiplos triângulos sintéticos: mais triângulos monitorados gera igual ou mais ciclos que um único, sob o mesmo cenário/seed', async () => {
+    // Não é uma garantia matemática geral (o mutex global serializa disparos
+    // — ver README), mas com 5 triângulos independentes competindo pela
+    // mesma amostra de ticks, a MEDIÇÃO empírica não deveria nunca ser
+    // pior que rodar só o primeiro deles isoladamente.
+    const single = await runPaperTradingSimulation('50', RICH_SCENARIO, 20000, 5, {}, '0.0005', [DEFAULT_SYNTHETIC_TRIANGLE]);
+    const multi = await runPaperTradingSimulation('50', RICH_SCENARIO, 20000, 5, {}, '0.0005', ILLUSTRATIVE_FIVE_TRIANGLES);
+
+    assert.ok(multi.totalCycles >= single.totalCycles, `esperava >= ciclos com 5 triângulos (obtive ${multi.totalCycles}) do que com 1 (${single.totalCycles})`);
+});
+
+test('triângulos sintéticos independentes nunca compartilham símbolo entre si (pré-requisito do provider — ver seu comentário de classe)', () => {
+    const seen = new Set<string>();
+    for (const t of ILLUSTRATIVE_FIVE_TRIANGLES) {
+        for (const leg of [t.leg1, t.leg2, t.leg3]) {
+            assert.ok(!seen.has(leg), `símbolo ${leg} reaparece em mais de um triângulo sintético — quebraria a independência assumida pelo provider`);
+            seen.add(leg);
+        }
+    }
 });
