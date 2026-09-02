@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "live": "ts-node src/live.ts",
+    "sniff": "ts-node src/opportunitySniffer.ts",
     "typecheck": "tsc -p . --noEmit",
     "test": "node --require ts-node/register --test src/*.test.ts"
   },

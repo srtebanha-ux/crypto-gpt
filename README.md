@@ -28,8 +28,13 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
 - `src/index.ts` — bootstrap da demo (mock).
 - `src/live.ts` — bootstrap real (Binance), com gate de segurança e
   heartbeat para operação 24/7.
+- `src/opportunitySniffer.ts` — ferramenta de **medição empírica** (não
+  executa ordens): descobre em tempo real todos os triângulos
+  USDT→base→alt→USDT realmente listados na Binance e mede com que
+  frequência e tamanho ineficiências líquidas de taxa aparecem de verdade
+  — ver [Medindo a oportunidade real](#medindo-a-oportunidade-real-opportunitysnifferts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 38 testes, todos sem acesso a rede).
+  `npm test` — 45 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -254,12 +259,85 @@ Variáveis de ambiente aceitas por `src/live.ts` (ver também `.env.example`):
 | `RATIO_EWMA_ALPHA` | `0.05` | Memória do EWMA (`2/(N+1)` ≈ janela de N amostras). |
 | `HEARTBEAT_INTERVAL_MIN` | `5` | Intervalo do log de heartbeat; `0` desativa. |
 
+## Medindo a oportunidade real (`opportunitySniffer.ts`)
+
+O motor de execução assume um par fixo (`BTC/USDT → ETH/BTC → ETH/USDT`).
+Uma pergunta legítima e separada é: **quantas ineficiências líquidas de
+taxa realmente existem, com que frequência e de que tamanho**, olhando
+para todos os triângulos de fato negociáveis na Binance (não só três
+pares)? `src/opportunitySniffer.ts` responde isso **medindo**, em vez de
+assumir uma taxa e calcular quantos ciclos seriam necessários pra bater
+uma meta — essa segunda abordagem é circular (assume a resposta que
+deveria provar) e não diz nada sobre se as oportunidades existem de fato.
+
+O que ele faz:
+1. Busca `/api/v3/exchangeInfo` (REST, público, sem credenciais) e
+   constrói o grafo de triângulos `USDT → base → alt → USDT` cujos **três
+   lados existem como par realmente listado** (`buildTriangles` —
+   testado isoladamente em `opportunitySniffer.test.ts`, sem rede). Isso
+   importa: `SOL → WIF → USDT` só é um triângulo arbitrável de verdade se
+   `WIF/SOL` (ou `SOL/WIF`) existir como mercado — a maioria dos pares
+   alt/alt não existe na Binance, só alt/USDT (e um subconjunto também
+   contra BTC/ETH/BNB). Contar "combinações combinatorialmente possíveis"
+   sem checar quais são realmente listadas superestima o número de
+   triângulos operáveis.
+2. Assina `@bookTicker` de cada símbolo envolvido via WebSocket (em lotes
+   de 200 com espaçamento de 250ms entre lotes, para não estourar o
+   rate limit de mensagens de controle da Binance) e mantém um índice
+   símbolo → triângulos afetados, para reavaliar só os triângulos
+   realmente impactados a cada tick (`O(k)`, não `O(N)` sobre todos os
+   triângulos a cada mensagem).
+3. A cada tick, recalcula `P3 / (P1·P2)` do(s) triângulo(s) afetado(s) e
+   loga quando a ineficiência líquida de taxa (`(1-f)³`) supera o alvo
+   configurado — descartando avaliações em que qualquer uma das 3 pernas
+   está desatualizada há mais de `MAX_LEG_AGE_MS` (evita "oportunidades"
+   fantasma formadas por comparar uma perna velha com pernas frescas).
+4. A cada 10s, reporta ticks processados, oportunidades líquidas
+   encontradas, o maior lucro líquido observado e uma extrapolação de
+   oportunidades/hora.
+
+**Não envia nenhuma ordem** — é só leitura de mercado e estatística, por
+isso pode rodar com segurança mesmo sem `BINANCE_API_KEY`/`SECRET`.
+
+### Rodar
+
+```bash
+npm run sniff
+```
+
+Variáveis opcionais: `SNIFFER_TAKER_FEE` (padrão `0.001`),
+`SNIFFER_TARGET_NET_PROFIT` (padrão `0.0002` = 0,02% líquido — o mesmo
+número usado na discussão sobre viabilidade da estratégia),
+`SNIFFER_BASES` (padrão `BTC,ETH,BNB`).
+
+### Como interpretar o resultado — e o que ele NÃO prova
+
+O número de "oportunidades líquidas/hora" que essa ferramenta mede é um
+**limite superior** do que é capturável, não uma promessa de lucro:
+1. Ela não compete por latência com ninguém — só observa. Uma
+   ineficiência real pode existir por poucos milissegundos e ser fechada
+   por um bot colocado no mesmo datacenter da Binance antes que este
+   sniffer (rodando num container comum, sem colocation) sequer receba o
+   tick — e muito antes do motor de execução real conseguir montar e
+   enviar 3 ordens sequenciais.
+2. Pares de cauda longa (os que mais aumentam a contagem de triângulos)
+   tendem a ser os mais ilíquidos — exatamente onde a suposição de
+   "capital pequeno, zero impacto de mercado" é mais frágil, e onde o
+   spread bid/ask sozinho já pode consumir a "ineficiência" observada.
+3. Ele mede o **presente/futuro a partir de agora**, não um histórico —
+   rode por horas/dias para ter uma amostra estatisticamente honesta
+   antes de tirar qualquer conclusão sobre viabilidade.
+
 > **Nota sobre testes em ambientes de rede restrita** (ex. sandboxes de CI
 > ou desenvolvimento sem egress liberado): a conexão com
-> `testnet.binance.vision` / `stream.binance.com` será bloqueada pela
-> política de rede do ambiente — isso não é um erro do conector. A lógica
-> do conector (assinatura HMAC, arredondamento por `LOT_SIZE`, contabilidade
-> de `netProceeds`, parsing de profundidade/resposta) é coberta por testes
-> de unidade que não dependem de rede — ver `src/binanceExchangeProvider.test.ts`
-> — mas a conectividade fim-a-fim só pode ser validada rodando `npm run live`
-> (ou o deploy no Railway) a partir de um ambiente com acesso de rede à Binance.
+> `testnet.binance.vision` / `stream.binance.com` / `api.binance.com` será
+> bloqueada pela política de rede do ambiente (confirmado neste repo: até
+> a REST pública e não-autenticada `api.binance.com/api/v3/exchangeInfo`
+> retorna `403 connect_rejected` do proxy) — isso não é um erro do
+> conector nem do `opportunitySniffer`. A lógica de ambos (assinatura
+> HMAC, arredondamento por `LOT_SIZE`, contabilidade de `netProceeds`,
+> construção de triângulos, avaliação de ineficiência) é coberta por
+> testes de unidade que não dependem de rede — ver `src/binanceExchangeProvider.test.ts`
+> e `src/opportunitySniffer.test.ts` — mas a conectividade fim-a-fim só
+> pode ser validada rodando `npm run live` / `npm run sniff` (ou o deploy
+> no Railway) a partir de um ambiente com acesso de rede à Binance.
