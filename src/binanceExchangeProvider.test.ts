@@ -21,8 +21,19 @@ function jsonResponse(status: number, body: unknown): Response {
     } as unknown as Response;
 }
 
+/** Seeda diretamente os mapas dinâmicos par<->símbolo (normalmente montados por discoverTrianglesAndFilters em connect()). */
+function seedSymbolMapping(provider: BinanceExchangeProvider, pair: string, binanceSymbol: string): void {
+    const p = provider as unknown as { pairToBinanceSymbol: Map<string, string>; binanceSymbolToPair: Map<string, string> };
+    p.pairToBinanceSymbol.set(pair, binanceSymbol);
+    p.binanceSymbolToPair.set(binanceSymbol, pair);
+}
+
+/** Provider com o mapeamento par<->símbolo dos testes de executeOrder já seedado, sem passar por connect() (sem rede real). */
 function newProvider(): BinanceExchangeProvider {
-    return new BinanceExchangeProvider({ apiKey: 'test-key', apiSecret: 'test-secret', live: false });
+    const provider = new BinanceExchangeProvider({ apiKey: 'test-key', apiSecret: 'test-secret', live: false });
+    seedSymbolMapping(provider, 'BTC/USDT', 'BTCUSDT');
+    seedSymbolMapping(provider, 'ETH/USDT', 'ETHUSDT');
+    return provider;
 }
 
 function seedFilters(
@@ -228,4 +239,71 @@ test('getOrderBookSnapshot retorna undefined antes de qualquer mensagem de profu
     assert.equal(snapshot!.bids[0].price.toString(), '60000');
     assert.equal(snapshot!.asks[0].price.toString(), '60010');
     assert.equal(provider.getOrderBookSnapshot('ETH/BTC'), undefined);
+});
+
+test('discoverTrianglesAndFilters descobre triângulos reais e monta os mapas de símbolo/filtros dinamicamente a partir do exchangeInfo', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false, intermediateBases: ['BTC'] });
+
+    await withFetchStub(
+        async () =>
+            jsonResponse(200, {
+                symbols: [
+                    {
+                        symbol: 'BTCUSDT',
+                        baseAsset: 'BTC',
+                        quoteAsset: 'USDT',
+                        status: 'TRADING',
+                        filters: [
+                            { filterType: 'LOT_SIZE', stepSize: '0.00001', minQty: '0.00001' },
+                            { filterType: 'MIN_NOTIONAL', minNotional: '10' },
+                        ],
+                    },
+                    {
+                        symbol: 'ETHBTC',
+                        baseAsset: 'ETH',
+                        quoteAsset: 'BTC',
+                        status: 'TRADING',
+                        filters: [{ filterType: 'LOT_SIZE', stepSize: '0.0001', minQty: '0.0001' }],
+                    },
+                    {
+                        symbol: 'ETHUSDT',
+                        baseAsset: 'ETH',
+                        quoteAsset: 'USDT',
+                        status: 'TRADING',
+                        filters: [{ filterType: 'LOT_SIZE', stepSize: '0.0001', minQty: '0.0001' }],
+                    },
+                    // WIF/BTC não está listado -> WIFUSDT não deve formar triângulo.
+                    { symbol: 'WIFUSDT', baseAsset: 'WIF', quoteAsset: 'USDT', status: 'TRADING', filters: [] },
+                    // Não está em TRADING -> deve ser ignorado inteiramente.
+                    { symbol: 'DOGEBUSD', baseAsset: 'DOGE', quoteAsset: 'BUSD', status: 'BREAK', filters: [] },
+                ],
+            }),
+        () => (provider as unknown as { discoverTrianglesAndFilters: () => Promise<void> }).discoverTrianglesAndFilters()
+    );
+
+    const triangles = provider.getDiscoveredTriangles();
+    assert.equal(triangles.length, 1);
+    assert.deepEqual(triangles[0], { id: 'USDT-BTC-ETH', leg1: 'BTC/USDT', leg2: 'ETH/BTC', leg3: 'ETH/USDT' });
+
+    const filters = (provider as unknown as { symbolFilters: Map<string, { minNotional: Decimal }> }).symbolFilters;
+    assert.equal(filters.get('BTCUSDT')?.minNotional.toString(), '10');
+    assert.equal(filters.get('ETHBTC')?.minNotional.toString(), '0', 'sem filtro MIN_NOTIONAL informado, cai no padrão 0');
+
+    // A ordem passa a poder ser executada usando o par descoberto dinamicamente.
+    const mapping = provider as unknown as { pairToBinanceSymbol: Map<string, string> };
+    assert.equal(mapping.pairToBinanceSymbol.get('ETH/BTC'), 'ETHBTC');
+});
+
+test('discoverTrianglesAndFilters lança erro claro quando nenhum triângulo real é encontrado para as bases configuradas', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false, intermediateBases: ['BNB'] });
+
+    await assert.rejects(
+        () =>
+            withFetchStub(
+                async () =>
+                    jsonResponse(200, { symbols: [{ symbol: 'ETHUSDT', baseAsset: 'ETH', quoteAsset: 'USDT', status: 'TRADING', filters: [] }] }),
+                () => (provider as unknown as { discoverTrianglesAndFilters: () => Promise<void> }).discoverTrianglesAndFilters()
+            ),
+        /Nenhum triângulo/
+    );
 });

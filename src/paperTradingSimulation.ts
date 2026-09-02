@@ -23,10 +23,16 @@ import { EventEmitter } from 'events';
 import { createLogger } from './logger';
 import { RiskManager } from './riskManager';
 import { EngineConfig, TriangularArbitrageEngine } from './engine';
-import { ExecutionResult, IExchangeProvider, OrderSide, OrderType } from './types';
+import { ExecutionResult, IExchangeProvider, OrderSide, OrderType, Triangle } from './types';
 import { createSeededRandom, gaussianSample, RandomSource } from './prng';
 
 const log = createLogger('papertrading');
+
+// SimulatedExchangeProvider só modela os preços sintéticos de UM triângulo
+// (ver advanceTick abaixo) — extensão para múltiplos triângulos sintéticos
+// fica fora do escopo desta simulação por ora (o engine real já suporta
+// vários; ver src/engine.ts e src/binanceExchangeProvider.ts).
+const SIMULATED_TRIANGLE: Triangle = { id: 'USDT-BTC-ETH', leg1: 'BTC/USDT', leg2: 'ETH/BTC', leg3: 'ETH/USDT' };
 
 export interface NoiseScenario {
     baseNoiseBps: number;
@@ -129,7 +135,7 @@ export async function runPaperTradingSimulation(
     const random = createSeededRandom(seed);
     const provider = new SimulatedExchangeProvider(random, scenario);
     const riskManager = new RiskManager(maxSlippage);
-    const engine = new TriangularArbitrageEngine(provider, riskManager, capitalUsd, engineConfig);
+    const engine = new TriangularArbitrageEngine(provider, riskManager, [SIMULATED_TRIANGLE], capitalUsd, engineConfig);
 
     let totalCycles = 0;
     let haltReason: PaperTradingResult['haltReason'];

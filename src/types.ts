@@ -15,6 +15,22 @@ export type Ticker = {
 export type OrderType = 'LIMIT' | 'MARKET';
 export type OrderSide = 'BUY' | 'SELL';
 
+/**
+ * Um triângulo de arbitragem operável pelo engine, em formato de PAR interno
+ * (ex.: "BTC/USDT") — não o formato de símbolo cru da Binance ("BTCUSDT")
+ * usado por opportunitySniffer.ts/triangleTopology.ts para assinar streams
+ * diretamente. `id` identifica o triângulo de forma estável (ex.:
+ * "USDT-BTC-ETH"), usado pelo engine como chave do EwmaTracker dedicado a
+ * cada triângulo — cada um mede sua própria linha de base, nunca uma
+ * combinada entre triângulos diferentes.
+ */
+export interface Triangle {
+    id: string;
+    leg1: string; // USDT -> base, lado ASK (ex.: "BTC/USDT")
+    leg2: string; // base -> alt, lado ASK (ex.: "ETH/BTC")
+    leg3: string; // alt -> USDT, lado BID (ex.: "ETH/USDT")
+}
+
 export interface ExecutionResult {
     orderId: string;
     status: 'FILLED' | 'REJECTED' | 'FAILED';

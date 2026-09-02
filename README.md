@@ -15,24 +15,40 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
 - `src/marketMicrostructure.ts` — `estimateVwapFill`: caminha níveis reais
   do order book para estimar o preço médio de execução (VWAP), em vez de
   assumir preenchimento integral no topo do book.
-- `src/engine.ts` — `TriangularArbitrageEngine`: avalia o book a cada tick,
-  aplica as três camadas de kill switch, executa o ciclo de 3 pernas quando
-  todas concordam e, se uma perna falhar no meio do caminho, dispara o
-  unwind de emergência (ver abaixo).
+- `src/triangleTopology.ts` — descoberta de topologia compartilhada: a
+  partir da lista real de símbolos da Binance, constrói o grafo de
+  triângulos `USDT → base → alt → USDT` cujos **três lados existem como par
+  realmente listado** — em dois formatos (`buildTriangles`, símbolo cru, ex.
+  `BTCUSDT`, usado por `opportunitySniffer.ts`; `buildEnginePairTriangles`,
+  formato de par, ex. `BTC/USDT`, usado pelo engine/`BinanceExchangeProvider`),
+  ambos sobre o mesmo núcleo de descoberta — nunca duas implementações
+  divergentes do mesmo grafo.
+- `src/engine.ts` — `TriangularArbitrageEngine`: recebe uma **lista** de
+  triângulos (não um único par fixo) e, para cada tick, avalia só os
+  triângulos afetados por aquele símbolo (índice `O(k)`), aplicando as três
+  camadas de kill switch — cada triângulo com seu próprio `EwmaTracker`
+  (linha de base nunca se mistura entre triângulos). Capital, circuit
+  breaker e o mutex de execução são **globais**, compartilhados por todos os
+  triângulos: nunca duas execuções em voo ao mesmo tempo, mesmo entre
+  triângulos diferentes — é isso que preserva "zero alavancagem" ao
+  monitorar vários ao mesmo tempo. Quando uma perna falha no meio do
+  caminho, dispara o unwind de emergência (ver abaixo).
 - `src/mockExchangeProvider.ts` — feed sintético para demo/dev, sem rede.
-- `src/binanceExchangeProvider.ts` — conector real: book em tempo real via
-  WebSocket (`bookTicker` + `depth5`, combined stream) e execução de ordens
-  via REST assinada (HMAC-SHA256).
+- `src/binanceExchangeProvider.ts` — conector real: descobre dinamicamente
+  (via `triangleTopology.ts`) todos os triângulos operáveis, assina o book
+  em tempo real via WebSocket (`bookTicker` + `depth5`, combined stream) de
+  todos os símbolos envolvidos e executa ordens via REST assinada
+  (HMAC-SHA256).
 - `src/logger.ts` — logger mínimo com timestamp ISO/nível, usado em toda a
   aplicação em vez de `console.log` solto.
 - `src/index.ts` — bootstrap da demo (mock).
 - `src/live.ts` — bootstrap real (Binance), com gate de segurança e
   heartbeat para operação 24/7.
 - `src/opportunitySniffer.ts` — ferramenta de **medição empírica** (não
-  executa ordens): descobre em tempo real todos os triângulos
-  USDT→base→alt→USDT realmente listados na Binance e mede com que
-  frequência e tamanho ineficiências líquidas de taxa aparecem de verdade
-  — ver [Medindo a oportunidade real](#medindo-a-oportunidade-real-opportunitysnifferts).
+  executa ordens): usa `triangleTopology.ts` para descobrir em tempo real
+  todos os triângulos USDT→base→alt→USDT realmente listados na Binance e
+  mede com que frequência e tamanho ineficiências líquidas de taxa aparecem
+  de verdade — ver [Medindo a oportunidade real](#medindo-a-oportunidade-real-opportunitysnifferts).
 - `src/prng.ts` — PRNG com seed (mulberry32) + amostrador gaussiano, usado
   pela simulação abaixo para ser reprodutível/testável.
 - `src/monteCarloSimulation.ts` — **simulação de sensibilidade** (sem
@@ -43,7 +59,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 61 testes, todos sem acesso a rede).
+  `npm test` — 68 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -52,7 +68,9 @@ de precisão de ponto flutuante.
 ## Arbitragem Triangular
 
 Explora ineficiências de preço síncronas entre 3 pares na mesma corretora
-(ex. `USDT → BTC → ETH → USDT`).
+(ex. `USDT → BTC → ETH → USDT`). O engine roda uma **lista** de triângulos
+assim ao mesmo tempo (não só um) — ver [Múltiplos triângulos](#múltiplos-triângulos-expansão-da-superfície-de-oportunidade)
+abaixo.
 
 ### As três camadas de kill switch
 
@@ -66,8 +84,10 @@ erro diferente:
    ```
 2. **Estatística** (`EwmaTracker` sobre R = P3/(P1·P2), em `engine.ts`) — a
    ineficiência observada precisa ser uma anomalia genuína frente à linha de
-   base recente do próprio par sintético, não um tick isolado ruidoso ou
-   artefato de latência. Usa variância exponencial em uma passada (fórmula
+   base recente do **próprio triângulo** (cada triângulo tem seu próprio
+   `EwmaTracker`, chaveado por `triangle.id` — a linha de base de um nunca
+   se mistura com a de outro), não um tick isolado ruidoso ou artefato de
+   latência. Usa variância exponencial em uma passada (fórmula
    numericamente estável, a mesma usada para volatilidade realizada de curto
    prazo):
    ```
@@ -96,7 +116,9 @@ Kill switches adicionais:
   vazio) invalida o ciclo — sem isso, uma divisão por zero no `decimal.js`
   retornaria `Infinity` em vez de lançar, e o ciclo passaria como "viável"
   por um dado quebrado.
-- Um guard (`isExecutingCycle`) impede sobreposição de ciclos.
+- Um guard (`isExecutingCycle`) impede sobreposição de ciclos — **global**,
+  compartilhado por todos os triângulos monitorados: nunca duas execuções em
+  voo ao mesmo tempo, nem entre triângulos diferentes.
 
 A demo/mock (`src/index.ts`) desativa a camada estatística
 (`statMinSamples: 0`) de propósito: seu feed sintético repete sempre a
@@ -157,7 +179,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 61 testes, todos sem rede, devem passar.
+1. `npm test` — 68 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -192,18 +214,74 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 61 testes, sem rede
+npm test            # suíte de testes (node:test) — 68 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
+## Múltiplos triângulos: expansão da superfície de oportunidade
+
+O engine monitora e opera **vários triângulos reais ao mesmo tempo**, não
+um único par fixo. Isso existe porque a alavanca legítima (sem alavancagem
+financeira) para aumentar a taxa de ciclos capturáveis é ampliar quantas
+ineficiências reais o robô consegue *ver*, não afrouxar nenhum kill switch.
+
+Como funciona:
+- `src/triangleTopology.ts` descobre, a partir do `exchangeInfo` real da
+  Binance, todos os triângulos `USDT → base → alt → USDT` cujos três lados
+  existem como par de fato listado — as bases intermediárias usadas são
+  configuráveis (`TRIANGLE_BASES`, padrão `BTC,ETH,BNB,FDUSD`; mesmo padrão
+  do `opportunitySniffer.ts`).
+- `TriangularArbitrageEngine` recebe essa lista no construtor. A cada tick,
+  só reavalia os triângulos realmente afetados pelo símbolo que chegou
+  (índice `trianglesBySymbol`, `O(k)`) — nunca varre todos os triângulos a
+  cada mensagem.
+- Cada triângulo tem seu **próprio** `EwmaTracker` (chaveado por
+  `triangle.id`): o warm-up estatístico de um nunca conta para o gate de
+  outro (ver teste dedicado em `engine.test.ts`, que prova isso simulando o
+  bug que aconteceria se os trackers fossem compartilhados).
+- **Capital, circuit breaker e o mutex de execução (`isExecutingCycle`)
+  continuam GLOBAIS** — compartilhados por todos os triângulos, nunca
+  duplicados nem divididos entre eles. Na prática: mesmo monitorando dez
+  triângulos, nunca há duas execuções em voo ao mesmo tempo, e o capital
+  comprometido em qualquer instante é sempre o mesmo de um engine de
+  triângulo único. É isso que preserva "zero alavancagem" ao ampliar a
+  superfície de oportunidade — o ganho vem de *ver* mais chances reais, não
+  de comprometer mais capital por vez.
+
+Trade-off honesto: mais bases intermediárias = mais símbolos assinados via
+WebSocket (uma única conexão combined-stream, limite documentado de 1024
+streams — o padrão de 4 bases gera dezenas, não centenas) e mais chamadas
+de avaliação por tick, mas o mutex global significa que a taxa de *ciclos
+executados* não escala linearmente com o número de triângulos monitorados:
+se dois dispararem "ao mesmo tempo", um sempre espera o outro terminar (ver
+teste "mutex global impede execução simultânea" em `engine.test.ts`). O
+ganho real é probabilístico — mais chances de pelo menos um triângulo estar
+divergente a qualquer momento — não uma multiplicação direta da taxa de
+oportunidades pelo número de triângulos.
+
 ## Conector real da Binance (`src/binanceExchangeProvider.ts`)
 
+- **Descoberta dinâmica de triângulos**: na conexão, busca
+  `/api/v3/exchangeInfo` completo e usa `buildEnginePairTriangles`
+  (`triangleTopology.ts`) para descobrir todos os triângulos
+  USDT→base→alt→USDT cujos três lados existem como par realmente listado e
+  em `TRADING` — mesmo mecanismo do `opportunitySniffer.ts`, mas em formato
+  de par (`BTC/USDT`) em vez de símbolo cru. As bases intermediárias usadas
+  são configuráveis (`intermediateBases`/`TRIANGLE_BASES`, padrão
+  `BTC,ETH,BNB,FDUSD`). Os triângulos descobertos ficam disponíveis via
+  `getDiscoveredTriangles()`, usado por `src/live.ts` para construir o
+  engine.
 - **Book em tempo real**: assina `<symbol>@bookTicker` (topo do book) e
   `<symbol>@depth5@100ms` (5 níveis de profundidade, alimenta o kill switch
-  #3) para os 3 pares, no mesmo combined stream
+  #3) para **todos os símbolos únicos** envolvidos nos triângulos
+  descobertos, no mesmo combined stream
   (`wss://stream.binance.com:9443/stream?streams=...`, ou
-  `wss://testnet.binance.vision/...` no testnet), com reconexão automática
-  e backoff exponencial (até 30s) em caso de queda.
+  `wss://testnet.binance.vision/...` no testnet) — o wrapper `{stream,
+  data}` do combined stream é necessário porque o payload cru de `@depth5`
+  não inclui o símbolo, então é a única forma de saber a qual par cada
+  mensagem pertence quando múltiplos símbolos são assinados na mesma
+  conexão. Reconexão automática e backoff exponencial (até 30s) em caso de
+  queda.
 - **Execução**: ordens `MARKET`/`LIMIT` via `POST /api/v3/order`, assinadas
   com HMAC-SHA256 (`apiSecret`) e enviadas com `X-MBX-APIKEY`. A quantidade
   é arredondada para baixo conforme o filtro `LOT_SIZE` (`stepSize`) do
@@ -313,6 +391,7 @@ Variáveis de ambiente aceitas por `src/live.ts` (ver também `.env.example`):
 | `MAX_SLIPPAGE` | `0.0005` | Tolerância mínima de lucro líquido sobre o capital (kill switch #1). |
 | `BINANCE_LIVE` | `false` | `true` = produção (dinheiro real); qualquer outro valor = testnet. |
 | `BINANCE_LIVE_CONFIRM` | — | Deve ser exatamente `I_UNDERSTAND_THE_RISK` quando `BINANCE_LIVE=true`. |
+| `TRIANGLE_BASES` | `BTC,ETH,BNB,FDUSD` | Bases intermediárias para a descoberta dinâmica de triângulos (ver [Múltiplos triângulos](#múltiplos-triângulos-expansão-da-superfície-de-oportunidade)). Mais bases = mais triângulos monitorados simultaneamente — capital/circuit breaker/mutex continuam globais. |
 | `STAT_MIN_SAMPLES` | `20` | Amostras mínimas de linha de base antes do kill switch #2 liberar disparo. |
 | `STAT_Z_THRESHOLD` | `3` | Desvios-padrão exigidos do kill switch #2. |
 | `RATIO_EWMA_ALPHA` | `0.05` | Memória do EWMA (`2/(N+1)` ≈ janela de N amostras). |
@@ -321,21 +400,30 @@ Variáveis de ambiente aceitas por `src/live.ts` (ver também `.env.example`):
 
 ## Medindo a oportunidade real (`opportunitySniffer.ts`)
 
-O motor de execução assume um par fixo (`BTC/USDT → ETH/BTC → ETH/USDT`).
-Uma pergunta legítima e separada é: **quantas ineficiências líquidas de
-taxa realmente existem, com que frequência e de que tamanho**, olhando
-para todos os triângulos de fato negociáveis na Binance (não só três
-pares)? `src/opportunitySniffer.ts` responde isso **medindo**, em vez de
+O motor de execução já descobre dinamicamente todos os triângulos operáveis
+(ver [Múltiplos triângulos](#múltiplos-triângulos-expansão-da-superfície-de-oportunidade)
+acima) — mas isso não torna esta ferramenta redundante, porque a pergunta
+que ela responde é diferente e continua legítima e separada: **quantas
+ineficiências líquidas de taxa realmente existem, com que frequência e de
+que tamanho**, olhando para todos os triângulos de fato negociáveis na
+Binance? `src/opportunitySniffer.ts` responde isso **medindo**, em vez de
 assumir uma taxa e calcular quantos ciclos seriam necessários pra bater
 uma meta — essa segunda abordagem é circular (assume a resposta que
 deveria provar) e não diz nada sobre se as oportunidades existem de fato.
+Por ser só leitura (nenhuma ordem, nenhum capital em risco), o sniffer pode
+apontar para uma superfície de bases intermediárias bem mais ampla do que
+você necessariamente habilitaria no engine real via `TRIANGLE_BASES` — é a
+ferramenta certa para decidir *quais* bases valem a pena operar de verdade
+antes de arriscar capital nelas.
 
 O que ele faz:
 1. Busca `/api/v3/exchangeInfo` (REST, público, sem credenciais) e
    constrói o grafo de triângulos `USDT → base → alt → USDT` cujos **três
-   lados existem como par realmente listado** (`buildTriangles` —
-   testado isoladamente em `opportunitySniffer.test.ts`, sem rede). Isso
-   importa: `SOL → WIF → USDT` só é um triângulo arbitrável de verdade se
+   lados existem como par realmente listado** (`buildTriangles`, em
+   `triangleTopology.ts` — o mesmo núcleo de descoberta usado pelo engine
+   real via `buildEnginePairTriangles`; testado isoladamente em
+   `triangleTopology.test.ts`, sem rede). Isso importa: `SOL → WIF → USDT`
+   só é um triângulo arbitrável de verdade se
    `WIF/SOL` (ou `SOL/WIF`) existir como mercado — a maioria dos pares
    alt/alt não existe na Binance, só alt/USDT (e um subconjunto também
    contra BTC/ETH/BNB). Contar "combinações combinatorialmente possíveis"
@@ -454,7 +542,11 @@ do `RiskManager` isolada, tick a tick, sem estado entre eles), esta roda o
 **engine real inteiro** — `TriangularArbitrageEngine` + `RiskManager`,
 com os 3 kill switches de disparo, unwind de emergência e circuit breaker
 de drawdown — através de **muitos ciclos em sequência**, contra um feed
-sintético (mesmo modelo de ruído do `monteCarloSimulation.ts`).
+sintético (mesmo modelo de ruído do `monteCarloSimulation.ts`). O
+`SimulatedExchangeProvider` só modela os preços de **um** triângulo
+sintético — o engine real suporta [múltiplos triângulos](#múltiplos-triângulos-expansão-da-superfície-de-oportunidade),
+mas estender o feed sintético pra múltiplos ao mesmo tempo fica fora do
+escopo desta ferramenta por ora.
 
 Isso importa porque foi rodando essa simulação por 5 dias simulados que se
 encontrou um bug real: o `RiskManager` fixava um teto de capital igual ao
@@ -491,8 +583,9 @@ engine se comportaria** sob essa hipótese, não uma previsão de retorno.
 > retorna `403 connect_rejected` do proxy) — isso não é um erro do
 > conector nem do `opportunitySniffer`. A lógica de ambos (assinatura
 > HMAC, arredondamento por `LOT_SIZE`, contabilidade de `netProceeds`,
-> construção de triângulos, avaliação de ineficiência) é coberta por
-> testes de unidade que não dependem de rede — ver `src/binanceExchangeProvider.test.ts`
-> e `src/opportunitySniffer.test.ts` — mas a conectividade fim-a-fim só
+> descoberta dinâmica de triângulos, avaliação de ineficiência) é coberta
+> por testes de unidade que não dependem de rede — ver
+> `src/binanceExchangeProvider.test.ts`, `src/triangleTopology.test.ts` e
+> `src/opportunitySniffer.test.ts` — mas a conectividade fim-a-fim só
 > pode ser validada rodando `npm run live` / `npm run sniff` (ou o deploy
 > no Railway) a partir de um ambiente com acesso de rede à Binance.

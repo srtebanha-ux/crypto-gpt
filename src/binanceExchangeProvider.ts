@@ -1,15 +1,21 @@
 // Arquivo: src/binanceExchangeProvider.ts
 //
 // Conector real de mercado/execução para a Binance (Spot):
+//   - Descoberta dinâmica de TODOS os triângulos USDT->base->alt->USDT
+//     realmente listados na Binance (via REST /api/v3/exchangeInfo), usando
+//     o mesmo mecanismo do opportunitySniffer.ts (ver triangleTopology.ts) —
+//     em vez de um único triângulo fixo hardcoded.
 //   - Dados de book em tempo real via WebSocket: `<symbol>@bookTicker` (topo
 //     do book, dispara o kill switch determinístico/estatístico) e
 //     `<symbol>@depth5@100ms` (5 níveis de profundidade, mantidos em
 //     memória e usados pelo kill switch de confirmação por VWAP — ver
 //     getOrderBookSnapshot / RiskManager.isTriangularArbitrageViableWithDepth).
-//     Ambos no mesmo combined stream, com reconexão automática e backoff
-//     exponencial.
+//     Ambos no mesmo combined stream (necessário: o payload cru de
+//     `@depth5` não inclui o símbolo — só o wrapper `{stream, data}` do
+//     combined stream permite saber a qual símbolo cada mensagem pertence),
+//     com reconexão automática e backoff exponencial.
 //   - Execução de ordens via REST assinada (HMAC-SHA256), respeitando os
-//     filtros LOT_SIZE/MIN_NOTIONAL do par antes de enviar.
+//     filtros LOT_SIZE/MIN_NOTIONAL reais de cada par antes de enviar.
 //   - Contabilidade de taxa fiel à Binance: a taxa é debitada do ativo que
 //     você RECEBE na perna (base para BUY, cotação para SELL), então
 //     `netProceeds` já vem líquido — ver a nota em `types.ts`.
@@ -22,7 +28,8 @@ import * as crypto from 'crypto';
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { createLogger } from './logger';
-import { ExecutionResult, IExchangeProvider, OrderBookLevel, OrderBookSnapshot, OrderSide, OrderType, Ticker } from './types';
+import { ExecutionResult, IExchangeProvider, OrderBookLevel, OrderBookSnapshot, OrderSide, OrderType, Ticker, Triangle } from './types';
+import { buildEnginePairTriangles } from './triangleTopology';
 
 const log = createLogger('binance');
 
@@ -52,17 +59,15 @@ export function parseDepthLevels(raw: unknown): OrderBookLevel[] {
     return levels;
 }
 
-// Mapeamento entre o símbolo interno do engine ("BTC/USDT") e o símbolo
-// nativo da Binance ("BTCUSDT"), usado tanto para assinar streams quanto
-// para montar as ordens REST.
-const PAIR_TO_BINANCE_SYMBOL: Record<string, string> = {
-    'BTC/USDT': 'BTCUSDT',
-    'ETH/BTC': 'ETHBTC',
-    'ETH/USDT': 'ETHUSDT',
-};
-const BINANCE_SYMBOL_TO_PAIR: Record<string, string> = Object.fromEntries(
-    Object.entries(PAIR_TO_BINANCE_SYMBOL).map(([pair, symbol]) => [symbol, pair])
-);
+// Bases intermediárias padrão para a descoberta de triângulos — mesmo
+// padrão do opportunitySniffer.ts (ver SNIFFER_BASES), configurável via
+// BinanceExchangeProviderOptions.intermediateBases (ver TRIANGLE_BASES em
+// src/live.ts).
+const DEFAULT_INTERMEDIATE_BASES = ['BTC', 'ETH', 'BNB', 'FDUSD'];
+// Limite documentado da Binance para o número de streams numa única conexão
+// combined-stream — só relevante se INTERMEDIATE_BASES for configurado de
+// forma extremamente ampla (o padrão gera dezenas de streams, não centenas).
+const MAX_WS_STREAMS_PER_CONNECTION = 1024;
 
 interface SymbolFilters {
     stepSize: Decimal;
@@ -78,6 +83,13 @@ export interface BinanceExchangeProviderOptions {
     recvWindowMs?: number;
     /** Taxa taker de fallback caso o endpoint de fee não esteja disponível (ex.: testnet). */
     fallbackFeeRate?: string;
+    /**
+     * Bases intermediárias usadas para descobrir dinamicamente todos os
+     * triângulos USDT->base->alt->USDT realmente listados na Binance (ver
+     * triangleTopology.ts). Padrão: BTC, ETH, BNB, FDUSD — mesmo padrão do
+     * opportunitySniffer.ts.
+     */
+    intermediateBases?: string[];
 }
 
 const MAX_RECONNECT_DELAY_MS = 30_000;
@@ -115,12 +127,18 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     private readonly restBaseUrl: string;
     private readonly wsBaseUrl: string;
     private readonly recvWindowMs: number;
+    private readonly intermediateBases: string[];
 
     private feeRate: Decimal;
     private serverTimeOffsetMs = 0;
     private symbolFilters = new Map<string, SymbolFilters>();
     /** Profundidade mais recente por par interno ("BTC/USDT"), atualizada pelo stream @depth5. */
     private depthState = new Map<string, OrderBookSnapshot>();
+    /** Triângulos reais descobertos na última chamada de connect() — ver getDiscoveredTriangles(). */
+    private discoveredTriangles: Triangle[] = [];
+    /** Mapeamento dinâmico par interno <-> símbolo nativo Binance, construído a partir dos triângulos descobertos. */
+    private pairToBinanceSymbol = new Map<string, string>();
+    private binanceSymbolToPair = new Map<string, string>();
 
     private ws: WebSocket | null = null;
     private reconnectAttempts = 0;
@@ -135,15 +153,16 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         this.apiSecret = options.apiSecret;
         this.recvWindowMs = options.recvWindowMs ?? 5000;
         this.feeRate = new Decimal(options.fallbackFeeRate ?? '0.001');
+        this.intermediateBases = options.intermediateBases ?? DEFAULT_INTERMEDIATE_BASES;
 
         this.restBaseUrl = options.live ? 'https://api.binance.com' : 'https://testnet.binance.vision';
         this.wsBaseUrl = options.live ? 'wss://stream.binance.com:9443' : 'wss://testnet.binance.vision';
     }
 
-    /** Sincroniza relógio, carrega filtros de símbolo/fee e abre o WebSocket. Chamar antes de operar. */
+    /** Sincroniza relógio, descobre a topologia real de triângulos + filtros de símbolo/fee e abre o WebSocket. Chamar antes de operar. */
     public async connect(): Promise<void> {
         await withRetry('Sincronização de horário', () => this.syncServerTime());
-        await withRetry('Carga de exchangeInfo', () => this.loadExchangeFilters());
+        await withRetry('Descoberta de triângulos e filtros de símbolo', () => this.discoverTrianglesAndFilters());
         await this.loadTradingFee(); // best-effort, não bloqueia o startup
         this.openWebSocket();
     }
@@ -153,14 +172,25 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         this.ws?.close();
     }
 
+    /** Triângulos USDT->base->alt->USDT reais descobertos na Binance na última chamada de connect(). */
+    public getDiscoveredTriangles(): Triangle[] {
+        return this.discoveredTriangles;
+    }
+
     // ------------------------------------------------------------------
     // WebSocket: feed de book em tempo real
     // ------------------------------------------------------------------
     private openWebSocket(): void {
-        const streams = Object.keys(BINANCE_SYMBOL_TO_PAIR)
-            .flatMap((symbol) => [`${symbol.toLowerCase()}@bookTicker`, `${symbol.toLowerCase()}@depth5@100ms`])
-            .join('/');
-        const url = `${this.wsBaseUrl}/stream?streams=${streams}`;
+        const streams = Array.from(this.binanceSymbolToPair.keys()).flatMap((symbol) => [
+            `${symbol.toLowerCase()}@bookTicker`,
+            `${symbol.toLowerCase()}@depth5@100ms`,
+        ]);
+        if (streams.length > MAX_WS_STREAMS_PER_CONNECTION) {
+            log.warn(
+                `Número de streams (${streams.length}) excede o limite documentado de ${MAX_WS_STREAMS_PER_CONNECTION} por conexão combined-stream da Binance — considere reduzir intermediateBases/TRIANGLE_BASES.`
+            );
+        }
+        const url = `${this.wsBaseUrl}/stream?streams=${streams.join('/')}`;
         this.ws = new WebSocket(url);
 
         this.ws.on('open', () => {
@@ -204,7 +234,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
 
     private handleBookTicker(data: { s?: string; b?: string; a?: string }): void {
         if (!data.s || !data.b || !data.a) return;
-        const pair = BINANCE_SYMBOL_TO_PAIR[data.s];
+        const pair = this.binanceSymbolToPair.get(data.s);
         if (!pair) return;
 
         const ticker: Ticker = {
@@ -213,7 +243,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
             ask: new Decimal(data.a),
             // O stream bookTicker não traz timestamp de evento; usamos o
             // horário de recebimento local, que é o que o kill switch de
-            // obsolescência do engine (evaluateInefficiency) espera.
+            // obsolescência do engine (evaluateTriangle) espera.
             timestamp: Date.now(),
         };
         this.emit('ticker', ticker);
@@ -221,7 +251,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
 
     private handleDepthUpdate(streamName: string, data: { bids?: unknown; asks?: unknown }): void {
         const binanceSymbol = streamName.split('@')[0]?.toUpperCase();
-        const pair = binanceSymbol ? BINANCE_SYMBOL_TO_PAIR[binanceSymbol] : undefined;
+        const pair = binanceSymbol ? this.binanceSymbolToPair.get(binanceSymbol) : undefined;
         if (!pair) return;
 
         this.depthState.set(pair, {
@@ -251,21 +281,62 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         this.serverTimeOffsetMs = serverTime - Date.now();
     }
 
-    private async loadExchangeFilters(): Promise<void> {
-        const symbolsParam = encodeURIComponent(JSON.stringify(Object.keys(BINANCE_SYMBOL_TO_PAIR)));
-        const res = await fetch(`${this.restBaseUrl}/api/v3/exchangeInfo?symbols=${symbolsParam}`);
+    /**
+     * Busca o exchangeInfo COMPLETO (não dá pra filtrar por símbolo antes de
+     * saber quais símbolos existem — mesma abordagem do
+     * opportunitySniffer.ts) e descobre, a partir dos pares realmente
+     * listados e em TRADING, todos os triângulos USDT->base->alt->USDT
+     * operáveis (ver triangleTopology.ts). Constrói dinamicamente os mapas
+     * par<->símbolo nativo e os filtros LOT_SIZE/MIN_NOTIONAL reais de cada
+     * símbolo envolvido — nada disso fica mais hardcoded para 3 pares fixos.
+     */
+    private async discoverTrianglesAndFilters(): Promise<void> {
+        const res = await fetch(`${this.restBaseUrl}/api/v3/exchangeInfo`);
         if (!res.ok) throw new Error(`Falha ao carregar exchangeInfo: HTTP ${res.status}`);
-        const json = (await res.json()) as { symbols: Array<{ symbol: string; filters: Array<Record<string, string>> }> };
+        const json = (await res.json()) as {
+            symbols: Array<{ symbol: string; baseAsset: string; quoteAsset: string; status: string; filters: Array<Record<string, string>> }>;
+        };
+        const activeSymbols = (json.symbols ?? []).filter((s) => s.status === 'TRADING');
 
-        for (const s of json.symbols ?? []) {
-            const lotSize = s.filters.find((f) => f.filterType === 'LOT_SIZE');
-            const notionalFilter = s.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
-            this.symbolFilters.set(s.symbol, {
-                stepSize: new Decimal(lotSize?.stepSize ?? '0.00000001'),
-                minQty: new Decimal(lotSize?.minQty ?? '0'),
-                minNotional: new Decimal(notionalFilter?.minNotional ?? notionalFilter?.notional ?? '0'),
-            });
+        this.discoveredTriangles = buildEnginePairTriangles(
+            activeSymbols.map((s) => ({ symbol: s.symbol, baseAsset: s.baseAsset, quoteAsset: s.quoteAsset })),
+            this.intermediateBases
+        );
+        if (this.discoveredTriangles.length === 0) {
+            throw new Error(
+                `Nenhum triângulo USDT->base->alt->USDT real encontrado para as bases intermediárias configuradas (${this.intermediateBases.join(',')}).`
+            );
         }
+
+        const infoBySymbol = new Map(activeSymbols.map((s) => [s.symbol, s]));
+        this.pairToBinanceSymbol = new Map();
+        this.binanceSymbolToPair = new Map();
+        this.symbolFilters = new Map();
+
+        for (const t of this.discoveredTriangles) {
+            for (const pair of [t.leg1, t.leg2, t.leg3]) {
+                if (this.pairToBinanceSymbol.has(pair)) continue; // símbolo compartilhado por mais de um triângulo
+                const [base, quote] = pair.split('/');
+                const rawSymbol = `${base}${quote}`;
+                this.pairToBinanceSymbol.set(pair, rawSymbol);
+                this.binanceSymbolToPair.set(rawSymbol, pair);
+
+                const info = infoBySymbol.get(rawSymbol);
+                const lotSize = info?.filters.find((f) => f.filterType === 'LOT_SIZE');
+                const notionalFilter = info?.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+                this.symbolFilters.set(rawSymbol, {
+                    stepSize: new Decimal(lotSize?.stepSize ?? '0.00000001'),
+                    minQty: new Decimal(lotSize?.minQty ?? '0'),
+                    minNotional: new Decimal(notionalFilter?.minNotional ?? notionalFilter?.notional ?? '0'),
+                });
+            }
+        }
+
+        log.info('Topologia real de triângulos descoberta na Binance.', {
+            triangulosOperaveis: this.discoveredTriangles.length,
+            simbolosUnicos: this.pairToBinanceSymbol.size,
+            basesIntermediarias: this.intermediateBases.join(','),
+        });
     }
 
     private async loadTradingFee(): Promise<void> {
@@ -325,7 +396,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     }
 
     public async executeOrder(pairSymbol: string, side: OrderSide, type: OrderType, qty: Decimal, price?: Decimal): Promise<ExecutionResult> {
-        const symbol = PAIR_TO_BINANCE_SYMBOL[pairSymbol];
+        const symbol = this.pairToBinanceSymbol.get(pairSymbol);
         if (!symbol) throw new Error(`Símbolo desconhecido para a Binance: ${pairSymbol}`);
 
         const filters = this.symbolFilters.get(symbol);

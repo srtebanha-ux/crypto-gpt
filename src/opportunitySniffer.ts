@@ -15,6 +15,7 @@
 import { Decimal } from 'decimal.js';
 import WebSocket from 'ws';
 import { createLogger } from './logger';
+import { buildTriangles, RawTriangle as Triangle, SymbolInfo } from './triangleTopology';
 
 const log = createLogger('sniffer');
 
@@ -29,48 +30,11 @@ const TARGET_NET_PROFIT = new Decimal(process.env.SNIFFER_TARGET_NET_PROFIT ?? '
 const INTERMEDIATE_BASES = (process.env.SNIFFER_BASES ?? 'BTC,ETH,BNB,FDUSD').split(',').map((s) => s.trim().toUpperCase());
 
 // ============================================================================
-// [1] FUNÇÕES PURAS (testadas isoladamente em opportunitySniffer.test.ts,
-// sem rede) — mapeamento topológico e avaliação de triângulo.
+// [1] FUNÇÕES PURAS (testadas isoladamente em triangleTopology.test.ts e
+// opportunitySniffer.test.ts, sem rede) — mapeamento topológico (compartilhado
+// com engine.ts/BinanceExchangeProvider via triangleTopology.ts) e avaliação
+// de triângulo.
 // ============================================================================
-export interface SymbolInfo {
-    symbol: string;
-    baseAsset: string;
-    quoteAsset: string;
-}
-
-export interface Triangle {
-    id: string;
-    leg1: string; // USDT -> base (ex.: BTCUSDT), lado ASK
-    leg2: string; // base -> alt (ex.: ETHBTC), lado ASK
-    leg3: string; // alt -> USDT (ex.: ETHUSDT), lado BID
-}
-
-/**
- * Constrói o grafo de triângulos USDT→base→alt→USDT que são REALMENTE
- * negociáveis (os três lados existem como par listado), a partir da lista
- * real de símbolos da Binance — em vez de assumir uma contagem de
- * triângulos combinatorialmente possível mas não necessariamente listada.
- */
-export function buildTriangles(symbols: SymbolInfo[], intermediateBases: string[]): Triangle[] {
-    const symbolSet = new Set(symbols.map((s) => s.symbol));
-    const triangles: Triangle[] = [];
-
-    for (const base of intermediateBases) {
-        const leg1 = `${base}USDT`;
-        if (!symbolSet.has(leg1)) continue;
-
-        for (const s of symbols) {
-            if (s.quoteAsset !== base || s.baseAsset === 'USDT') continue;
-            const altAsset = s.baseAsset;
-            const leg3 = `${altAsset}USDT`;
-            if (!symbolSet.has(leg3)) continue;
-
-            triangles.push({ id: `USDT-${base}-${altAsset}`, leg1, leg2: s.symbol, leg3 });
-        }
-    }
-    return triangles;
-}
-
 export interface BookTick {
     bid: Decimal;
     ask: Decimal;

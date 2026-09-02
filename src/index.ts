@@ -8,6 +8,7 @@ import { createLogger } from './logger';
 import { RiskManager } from './riskManager';
 import { TriangularArbitrageEngine } from './engine';
 import { MockExchangeProvider } from './mockExchangeProvider';
+import { Triangle } from './types';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
@@ -22,12 +23,13 @@ function bootstrap() {
 
     const exchange = new MockExchangeProvider();
     const riskManager = new RiskManager(MAX_SLIPPAGE);
+    const demoTriangle: Triangle = { id: 'USDT-BTC-ETH', leg1: 'BTC/USDT', leg2: 'ETH/BTC', leg3: 'ETH/USDT' };
 
     // statMinSamples: 0 desativa o kill switch estatístico (camada #2) para
     // a demo: o feed mock repete sempre a mesma distorção fixa, então nunca
     // teria uma variância real para julgar um tick como "anomalia" — esse
     // gate só faz sentido contra um feed de mercado genuíno (ver src/live.ts).
-    new TriangularArbitrageEngine(exchange, riskManager, C0_BASE, { statMinSamples: 0 });
+    new TriangularArbitrageEngine(exchange, riskManager, [demoTriangle], C0_BASE, { statMinSamples: 0 });
 }
 
 bootstrap();

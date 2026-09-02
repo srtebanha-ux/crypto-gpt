@@ -9,6 +9,8 @@ import { ExecutionResult, IExchangeProvider, OrderBookSnapshot, OrderSide, Order
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
+const TEST_TRIANGLE = { id: 'USDT-BTC-ETH', leg1: 'BTC/USDT', leg2: 'ETH/BTC', leg3: 'ETH/USDT' };
+
 type OrderCall = { symbol: string; side: OrderSide; type: OrderType; qty: Decimal; price?: Decimal };
 
 /** Provider falso, 100% síncrono/determinístico, para exercitar o engine sem rede. */
@@ -64,7 +66,7 @@ test('dispara e completa um ciclo lucrativo quando o triângulo diverge', async 
     const riskManager = new RiskManager('0.0005');
     // statMinSamples: 0 — este teste cobre a execução do ciclo, não o kill
     // switch estatístico (coberto em teste dedicado abaixo).
-    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50', { statMinSamples: 0 });
 
     const successPromise = waitFor(engine, 'cycle-success');
     exchange.pushTicker('BTC/USDT', '60000', '60010');
@@ -90,7 +92,7 @@ test('dispara e completa um ciclo lucrativo quando o triângulo diverge', async 
 test('não dispara ciclo quando o book não tem ineficiência suficiente', async () => {
     const exchange = new FakeExchangeProvider([]);
     const riskManager = new RiskManager('0.0005');
-    new TriangularArbitrageEngine(exchange, riskManager, '50');
+    new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50');
 
     // p3 = p1 * p2 (sem distorção) — não deve nem tentar executar nenhuma ordem.
     exchange.pushTicker('BTC/USDT', '60000', '60000');
@@ -104,7 +106,7 @@ test('não dispara ciclo quando o book não tem ineficiência suficiente', async
 test('ignora ticks obsoletos (kill switch de timestamp)', async () => {
     const exchange = new FakeExchangeProvider([]);
     const riskManager = new RiskManager('0.0005');
-    new TriangularArbitrageEngine(exchange, riskManager, '50');
+    new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50');
 
     // Mesma ineficiência do teste de sucesso, mas com um tick "velho" (>100ms).
     exchange.pushTicker('BTC/USDT', '60000', '60010', 500);
@@ -125,7 +127,7 @@ test('unwind de emergência vende o ETH residual quando a perna 3 falha', async 
         () => fill('49.9', '0.016597', '3049'), // unwind: vende o ETH residual
     ]);
     const riskManager = new RiskManager('0.0005');
-    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50', { statMinSamples: 0 });
 
     const failurePromise = waitFor(engine, 'cycle-failure');
     exchange.pushTicker('BTC/USDT', '60000', '60010');
@@ -151,7 +153,7 @@ test('emite critical-exposure quando o próprio unwind falha', async () => {
         },
     ]);
     const riskManager = new RiskManager('0.0005');
-    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50', { statMinSamples: 0 });
 
     const criticalPromise = waitFor(engine, 'critical-exposure');
     exchange.pushTicker('BTC/USDT', '60000', '60010');
@@ -182,7 +184,7 @@ test('kill switch estatístico bloqueia o disparo durante o warm-up (amostras in
     // statMinSamples muito alto: mesmo com a MESMA ineficiência claramente
     // lucrativa do teste de sucesso, o gate estatístico nunca terá amostras
     // suficientes de linha de base para liberar o disparo nesta janela de teste.
-    new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 1000 });
+    new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50', { statMinSamples: 1000 });
 
     exchange.pushTicker('BTC/USDT', '60000', '60010');
     exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
@@ -218,7 +220,7 @@ test('kill switch de profundidade bloqueia quando o book real não sustenta o ci
     exchange.setSnapshot('ETH/USDT', snapshot([['3050', '0.00000001']]));
 
     const riskManager = new RiskManager('0.0005');
-    new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
+    new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50', { statMinSamples: 0 });
 
     exchange.pushTicker('BTC/USDT', '60000', '60010');
     exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
@@ -239,7 +241,7 @@ test('kill switch de profundidade libera o disparo quando o book real sustenta o
     exchange.setSnapshot('ETH/USDT', snapshot([['3050', '10']]));
 
     const riskManager = new RiskManager('0.0005');
-    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50', { statMinSamples: 0 });
 
     const successPromise = waitFor(engine, 'cycle-success');
     exchange.pushTicker('BTC/USDT', '60000', '60010');
@@ -262,7 +264,7 @@ test('circuit breaker de drawdown halta o engine após perdas acumuladas além d
         () => fill('44', '0.016', '3050'),
     ]);
     const riskManager = new RiskManager('0.0005');
-    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0, maxDrawdownFraction: new Decimal('0.10') });
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, [TEST_TRIANGLE], '50', { statMinSamples: 0, maxDrawdownFraction: new Decimal('0.10') });
 
     const firstSuccess = waitFor(engine, 'cycle-success');
     exchange.pushTicker('BTC/USDT', '60000', '60010');
@@ -290,4 +292,101 @@ test('circuit breaker de drawdown halta o engine após perdas acumuladas além d
     exchange.pushTicker('ETH/USDT', '3050', '3060');
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(exchange.calls.length, 6, 'nenhuma nova ordem deveria ser enviada após o circuit breaker');
+});
+
+// ============================================================================
+// MULTI-TRIÂNGULO: mutex global entre triângulos diferentes + isolamento do
+// EwmaTracker por triângulo. Ver o cabeçalho da classe em engine.ts — capital,
+// circuit breaker e o mutex de execução são deliberadamente GLOBAIS (nunca
+// duplicados/divididos entre triângulos), pois é isso que preserva "zero
+// alavancagem" ao monitorar vários triângulos ao mesmo tempo.
+// ============================================================================
+const TRIANGLE_A = { id: 'A', leg1: 'BTC/USDT', leg2: 'ETH/BTC', leg3: 'ETH/USDT' };
+const TRIANGLE_B = { id: 'B', leg1: 'BNB/USDT', leg2: 'SOL/BNB', leg3: 'SOL/USDT' };
+
+function pushTriangleA(exchange: FakeExchangeProvider) {
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+}
+
+function pushTriangleB(exchange: FakeExchangeProvider) {
+    exchange.pushTicker('BNB/USDT', '299.85', '300');
+    exchange.pushTicker('SOL/BNB', '0.0995', '0.1');
+    exchange.pushTicker('SOL/USDT', '30.45', '30.55');
+}
+
+test('mutex global impede execução simultânea entre triângulos diferentes (sem alavancagem: nunca duas execuções em voo ao mesmo tempo)', async () => {
+    const exchange = new FakeExchangeProvider([
+        () => fill('0.000832', '0.000833', '60010'), // A leg1
+        () => fill('0.016597', '0.016614', '0.0501'), // A leg2
+        () => fill('50.5', '0.016597', '3050'), // A leg3
+        () => fill('0.5', '0.5', '300'), // B leg1
+        () => fill('5', '5', '0.1'), // B leg2
+        () => fill('51', '5', '30.45'), // B leg3
+    ]);
+    const riskManager = new RiskManager('0.0005');
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, [TRIANGLE_A, TRIANGLE_B], '50', { statMinSamples: 0 });
+
+    const successA = waitFor(engine, 'cycle-success');
+
+    // Dispara A; na MESMA sequência síncrona, B também teria uma ineficiência
+    // real (mesma magnitude de divergência de A), mas o mutex global
+    // (isExecutingCycle) deve bloqueá-lo enquanto A ainda está em voo.
+    pushTriangleA(exchange);
+    pushTriangleB(exchange);
+
+    await successA;
+    assert.equal(exchange.calls.length, 3, 'B não deveria ter disparado nenhuma ordem enquanto A ainda estava em execução');
+    assert.equal(exchange.calls[0].symbol, 'BTC/USDT');
+
+    const successB = waitFor(engine, 'cycle-success');
+    // Reenvia os ticks de B com timestamp fresco (os anteriores podem já
+    // estar obsoletos pelo kill switch de idade após a espera de A).
+    pushTriangleB(exchange);
+    await successB;
+
+    assert.equal(exchange.calls.length, 6, 'depois que A libera o mutex global, B deve conseguir disparar seu próprio ciclo');
+    assert.equal(exchange.calls[3].symbol, 'BNB/USDT');
+});
+
+test('EwmaTracker por triângulo é isolado: o warm-up de um nunca conta para o kill switch estatístico de outro', async () => {
+    const exchange = new FakeExchangeProvider([
+        () => fill('0.000832', '0.000833', '60010'), // A leg1
+        () => fill('0.016597', '0.016614', '0.0501'), // A leg2
+        () => fill('50.5', '0.016597', '3050'), // A leg3
+    ]);
+    const riskManager = new RiskManager('0.0005');
+    // statMinSamples=2: cada triângulo precisa de 2 amostras JÁ incorporadas
+    // ao SEU PRÓPRIO EwmaTracker antes do kill switch estatístico liberar
+    // qualquer disparo. Se os trackers fossem compartilhados entre
+    // triângulos (a regressão que este teste previne), o warm-up de B
+    // contaria para o gate de A e vice-versa, e A dispararia cedo demais.
+    // statZThreshold=0: cada tick reenvia a MESMA razão (mesmo preço), então
+    // a partir da 2ª amostra x==mean sempre (diff=0) e zScore fica travado em
+    // 0 — 0 >= 0 sempre passa, isolando o teste para depender só da contagem
+    // de amostras (comportamento do zScore em si já é coberto em
+    // statistics.test.ts e no teste de warm-up estatístico acima).
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, [TRIANGLE_A, TRIANGLE_B], '50', {
+        statMinSamples: 2,
+        statZThreshold: new Decimal(0),
+    });
+
+    pushTriangleA(exchange); // toque #1 do tracker de A (contagem própria: 0 -> 1)
+    pushTriangleB(exchange); // toque #1 do tracker de B (contagem própria: 0 -> 1)
+    exchange.pushTicker('ETH/USDT', '3050', '3060'); // toque #2 de A (contagem própria: 1 -> 2)
+    exchange.pushTicker('SOL/USDT', '30.45', '30.55'); // toque #2 de B (contagem própria: 1 -> 2)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(
+        exchange.calls.length,
+        0,
+        'nenhum dos dois deveria disparar ainda — nenhum triângulo tem 2 amostras PRÓPRIAS incorporadas (se os trackers fossem compartilhados, o total de 4 toques já teria liberado o disparo aqui)'
+    );
+
+    const successA = waitFor(engine, 'cycle-success');
+    exchange.pushTicker('ETH/USDT', '3050', '3060'); // toque #3 de A: sampleCountBeforeUpdate=2 >= statMinSamples -> libera
+    await successA;
+
+    assert.equal(exchange.calls.length, 3, 'apenas o ciclo de A deveria ter disparado');
+    assert.equal(exchange.calls[0].symbol, 'BTC/USDT');
 });

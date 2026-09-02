@@ -2,42 +2,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { buildTriangles, evaluateTriangle, SymbolInfo } from './opportunitySniffer';
+import { evaluateTriangle } from './opportunitySniffer';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
-function sym(symbol: string, baseAsset: string, quoteAsset: string): SymbolInfo {
-    return { symbol, baseAsset, quoteAsset };
-}
-
-test('buildTriangles só inclui triângulos cujos TRÊS lados existem como par real listado', () => {
-    const symbols: SymbolInfo[] = [
-        sym('BTCUSDT', 'BTC', 'USDT'),
-        sym('ETHUSDT', 'ETH', 'USDT'),
-        sym('ETHBTC', 'ETH', 'BTC'), // ETH/BTC listado -> triângulo USDT-BTC-ETH é válido
-        sym('WIFUSDT', 'WIF', 'USDT'),
-        // WIF/BTC NÃO está listado -> não deve gerar um triângulo USDT-BTC-WIF
-    ];
-
-    const triangles = buildTriangles(symbols, ['BTC']);
-
-    assert.equal(triangles.length, 1);
-    assert.deepEqual(triangles[0], { id: 'USDT-BTC-ETH', leg1: 'BTCUSDT', leg2: 'ETHBTC', leg3: 'ETHUSDT' });
-});
-
-test('buildTriangles ignora bases intermediárias que não têm par XXXUSDT listado', () => {
-    const symbols: SymbolInfo[] = [sym('ETHBNB', 'ETH', 'BNB'), sym('ETHUSDT', 'ETH', 'USDT')];
-    // Sem BNBUSDT listado, não há como fechar USDT -> BNB.
-    const triangles = buildTriangles(symbols, ['BNB']);
-    assert.equal(triangles.length, 0);
-});
-
-test('buildTriangles nunca usa USDT como ativo intermediário da 2ª perna', () => {
-    const symbols: SymbolInfo[] = [sym('BTCUSDT', 'BTC', 'USDT'), sym('USDTBTC', 'USDT', 'BTC')]; // hipotético/degenerado
-    const triangles = buildTriangles(symbols, ['BTC']);
-    assert.equal(triangles.length, 0, 'um par com baseAsset=USDT não deveria virar a "perna 2" de um triângulo');
-});
-
+// A descoberta de topologia (buildTriangles/buildEnginePairTriangles) mudou
+// para src/triangleTopology.ts (compartilhada com o engine) — ver
+// triangleTopology.test.ts. Este arquivo cobre só o que continua local ao
+// sniffer: avaliação de triângulo e a fórmula de spread mínimo exigido.
 const triangle = { id: 'USDT-BTC-ETH', leg1: 'BTCUSDT', leg2: 'ETHBTC', leg3: 'ETHUSDT' };
 const retentionCubed = new Decimal(1).minus('0.001').pow(3);
 const requiredGrossSpread = new Decimal(1).plus('0.0002').dividedBy(retentionCubed);

@@ -11,6 +11,13 @@
 //   MAX_SLIPPAGE           (padrão "0.0005")
 //   BINANCE_LIVE           ("true" para produção; qualquer outro valor => testnet)
 //   BINANCE_LIVE_CONFIRM   (deve ser exatamente "I_UNDERSTAND_THE_RISK" quando BINANCE_LIVE=true)
+//   TRIANGLE_BASES          (padrão "BTC,ETH,BNB,FDUSD" — bases intermediárias usadas
+//                            para descobrir dinamicamente TODOS os triângulos
+//                            USDT->base->alt->USDT realmente listados na Binance;
+//                            ver src/triangleTopology.ts. Quanto mais bases, mais
+//                            triângulos monitorados simultaneamente — capital,
+//                            circuit breaker e mutex de execução continuam GLOBAIS
+//                            e nunca divididos entre eles, ver engine.ts.)
 //   STAT_MIN_SAMPLES        (padrão 20 — kill switch estatístico, ver engine.ts)
 //   STAT_Z_THRESHOLD        (padrão 3)
 //   RATIO_EWMA_ALPHA        (padrão 0.05)
@@ -59,6 +66,15 @@ function resolveLiveMode(): boolean {
     return true;
 }
 
+function resolveIntermediateBases(): string[] | undefined {
+    const raw = process.env.TRIANGLE_BASES;
+    if (!raw) return undefined; // undefined -> BinanceExchangeProvider usa seu próprio padrão (BTC,ETH,BNB,FDUSD)
+    return raw
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+}
+
 function resolveEngineConfig(): Partial<EngineConfig> {
     const config: Partial<EngineConfig> = {};
     if (process.env.STAT_MIN_SAMPLES) config.statMinSamples = Number(process.env.STAT_MIN_SAMPLES);
@@ -104,17 +120,23 @@ async function bootstrap() {
         log.warn('*** MODO LIVE ATIVO: ordens reais serão enviadas à Binance. ***');
     }
 
-    const exchange = new BinanceExchangeProvider({ apiKey, apiSecret, live });
+    const exchange = new BinanceExchangeProvider({ apiKey, apiSecret, live, intermediateBases: resolveIntermediateBases() });
     await exchange.connect();
+
+    const triangles = exchange.getDiscoveredTriangles();
+    log.info(`Topologia real descoberta na Binance: ${triangles.length} triângulo(s) operável(is).`, {
+        triangulos: triangles.map((t) => t.id),
+    });
 
     const startingCapital = await resolveStartingCapital(exchange, configuredCapital);
     const riskManager = new RiskManager(MAX_SLIPPAGE);
-    const engine = new TriangularArbitrageEngine(exchange, riskManager, startingCapital.toString(), resolveEngineConfig());
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, triangles, startingCapital.toString(), resolveEngineConfig());
 
-    engine.on('critical-exposure', ({ leg1, leg2, error }) => {
-        log.error('*** PARADA DE EMERGÊNCIA: exposição direcional não neutralizada. Engine parado permanentemente. Intervenção manual necessária. ***', {
-            leg1Symbol: leg1 ? 'BTC/USDT' : undefined,
-            leg2Symbol: leg2 ? 'ETH/BTC' : undefined,
+    engine.on('critical-exposure', ({ triangleId, leg1, leg2, error }) => {
+        log.error('*** PARADA DE EMERGÊNCIA: exposição direcional não neutralizada. Engine parado permanentemente (para TODOS os triângulos). Intervenção manual necessária. ***', {
+            triangulo: triangleId,
+            leg1Preenchida: Boolean(leg1),
+            leg2Preenchida: Boolean(leg2),
             error: error instanceof Error ? error.message : String(error),
         });
         // Sem process.exit() aqui de propósito — ver o cabeçalho do arquivo.
@@ -134,6 +156,7 @@ async function bootstrap() {
             log.info('Heartbeat — engine ativo.', {
                 halted: engine.isHalted(),
                 capital: engine.getCurrentCapital().toFixed(6),
+                triangulosMonitorados: triangles.length,
             });
         }, heartbeatIntervalMin * 60_000).unref();
     }

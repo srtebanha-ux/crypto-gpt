@@ -3,7 +3,7 @@ import { Decimal } from 'decimal.js';
 import { EventEmitter } from 'events';
 import { createLogger } from './logger';
 import { EwmaTracker } from './statistics';
-import { ExecutionResult, IExchangeProvider, Ticker } from './types';
+import { ExecutionResult, IExchangeProvider, Ticker, Triangle } from './types';
 import { RiskManager } from './riskManager';
 
 const log = createLogger('engine');
@@ -51,24 +51,34 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
 };
 
 // ============================================================================
-// CORE ENGINE: TRIANGULAR ARBITRAGE HFT
+// CORE ENGINE: TRIANGULAR ARBITRAGE HFT (MULTI-TRIÂNGULO)
 //
 // Três camadas independentes de kill switch precisam concordar antes de
-// qualquer capital ser comprometido:
+// qualquer capital ser comprometido, avaliadas PARA CADA TRIÂNGULO de forma
+// independente:
 //   1. Determinística  (RiskManager.isTriangularArbitrageViable)      — o
 //      retorno líquido projetado no topo do book supera capital + slippage.
 //   2. Estatística      (EwmaTracker sobre R = P3/(P1·P2))             — a
 //      ineficiência observada é uma anomalia frente à linha de base recente
-//      do próprio par sintético, não um tick isolado ruidoso.
+//      do PRÓPRIO triângulo, não um tick isolado ruidoso. Cada triângulo tem
+//      seu próprio EwmaTracker (chaveado por `triangle.id`) — o warm-up de
+//      um nunca conta para o gate estatístico de outro.
 //   3. Profundidade      (RiskManager.isTriangularArbitrageViableWithDepth,
 //      opcional — só quando o provider expõe getOrderBookSnapshot)    — o
 //      book tem liquidez real o suficiente, nos preços reais, para sustentar
 //      o ciclo inteiro dentro do orçamento de cada perna.
 //
+// Capital, circuit breaker e o mutex de execução são GLOBAIS — compartilhados
+// por todos os triângulos, nunca duplicados ou divididos entre eles. Isso é
+// deliberado: é o que preserva "zero alavancagem" ao operar múltiplos
+// triângulos ao mesmo tempo — nunca duas execuções em voo simultaneamente,
+// então o capital nunca está comprometido em mais de um ciclo por vez, não
+// importa quantos triângulos o engine monitore.
+//
 // Eventos emitidos:
-//   'cycle-success'     (payload: { profit: Decimal; capital: Decimal })
-//   'cycle-failure'     (payload: { error: unknown; unwound: boolean })
-//   'critical-exposure' (payload: { leg1?: ExecutionResult; leg2?: ExecutionResult; error: unknown })
+//   'cycle-success'     (payload: { triangleId: string; profit: Decimal; capital: Decimal })
+//   'cycle-failure'     (payload: { triangleId: string; error: unknown; unwound: boolean })
+//   'critical-exposure' (payload: { triangleId: string; leg1?: ExecutionResult; leg2?: ExecutionResult; error: unknown })
 //     — o unwind de emergência também falhou; há posição direcional aberta
 //     na corretora que o engine não conseguiu neutralizar sozinho.
 //   'circuit-breaker-triggered' (payload: { initialCapital: Decimal; currentCapital: Decimal; drawdownFraction: Decimal })
@@ -79,31 +89,49 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
 //     cada ciclo individual pareceu correto no momento da decisão.
 //
 // Em qualquer um dos dois eventos acima, o engine se HALTA PERMANENTEMENTE
-// (isHalted() === true): nunca mais inicia um novo ciclo sozinho, mesmo que
-// o processo continue de pé — decidido assim de propósito, para não competir
-// com um restart automático de infraestrutura (ver src/live.ts) que
-// reativaria o robô às cegas sobre uma posição não neutralizada ou uma
-// estratégia que está sistematicamente perdendo dinheiro.
+// (isHalted() === true) — para TODOS os triângulos, não só o que disparou o
+// halt: nunca mais inicia um novo ciclo sozinho, mesmo que o processo
+// continue de pé — decidido assim de propósito, para não competir com um
+// restart automático de infraestrutura (ver src/live.ts) que reativaria o
+// robô às cegas sobre uma posição não neutralizada ou uma estratégia que
+// está sistematicamente perdendo dinheiro.
 // ============================================================================
 export class TriangularArbitrageEngine extends EventEmitter {
     private readonly exchange: IExchangeProvider;
     private readonly riskManager: RiskManager;
     private readonly config: EngineConfig;
-    private readonly ratioTracker: EwmaTracker;
+    private readonly triangles: Triangle[];
+    /** Um EwmaTracker por triângulo (chave: triangle.id) — linhas de base nunca se misturam entre triângulos. */
+    private readonly ratioTrackers: Map<string, EwmaTracker> = new Map();
+    /** Índice símbolo -> triângulos afetados, construído uma vez — evita re-varrer todos os triângulos a cada tick (O(k), não O(N)). */
+    private readonly trianglesBySymbol: Map<string, Triangle[]> = new Map();
     private readonly orderBookState: Map<string, Ticker> = new Map();
     private readonly initialCapital: Decimal;
+    /** Mutex GLOBAL — nunca dois ciclos em voo ao mesmo tempo, mesmo entre triângulos diferentes (ver cabeçalho da classe). */
     private isExecutingCycle = false;
     private haltedPermanently = false;
     private currentCapital: Decimal;
 
-    constructor(exchange: IExchangeProvider, riskManager: RiskManager, initialCapital: string, config: Partial<EngineConfig> = {}) {
+    constructor(exchange: IExchangeProvider, riskManager: RiskManager, triangles: Triangle[], initialCapital: string, config: Partial<EngineConfig> = {}) {
         super();
+        if (triangles.length === 0) {
+            throw new Error('TriangularArbitrageEngine requer ao menos um triângulo para operar.');
+        }
         this.exchange = exchange;
         this.riskManager = riskManager;
+        this.triangles = triangles;
         this.initialCapital = new Decimal(initialCapital);
         this.currentCapital = this.initialCapital;
         this.config = { ...DEFAULT_ENGINE_CONFIG, ...config };
-        this.ratioTracker = new EwmaTracker(this.config.ratioEwmaAlpha);
+
+        for (const t of triangles) {
+            this.ratioTrackers.set(t.id, new EwmaTracker(this.config.ratioEwmaAlpha));
+            for (const leg of [t.leg1, t.leg2, t.leg3]) {
+                const list = this.trianglesBySymbol.get(leg) ?? [];
+                list.push(t);
+                this.trianglesBySymbol.set(leg, list);
+            }
+        }
 
         this.initializeFeed();
     }
@@ -146,43 +174,50 @@ export class TriangularArbitrageEngine extends EventEmitter {
     private initializeFeed() {
         this.exchange.on('ticker', (ticker: Ticker) => {
             this.orderBookState.set(ticker.symbol, ticker);
-            this.evaluateInefficiency();
+            const affected = this.trianglesBySymbol.get(ticker.symbol) ?? []; // O(k): só os triângulos que usam este símbolo
+            for (const triangle of affected) {
+                this.evaluateTriangle(triangle);
+            }
         });
         log.info('Triangular Arbitrage Engine inicializado.', {
             capitalBase: this.currentCapital.toString(),
+            triangulos: this.triangles.map((t) => t.id),
             statMinSamples: this.config.statMinSamples,
             statZThreshold: this.config.statZThreshold.toString(),
         });
     }
 
-    private async evaluateInefficiency() {
+    private async evaluateTriangle(triangle: Triangle) {
         if (this.haltedPermanently) return; // parada de emergência definitiva — ver cabeçalho da classe
-        if (this.isExecutingCycle) return; // prevenção estrita de race conditions e sobreposição de I/O
+        if (this.isExecutingCycle) return; // mutex GLOBAL — nunca duas execuções em voo, nem entre triângulos diferentes
 
-        const btcUsdt = this.orderBookState.get('BTC/USDT');
-        const ethBtc = this.orderBookState.get('ETH/BTC');
-        const ethUsdt = this.orderBookState.get('ETH/USDT');
-        if (!btcUsdt || !ethBtc || !ethUsdt) return;
+        const tick1 = this.orderBookState.get(triangle.leg1);
+        const tick2 = this.orderBookState.get(triangle.leg2);
+        const tick3 = this.orderBookState.get(triangle.leg3);
+        if (!tick1 || !tick2 || !tick3) return;
 
         // Kill switch #0 — obsolescência temporal do dado.
         const now = Date.now();
         const maxAge = this.config.maxTickAgeMs.toNumber();
-        if (now - btcUsdt.timestamp > maxAge || now - ethBtc.timestamp > maxAge || now - ethUsdt.timestamp > maxAge) {
+        if (now - tick1.timestamp > maxAge || now - tick2.timestamp > maxAge || now - tick3.timestamp > maxAge) {
             return;
         }
 
-        const p1Ask = btcUsdt.ask;
-        const p2Ask = ethBtc.ask;
-        const p3Bid = ethUsdt.bid;
+        const p1Ask = tick1.ask;
+        const p2Ask = tick2.ask;
+        const p3Bid = tick3.bid;
         if (!p1Ask.greaterThan(0) || !p2Ask.greaterThan(0) || !p3Bid.greaterThan(0)) return;
 
         // Kill switch #1 — estatístico: pontua a razão de eficiência ANTES de
-        // incorporá-la ao EWMA (senão o próprio outlier diluiria seu z-score
-        // — ver a nota em EwmaTracker), depois sempre atualiza o tracker.
+        // incorporá-la ao EWMA DESTE triângulo (senão o próprio outlier
+        // diluiria seu z-score — ver a nota em EwmaTracker), depois sempre
+        // atualiza o tracker. Cada triângulo tem o seu próprio (ver
+        // constructor) — nunca compartilhado entre triângulos diferentes.
+        const tracker = this.ratioTrackers.get(triangle.id)!;
         const ratio = p3Bid.dividedBy(p1Ask.mul(p2Ask));
-        const zScore = this.ratioTracker.zScore(ratio);
-        const sampleCountBeforeUpdate = this.ratioTracker.sampleCount();
-        this.ratioTracker.update(ratio); // sempre aprende do tick, mesmo quando o gate abaixo bloqueia o disparo
+        const zScore = tracker.zScore(ratio);
+        const sampleCountBeforeUpdate = tracker.sampleCount();
+        tracker.update(ratio); // sempre aprende do tick, mesmo quando o gate abaixo bloqueia o disparo
 
         // statMinSamples <= 0 desativa esta camada por completo (usado pela
         // demo/mock — ver a doc de EngineConfig.statMinSamples). Do
@@ -206,9 +241,9 @@ export class TriangularArbitrageEngine extends EventEmitter {
         // esta camada é pulada na demo — ver getOrderBookSnapshot em types.ts).
         let projectedProfit = analysis.expectedNetProfit;
         if (this.exchange.getOrderBookSnapshot) {
-            const snap1 = this.exchange.getOrderBookSnapshot('BTC/USDT');
-            const snap2 = this.exchange.getOrderBookSnapshot('ETH/BTC');
-            const snap3 = this.exchange.getOrderBookSnapshot('ETH/USDT');
+            const snap1 = this.exchange.getOrderBookSnapshot(triangle.leg1);
+            const snap2 = this.exchange.getOrderBookSnapshot(triangle.leg2);
+            const snap3 = this.exchange.getOrderBookSnapshot(triangle.leg3);
             if (!snap1 || !snap2 || !snap3) return; // profundidade ainda não chegou — não dispara sem confirmação
             const depth = this.riskManager.isTriangularArbitrageViableWithDepth(
                 this.currentCapital,
@@ -222,27 +257,30 @@ export class TriangularArbitrageEngine extends EventEmitter {
         }
 
         this.isExecutingCycle = true;
-        await this.executeArbitrageCycle(p1Ask, p2Ask, p3Bid, projectedProfit);
+        await this.executeArbitrageCycle(triangle, p1Ask, p2Ask, p3Bid, projectedProfit);
     }
 
-    private async executeArbitrageCycle(p1Ask: Decimal, p2Ask: Decimal, p3Bid: Decimal, projectedProfit: Decimal) {
-        log.info('Ineficiência confirmada nas três camadas — iniciando ciclo.', { projectedNetProfit: projectedProfit.toFixed(6) });
+    private async executeArbitrageCycle(triangle: Triangle, p1Ask: Decimal, p2Ask: Decimal, p3Bid: Decimal, projectedProfit: Decimal) {
+        log.info('Ineficiência confirmada nas três camadas — iniciando ciclo.', {
+            triangulo: triangle.id,
+            projectedNetProfit: projectedProfit.toFixed(6),
+        });
         const startTime = Date.now();
 
         let leg1: ExecutionResult | undefined;
         let leg2: ExecutionResult | undefined;
 
         try {
-            // Perna 1: Comprar BTC com todo o capital disponível em USDT.
-            const btcQtyToRequest = this.currentCapital.dividedBy(p1Ask);
-            leg1 = await this.exchange.executeOrder('BTC/USDT', 'BUY', 'MARKET', btcQtyToRequest, p1Ask);
+            // Perna 1: Comprar o ativo-base com todo o capital disponível em USDT.
+            const leg1QtyToRequest = this.currentCapital.dividedBy(p1Ask);
+            leg1 = await this.exchange.executeOrder(triangle.leg1, 'BUY', 'MARKET', leg1QtyToRequest, p1Ask);
 
-            // Perna 2: Comprar ETH com todo o BTC líquido recebido na perna 1.
-            const ethQtyToRequest = leg1.netProceeds.dividedBy(p2Ask);
-            leg2 = await this.exchange.executeOrder('ETH/BTC', 'BUY', 'MARKET', ethQtyToRequest, p2Ask);
+            // Perna 2: Comprar o ativo intermediário com todo o líquido recebido na perna 1.
+            const leg2QtyToRequest = leg1.netProceeds.dividedBy(p2Ask);
+            leg2 = await this.exchange.executeOrder(triangle.leg2, 'BUY', 'MARKET', leg2QtyToRequest, p2Ask);
 
-            // Perna 3: Vender todo o ETH líquido recebido na perna 2 de volta para USDT.
-            const leg3 = await this.exchange.executeOrder('ETH/USDT', 'SELL', 'MARKET', leg2.netProceeds, p3Bid);
+            // Perna 3: Vender todo o líquido recebido na perna 2 de volta para USDT.
+            const leg3 = await this.exchange.executeOrder(triangle.leg3, 'SELL', 'MARKET', leg2.netProceeds, p3Bid);
 
             // leg3.netProceeds já é o USDT líquido final — o provider aplicou
             // a taxa real de cada perna, nada a descontar aqui de novo.
@@ -252,16 +290,18 @@ export class TriangularArbitrageEngine extends EventEmitter {
             this.checkDrawdownCircuitBreaker();
 
             log.info('Arbitragem concluída com sucesso.', {
+                triangulo: triangle.id,
                 executionTimeMs: Date.now() - startTime,
                 capital: this.currentCapital.toFixed(6),
                 profit: actualProfit.toFixed(6),
             });
-            this.emit('cycle-success', { profit: actualProfit, capital: this.currentCapital });
+            this.emit('cycle-success', { triangleId: triangle.id, profit: actualProfit, capital: this.currentCapital });
         } catch (error) {
             log.error('Falha na execução do ciclo — risco de exposição direcional. Iniciando unwind de emergência.', {
+                triangulo: triangle.id,
                 error: error instanceof Error ? error.message : String(error),
             });
-            await this.emergencyUnwind(leg1, leg2, p1Ask, p3Bid, error);
+            await this.emergencyUnwind(triangle, leg1, leg2, p1Ask, p3Bid, error);
         } finally {
             this.isExecutingCycle = false;
         }
@@ -269,38 +309,53 @@ export class TriangularArbitrageEngine extends EventEmitter {
 
     /**
      * Neutraliza a exposição direcional deixada por um ciclo que falhou no
-     * meio do caminho: se a perna 2 (ETH) já preencheu, vende o ETH residual
-     * a mercado por USDT; senão, se apenas a perna 1 (BTC) preencheu, vende
-     * o BTC residual a mercado por USDT. Se o próprio unwind falhar, emite
-     * 'critical-exposure' e o engine se HALTA PERMANENTEMENTE — não há mais
-     * nada que ele possa fazer sozinho.
+     * meio do caminho: se a perna 2 (ativo intermediário) já preencheu,
+     * vende o residual a mercado por USDT via `triangle.leg3`; senão, se
+     * apenas a perna 1 (ativo-base) preencheu, vende o residual a mercado
+     * por USDT via `triangle.leg1`. Se o próprio unwind falhar, emite
+     * 'critical-exposure' e o engine se HALTA PERMANENTEMENTE (para TODOS os
+     * triângulos) — não há mais nada que ele possa fazer sozinho.
      */
-    private async emergencyUnwind(leg1: ExecutionResult | undefined, leg2: ExecutionResult | undefined, p1Ask: Decimal, p3Bid: Decimal, originalError: unknown) {
+    private async emergencyUnwind(
+        triangle: Triangle,
+        leg1: ExecutionResult | undefined,
+        leg2: ExecutionResult | undefined,
+        p1Ask: Decimal,
+        p3Bid: Decimal,
+        originalError: unknown
+    ) {
         try {
             if (leg2) {
-                const unwind = await this.exchange.executeOrder('ETH/USDT', 'SELL', 'MARKET', leg2.netProceeds, p3Bid);
+                const unwind = await this.exchange.executeOrder(triangle.leg3, 'SELL', 'MARKET', leg2.netProceeds, p3Bid);
                 this.currentCapital = unwind.netProceeds;
                 this.checkDrawdownCircuitBreaker();
-                log.warn('Unwind concluído: ETH residual vendido a mercado.', { capitalAposUnwind: this.currentCapital.toFixed(6) });
-                this.emit('cycle-failure', { error: originalError, unwound: true });
+                log.warn('Unwind concluído: ativo intermediário residual vendido a mercado.', {
+                    triangulo: triangle.id,
+                    capitalAposUnwind: this.currentCapital.toFixed(6),
+                });
+                this.emit('cycle-failure', { triangleId: triangle.id, error: originalError, unwound: true });
                 return;
             }
             if (leg1) {
-                const unwind = await this.exchange.executeOrder('BTC/USDT', 'SELL', 'MARKET', leg1.netProceeds, p1Ask);
+                const unwind = await this.exchange.executeOrder(triangle.leg1, 'SELL', 'MARKET', leg1.netProceeds, p1Ask);
                 this.currentCapital = unwind.netProceeds;
                 this.checkDrawdownCircuitBreaker();
-                log.warn('Unwind concluído: BTC residual vendido a mercado.', { capitalAposUnwind: this.currentCapital.toFixed(6) });
-                this.emit('cycle-failure', { error: originalError, unwound: true });
+                log.warn('Unwind concluído: ativo-base residual vendido a mercado.', {
+                    triangulo: triangle.id,
+                    capitalAposUnwind: this.currentCapital.toFixed(6),
+                });
+                this.emit('cycle-failure', { triangleId: triangle.id, error: originalError, unwound: true });
                 return;
             }
             // Falhou antes de qualquer perna preencher: nenhuma posição para neutralizar.
-            this.emit('cycle-failure', { error: originalError, unwound: false });
+            this.emit('cycle-failure', { triangleId: triangle.id, error: originalError, unwound: false });
         } catch (unwindError) {
             this.haltedPermanently = true;
             log.error('FALHA NO UNWIND DE EMERGÊNCIA — exposição direcional NÃO neutralizada. Engine halted permanentemente. Intervenção manual necessária.', {
+                triangulo: triangle.id,
                 unwindError: unwindError instanceof Error ? unwindError.message : String(unwindError),
             });
-            this.emit('critical-exposure', { leg1, leg2, error: unwindError });
+            this.emit('critical-exposure', { triangleId: triangle.id, leg1, leg2, error: unwindError });
         }
     }
 }
