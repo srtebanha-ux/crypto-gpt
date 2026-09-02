@@ -61,7 +61,7 @@ test('dispara e completa um ciclo lucrativo quando o triângulo diverge', async 
         () => fill('0.016597', '0.016614', '0.0501'), // leg2 BUY ETH/BTC
         () => fill('50.5', '0.016597', '3050'), // leg3 SELL ETH/USDT
     ]);
-    const riskManager = new RiskManager('50', '0.0005');
+    const riskManager = new RiskManager('0.0005');
     // statMinSamples: 0 — este teste cobre a execução do ciclo, não o kill
     // switch estatístico (coberto em teste dedicado abaixo).
     const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
@@ -89,7 +89,7 @@ test('dispara e completa um ciclo lucrativo quando o triângulo diverge', async 
 
 test('não dispara ciclo quando o book não tem ineficiência suficiente', async () => {
     const exchange = new FakeExchangeProvider([]);
-    const riskManager = new RiskManager('50', '0.0005');
+    const riskManager = new RiskManager('0.0005');
     new TriangularArbitrageEngine(exchange, riskManager, '50');
 
     // p3 = p1 * p2 (sem distorção) — não deve nem tentar executar nenhuma ordem.
@@ -103,7 +103,7 @@ test('não dispara ciclo quando o book não tem ineficiência suficiente', async
 
 test('ignora ticks obsoletos (kill switch de timestamp)', async () => {
     const exchange = new FakeExchangeProvider([]);
-    const riskManager = new RiskManager('50', '0.0005');
+    const riskManager = new RiskManager('0.0005');
     new TriangularArbitrageEngine(exchange, riskManager, '50');
 
     // Mesma ineficiência do teste de sucesso, mas com um tick "velho" (>100ms).
@@ -124,7 +124,7 @@ test('unwind de emergência vende o ETH residual quando a perna 3 falha', async 
         },
         () => fill('49.9', '0.016597', '3049'), // unwind: vende o ETH residual
     ]);
-    const riskManager = new RiskManager('50', '0.0005');
+    const riskManager = new RiskManager('0.0005');
     const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
 
     const failurePromise = waitFor(engine, 'cycle-failure');
@@ -150,7 +150,7 @@ test('emite critical-exposure quando o próprio unwind falha', async () => {
             throw new Error('unwind também falhou — corretora fora do ar');
         },
     ]);
-    const riskManager = new RiskManager('50', '0.0005');
+    const riskManager = new RiskManager('0.0005');
     const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
 
     const criticalPromise = waitFor(engine, 'critical-exposure');
@@ -178,7 +178,7 @@ test('emite critical-exposure quando o próprio unwind falha', async () => {
 
 test('kill switch estatístico bloqueia o disparo durante o warm-up (amostras insuficientes)', async () => {
     const exchange = new FakeExchangeProvider([]);
-    const riskManager = new RiskManager('50', '0.0005');
+    const riskManager = new RiskManager('0.0005');
     // statMinSamples muito alto: mesmo com a MESMA ineficiência claramente
     // lucrativa do teste de sucesso, o gate estatístico nunca terá amostras
     // suficientes de linha de base para liberar o disparo nesta janela de teste.
@@ -217,7 +217,7 @@ test('kill switch de profundidade bloqueia quando o book real não sustenta o ci
     exchange.setSnapshot('ETH/BTC', snapshot([['0.0501', '0.00000001']]));
     exchange.setSnapshot('ETH/USDT', snapshot([['3050', '0.00000001']]));
 
-    const riskManager = new RiskManager('50', '0.0005');
+    const riskManager = new RiskManager('0.0005');
     new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
 
     exchange.pushTicker('BTC/USDT', '60000', '60010');
@@ -238,7 +238,7 @@ test('kill switch de profundidade libera o disparo quando o book real sustenta o
     exchange.setSnapshot('ETH/BTC', snapshot([['0.0501', '100']]));
     exchange.setSnapshot('ETH/USDT', snapshot([['3050', '10']]));
 
-    const riskManager = new RiskManager('50', '0.0005');
+    const riskManager = new RiskManager('0.0005');
     const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
 
     const successPromise = waitFor(engine, 'cycle-success');
@@ -261,7 +261,7 @@ test('circuit breaker de drawdown halta o engine após perdas acumuladas além d
         () => fill('0.016', '0.016', '0.0501'),
         () => fill('44', '0.016', '3050'),
     ]);
-    const riskManager = new RiskManager('50', '0.0005');
+    const riskManager = new RiskManager('0.0005');
     const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0, maxDrawdownFraction: new Decimal('0.10') });
 
     const firstSuccess = waitFor(engine, 'cycle-success');

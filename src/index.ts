@@ -21,7 +21,7 @@ function bootstrap() {
     const MAX_SLIPPAGE = '0.0005';
 
     const exchange = new MockExchangeProvider();
-    const riskManager = new RiskManager(C0_BASE, MAX_SLIPPAGE);
+    const riskManager = new RiskManager(MAX_SLIPPAGE);
 
     // statMinSamples: 0 desativa o kill switch estatístico (camada #2) para
     // a demo: o feed mock repete sempre a mesma distorção fixa, então nunca

@@ -108,7 +108,7 @@ async function bootstrap() {
     await exchange.connect();
 
     const startingCapital = await resolveStartingCapital(exchange, configuredCapital);
-    const riskManager = new RiskManager(startingCapital.toString(), MAX_SLIPPAGE);
+    const riskManager = new RiskManager(MAX_SLIPPAGE);
     const engine = new TriangularArbitrageEngine(exchange, riskManager, startingCapital.toString(), resolveEngineConfig());
 
     engine.on('critical-exposure', ({ leg1, leg2, error }) => {

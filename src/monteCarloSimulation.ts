@@ -48,7 +48,7 @@ export interface ScenarioResult extends ScenarioParams {
  * reprodutibilidade determinística nos testes.
  */
 export function runScenario(params: ScenarioParams, random: RandomSource, capitalUsd = '50', maxSlippage = '0.0005', feeRate = '0.001'): ScenarioResult {
-    const riskManager = new RiskManager(capitalUsd, maxSlippage);
+    const riskManager = new RiskManager(maxSlippage);
     const capital = new Decimal(capitalUsd);
     const fee = new Decimal(feeRate);
 

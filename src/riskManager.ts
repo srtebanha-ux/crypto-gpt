@@ -15,13 +15,23 @@ export interface DepthViabilityResult extends ViabilityResult {
 
 // ============================================================================
 // RISK MANAGER (Kill Switch e Validação de Estado)
+//
+// Não valida um teto de capital aqui de propósito: uma versão anterior
+// comparava `initialCapital` (o capital ATUAL do engine, que cresce a cada
+// ciclo lucrativo) contra um teto fixado no capital INICIAL na construção
+// — na prática isso significava que o primeiro ciclo lucrativo já deixava
+// esse teto ultrapassado, e todo ciclo seguinte era rejeitado
+// silenciosamente para sempre (bug real, achado rodando uma simulação de
+// vários dias — ver o histórico deste arquivo). Os limites de capital que
+// importam já existem em outro lugar, sem esse efeito colateral: o saldo
+// real da conta clampa o capital inicial (`resolveStartingCapital` em
+// `live.ts`) e o circuit breaker de drawdown (`engine.ts`) limita a perda
+// máxima — nenhum dos dois trava o engine por ele estar indo bem.
 // ============================================================================
 export class RiskManager {
-    private maxCapitalAllocated: Decimal;
     private maxSlippageTolerance: Decimal;
 
-    constructor(capital: string, slippageTolerance: string) {
-        this.maxCapitalAllocated = new Decimal(capital);
+    constructor(slippageTolerance: string) {
         this.maxSlippageTolerance = new Decimal(slippageTolerance);
     }
 
@@ -32,9 +42,6 @@ export class RiskManager {
         p3Bid: Decimal,
         feeRate: Decimal
     ): ViabilityResult {
-        if (initialCapital.greaterThan(this.maxCapitalAllocated)) {
-            return { viable: false, expectedNetProfit: new Decimal(0) };
-        }
         // Kill switch de sanidade: preços não positivos (feed corrompido,
         // símbolo desconhecido, book vazio) nunca devem passar para a divisão
         // — sem isso, dividedBy(0) do decimal.js retorna Infinity em vez de
@@ -99,9 +106,6 @@ export class RiskManager {
         bidsLeg3: OrderBookLevel[],
         feeRate: Decimal
     ): DepthViabilityResult {
-        if (initialCapital.greaterThan(this.maxCapitalAllocated)) {
-            return { viable: false, expectedNetProfit: new Decimal(0), fullyFilled: false };
-        }
         const topAsk1 = asksLeg1[0]?.price;
         if (!topAsk1 || !topAsk1.greaterThan(0)) {
             return { viable: false, expectedNetProfit: new Decimal(0), fullyFilled: false };

@@ -39,8 +39,11 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   rede): reutiliza o `RiskManager` real contra preços sintéticos para
   explorar como a taxa de oportunidades varia com hipóteses de ruído de
   mercado — ver [Simulação de sensibilidade](#simulação-de-sensibilidade-montecarlosimulationts).
+- `src/paperTradingSimulation.ts` — **paper trading** (sem rede): roda o
+  `TriangularArbitrageEngine` real através de muitos ciclos em sequência
+  contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 57 testes, todos sem acesso a rede).
+  `npm test` — 61 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -154,21 +157,29 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 57 testes, todos sem rede, devem passar.
-2. `npm run sniff` (ou `./scripts/extract-sniffer-metrics.sh`) por várias
+1. `npm test` — 61 testes, todos sem rede, devem passar.
+2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
+   por vários dias simulados — exercita o engine real através de MUITOS
+   ciclos em sequência, não só um. Foi rodando essa simulação por vários
+   dias simulados que se achou um bug real que nenhum teste de ciclo único
+   pegava: o `RiskManager` fixava um teto de capital no valor inicial e
+   travava silenciosamente para sempre depois do primeiro ciclo lucrativo
+   (porque o capital do engine cresce, e o teto não). Já corrigido — mas é
+   o tipo de bug que só aparece rodando de verdade, por tempo suficiente.
+3. `npm run sniff` (ou `./scripts/extract-sniffer-metrics.sh`) por várias
    horas/dias contra a Binance real — sem isso, não há evidência de que
    existe alguma ineficiência líquida de taxa capturável nos pares
    escolhidos (ver [Medindo a oportunidade real](#medindo-a-oportunidade-real-opportunitysnifferts)).
-3. `npm run live` (ou o deploy no Railway) contra o **Spot Testnet**
+4. `npm run live` (ou o deploy no Railway) contra o **Spot Testnet**
    (padrão — não precisa fazer nada extra) por um período — confirme nos
    logs que não há crash, `uncaughtException`/`unhandledRejection`, nem
    halts inesperados, e que `Conectado ao feed de book/profundidade da
    Binance.` aparece sem erros de reconexão constantes.
-4. Só depois disso considere `BINANCE_LIVE=true` — comece com o menor
+5. Só depois disso considere `BINANCE_LIVE=true` — comece com o menor
    `CAPITAL_USD` que fizer sentido, e configure `MAX_DRAWDOWN_FRACTION`
    deliberadamente (não confie só no padrão de 10% sem pensar se esse
    valor faz sentido para o seu capital).
-5. Rodar 24/7 no Railway tem custo de infraestrutura independente do
+6. Rodar 24/7 no Railway tem custo de infraestrutura independente do
    resultado do trading (o worker fica ligado o tempo todo) — confira o
    preço atual no próprio painel do Railway antes de fazer o deploy; este
    projeto não tem como consultar isso.
@@ -181,7 +192,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 57 testes, sem rede
+npm test            # suíte de testes (node:test) — 61 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
@@ -435,6 +446,42 @@ exatamente o erro que essa simulação já pegou uma vez nesta discussão (uma
 comparação anterior, feita à mão, deu "8x abaixo da meta" quando a conta
 correta dava "1,3x acima" — os testes em `monteCarloSimulation.test.ts`
 existem para não deixar esse tipo de erro voltar).
+
+## Paper trading (`paperTradingSimulation.ts`)
+
+Diferente da simulação de sensibilidade acima (que só testa a matemática
+do `RiskManager` isolada, tick a tick, sem estado entre eles), esta roda o
+**engine real inteiro** — `TriangularArbitrageEngine` + `RiskManager`,
+com os 3 kill switches de disparo, unwind de emergência e circuit breaker
+de drawdown — através de **muitos ciclos em sequência**, contra um feed
+sintético (mesmo modelo de ruído do `monteCarloSimulation.ts`).
+
+Isso importa porque foi rodando essa simulação por 5 dias simulados que se
+encontrou um bug real: o `RiskManager` fixava um teto de capital igual ao
+capital inicial e, depois do primeiro ciclo lucrativo (que faz o capital
+do engine crescer), passava a rejeitar **todo** ciclo seguinte
+silenciosamente — para sempre. Rodando em produção, isso significava que
+o robô faria exatamente UM trade lucrativo e nunca mais nenhum, sem
+nenhum log de erro, halt ou aviso — pareceria só "sem oportunidades". Já
+corrigido (ver `src/riskManager.ts`), com um teste de regressão dedicado
+em `paperTradingSimulation.test.ts`. Nenhum teste de ciclo único
+(inclusive todos os outros deste projeto até então) exercitava esse
+caminho — só uma simulação de vários ciclos em sequência.
+
+```bash
+npm run paper-trade
+```
+
+Variáveis opcionais: `PAPER_CAPITAL_BRL` (padrão `300`), `PAPER_BRL_PER_USD`
+(padrão `5.5` — **suposição de câmbio, não cotação ao vivo**; confira a
+cotação real antes de tirar conclusões), `PAPER_DAYS` (padrão `1`),
+`PAPER_SEED`, `PAPER_NOISE_BPS` / `PAPER_JUMP_PROBABILITY` /
+`PAPER_JUMP_MEAN_BPS` (cenário de ruído — padrão é o "fronteira" do
+`monteCarloSimulation.ts`).
+
+Mesma ressalva de sempre: o cenário de ruído é uma suposição hipotética
+("e se desse certo"), não uma medição real — o resultado mostra **como o
+engine se comportaria** sob essa hipótese, não uma previsão de retorno.
 
 > **Nota sobre testes em ambientes de rede restrita** (ex. sandboxes de CI
 > ou desenvolvimento sem egress liberado): a conexão com

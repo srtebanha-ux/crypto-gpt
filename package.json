@@ -12,6 +12,7 @@
     "live": "ts-node src/live.ts",
     "sniff": "ts-node src/opportunitySniffer.ts",
     "simulate": "ts-node src/monteCarloSimulation.ts",
+    "paper-trade": "ts-node src/paperTradingSimulation.ts",
     "typecheck": "tsc -p . --noEmit",
     "test": "node --require ts-node/register --test src/*.test.ts"
   },
