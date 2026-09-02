@@ -289,7 +289,9 @@ oportunidades pelo número de triângulos.
   #3) para **todos os símbolos únicos** envolvidos nos triângulos
   descobertos, no mesmo combined stream
   (`wss://stream.binance.com:9443/stream?streams=...`, ou
-  `wss://testnet.binance.vision/...` no testnet) — o wrapper `{stream,
+  `wss://stream.testnet.binance.vision/...` no testnet — a Binance separa
+  REST e WebSocket em subdomínios diferentes tanto em produção quanto no
+  testnet, nunca o mesmo host para os dois) — o wrapper `{stream,
   data}` do combined stream é necessário porque o payload cru de `@depth5`
   não inclui o símbolo, então é a única forma de saber a qual par cada
   mensagem pertence quando múltiplos símbolos são assinados na mesma

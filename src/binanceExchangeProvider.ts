@@ -155,8 +155,15 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         this.feeRate = new Decimal(options.fallbackFeeRate ?? '0.001');
         this.intermediateBases = options.intermediateBases ?? DEFAULT_INTERMEDIATE_BASES;
 
+        // A Binance separa REST e WebSocket em subdomínios diferentes em
+        // produção (api.binance.com vs stream.binance.com) — o testnet
+        // segue a MESMA convenção (testnet.binance.vision vs
+        // stream.testnet.binance.vision), não o mesmo host pros dois. Usar
+        // testnet.binance.vision pro WebSocket (sem o subdomínio `stream.`)
+        // resulta em 404 no handshake — não existe handler em `/stream`
+        // nesse host, só no de streaming.
         this.restBaseUrl = options.live ? 'https://api.binance.com' : 'https://testnet.binance.vision';
-        this.wsBaseUrl = options.live ? 'wss://stream.binance.com:9443' : 'wss://testnet.binance.vision';
+        this.wsBaseUrl = options.live ? 'wss://stream.binance.com:9443' : 'wss://stream.testnet.binance.vision';
     }
 
     /** Sincroniza relógio, descobre a topologia real de triângulos + filtros de símbolo/fee e abre o WebSocket. Chamar antes de operar. */
