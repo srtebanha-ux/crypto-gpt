@@ -1,8 +1,13 @@
 // Arquivo: src/binanceExchangeProvider.ts
 //
 // Conector real de mercado/execução para a Binance (Spot):
-//   - Dados de book em tempo real via WebSocket (`<symbol>@bookTicker`,
-//     combined stream), com reconexão automática e backoff exponencial.
+//   - Dados de book em tempo real via WebSocket: `<symbol>@bookTicker` (topo
+//     do book, dispara o kill switch determinístico/estatístico) e
+//     `<symbol>@depth5@100ms` (5 níveis de profundidade, mantidos em
+//     memória e usados pelo kill switch de confirmação por VWAP — ver
+//     getOrderBookSnapshot / RiskManager.isTriangularArbitrageViableWithDepth).
+//     Ambos no mesmo combined stream, com reconexão automática e backoff
+//     exponencial.
 //   - Execução de ordens via REST assinada (HMAC-SHA256), respeitando os
 //     filtros LOT_SIZE/MIN_NOTIONAL do par antes de enviar.
 //   - Contabilidade de taxa fiel à Binance: a taxa é debitada do ativo que
@@ -17,9 +22,35 @@ import * as crypto from 'crypto';
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { createLogger } from './logger';
-import { ExecutionResult, IExchangeProvider, OrderSide, OrderType, Ticker } from './types';
+import { ExecutionResult, IExchangeProvider, OrderBookLevel, OrderBookSnapshot, OrderSide, OrderType, Ticker } from './types';
 
 const log = createLogger('binance');
+
+/**
+ * Converte os pares [preço, quantidade] crus de um payload de profundidade
+ * da Binance em `OrderBookLevel[]`, descartando entradas malformadas e
+ * níveis com quantidade zero (nos streams de diff isso sinaliza remoção do
+ * nível; num snapshot como `depth5` não deveria aparecer, mas filtrar é
+ * defensivo e barato). Exportada para ser testada isoladamente, sem WS.
+ */
+export function parseDepthLevels(raw: unknown): OrderBookLevel[] {
+    if (!Array.isArray(raw)) return [];
+    const levels: OrderBookLevel[] = [];
+    for (const entry of raw) {
+        if (!Array.isArray(entry) || entry.length < 2) continue;
+        let price: Decimal;
+        let qty: Decimal;
+        try {
+            price = new Decimal(entry[0]);
+            qty = new Decimal(entry[1]);
+        } catch {
+            continue; // preço/qty não numérico — payload malformado, descarta só este nível
+        }
+        if (price.lessThanOrEqualTo(0) || qty.lessThanOrEqualTo(0)) continue;
+        levels.push({ price, qty });
+    }
+    return levels;
+}
 
 // Mapeamento entre o símbolo interno do engine ("BTC/USDT") e o símbolo
 // nativo da Binance ("BTCUSDT"), usado tanto para assinar streams quanto
@@ -88,6 +119,8 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     private feeRate: Decimal;
     private serverTimeOffsetMs = 0;
     private symbolFilters = new Map<string, SymbolFilters>();
+    /** Profundidade mais recente por par interno ("BTC/USDT"), atualizada pelo stream @depth5. */
+    private depthState = new Map<string, OrderBookSnapshot>();
 
     private ws: WebSocket | null = null;
     private reconnectAttempts = 0;
@@ -125,21 +158,26 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     // ------------------------------------------------------------------
     private openWebSocket(): void {
         const streams = Object.keys(BINANCE_SYMBOL_TO_PAIR)
-            .map((symbol) => `${symbol.toLowerCase()}@bookTicker`)
+            .flatMap((symbol) => [`${symbol.toLowerCase()}@bookTicker`, `${symbol.toLowerCase()}@depth5@100ms`])
             .join('/');
         const url = `${this.wsBaseUrl}/stream?streams=${streams}`;
         this.ws = new WebSocket(url);
 
         this.ws.on('open', () => {
             this.reconnectAttempts = 0;
-            log.info('Conectado ao feed de book da Binance.', { url: this.wsBaseUrl });
+            log.info('Conectado ao feed de book/profundidade da Binance.', { url: this.wsBaseUrl });
         });
 
         this.ws.on('message', (raw: WebSocket.RawData) => {
             try {
                 const payload = JSON.parse(raw.toString());
-                const data = payload.data ?? payload; // combined stream envelopa em {stream, data}
-                this.handleBookTicker(data);
+                const streamName: string | undefined = payload.stream; // combined stream envelopa em {stream, data}
+                const data = payload.data ?? payload;
+                if (streamName?.includes('@depth')) {
+                    this.handleDepthUpdate(streamName, data);
+                } else {
+                    this.handleBookTicker(data);
+                }
             } catch (err) {
                 log.error('Falha ao parsear mensagem do book.', { error: err instanceof Error ? err.message : String(err) });
             }
@@ -179,6 +217,28 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
             timestamp: Date.now(),
         };
         this.emit('ticker', ticker);
+    }
+
+    private handleDepthUpdate(streamName: string, data: { bids?: unknown; asks?: unknown }): void {
+        const binanceSymbol = streamName.split('@')[0]?.toUpperCase();
+        const pair = binanceSymbol ? BINANCE_SYMBOL_TO_PAIR[binanceSymbol] : undefined;
+        if (!pair) return;
+
+        this.depthState.set(pair, {
+            bids: parseDepthLevels(data.bids),
+            asks: parseDepthLevels(data.asks),
+            timestamp: Date.now(),
+        });
+    }
+
+    /**
+     * Profundidade mais recente conhecida para um par ("BTC/USDT"), mantida
+     * em memória a partir do stream `@depth5` — nunca via chamada de rede
+     * síncrona (isso violaria o orçamento de latência de HFT). `undefined`
+     * antes da primeira mensagem de profundidade chegar para esse símbolo.
+     */
+    public getOrderBookSnapshot(symbol: string): OrderBookSnapshot | undefined {
+        return this.depthState.get(symbol);
     }
 
     // ------------------------------------------------------------------

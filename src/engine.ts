@@ -2,35 +2,85 @@
 import { Decimal } from 'decimal.js';
 import { EventEmitter } from 'events';
 import { createLogger } from './logger';
+import { EwmaTracker } from './statistics';
 import { ExecutionResult, IExchangeProvider, Ticker } from './types';
 import { RiskManager } from './riskManager';
 
 const log = createLogger('engine');
 
+export interface EngineConfig {
+    /** Kill switch de obsolescência de dado: idade máxima aceita de um tick, em ms. */
+    maxTickAgeMs: Decimal;
+    /**
+     * Memória do EWMA que modela a distribuição "normal" da razão de
+     * eficiência R = P3 / (P1·P2). alpha = 2/(N+1) aproxima uma janela de N
+     * amostras; alpha maior esquece o passado mais rápido.
+     */
+    ratioEwmaAlpha: Decimal;
+    /**
+     * Nº mínimo de ticks já incorporados ao EWMA antes do kill switch
+     * estatístico liberar QUALQUER disparo — enquanto a linha de base ainda
+     * não foi aprendida, a variância é artificialmente baixa e qualquer
+     * desvio pareceria (erroneamente) um outlier extremo. 0 desativa esse
+     * gate por completo (usado pela demo/mock, cujo feed sintético repete o
+     * mesmo valor fixo e nunca teria uma variância real para comparar).
+     */
+    statMinSamples: number;
+    /** Nº de desvios-padrão que R precisa exceder da média móvel para ser tratado como sinal, não ruído. */
+    statZThreshold: Decimal;
+}
+
+export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
+    maxTickAgeMs: new Decimal(100),
+    ratioEwmaAlpha: new Decimal('0.05'),
+    statMinSamples: 20,
+    statZThreshold: new Decimal('3'),
+};
+
 // ============================================================================
 // CORE ENGINE: TRIANGULAR ARBITRAGE HFT
 //
+// Três camadas independentes de kill switch precisam concordar antes de
+// qualquer capital ser comprometido:
+//   1. Determinística  (RiskManager.isTriangularArbitrageViable)      — o
+//      retorno líquido projetado no topo do book supera capital + slippage.
+//   2. Estatística      (EwmaTracker sobre R = P3/(P1·P2))             — a
+//      ineficiência observada é uma anomalia frente à linha de base recente
+//      do próprio par sintético, não um tick isolado ruidoso.
+//   3. Profundidade      (RiskManager.isTriangularArbitrageViableWithDepth,
+//      opcional — só quando o provider expõe getOrderBookSnapshot)    — o
+//      book tem liquidez real o suficiente, nos preços reais, para sustentar
+//      o ciclo inteiro dentro do orçamento de cada perna.
+//
 // Eventos emitidos:
-//   'cycle-success'    (payload: { profit: Decimal; capital: Decimal })
-//   'cycle-failure'    (payload: { error: unknown })
+//   'cycle-success'     (payload: { profit: Decimal; capital: Decimal })
+//   'cycle-failure'     (payload: { error: unknown; unwound: boolean })
 //   'critical-exposure' (payload: { leg1?: ExecutionResult; leg2?: ExecutionResult; error: unknown })
 //     — o unwind de emergência também falhou; há posição direcional aberta
-//     na corretora que o engine não conseguiu neutralizar sozinho. Quem
-//     consome o engine deve tratar isso como um alerta de intervenção
-//     manual imediata (ex.: parar o processo — ver src/live.ts).
+//     na corretora que o engine não conseguiu neutralizar sozinho. A partir
+//     daqui o engine se HALTA PERMANENTEMENTE (isHalted() === true): nunca
+//     mais inicia um novo ciclo sozinho, mesmo que o processo continue de
+//     pé — decidido assim de propósito, para não competir com um restart
+//     automático de infraestrutura (ver src/live.ts) que reativaria o robô
+//     às cegas sobre uma posição não neutralizada.
 // ============================================================================
 export class TriangularArbitrageEngine extends EventEmitter {
-    private exchange: IExchangeProvider;
-    private riskManager: RiskManager;
-    private orderBookState: Map<string, Ticker> = new Map();
-    private isExecutingCycle: boolean = false;
+    private readonly exchange: IExchangeProvider;
+    private readonly riskManager: RiskManager;
+    private readonly config: EngineConfig;
+    private readonly ratioTracker: EwmaTracker;
+    private readonly orderBookState: Map<string, Ticker> = new Map();
+    private isExecutingCycle = false;
+    private haltedPermanently = false;
     private currentCapital: Decimal;
 
-    constructor(exchange: IExchangeProvider, riskManager: RiskManager, initialCapital: string) {
+    constructor(exchange: IExchangeProvider, riskManager: RiskManager, initialCapital: string, config: Partial<EngineConfig> = {}) {
         super();
         this.exchange = exchange;
         this.riskManager = riskManager;
         this.currentCapital = new Decimal(initialCapital);
+        this.config = { ...DEFAULT_ENGINE_CONFIG, ...config };
+        this.ratioTracker = new EwmaTracker(this.config.ratioEwmaAlpha);
 
         this.initializeFeed();
     }
@@ -39,50 +89,94 @@ export class TriangularArbitrageEngine extends EventEmitter {
         return this.currentCapital;
     }
 
+    public isHalted(): boolean {
+        return this.haltedPermanently;
+    }
+
     private initializeFeed() {
         this.exchange.on('ticker', (ticker: Ticker) => {
             this.orderBookState.set(ticker.symbol, ticker);
             this.evaluateInefficiency();
         });
-        log.info('Triangular Arbitrage Engine inicializado.', { capitalBase: this.currentCapital.toString() });
+        log.info('Triangular Arbitrage Engine inicializado.', {
+            capitalBase: this.currentCapital.toString(),
+            statMinSamples: this.config.statMinSamples,
+            statZThreshold: this.config.statZThreshold.toString(),
+        });
     }
 
     private async evaluateInefficiency() {
-        if (this.isExecutingCycle) return; // Prevenção estrita de race conditions e sobreposição de I/O
+        if (this.haltedPermanently) return; // parada de emergência definitiva — ver cabeçalho da classe
+        if (this.isExecutingCycle) return; // prevenção estrita de race conditions e sobreposição de I/O
 
         const btcUsdt = this.orderBookState.get('BTC/USDT');
         const ethBtc = this.orderBookState.get('ETH/BTC');
         const ethUsdt = this.orderBookState.get('ETH/USDT');
-
         if (!btcUsdt || !ethBtc || !ethUsdt) return;
 
-        // Verifica a obsolescência temporal do dado (Kill Switch de Timestamp)
+        // Kill switch #0 — obsolescência temporal do dado.
         const now = Date.now();
-        const maxAge = 100; // ms
-        if ((now - btcUsdt.timestamp > maxAge) || (now - ethBtc.timestamp > maxAge) || (now - ethUsdt.timestamp > maxAge)) {
+        const maxAge = this.config.maxTickAgeMs.toNumber();
+        if (now - btcUsdt.timestamp > maxAge || now - ethBtc.timestamp > maxAge || now - ethUsdt.timestamp > maxAge) {
             return;
         }
 
         const p1Ask = btcUsdt.ask;
         const p2Ask = ethBtc.ask;
         const p3Bid = ethUsdt.bid;
+        if (!p1Ask.greaterThan(0) || !p2Ask.greaterThan(0) || !p3Bid.greaterThan(0)) return;
 
-        const analysis = this.riskManager.isTriangularArbitrageViable(
-            this.currentCapital,
-            p1Ask,
-            p2Ask,
-            p3Bid,
-            this.exchange.getFeeRate()
-        );
+        // Kill switch #1 — estatístico: pontua a razão de eficiência ANTES de
+        // incorporá-la ao EWMA (senão o próprio outlier diluiria seu z-score
+        // — ver a nota em EwmaTracker), depois sempre atualiza o tracker.
+        const ratio = p3Bid.dividedBy(p1Ask.mul(p2Ask));
+        const zScore = this.ratioTracker.zScore(ratio);
+        const sampleCountBeforeUpdate = this.ratioTracker.sampleCount();
+        this.ratioTracker.update(ratio); // sempre aprende do tick, mesmo quando o gate abaixo bloqueia o disparo
 
-        if (analysis.viable) {
-            this.isExecutingCycle = true;
-            await this.executeArbitrageCycle(p1Ask, p2Ask, p3Bid, analysis.expectedNetProfit);
+        // statMinSamples <= 0 desativa esta camada por completo (usado pela
+        // demo/mock — ver a doc de EngineConfig.statMinSamples). Do
+        // contrário, mesmo com sampleCountBeforeUpdate satisfeito, um
+        // z-score de 0 (variância ainda zerada) nunca alcançaria um
+        // statZThreshold > 0 sozinho, então a checagem teria o mesmo efeito
+        // prático de um bypass explícito nesse caso — mas ser explícito
+        // evita depender desse acidente aritmético.
+        const statGateDisabled = this.config.statMinSamples <= 0;
+        const statisticallySignificant =
+            statGateDisabled ||
+            (sampleCountBeforeUpdate >= this.config.statMinSamples && zScore.greaterThanOrEqualTo(this.config.statZThreshold));
+        if (!statisticallySignificant) return;
+
+        // Kill switch #2 — determinístico (topo do book).
+        const analysis = this.riskManager.isTriangularArbitrageViable(this.currentCapital, p1Ask, p2Ask, p3Bid, this.exchange.getFeeRate());
+        if (!analysis.viable) return;
+
+        // Kill switch #3 — confirmação por profundidade real do book, só
+        // quando o provider a expõe (a Binance, via WS; o mock não, então
+        // esta camada é pulada na demo — ver getOrderBookSnapshot em types.ts).
+        let projectedProfit = analysis.expectedNetProfit;
+        if (this.exchange.getOrderBookSnapshot) {
+            const snap1 = this.exchange.getOrderBookSnapshot('BTC/USDT');
+            const snap2 = this.exchange.getOrderBookSnapshot('ETH/BTC');
+            const snap3 = this.exchange.getOrderBookSnapshot('ETH/USDT');
+            if (!snap1 || !snap2 || !snap3) return; // profundidade ainda não chegou — não dispara sem confirmação
+            const depth = this.riskManager.isTriangularArbitrageViableWithDepth(
+                this.currentCapital,
+                snap1.asks,
+                snap2.asks,
+                snap3.bids,
+                this.exchange.getFeeRate()
+            );
+            if (!depth.viable) return;
+            projectedProfit = depth.expectedNetProfit;
         }
+
+        this.isExecutingCycle = true;
+        await this.executeArbitrageCycle(p1Ask, p2Ask, p3Bid, projectedProfit);
     }
 
     private async executeArbitrageCycle(p1Ask: Decimal, p2Ask: Decimal, p3Bid: Decimal, projectedProfit: Decimal) {
-        log.info('Ineficiência matemática detectada — iniciando ciclo.', { projectedNetProfit: projectedProfit.toFixed(6) });
+        log.info('Ineficiência confirmada nas três camadas — iniciando ciclo.', { projectedNetProfit: projectedProfit.toFixed(6) });
         const startTime = Date.now();
 
         let leg1: ExecutionResult | undefined;
@@ -127,8 +221,8 @@ export class TriangularArbitrageEngine extends EventEmitter {
      * meio do caminho: se a perna 2 (ETH) já preencheu, vende o ETH residual
      * a mercado por USDT; senão, se apenas a perna 1 (BTC) preencheu, vende
      * o BTC residual a mercado por USDT. Se o próprio unwind falhar, emite
-     * 'critical-exposure' para o chamador tratar como incidente — não há
-     * mais nada que o engine possa fazer sozinho.
+     * 'critical-exposure' e o engine se HALTA PERMANENTEMENTE — não há mais
+     * nada que ele possa fazer sozinho.
      */
     private async emergencyUnwind(leg1: ExecutionResult | undefined, leg2: ExecutionResult | undefined, p1Ask: Decimal, p3Bid: Decimal, originalError: unknown) {
         try {
@@ -149,7 +243,8 @@ export class TriangularArbitrageEngine extends EventEmitter {
             // Falhou antes de qualquer perna preencher: nenhuma posição para neutralizar.
             this.emit('cycle-failure', { error: originalError, unwound: false });
         } catch (unwindError) {
-            log.error('FALHA NO UNWIND DE EMERGÊNCIA — exposição direcional NÃO neutralizada. Intervenção manual necessária.', {
+            this.haltedPermanently = true;
+            log.error('FALHA NO UNWIND DE EMERGÊNCIA — exposição direcional NÃO neutralizada. Engine halted permanentemente. Intervenção manual necessária.', {
                 unwindError: unwindError instanceof Error ? unwindError.message : String(unwindError),
             });
             this.emit('critical-exposure', { leg1, leg2, error: unwindError });

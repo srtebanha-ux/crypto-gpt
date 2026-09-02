@@ -23,8 +23,11 @@ function bootstrap() {
     const exchange = new MockExchangeProvider();
     const riskManager = new RiskManager(C0_BASE, MAX_SLIPPAGE);
 
-    // Instanciação e operação perpétua em memória
-    new TriangularArbitrageEngine(exchange, riskManager, C0_BASE);
+    // statMinSamples: 0 desativa o kill switch estatístico (camada #2) para
+    // a demo: o feed mock repete sempre a mesma distorção fixa, então nunca
+    // teria uma variância real para julgar um tick como "anomalia" — esse
+    // gate só faz sentido contra um feed de mercado genuíno (ver src/live.ts).
+    new TriangularArbitrageEngine(exchange, riskManager, C0_BASE, { statMinSamples: 0 });
 }
 
 bootstrap();

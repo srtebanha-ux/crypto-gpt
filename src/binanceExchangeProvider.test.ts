@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { BinanceExchangeProvider } from './binanceExchangeProvider';
+import { BinanceExchangeProvider, parseDepthLevels } from './binanceExchangeProvider';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
@@ -192,4 +192,40 @@ test('lança erro claro quando a corretora rejeita a ordem (HTTP não-ok)', asyn
             ),
         /Insufficient balance/
     );
+});
+
+test('parseDepthLevels converte pares [preço, qty] crus e descarta entradas inválidas', () => {
+    const levels = parseDepthLevels([
+        ['60010.5', '0.5'],
+        ['60011.0', '1.2'],
+        ['60012.0', '0'], // qty zero — descartado (remoção de nível em streams de diff)
+        ['bad', '1'], // preço não numérico — descartado, não deve derrubar o parsing dos demais níveis
+    ]);
+    assert.equal(levels.length, 2);
+    assert.equal(levels[0].price.toString(), '60010.5');
+    assert.equal(levels[0].qty.toString(), '0.5');
+});
+
+test('parseDepthLevels retorna [] para entradas malformadas ou payload não-array', () => {
+    assert.deepEqual(parseDepthLevels(undefined), []);
+    assert.deepEqual(parseDepthLevels(null), []);
+    assert.deepEqual(parseDepthLevels('not-an-array'), []);
+    assert.deepEqual(parseDepthLevels([['100']]), []); // par incompleto
+});
+
+test('getOrderBookSnapshot retorna undefined antes de qualquer mensagem de profundidade, e o snapshot depois', () => {
+    const provider = newProvider();
+    assert.equal(provider.getOrderBookSnapshot('BTC/USDT'), undefined);
+
+    // Simula a chegada de uma mensagem de profundidade sem abrir um WS real.
+    (provider as unknown as { handleDepthUpdate: (stream: string, data: unknown) => void }).handleDepthUpdate('btcusdt@depth5@100ms', {
+        bids: [['60000', '1.5']],
+        asks: [['60010', '2.0']],
+    });
+
+    const snapshot = provider.getOrderBookSnapshot('BTC/USDT');
+    assert.ok(snapshot);
+    assert.equal(snapshot!.bids[0].price.toString(), '60000');
+    assert.equal(snapshot!.asks[0].price.toString(), '60010');
+    assert.equal(provider.getOrderBookSnapshot('ETH/BTC'), undefined);
 });

@@ -5,7 +5,7 @@ import { EventEmitter } from 'events';
 import { Decimal } from 'decimal.js';
 import { TriangularArbitrageEngine } from './engine';
 import { RiskManager } from './riskManager';
-import { ExecutionResult, IExchangeProvider, OrderSide, OrderType } from './types';
+import { ExecutionResult, IExchangeProvider, OrderBookSnapshot, OrderSide, OrderType } from './types';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
@@ -62,7 +62,9 @@ test('dispara e completa um ciclo lucrativo quando o triângulo diverge', async 
         () => fill('50.5', '0.016597', '3050'), // leg3 SELL ETH/USDT
     ]);
     const riskManager = new RiskManager('50', '0.0005');
-    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50');
+    // statMinSamples: 0 — este teste cobre a execução do ciclo, não o kill
+    // switch estatístico (coberto em teste dedicado abaixo).
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
 
     const successPromise = waitFor(engine, 'cycle-success');
     exchange.pushTicker('BTC/USDT', '60000', '60010');
@@ -123,7 +125,7 @@ test('unwind de emergência vende o ETH residual quando a perna 3 falha', async 
         () => fill('49.9', '0.016597', '3049'), // unwind: vende o ETH residual
     ]);
     const riskManager = new RiskManager('50', '0.0005');
-    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50');
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
 
     const failurePromise = waitFor(engine, 'cycle-failure');
     exchange.pushTicker('BTC/USDT', '60000', '60010');
@@ -149,7 +151,7 @@ test('emite critical-exposure quando o próprio unwind falha', async () => {
         },
     ]);
     const riskManager = new RiskManager('50', '0.0005');
-    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50');
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
 
     const criticalPromise = waitFor(engine, 'critical-exposure');
     exchange.pushTicker('BTC/USDT', '60000', '60010');
@@ -161,4 +163,89 @@ test('emite critical-exposure quando o próprio unwind falha', async () => {
     assert.equal(leg2, undefined);
     // Capital não deve ter sido atualizado, já que o unwind falhou.
     assert.equal(engine.getCurrentCapital().toString(), '50');
+
+    // A partir daqui o engine deve estar halted permanentemente: mesmo uma
+    // nova ineficiência claramente lucrativa não deve disparar mais nada —
+    // se disparasse, executeOrder chamaria um 4º handler inexistente e
+    // lançaria "nenhum handler configurado".
+    assert.equal(engine.isHalted(), true);
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(exchange.calls.length, 3, 'nenhuma nova ordem deveria ser enviada após a parada permanente');
+});
+
+test('kill switch estatístico bloqueia o disparo durante o warm-up (amostras insuficientes)', async () => {
+    const exchange = new FakeExchangeProvider([]);
+    const riskManager = new RiskManager('50', '0.0005');
+    // statMinSamples muito alto: mesmo com a MESMA ineficiência claramente
+    // lucrativa do teste de sucesso, o gate estatístico nunca terá amostras
+    // suficientes de linha de base para liberar o disparo nesta janela de teste.
+    new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 1000 });
+
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(exchange.calls.length, 0, 'sem linha de base suficiente, o gate estatístico deve bloquear mesmo uma ineficiência real');
+});
+
+/** Extensão do fake para testar o kill switch de profundidade (getOrderBookSnapshot é opcional na interface). */
+class FakeDepthExchangeProvider extends FakeExchangeProvider {
+    private snapshots = new Map<string, OrderBookSnapshot>();
+
+    public setSnapshot(symbol: string, snapshot: OrderBookSnapshot) {
+        this.snapshots.set(symbol, snapshot);
+    }
+
+    public getOrderBookSnapshot(symbol: string): OrderBookSnapshot | undefined {
+        return this.snapshots.get(symbol);
+    }
+}
+
+function snapshot(levels: Array<[string, string]>): OrderBookSnapshot {
+    const book = levels.map(([price, qty]) => ({ price: new Decimal(price), qty: new Decimal(qty) }));
+    return { bids: book, asks: book, timestamp: Date.now() };
+}
+
+test('kill switch de profundidade bloqueia quando o book real não sustenta o ciclo', async () => {
+    const exchange = new FakeDepthExchangeProvider([]);
+    // Profundidade irrisória em todos os 3 pares — muito abaixo do que os $50 exigiriam.
+    exchange.setSnapshot('BTC/USDT', snapshot([['60010', '0.00000001']]));
+    exchange.setSnapshot('ETH/BTC', snapshot([['0.0501', '0.00000001']]));
+    exchange.setSnapshot('ETH/USDT', snapshot([['3050', '0.00000001']]));
+
+    const riskManager = new RiskManager('50', '0.0005');
+    new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
+
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(exchange.calls.length, 0, 'topo do book favorável não deveria disparar quando a profundidade real não sustenta o ciclo');
+});
+
+test('kill switch de profundidade libera o disparo quando o book real sustenta o ciclo', async () => {
+    const exchange = new FakeDepthExchangeProvider([
+        () => fill('0.000832', '0.000833', '60010'),
+        () => fill('0.016597', '0.016614', '0.0501'),
+        () => fill('50.5', '0.016597', '3050'),
+    ]);
+    exchange.setSnapshot('BTC/USDT', snapshot([['60010', '10']]));
+    exchange.setSnapshot('ETH/BTC', snapshot([['0.0501', '100']]));
+    exchange.setSnapshot('ETH/USDT', snapshot([['3050', '10']]));
+
+    const riskManager = new RiskManager('50', '0.0005');
+    const engine = new TriangularArbitrageEngine(exchange, riskManager, '50', { statMinSamples: 0 });
+
+    const successPromise = waitFor(engine, 'cycle-success');
+    exchange.pushTicker('BTC/USDT', '60000', '60010');
+    exchange.pushTicker('ETH/BTC', '0.0500', '0.0501');
+    exchange.pushTicker('ETH/USDT', '3050', '3060');
+
+    await successPromise;
+    assert.equal(exchange.calls.length, 3);
 });

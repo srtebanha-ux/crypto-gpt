@@ -60,3 +60,64 @@ test('taxa mais alta reduz (ou elimina) a viabilidade da mesma ineficiência', (
     assert.equal(highFee.viable, false);
     assert.ok(highFee.expectedNetProfit.lessThan(lowFee.expectedNetProfit));
 });
+
+function bookLevel(price: string, qty: string) {
+    return { price: new Decimal(price), qty: new Decimal(qty) };
+}
+
+test('isTriangularArbitrageViableWithDepth concorda com a versão top-of-book quando há liquidez de sobra', () => {
+    const rm = new RiskManager('50', '0.0005');
+    const flat = rm.isTriangularArbitrageViable(new Decimal('50'), new Decimal('60010'), new Decimal('0.0501'), new Decimal('3050'), new Decimal('0.001'));
+    const depth = rm.isTriangularArbitrageViableWithDepth(
+        new Decimal('50'),
+        [bookLevel('60010', '10')], // 10 BTC de profundidade — muito acima do que $50 compraria
+        [bookLevel('0.0501', '100')],
+        [bookLevel('3050', '10')],
+        new Decimal('0.001')
+    );
+    assert.equal(depth.viable, true);
+    assert.equal(depth.fullyFilled, true);
+    // Mesma liquidez == mesmo preço em todos os níveis => lucro projetado deve bater (dentro de arredondamento).
+    assert.ok(depth.expectedNetProfit.minus(flat.expectedNetProfit).abs().lessThan('0.000001'));
+});
+
+test('isTriangularArbitrageViableWithDepth bloqueia quando a profundidade real não sustenta o ciclo', () => {
+    const rm = new RiskManager('50', '0.0005');
+    const result = rm.isTriangularArbitrageViableWithDepth(
+        new Decimal('50'),
+        [bookLevel('60010', '0.00000001')], // profundidade irrisória no nível 1
+        [bookLevel('0.0501', '100')],
+        [bookLevel('3050', '10')],
+        new Decimal('0.001')
+    );
+    assert.equal(result.fullyFilled, false);
+    assert.equal(result.viable, false);
+});
+
+test('isTriangularArbitrageViableWithDepth bloqueia quando caminhar níveis piores estoura o orçamento', () => {
+    const rm = new RiskManager('50', '0.0005');
+    // Só 0.0003 BTC no topo (~$18) — para preencher a quantidade-alvo
+    // aproximada por $50/60010, o restante precisa caminhar para um nível
+    // pior (60050), o que gasta mais do que os $50 orçados na perna 1.
+    const thin = rm.isTriangularArbitrageViableWithDepth(
+        new Decimal('50'),
+        [bookLevel('60010', '0.0003'), bookLevel('60050', '10')],
+        [bookLevel('0.0501', '100')],
+        [bookLevel('3050', '10')],
+        new Decimal('0.001')
+    );
+    assert.equal(thin.fullyFilled, false, 'gastar mais que o capital orçado para preencher a quantidade-alvo deve marcar fullyFilled=false');
+    assert.equal(thin.viable, false);
+
+    // Com profundidade de sobra em 60010, a mesma quantidade-alvo cabe
+    // inteira no orçamento de $50 e o ciclo volta a ser viável.
+    const deep = rm.isTriangularArbitrageViableWithDepth(
+        new Decimal('50'),
+        [bookLevel('60010', '10')],
+        [bookLevel('0.0501', '100')],
+        [bookLevel('3050', '10')],
+        new Decimal('0.001')
+    );
+    assert.equal(deep.fullyFilled, true);
+    assert.equal(deep.viable, true);
+});

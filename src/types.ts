@@ -38,6 +38,19 @@ export interface ExecutionResult {
     timestamp: number;
 }
 
+/** Um nível de preço do order book (usado para estimativas de execução por VWAP). */
+export interface OrderBookLevel {
+    price: Decimal;
+    qty: Decimal;
+}
+
+/** Snapshot da profundidade do book de um símbolo, do melhor para o pior preço. */
+export interface OrderBookSnapshot {
+    bids: OrderBookLevel[];
+    asks: OrderBookLevel[];
+    timestamp: number;
+}
+
 /**
  * Contrato que qualquer fonte de mercado/execução (mock ou corretora real)
  * deve implementar para ser consumida pelo TriangularArbitrageEngine.
@@ -52,4 +65,14 @@ export interface ExecutionResult {
 export interface IExchangeProvider extends EventEmitter {
     executeOrder(symbol: string, side: OrderSide, type: OrderType, qty: Decimal, price?: Decimal): Promise<ExecutionResult>;
     getFeeRate(): Decimal;
+    /**
+     * Profundidade atual do book para um símbolo, se este provider a mantiver
+     * (opcional — mantido em memória a partir de um stream, nunca via chamada
+     * de rede síncrona no caminho de execução). `undefined` quando o provider
+     * não suporta profundidade ou ainda não recebeu dados para o símbolo; o
+     * engine trata isso como "confirmação por profundidade indisponível" e,
+     * conforme sua configuração, ou ignora essa camada extra do kill switch,
+     * ou bloqueia o disparo até haver dado suficiente.
+     */
+    getOrderBookSnapshot?(symbol: string): OrderBookSnapshot | undefined;
 }
