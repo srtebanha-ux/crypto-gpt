@@ -13,14 +13,22 @@
 // um endereço errado não estoura — ele lê outro contrato, ou devolve vazio, e
 // vira um número plausível e errado no relatório. O mesmo vale para endereços
 // que eu escrevesse de memória. Então os pools são obrigatoriamente fornecidos
-// por quem roda (DEX_POOLS), e cada um é VERIFICADO na leitura: se não
-// responder como um pool de produto constante, o relatório diz qual falhou e
-// por quê, em vez de silenciosamente ignorar.
+// por quem roda (DEX_POOLS) ou descobertos enumerando uma factory informada
+// (DEX_FACTORY), e cada um é VERIFICADO na leitura: se não responder como um
+// pool de produto constante, é descartado e contabilizado no resumo, nunca
+// tratado em silêncio como pool vazio.
+//
+// O modo DEX_FACTORY é o que serve à cauda longa: searchers profissionais
+// concentram atenção nos pools grandes, porque a infraestrutura deles tem
+// custo fixo alto. Varrer pools recém-criados é procurar onde ninguém está
+// olhando — e com flash loan isso é acessível, já que o risco clássico de
+// ficar preso num token ilíquido desaparece quando a transação reverte.
 import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
 import { evaluateCycle, cycleSpotRatio } from './ammMath';
 import { findTriangularCycles, findTwoPoolCycles, hopsForCycle, type Cycle, type PoolInfo } from './dexGraph';
-import { SELECTORS, decodeAddressWord, decodeDecimals, decodeReserves, decodeUintWord, fromRawUnits } from './evmAbi';
+import { SELECTORS, decodeAddressWord, decodeDecimals, decodeReserves, decodeUintWord, encodeUint256, fromRawUnits } from './evmAbi';
+import { assertPlausiblePoolCount, parseScanMode, selectPoolIndices } from './poolDiscovery';
 
 Decimal.set({ precision: 40, rounding: Decimal.ROUND_DOWN });
 
@@ -74,6 +82,22 @@ async function batchEthCall(rpcUrl: string, calls: RpcCall[]): Promise<string[]>
     });
 }
 
+/**
+ * Tamanho máximo de um lote JSON-RPC. RPCs públicos rejeitam (ou truncam)
+ * lotes muito grandes, e varrer 200 pools são 600 chamadas — bem acima do que
+ * a maioria aceita de uma vez.
+ */
+const MAX_BATCH_SIZE = 100;
+
+/** Divide em lotes aceitáveis, preservando a ordem das respostas. */
+async function chunkedEthCall(rpcUrl: string, calls: RpcCall[]): Promise<string[]> {
+    const results: string[] = [];
+    for (let i = 0; i < calls.length; i += MAX_BATCH_SIZE) {
+        results.push(...(await batchEthCall(rpcUrl, calls.slice(i, i + MAX_BATCH_SIZE))));
+    }
+    return results;
+}
+
 async function fetchGasPriceWei(rpcUrl: string): Promise<Decimal> {
     const res = await fetch(rpcUrl, {
         method: 'POST',
@@ -98,9 +122,11 @@ async function loadPools(rpcUrl: string, addresses: string[], feeFraction: Decim
         calls.push({ to: address, data: SELECTORS.token1 });
         calls.push({ to: address, data: SELECTORS.getReserves });
     }
-    const results = await batchEthCall(rpcUrl, calls);
+    const results = await chunkedEthCall(rpcUrl, calls);
 
     const raw: Array<{ address: string; token0: string; token1: string; r0: Decimal; r1: Decimal }> = [];
+    let dead = 0;
+    let invalid = 0;
     for (let i = 0; i < addresses.length; i++) {
         const address = addresses[i];
         try {
@@ -108,22 +134,34 @@ async function loadPools(rpcUrl: string, addresses: string[], feeFraction: Decim
             const token1 = decodeAddressWord(results[i * 3 + 1], 0);
             const reserves = decodeReserves(results[i * 3 + 2]);
             if (reserves.reserve0.lessThanOrEqualTo(0) || reserves.reserve1.lessThanOrEqualTo(0)) {
-                log.warn(`Pool ${address} tem reserva zerada — descartado (pool morto ou recém-criado).`);
+                // Em varredura ampla a maioria dos pools está morta — um aviso
+                // por pool afogaria o relatório. Conta e resume; o detalhe fica
+                // em LOG_LEVEL=debug para quem estiver investigando.
+                dead += 1;
+                log.debug(`Pool ${address} com reserva zerada — descartado.`);
                 continue;
             }
             raw.push({ address, token0, token1, r0: reserves.reserve0, r1: reserves.reserve1 });
         } catch (err) {
-            log.error(`Pool ${address} NÃO respondeu como pool de produto constante — descartado.`, {
+            invalid += 1;
+            log.debug(`Pool ${address} não respondeu como pool de produto constante — descartado.`, {
                 erro: err instanceof Error ? err.message : String(err),
-                nota: 'Confira o endereço. Pool V3 (liquidez concentrada) não expõe getReserves() e não serve aqui.',
             });
         }
+    }
+
+    if (dead > 0 || invalid > 0) {
+        log.info('Pools descartados na leitura.', {
+            reservaZerada: dead,
+            naoEhPoolV2: invalid,
+            nota: 'Pool V3 (liquidez concentrada) não expõe getReserves(). Rode com LOG_LEVEL=debug para ver caso a caso.',
+        });
     }
 
     // Decimais de cada token: sem normalizar, comparar USDC (6 casas) com WETH
     // (18) erra por 1e12 — e o erro sai como "arbitragem gigante".
     const tokens = Array.from(new Set(raw.flatMap((p) => [p.token0, p.token1])));
-    const decimalResults = await batchEthCall(rpcUrl, tokens.map((t) => ({ to: t, data: SELECTORS.decimals })));
+    const decimalResults = await chunkedEthCall(rpcUrl, tokens.map((t) => ({ to: t, data: SELECTORS.decimals })));
     const decimalsByToken = new Map<string, number>();
     tokens.forEach((token, i) => {
         try {
@@ -152,6 +190,41 @@ async function loadPools(rpcUrl: string, addresses: string[], feeFraction: Decim
     return pools;
 }
 
+/**
+ * Descobre endereços de pool enumerando a factory da DEX.
+ *
+ * É o que transforma a ferramenta de "confere estes pools que eu escolhi" em
+ * "acha onde ninguém está olhando": searchers profissionais concentram
+ * atenção nos pools grandes, porque a infraestrutura deles tem custo fixo
+ * alto. A cauda longa fica desguarnecida — e com flash loan ela é acessível,
+ * já que o risco clássico de ficar preso num token ilíquido desaparece
+ * quando a transação inteira reverte.
+ */
+async function discoverPoolAddresses(rpcUrl: string, factory: string): Promise<string[]> {
+    const [lengthResult] = await batchEthCall(rpcUrl, [{ to: factory, data: SELECTORS.allPairsLength }]);
+    const total = decodeUintWord(lengthResult, 0).toNumber();
+    assertPlausiblePoolCount(total, factory);
+
+    const mode = parseScanMode(process.env.DEX_SCAN_MODE);
+    const limit = Number(process.env.DEX_SCAN_LIMIT ?? '200');
+    const seed = Number(process.env.DEX_SCAN_SEED ?? '1');
+    const indices = selectPoolIndices(total, limit, mode, seed);
+
+    log.info('Factory verificada — enumerando pools.', {
+        factory,
+        totalNaFactory: total,
+        varrendo: indices.length,
+        modo: mode,
+        nota: mode === 'newest' ? 'pools recém-criados: preço ainda não alinhado, menos indexados' : undefined,
+    });
+
+    const addressResults = await chunkedEthCall(
+        rpcUrl,
+        indices.map((i) => ({ to: factory, data: SELECTORS.allPairs + encodeUint256(i) })),
+    );
+    return addressResults.map((r) => decodeAddressWord(r, 0));
+}
+
 function describeCycle(cycle: Cycle): string {
     return cycle.path.map((t) => t.slice(0, 6)).join('->') + ` [${cycle.pools.map((p) => p.address.slice(0, 8)).join(', ')}]`;
 }
@@ -159,32 +232,38 @@ function describeCycle(cycle: Cycle): string {
 async function main() {
     const rpcUrl = process.env.DEX_RPC_URL ?? DEFAULT_RPC_URL;
     const baseToken = (process.env.DEX_BASE_TOKEN ?? DEFAULT_BASE_TOKEN).toLowerCase();
-    const poolAddresses = (process.env.DEX_POOLS ?? '')
+    const explicitPools = (process.env.DEX_POOLS ?? '')
         .split(',')
         .map((s) => s.trim().toLowerCase())
         .filter((s) => s.length > 0);
+    const factory = process.env.DEX_FACTORY?.trim().toLowerCase();
     const feeFraction = new Decimal(process.env.DEX_POOL_FEE ?? '0.003');
     const flashLoanFee = new Decimal(process.env.FLASH_LOAN_FEE ?? '0.0005'); // Aave V3; Balancer = 0
     const gasUnits = new Decimal(process.env.DEX_GAS_UNITS ?? String(DEFAULT_GAS_UNITS));
 
-    if (poolAddresses.length === 0) {
-        log.error('Defina DEX_POOLS com os endereços dos pools, separados por vírgula.', {
+    if (explicitPools.length === 0 && !factory) {
+        log.error('Defina DEX_FACTORY (varredura ampla) ou DEX_POOLS (endereços específicos).', {
             porque:
                 'Nenhum endereço vem embutido de propósito: endereço errado não estoura, vira número plausível e errado no relatório.',
-            comoObter:
-                'Pegue os pools de maior liquidez na interface da DEX (Aerodrome/Uniswap na Base) ou no Basescan. Precisam ser pools de produto constante (V2), não V3.',
-            exemplo: 'DEX_POOLS=0xabc...,0xdef... npm run sniff-dex',
+            varreduraAmpla:
+                'DEX_FACTORY=0x... — enumera pools da factory da DEX e procura onde ninguém está olhando. É o modo indicado para cauda longa.',
+            enderecosEspecificos:
+                'DEX_POOLS=0xabc...,0xdef... — quando você já sabe quais pools quer conferir. Precisam ser de produto constante (V2), não V3.',
         });
         process.exit(1);
     }
 
     log.info('Lendo pools on-chain (nenhuma transação será enviada).', {
         rpc: rpcUrl,
-        pools: poolAddresses.length,
+        modo: factory ? 'descoberta via factory' : 'lista explícita',
         tokenBase: baseToken,
         taxaPool: feeFraction.toString(),
         taxaFlashLoan: flashLoanFee.toString(),
     });
+
+    const poolAddresses = factory
+        ? Array.from(new Set([...explicitPools, ...(await discoverPoolAddresses(rpcUrl, factory))]))
+        : explicitPools;
 
     const pools = await loadPools(rpcUrl, poolAddresses, feeFraction);
     if (pools.length === 0) {

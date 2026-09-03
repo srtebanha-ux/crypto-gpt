@@ -63,7 +63,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 173 testes, todos sem acesso a rede).
+  `npm test` — 187 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -192,7 +192,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 173 testes, todos sem rede, devem passar.
+1. `npm test` — 187 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -227,7 +227,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 173 testes, sem rede
+npm test            # suíte de testes (node:test) — 187 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
@@ -765,18 +765,57 @@ verificado na leitura (`token0`/`token1`/`getReserves`, reservas dentro de
 uint112, `decimals()` em faixa de ERC-20); o que não passar é reportado com o
 motivo e descartado, nunca tratado em silêncio como pool vazio.
 
+A factory informada em `DEX_FACTORY` também é verificada antes de ser usada:
+`allPairsLength()` devolvendo 0 estoura, porque uma factory em uso nunca tem
+zero pools — um endereço que não é factory devolveria `0x`, que decodifica
+como zero, e o relatório diria "0 pools encontrados" mandando o operador
+procurar o problema no mercado em vez de no endereço.
+
 Pelo mesmo motivo, os seletores de função em `evmAbi.ts` são constantes
 documentadas e toda leitura tem verificação de sanidade: o keccak-256 do
 Ethereum difere do SHA3-256 do Node, então os seletores não podem ser
 calculados em tempo de execução.
 
+### Dois modos: lista explícita e varredura da cauda longa
+
 ```bash
+# Varredura ampla — procura onde ninguém está olhando
+DEX_FACTORY=0x... npm run sniff-dex
+
+# Pools específicos que voce ja escolheu
 DEX_POOLS=0xabc...,0xdef... npm run sniff-dex
 ```
 
+O modo `DEX_FACTORY` existe por uma razão econômica: searchers profissionais
+têm custo fixo alto de infraestrutura, então concentram atenção em
+oportunidades grandes. Uma arbitragem de poucos dólares não paga a atenção
+deles. A cauda longa — pools pequenos, tokens de baixa capitalização, pools
+recém-criados — fica desguarnecida.
+
+E com flash loan essa cauda é acessível de um jeito que capital próprio não
+permitiria: o risco clássico ali é comprar um token ilíquido e ficar preso.
+Com atomicidade isso não existe — se a venda não sai pelo preço necessário, a
+transação inteira reverte e o custo é o gas.
+
+Ressalva honesta: boa parte da cauda longa é lixo, incluindo *honeypots*
+(tokens que deixam comprar e não deixam vender). Com flash loan um honeypot
+apenas reverte a transação, mas significa que parte das "oportunidades"
+encontradas será falsa.
+
+O padrão de varredura é `newest`: pools recém-criados, cujo preço ainda não
+foi alinhado e que os indexadores podem não ter pego. `oldest` varre os
+primeiros índices, majoritariamente pools mortos. `random` cobre o espaço de
+forma não enviesada, com semente fixa — sem reprodutibilidade não daria para
+saber se um resultado diferente entre duas rodadas veio do mercado ou do
+sorteio.
+
 | Variável | Padrão | Para quê |
 | --- | --- | --- |
-| `DEX_POOLS` | — (obrigatório) | Endereços de pools V2, separados por vírgula. |
+| `DEX_FACTORY` | — | Factory V2 a enumerar. Verificada antes de ser usada (ver abaixo). |
+| `DEX_POOLS` | — | Endereços de pools V2, separados por vírgula. Um dos dois é obrigatório. |
+| `DEX_SCAN_LIMIT` | `200` | Quantos pools varrer da factory. |
+| `DEX_SCAN_MODE` | `newest` | `newest`, `oldest` ou `random`. |
+| `DEX_SCAN_SEED` | `1` | Semente do modo `random`, para varredura reprodutível. |
 | `DEX_RPC_URL` | `https://mainnet.base.org` | RPC da rede. |
 | `DEX_BASE_TOKEN` | WETH da Base | Token de partida e chegada do ciclo. |
 | `DEX_POOL_FEE` | `0.003` | Taxa por hop. Baixe para medir faixas menores. |
