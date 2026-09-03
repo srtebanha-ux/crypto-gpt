@@ -21,7 +21,7 @@
 // Sem I/O: recebe candles já carregados.
 import { Decimal } from 'decimal.js';
 import { atr, detectBreakout, detectOversoldReversion, isAboveTrend, rsiSeries, type Candle } from './signals';
-import { planPosition, updateTrailingStop, updateTrailingStopAtr } from './positionSizing';
+import { planPosition, tradeNetPnl, updateTrailingStop, updateTrailingStopAtr } from './positionSizing';
 
 /**
  * As duas famílias são OPOSTAS, e qual funciona é pergunta empírica:
@@ -103,7 +103,6 @@ interface OpenPosition {
     quantity: Decimal;
     stopPrice: Decimal;
     highestSinceEntry: Decimal;
-    entryFee: Decimal;
 }
 
 export function runBacktest(candles: Candle[], initialCapital: Decimal, params: StrategyParams): BacktestResult {
@@ -123,10 +122,9 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
         params.entryStrategy === 'reversion' ? rsiSeries(candles, params.rsiPeriod ?? 14) : [];
 
     const closePosition = (pos: OpenPosition, exitIndex: number, exitPrice: Decimal, reason: Trade['exitReason']) => {
-        const grossOut = pos.quantity.mul(exitPrice);
-        const exitFee = grossOut.mul(params.feeRate);
-        const grossIn = pos.quantity.mul(pos.entryPrice);
-        const netProfit = grossOut.minus(exitFee).minus(grossIn).minus(pos.entryFee);
+        // Mesma função que o motor ao vivo usa, para que papel e backtest não
+        // possam divergir por uma taxa contada de um jeito só num dos dois.
+        const { netProfit, feesPaid } = tradeNetPnl(pos.entryPrice, exitPrice, pos.quantity, params.feeRate);
 
         capital = capital.plus(netProfit);
         trades.push({
@@ -136,7 +134,7 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
             exitPrice,
             quantity: pos.quantity,
             netProfit,
-            feesPaid: pos.entryFee.plus(exitFee),
+            feesPaid,
             exitReason: reason,
         });
 
@@ -225,7 +223,6 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
             quantity: plan.quantity,
             stopPrice,
             highestSinceEntry: entryPrice,
-            entryFee: plan.notional.mul(params.feeRate),
         };
         i = nextIndex; // a vela de entrada já foi consumida
     }

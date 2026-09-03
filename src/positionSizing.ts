@@ -35,6 +35,20 @@ export interface RiskParams {
     minNotional?: Decimal;
     /** Passo de quantidade do símbolo (LOT_SIZE). A quantidade é truncada a ele. */
     stepSize?: Decimal;
+    /**
+     * Dinheiro LIVRE para esta posição, quando parte do capital já está preso
+     * em outras posições abertas.
+     *
+     * Existe porque `capital` sozinho não basta num motor multi-ativo: se cada
+     * ativo dimensionar contra o capital TOTAL, quatro posições simultâneas
+     * comprometem quatro vezes o dinheiro que existe — alavancagem acidental,
+     * sem ninguém ter pedido alavancagem. O orçamento de risco continua saindo
+     * do patrimônio total (é o risco por operação que se quer constante); só o
+     * TETO de quanto dá para comprar passa a ser o caixa livre.
+     *
+     * Omitido, equivale a `capital` (caso de ativo único).
+     */
+    availableCapital?: Decimal;
 }
 
 export interface PositionPlan {
@@ -100,9 +114,11 @@ export function planPosition(params: RiskParams): PositionPlan {
     const riskPerUnit = entryPrice.minus(stopPrice);
     const rawQuantity = riskBudget.dividedBy(riskPerUnit);
 
-    // O capital é um teto independente do orçamento de risco: com stop muito
+    // O caixa é um teto independente do orçamento de risco: com stop muito
     // próximo, a fórmula pediria uma posição maior que o dinheiro disponível.
-    const maxAffordable = capital.dividedBy(entryPrice);
+    const cash = params.availableCapital ?? capital;
+    if (cash.lessThanOrEqualTo(0)) return zero('Sem caixa livre — o capital já está todo em posições abertas.');
+    const maxAffordable = cash.dividedBy(entryPrice);
     const capped = Decimal.min(rawQuantity, maxAffordable);
     const quantity = truncateToStep(capped, params.stepSize);
 
@@ -191,4 +207,31 @@ export function consecutiveLossesSurvivable(riskFraction: Decimal, ruinFraction 
     // (1 - risco)^n >= ruinFraction  =>  n <= ln(ruinFraction) / ln(1 - risco)
     const survival = Math.log(ruinFraction.toNumber()) / Math.log(new Decimal(1).minus(riskFraction).toNumber());
     return Math.floor(survival);
+}
+
+/**
+ * Resultado LÍQUIDO de uma operação, com a taxa da corretora cobrada nas DUAS
+ * pontas (compra e venda).
+ *
+ * Vive aqui, e não dentro do backtest ou do motor ao vivo, porque os dois
+ * precisam da mesma conta: se o motor ao vivo esquecesse a taxa, o "resultado"
+ * do modo papel apareceria melhor que o do backtest sobre exatamente o mesmo
+ * mercado — e a diferença seria mérito de uma taxa não cobrada, não de
+ * estratégia. Duas taxas de 0,1% custam 0,2% de ida e volta, o que já come um
+ * movimento pequeno inteiro.
+ */
+export function tradeNetPnl(
+    entryPrice: Decimal,
+    exitPrice: Decimal,
+    quantity: Decimal,
+    feeRate: Decimal,
+): { netProfit: Decimal; feesPaid: Decimal } {
+    const grossIn = quantity.mul(entryPrice);
+    const grossOut = quantity.mul(exitPrice);
+    const entryFee = grossIn.mul(feeRate);
+    const exitFee = grossOut.mul(feeRate);
+    return {
+        netProfit: grossOut.minus(exitFee).minus(grossIn).minus(entryFee),
+        feesPaid: entryFee.plus(exitFee),
+    };
 }

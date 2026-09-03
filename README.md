@@ -969,3 +969,93 @@ estratégia.
 | `BT_FEE_RATE` | `0.00075` | Taker com desconto de BNB. |
 
 Backtest mede o passado. É o piso da decisão, não promessa de futuro.
+
+## Motor direcional 24/7 (`directionalLive.ts`)
+
+O backtest mede; este motor **opera**. Ele roda ininterruptamente sobre vários
+ativos, comprando na baixa (`reversion`) ou no rompimento (`breakout`), com
+stop e stop móvel em ATR.
+
+```bash
+# Papel — nenhuma ordem, nenhuma chave, nenhum risco. É o padrão.
+DIRECTIONAL_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT npm run directional
+```
+
+### Ele usa exatamente o mesmo código do backtest
+
+`signals.ts` e `positionSizing.ts` são importados sem cópia nem variação. Isso
+é deliberado: se o motor ao vivo decidisse por lógica própria — ainda que
+"equivalente" —, o backtest não estaria medindo o que vai operar, e todo o
+trabalho de validação viraria decoração. Qualquer melhoria de sinal entra num
+lugar só e aparece nos dois.
+
+Três equivalências que preservam essa propriedade ao vivo:
+
+1. **A última vela da Binance é descartada.** Ela ainda está em formação: o
+   "fechamento" vai mudar, e um sinal disparado sobre ele some no minuto
+   seguinte. É o *look-ahead* na sua forma ao vivo.
+2. **Stop checado pela mínima da vela**, como no backtest.
+3. **Taxa cobrada nas duas pontas, inclusive no modo papel** (`tradeNetPnl`, a
+   mesma função que o backtest usa). Sem isso o papel mostraria lucro em alta
+   de 0,1% que ao vivo custa dinheiro — e o mérito seria de uma taxa não
+   cobrada, não da estratégia. Ao vivo, a taxa vem da conta real (com desconto
+   de BNB, se ativo), não de um palpite.
+
+### Caixa livre: o motor multi-ativo não se alavanca sozinho
+
+Cada posição é dimensionada contra o **caixa ainda livre**, não contra o
+patrimônio total. Sem isso, quatro ativos dimensionando cada um contra os mesmos
+20 dólares comprometem 80 — alavancagem que ninguém pediu, que aparece como
+ordem recusada por saldo no melhor caso. O orçamento de risco por operação
+continua saindo do patrimônio total: é ele que precisa ser constante para a
+estratégia ser a mesma que o backtest mediu.
+
+### Ordens reais exigem duas confirmações
+
+```bash
+DIRECTIONAL_LIVE=true DIRECTIONAL_LIVE_CONFIRM=I_UNDERSTAND_THE_RISK npm run directional
+```
+
+Sem as duas, o motor roda em papel. Ao vivo ele registra o **preço realmente
+executado**, não o pretendido: ordem a mercado escorrega, e mais nas saídas por
+stop, que são as que mais importam.
+
+| Variável | Padrão | Para quê |
+| --- | --- | --- |
+| `DIRECTIONAL_SYMBOLS` | `BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT` | Ativos acompanhados. |
+| `DIRECTIONAL_STRATEGY` | `reversion` | `reversion` (comprar na baixa) ou `breakout`. |
+| `DIRECTIONAL_INTERVAL` | `1h` | Tamanho da vela. |
+| `DIRECTIONAL_CAPITAL` | `20` | Capital inicial. |
+| `DIRECTIONAL_POLL_SEC` | `60` | Intervalo entre varreduras. |
+| `DIRECTIONAL_LIVE` | `false` | `true` + confirmação para ordens reais. |
+
+Os parâmetros de sinal e risco são os mesmos `BT_*` do backtest — de propósito:
+operar com parâmetros diferentes dos medidos é operar às cegas.
+
+### Alavancagem: a resposta está na medição, e ela é não
+
+Alavancar multiplica o retorno **e o drawdown**. Os drawdowns máximos medidos
+no próprio backtest desta estratégia, excluindo ZEC (que subiu 2093% na janela
+e sozinha carregava o resultado):
+
+| Ativo / família | Drawdown máximo |
+| --- | --- |
+| BNB `breakout` | 24,21% |
+| BNB `reversion` | 30,57% |
+| ETH `breakout` | 56,12% |
+
+A 3× de alavancagem, uma queda de **33%** no patrimônio zera a conta. Dois dos
+três números acima já passam disso — não em cenário pessimista inventado, mas
+no histórico que a estratégia realmente atravessou. Alavancar aqui não amplia
+lucro: liquida.
+
+Alavancagem passa a ser discussão legítima quando existirem, medidos e não
+argumentados: expectativa positiva na maioria dos ativos, consistência entre as
+metades do período, e drawdown máximo **bem abaixo** de 1/alavancagem. Hoje a
+estratégia tem 2 de 4 ativos positivos e consistentes. Isso é promissor, não
+validado.
+
+Flash loan é outra coisa e continua de pé: não há posição mantida, não há
+liquidação, e a falha reverte a transação — o custo máximo é o gás. O que não
+funciona é alavancagem de margem sobre uma direção que ainda não provou ter
+vantagem.

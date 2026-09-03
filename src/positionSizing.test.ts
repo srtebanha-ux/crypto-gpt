@@ -12,6 +12,7 @@ import {
     consecutiveLossesSurvivable,
     expectancyPerTrade,
     planPosition,
+    tradeNetPnl,
     truncateToStep,
     updateTrailingStop,
     updateTrailingStopAtr,
@@ -240,4 +241,80 @@ test('trailing em ATR aperta sozinho quando a volatilidade cai', () => {
     const volatil = updateTrailingStopAtr(d('99000'), d('110000'), d('1000'), d('3'));
     const calmo = updateTrailingStopAtr(d('99000'), d('110000'), d('200'), d('3'));
     assert.ok(calmo.greaterThan(volatil));
+});
+
+// --- Caixa livre num motor multi-ativo --------------------------------------
+
+test('caixa livre limita a posição — quatro ativos não comprometem quatro vezes o capital', () => {
+    // Sem `availableCapital`, cada ativo dimensiona contra o capital TOTAL e
+    // quatro posições simultâneas pedem quatro vezes o dinheiro que existe.
+    // Isso é alavancagem acidental: ninguém pediu, e a corretora rejeita a
+    // quarta ordem por saldo — ou pior, aceita usando margem.
+    const semCaixa = planPosition({
+        capital: d('1000'),
+        riskFraction: d('0.02'),
+        entryPrice: d('100'),
+        stopPrice: d('99.9'), // stop colado => a fórmula pede posição enorme
+    });
+    assert.equal(semCaixa.notional.toString(), '1000');
+
+    const comCaixa = planPosition({
+        capital: d('1000'),
+        availableCapital: d('250'), // 750 já presos em outras posições
+        riskFraction: d('0.02'),
+        entryPrice: d('100'),
+        stopPrice: d('99.9'),
+    });
+    assert.equal(comCaixa.notional.toString(), '250');
+});
+
+test('o orçamento de RISCO continua saindo do patrimônio total, não do caixa livre', () => {
+    // A perda aceita por operação é uma fração do patrimônio; se ela encolhesse
+    // junto com o caixa, o risco por operação cairia sozinho a cada posição
+    // aberta e a estratégia deixaria de ser a que foi medida no backtest.
+    const plan = planPosition({
+        capital: d('1000'),
+        availableCapital: d('500'),
+        riskFraction: d('0.02'),
+        entryPrice: d('100'),
+        stopPrice: d('90'), // stop largo: o teto de caixa não morde
+    });
+    assert.equal(plan.riskAmount.toString(), '20'); // 2% de 1000, não de 500
+    assert.equal(plan.quantity.toString(), '2');
+});
+
+test('sem caixa livre, recusa com motivo em vez de operar com dinheiro inexistente', () => {
+    const plan = planPosition({
+        capital: d('1000'),
+        availableCapital: d('0'),
+        riskFraction: d('0.02'),
+        entryPrice: d('100'),
+        stopPrice: d('90'),
+    });
+    assert.equal(plan.quantity.toString(), '0');
+    assert.match(plan.reason!, /caixa livre/);
+});
+
+// --- Taxas nas duas pontas --------------------------------------------------
+
+test('a taxa é cobrada na compra E na venda', () => {
+    // 10 unidades a 100 = 1000 de entrada, saída a 110 = 1100.
+    // Bruto +100; taxas 0,1%: 1 na entrada, 1,1 na saída => líquido 97,90.
+    const { netProfit, feesPaid } = tradeNetPnl(d('100'), d('110'), d('10'), d('0.001'));
+    assert.equal(netProfit.toString(), '97.9');
+    assert.equal(feesPaid.toString(), '2.1');
+});
+
+test('movimento pequeno demais vira prejuízo depois das taxas', () => {
+    // Este é o motivo de a taxa não poder ficar de fora do modo papel: uma alta
+    // de 0,1% parece ganho e é perda. Se o papel não cobrasse taxa, o motor
+    // reportaria lucro numa operação que, ao vivo, custa dinheiro.
+    const { netProfit } = tradeNetPnl(d('100'), d('100.1'), d('10'), d('0.001'));
+    assert.ok(netProfit.lessThan(0), `+0,1% com 0,2% de custo tem que dar prejuízo, deu ${netProfit}`);
+});
+
+test('operação sem variação de preço perde exatamente as duas taxas', () => {
+    const { netProfit, feesPaid } = tradeNetPnl(d('100'), d('100'), d('10'), d('0.001'));
+    assert.equal(netProfit.toString(), '-2');
+    assert.equal(feesPaid.toString(), '2');
 });
