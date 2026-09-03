@@ -63,7 +63,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 107 testes, todos sem acesso a rede).
+  `npm test` — 120 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -192,7 +192,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 107 testes, todos sem rede, devem passar.
+1. `npm test` — 120 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -227,7 +227,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 107 testes, sem rede
+npm test            # suíte de testes (node:test) — 120 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
@@ -674,3 +674,54 @@ Como ler:
 O `expectedNetProfit` que alimenta essa métrica é calculado **antes** do gate
 estatístico de propósito: medir só o que passou pelo gate daria uma amostra
 enviesada, cega justamente para o segundo caso acima.
+
+## Medindo o carry de funding rate (`fundingRateSniffer.ts`)
+
+Ferramenta de **medição empírica** — não envia ordem nenhuma, e só usa
+endpoints públicos (dispensa API key e conta de futuros).
+
+O motivo de existir é o mesmo do `opportunitySniffer.ts`. Na arbitragem
+triangular, um dia inteiro de argumento não resolveu o que dez minutos de
+medição resolveram: o mercado oferecia ~0,124% de desalinhamento contra um
+custo de execução de 0,225%, e nenhum ajuste de parâmetro mudaria essa
+aritmética. Antes de construir um motor novo, mede-se.
+
+A estratégia aqui é o **carry delta-neutro**: comprado no spot, vendido no
+perpétuo, mesmo notional. O preço se move nos dois lados e se cancela; o que
+sobra é o funding que os comprados pagam aos vendidos a cada 8 horas.
+
+A diferença estrutural em relação à arbitragem triangular importa:
+
+| | Triangular | Carry de funding |
+| --- | --- | --- |
+| Vantagem | Inexistente para nós — o desalinhamento não cobre a taxa | Real — funding é pago no relógio |
+| Depende de vencer latência? | Sim, e perdemos por 50-100ms | Não |
+| Escala com capital? | Irrelevante: o valor esperado é negativo | Sim, linearmente |
+
+O relatório responde três perguntas, nesta ordem:
+
+1. **Quanto os perpétuos pagam hoje** — funding atual e anualizado.
+2. **Com que frequência o funding fica negativo** (`fracaoNegativa`) — quando
+   fica, são os vendidos que pagam e a posição sangra. Esse número importa
+   mais que a taxa atual: um funding alto que vira negativo 40% do tempo é
+   pior que um modesto e estável.
+3. **A partir de qual capital isso deixa de ser trocado por taxa** — a tabela
+   final projeta lucro líquido anual e mensal para capitais de $20 a $10.000.
+
+Duas escolhas deliberadas na matemática (`fundingRate.ts`):
+
+- **Capital exigido é o dobro do notional de uma perna.** É preciso ter o
+  ativo no spot *e* a margem no perpétuo simultaneamente. Ignorar isso é o
+  erro clássico que faz uma projeção de carry parecer o dobro do que é.
+- **A projeção usa a média histórica, não a taxa atual.** A taxa atual é um
+  ponto isolado e costuma estar no pico justamente nos símbolos que lideram o
+  ranking — projetar por ela seria sistematicamente otimista.
+
+```bash
+npm run sniff-funding
+```
+
+O retorno **percentual** é idêntico em todas as linhas da tabela: escalar
+capital não cria vantagem, só torna a mesma vantagem grande o bastante para
+importar. A linha onde o lucro mensal deixa de ser irrelevante é o capital
+mínimo que justifica construir o motor de execução.
