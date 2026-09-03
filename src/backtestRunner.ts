@@ -95,6 +95,12 @@ async function fetchKlines(symbol: string, interval: string, limit: number): Pro
 
 function resolveParams(): StrategyParams {
     return {
+        rsiPeriod: Number(process.env.BT_RSI_PERIOD ?? '14'),
+        // 30 é o valor de manual para mercado lateral. Para comprar correção
+        // DENTRO de uma tendência de alta ele quase nunca é atingido — as
+        // quedas param em 40-45 —, e o resultado é a estratégia não disparar
+        // nenhuma vez, que não é "perdeu": é "nunca foi testada".
+        rsiThreshold: new Decimal(process.env.BT_RSI_THRESHOLD ?? '30'),
         breakoutLookback: Number(process.env.BT_BREAKOUT_LOOKBACK ?? '20'),
         atrPeriod: Number(process.env.BT_ATR_PERIOD ?? '14'),
         atrStopMultiplier: new Decimal(process.env.BT_ATR_STOP_MULT ?? '2'),

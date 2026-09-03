@@ -20,7 +20,7 @@
 //
 // Sem I/O: recebe candles já carregados.
 import { Decimal } from 'decimal.js';
-import { detectBreakout, detectOversoldReversion, isAboveTrend, type Candle } from './signals';
+import { detectBreakout, detectOversoldReversion, isAboveTrend, rsiSeries, type Candle } from './signals';
 import { planPosition, updateTrailingStop } from './positionSizing';
 
 /**
@@ -109,6 +109,13 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
     let peakCapital = initialCapital;
     let maxDrawdown = new Decimal(0);
 
+    // Pré-computados UMA vez. Calcular por vela transformaria a varredura em
+    // O(n²): a série de RSI refeita desde o início a cada chamada, e o array
+    // de fechamentos realocado a cada filtro de tendência.
+    const closes = candles.map((c) => c.close);
+    const rsiValues =
+        params.entryStrategy === 'reversion' ? rsiSeries(candles, params.rsiPeriod ?? 14) : [];
+
     const closePosition = (pos: OpenPosition, exitIndex: number, exitPrice: Decimal, reason: Trade['exitReason']) => {
         const grossOut = pos.quantity.mul(exitPrice);
         const exitFee = grossOut.mul(params.feeRate);
@@ -163,7 +170,7 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
                 ? detectOversoldReversion(
                       candles,
                       i,
-                      params.rsiPeriod ?? 14,
+                      rsiValues,
                       params.rsiThreshold ?? new Decimal(30),
                       params.atrPeriod,
                   )
@@ -171,7 +178,7 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
         if (!signal.triggered || signal.atrValue === null) continue;
 
         if (params.trendPeriod > 0) {
-            const aboveTrend = isAboveTrend(candles, i, params.trendPeriod);
+            const aboveTrend = isAboveTrend(closes, i, params.trendPeriod);
             if (aboveTrend !== true) continue;
         }
 

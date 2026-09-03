@@ -10,6 +10,7 @@ import {
     isAboveTrend,
     lowestLowBefore,
     rsi,
+    rsiSeries,
     sma,
     trueRange,
     type Candle,
@@ -98,9 +99,11 @@ test('vela que TOCA a máxima mas fecha abaixo não dispara rompimento', () => {
 // --- Tendência --------------------------------------------------------------
 
 test('isAboveTrend separa acima e abaixo da média longa', () => {
-    const subindo = fromCloses([10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    // Recebe fechamentos já extraídos: extrair dentro alocaria o array inteiro
+    // a cada vela, tornando a varredura O(n²).
+    const subindo = fromCloses([10, 20, 30, 40, 50, 60, 70, 80, 90, 100]).map((c) => c.close);
     assert.equal(isAboveTrend(subindo, 9, 5), true);
-    const caindo = fromCloses([100, 90, 80, 70, 60, 50, 40, 30, 20, 10]);
+    const caindo = fromCloses([100, 90, 80, 70, 60, 50, 40, 30, 20, 10]).map((c) => c.close);
     assert.equal(isAboveTrend(caindo, 9, 5), false);
 });
 
@@ -139,7 +142,7 @@ test('reversão exige que o RSI tenha VIRADO para cima, não só estar baixo', (
     // Comprar com o RSI ainda caindo é apostar num fundo não confirmado.
     const aindaCaindo = fromCloses([100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 78, 76, 74, 72, 70, 68]);
     assert.equal(
-        detectOversoldReversion(aindaCaindo, 16, 14, d(30), 5).triggered,
+        detectOversoldReversion(aindaCaindo, 16, rsiSeries(aindaCaindo, 14), d(30), 5).triggered,
         false,
         'RSI baixo mas ainda caindo não dispara',
     );
@@ -149,7 +152,7 @@ test('reversão dispara quando o RSI estava baixo e virou para cima', () => {
     const viradaAposQueda = fromCloses([
         100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 78, 76, 74, 72, 70, 78,
     ]);
-    const sinal = detectOversoldReversion(viradaAposQueda, 16, 14, d(30), 5);
+    const sinal = detectOversoldReversion(viradaAposQueda, 16, rsiSeries(viradaAposQueda, 14), d(30), 5);
     assert.ok(sinal.triggered, 'queda profunda seguida de virada é o sinal de "comprar na baixa"');
     assert.ok(sinal.rsiValue!.greaterThan(0));
     assert.notEqual(sinal.atrValue, null);
@@ -157,12 +160,36 @@ test('reversão dispara quando o RSI estava baixo e virou para cima', () => {
 
 test('reversão não dispara em série lateral (nunca ficou sobrevendida)', () => {
     const lateral = fromCloses([100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 102]);
-    assert.equal(detectOversoldReversion(lateral, 16, 14, d(30), 5).triggered, false);
+    assert.equal(detectOversoldReversion(lateral, 16, rsiSeries(lateral, 14), d(30), 5).triggered, false);
 });
 
 test('reversão devolve não-disparado quando falta histórico, sem lançar', () => {
     const curta = fromCloses([100, 99, 98]);
-    const sinal = detectOversoldReversion(curta, 2, 14, d(30), 5);
+    const sinal = detectOversoldReversion(curta, 2, rsiSeries(curta, 14), d(30), 5);
     assert.equal(sinal.triggered, false);
     assert.equal(sinal.rsiValue, null);
+});
+
+// --- Série de RSI (a versão O(n) usada pelo backtest) ------------------------
+
+test('rsiSeries concorda com rsi() ponto a ponto', () => {
+    // As duas implementações precisam dar o MESMO número: a série existe só
+    // por performance, e uma divergência entre elas produziria backtest
+    // diferente da consulta pontual sem ninguém perceber.
+    const serie = fromCloses([100, 102, 101, 105, 103, 108, 106, 110, 107, 112, 109, 115, 111, 118, 114, 120, 117]);
+    const values = rsiSeries(serie, 14);
+    for (let i = 14; i < serie.length; i++) {
+        assert.equal(values[i]!.toFixed(10), rsi(serie, i, 14)!.toFixed(10), `divergiu no índice ${i}`);
+    }
+});
+
+test('rsiSeries devolve null onde falta histórico', () => {
+    const serie = fromCloses([100, 102, 101, 105, 103, 108, 106, 110, 107, 112, 109, 115, 111, 118, 114, 120]);
+    const values = rsiSeries(serie, 14);
+    for (let i = 0; i < 14; i++) assert.equal(values[i], null, `índice ${i} deveria ser null`);
+    assert.notEqual(values[14], null);
+});
+
+test('rsiSeries com série curta demais devolve tudo null sem estourar', () => {
+    assert.ok(rsiSeries(fromCloses([100, 101]), 14).every((v) => v === null));
 });

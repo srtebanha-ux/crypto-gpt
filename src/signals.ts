@@ -129,12 +129,16 @@ export function detectBreakout(candles: Candle[], index: number, lookback: numbe
  * Rompimentos contra a tendência principal falham com muito mais frequência —
  * o filtro reduz o número de operações e é justamente aí que ele ajuda:
  * cada operação evitada é uma taxa não paga.
+ *
+ * Recebe os fechamentos JÁ EXTRAÍDOS, não os candles: extrair aqui dentro
+ * alocaria o array inteiro a cada vela avaliada, transformando a varredura em
+ * O(n²). Num backtest de 10 mil velas isso é a diferença entre segundos e
+ * dezenas de minutos.
  */
-export function isAboveTrend(candles: Candle[], index: number, trendPeriod: number): boolean | null {
-    const closes = candles.map((c) => c.close);
+export function isAboveTrend(closes: Decimal[], index: number, trendPeriod: number): boolean | null {
     const trend = sma(closes, index, trendPeriod);
     if (trend === null) return null;
-    return candles[index].close.greaterThan(trend);
+    return closes[index].greaterThan(trend);
 }
 
 /**
@@ -182,6 +186,44 @@ export function rsi(candles: Candle[], endIndex: number, period: number): Decima
     return new Decimal(100).minus(new Decimal(100).dividedBy(rs.plus(1)));
 }
 
+/**
+ * Série completa de RSI em UMA passada, O(n).
+ *
+ * `rsi()` acima recalcula desde o índice 0 a cada chamada, o que é aceitável
+ * para uma consulta pontual e desastroso num backtest: chamada por vela, vira
+ * O(n²). Esta versão faz a suavização de Wilder incrementalmente e devolve o
+ * valor de cada índice (null onde ainda não há histórico suficiente).
+ */
+export function rsiSeries(candles: Candle[], period: number): (Decimal | null)[] {
+    const out: (Decimal | null)[] = new Array(candles.length).fill(null);
+    if (period <= 0 || candles.length <= period) return out;
+
+    let gainSum = new Decimal(0);
+    let lossSum = new Decimal(0);
+    for (let i = 1; i <= period; i++) {
+        const change = candles[i].close.minus(candles[i - 1].close);
+        if (change.greaterThan(0)) gainSum = gainSum.plus(change);
+        else lossSum = lossSum.plus(change.abs());
+    }
+    let avgGain = gainSum.dividedBy(period);
+    let avgLoss = lossSum.dividedBy(period);
+    out[period] = avgLoss.isZero()
+        ? new Decimal(100)
+        : new Decimal(100).minus(new Decimal(100).dividedBy(avgGain.dividedBy(avgLoss).plus(1)));
+
+    for (let i = period + 1; i < candles.length; i++) {
+        const change = candles[i].close.minus(candles[i - 1].close);
+        const gain = change.greaterThan(0) ? change : new Decimal(0);
+        const loss = change.lessThan(0) ? change.abs() : new Decimal(0);
+        avgGain = avgGain.mul(period - 1).plus(gain).dividedBy(period);
+        avgLoss = avgLoss.mul(period - 1).plus(loss).dividedBy(period);
+        out[i] = avgLoss.isZero()
+            ? new Decimal(100)
+            : new Decimal(100).minus(new Decimal(100).dividedBy(avgGain.dividedBy(avgLoss).plus(1)));
+    }
+    return out;
+}
+
 export interface ReversionSignal {
     triggered: boolean;
     rsiValue: Decimal | null;
@@ -206,13 +248,13 @@ export interface ReversionSignal {
 export function detectOversoldReversion(
     candles: Candle[],
     index: number,
-    rsiPeriod: number,
+    rsiValues: (Decimal | null)[],
     rsiThreshold: Decimal,
     atrPeriod: number,
 ): ReversionSignal {
     const atrValue = atr(candles, index, atrPeriod);
-    const current = rsi(candles, index, rsiPeriod);
-    const previous = rsi(candles, index - 1, rsiPeriod);
+    const current = index >= 0 && index < rsiValues.length ? rsiValues[index] : null;
+    const previous = index - 1 >= 0 && index - 1 < rsiValues.length ? rsiValues[index - 1] : null;
 
     if (current === null || previous === null || atrValue === null) {
         return { triggered: false, rsiValue: current, atrValue };
