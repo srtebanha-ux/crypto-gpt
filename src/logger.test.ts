@@ -86,3 +86,26 @@ test('LOG_LEVEL inválido/desconhecido cai no padrão (info) em vez de silenciar
     assert.equal(logLines.length, 1);
     delete process.env.LOG_LEVEL;
 });
+
+
+test('debug fica silencioso no nível padrão — detalhe por item não afoga o log', () => {
+    // LOG_LEVELS já declarava `debug: 0` antes de o método existir, então
+    // LOG_LEVEL=debug era aceito e nada podia emitir nele. Este teste fixa
+    // que os dois lados agora concordam.
+    const { createLogger } = freshLoggerModule(undefined);
+    const log = createLogger('test');
+    const { logLines } = captureConsole(() => log.debug('detalhe por item'));
+    assert.equal(logLines.length, 0);
+});
+
+test('LOG_LEVEL=debug faz o detalhe aparecer, marcado como DEBUG', () => {
+    const { createLogger } = freshLoggerModule('debug');
+    const log = createLogger('test');
+    const { logLines } = captureConsole(() => {
+        log.debug('detalhe por item');
+        log.info('resumo');
+    });
+    assert.equal(logLines.length, 2);
+    assert.match(logLines[0], /\[DEBUG\]/);
+    assert.match(logLines[1], /\[INFO\]/);
+});

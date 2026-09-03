@@ -63,7 +63,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 138 testes, todos sem acesso a rede).
+  `npm test` — 173 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -192,7 +192,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 138 testes, todos sem rede, devem passar.
+1. `npm test` — 173 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -227,7 +227,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 138 testes, sem rede
+npm test            # suíte de testes (node:test) — 173 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
@@ -725,3 +725,66 @@ O retorno **percentual** é idêntico em todas as linhas da tabela: escalar
 capital não cria vantagem, só torna a mesma vantagem grande o bastante para
 importar. A linha onde o lucro mensal deixa de ser irrelevante é o capital
 mínimo que justifica construir o motor de execução.
+
+## Medindo arbitragem on-chain (`dexArbitrageSniffer.ts`)
+
+Terceira ferramenta de **medição empírica** — não envia transação, não assina
+nada, não precisa de chave privada. Só `eth_call`.
+
+A pergunta que ela responde: vale escrever um contrato Solidity de flash loan?
+Escrever o contrato é caro e arriscado (código financeiro que executa
+atomicamente com valores emprestados); alguns `eth_call` custam nada.
+
+### Por que flash loan muda a equação
+
+Não é alavancagem no sentido de risco: o empréstimo nasce e morre na mesma
+transação. Não há posição mantida, não há liquidação, e se o ciclo não fecha a
+transação **reverte** — a perda máxima é o gas. Capital deixa de ser o gargalo
+que travou as estratégias anteriores.
+
+O que NÃO desaparece é a competição: on-chain a inclusão é **leiloada** (MEV).
+Você não precisa ser mais rápido, precisa entregar mais lucro ao validador — e
+no equilíbrio sobra pouco. Por isso o número que o sniffer mede é um **piso**:
+se nem o lucro bruto aparece, não há o que disputar.
+
+### A barreira é maior do que a intuição sugere
+
+Pool Uniswap V2 cobra **0,3% por hop**. Um ciclo de 2 hops custa 0,6%; de 3
+hops, 0,9% — contra os 0,225% da Binance com desconto de BNB. A taxa on-chain
+é quase 3× maior, não menor.
+
+O que compensa: faixas de taxa menores existem (0,05%/0,01%, pools de
+stablecoin — ajuste `DEX_POOL_FEE`), o preço on-chain é genuinamente mais lento
+que o de uma CEX, e o gas em L2 é barato.
+
+### Nenhum endereço vem embutido no código
+
+`DEX_POOLS` é obrigatório. Endereço errado **não estoura** — lê outro contrato
+ou devolve vazio, e vira número plausível e errado no relatório. Cada pool é
+verificado na leitura (`token0`/`token1`/`getReserves`, reservas dentro de
+uint112, `decimals()` em faixa de ERC-20); o que não passar é reportado com o
+motivo e descartado, nunca tratado em silêncio como pool vazio.
+
+Pelo mesmo motivo, os seletores de função em `evmAbi.ts` são constantes
+documentadas e toda leitura tem verificação de sanidade: o keccak-256 do
+Ethereum difere do SHA3-256 do Node, então os seletores não podem ser
+calculados em tempo de execução.
+
+```bash
+DEX_POOLS=0xabc...,0xdef... npm run sniff-dex
+```
+
+| Variável | Padrão | Para quê |
+| --- | --- | --- |
+| `DEX_POOLS` | — (obrigatório) | Endereços de pools V2, separados por vírgula. |
+| `DEX_RPC_URL` | `https://mainnet.base.org` | RPC da rede. |
+| `DEX_BASE_TOKEN` | WETH da Base | Token de partida e chegada do ciclo. |
+| `DEX_POOL_FEE` | `0.003` | Taxa por hop. Baixe para medir faixas menores. |
+| `FLASH_LOAN_FEE` | `0.0005` | Aave V3. Balancer é `0`. |
+| `DEX_GAS_UNITS` | `450000` | Gas estimado da transação de arbitragem. |
+| `DEX_MAX_RESERVE_FRACTION` | `0.1` | Teto de entrada como fração da menor reserva do ciclo. |
+
+Escopo: pools de **produto constante** (V2 e forks). Liquidez concentrada (V3)
+exige percorrer ticks e é uma ordem de grandeza mais complexa — como isto é
+medição, um piso conservador sobre V2 responde a pergunta, e se não houver
+oportunidade nem aqui, V3 não salvaria.

@@ -29,6 +29,13 @@ function line(level: string, scope: string, message: string, fields: LogFields):
 }
 
 export interface Logger {
+    /**
+     * Detalhe por item, silenciado por padrão. Existe para ferramentas de
+     * medição que avaliam milhares de candidatos por rodada: emitir cada um em
+     * `info` afogaria o resumo que importa, mas o detalhe é exatamente o que se
+     * quer ao investigar um resultado. Ligue com LOG_LEVEL=debug.
+     */
+    debug(message: string, fields?: LogFields): void;
     info(message: string, fields?: LogFields): void;
     warn(message: string, fields?: LogFields): void;
     error(message: string, fields?: LogFields): void;
@@ -36,6 +43,10 @@ export interface Logger {
 
 export function createLogger(scope: string): Logger {
     return {
+        debug(message, fields) {
+            if (LOG_LEVELS.debug < minLevel) return;
+            console.log(line('DEBUG', scope, message, fields));
+        },
         info(message, fields) {
             if (LOG_LEVELS.info < minLevel) return;
             console.log(line('INFO', scope, message, fields));
