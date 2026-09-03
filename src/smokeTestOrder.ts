@@ -74,7 +74,12 @@ async function main() {
     process.exit(0);
 }
 
-main().catch((err) => {
-    log.error('Falha no teste de fumaça de execução.', { error: err instanceof Error ? err.message : String(err) });
-    process.exit(1);
-});
+// Guardado como os demais executáveis do projeto: sem isto, qualquer
+// `import` deste módulo (inclusive de um teste) dispararia a medição de
+// verdade, indo à rede no meio da suíte.
+if (require.main === module) {
+    main().catch((err) => {
+        log.error('Falha no teste de fumaça de execução.', { error: err instanceof Error ? err.message : String(err) });
+        process.exit(1);
+    });
+}

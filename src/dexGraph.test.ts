@@ -100,18 +100,36 @@ test('hopsForCycle lança se o ciclo não fecha no token de partida', () => {
 
 // --- Enumeração de triângulos ----------------------------------------------
 
-test('encontra o triângulo A->B->C->A', () => {
+test('encontra o triângulo A->B->C->A entre as rotas retornadas', () => {
     const pools = [pool('0x1', A, B, '1', '1'), pool('0x2', B, C, '1', '1'), pool('0x3', C, A, '1', '1')];
     const cycles = findTriangularCycles(pools, A);
-    assert.equal(cycles.length, 1);
-    assert.deepEqual(cycles[0].path, [A, B, C, A].map((t) => t.toLowerCase()));
+    const esperado = [A, B, C, A].map((t) => t.toLowerCase());
+    assert.ok(
+        cycles.some((c) => c.path.length === esperado.length && c.path.every((t, i) => t === esperado[i])),
+        'a rota A->B->C->A tem que estar entre os ciclos encontrados',
+    );
 });
 
-test('o mesmo triângulo não é reportado duas vezes (ida e volta são o mesmo)', () => {
-    // Sem a chave canônica, A->B->C->A e A->C->B->A viriam como dois achados,
-    // dobrando o relatório sem acrescentar informação.
+test('OS DOIS sentidos do triângulo são reportados — não são a mesma operação', () => {
+    // A->B->C->A e A->C->B->A são rotas diferentes: se o ativo está caro num
+    // pool e barato no outro, só um dos sentidos dá lucro. Deduplicar por
+    // conjunto de pools (ignorando a ordem) descartaria metade das
+    // oportunidades, e o relatório sairia "nenhum ciclo lucrativo" com a
+    // mesma cara de um mercado sem oportunidade nenhuma.
     const pools = [pool('0x1', A, B, '1', '1'), pool('0x2', B, C, '1', '1'), pool('0x3', C, A, '1', '1')];
-    assert.equal(findTriangularCycles(pools, A).length, 1);
+    const cycles = findTriangularCycles(pools, A);
+    assert.equal(cycles.length, 2);
+
+    const rotas = cycles.map((c) => c.pools.map((p) => p.address).join('|'));
+    assert.equal(new Set(rotas).size, 2, 'as duas rotas têm que ser distintas');
+    // Uma é o inverso da outra: mesma trinca de pools, ordem oposta.
+    assert.deepEqual([...rotas[0].split('|')].reverse(), rotas[1].split('|'));
+});
+
+test('a mesma rota no MESMO sentido nunca aparece duplicada', () => {
+    const pools = [pool('0x1', A, B, '1', '1'), pool('0x2', B, C, '1', '1'), pool('0x3', C, A, '1', '1')];
+    const rotas = findTriangularCycles(pools, A).map((c) => c.pools.map((p) => p.address).join('|'));
+    assert.equal(new Set(rotas).size, rotas.length);
 });
 
 test('não confunde dois pools do mesmo par com um triângulo', () => {
@@ -151,18 +169,28 @@ test('todo triângulo encontrado produz hops válidos e fechados', () => {
 
 // --- Ciclos de 2 pools ------------------------------------------------------
 
-test('encontra dois pools do mesmo par (a arbitragem on-chain mais comum)', () => {
+test('encontra dois pools do mesmo par, nos DOIS sentidos', () => {
+    // Qual sentido dá lucro depende de onde o ativo está caro — algo que só a
+    // avaliação de tamanho responde. Emitir um só, escolhido pela ordem em que
+    // os pools apareceram, acertaria por sorte metade das vezes.
     const pools = [pool('0x1', A, B, '1000', '1000'), pool('0x2', A, B, '1000', '1100')];
     const cycles = findTwoPoolCycles(pools, A);
-    assert.equal(cycles.length, 1);
-    assert.equal(cycles[0].pools.length, 2);
-    assert.doesNotThrow(() => hopsForCycle(cycles[0]));
+    assert.equal(cycles.length, 2);
+    for (const cycle of cycles) {
+        assert.equal(cycle.pools.length, 2);
+        assert.doesNotThrow(() => hopsForCycle(cycle));
+    }
+    assert.deepEqual(
+        cycles[0].pools.map((p) => p.address),
+        [...cycles[1].pools.map((p) => p.address)].reverse(),
+    );
 });
 
 test('ciclo de 2 pools paga só duas taxas — piso menor que o do triângulo', () => {
     const doisPools = [pool('0x1', A, B, '1000000', '1000000'), pool('0x2', A, B, '1000000', '1006000')];
     const cycles = findTwoPoolCycles(doisPools, A);
     const hops = hopsForCycle(cycles[0]);
+    void cycles;
     assert.equal(hops.length, 2);
     // 0,6% de desalinhamento contra 0,6% de taxa: quase no limite, mas o
     // ciclo de 3 hops (0,9% de taxa) já estaria claramente no prejuízo.

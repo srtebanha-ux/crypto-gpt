@@ -100,10 +100,15 @@ function buildTokenIndex(pools: PoolInfo[]): Map<string, PoolInfo[]> {
  * proporcionalmente maior para valer a pena. Se não houver oportunidade em 3
  * hops, ciclos de 4 são ainda menos prováveis — e o espaço de busca explode.
  *
- * Cada ciclo aparece uma única vez: a mesma rota percorrida ao contrário é o
- * mesmo triângulo, e reportar as duas direções dobraria o relatório sem
- * acrescentar informação (a otimização de tamanho já descarta a direção que
- * não é lucrativa, devolvendo lucro zero).
+ * AS DUAS DIREÇÕES SÃO RETORNADAS, e isso não é redundância: percorrer
+ * A->B->C->A e A->C->B->A são operações diferentes. Se o ativo está caro no
+ * pool 2 e barato no pool 1, só um dos sentidos dá lucro — o outro dá
+ * prejuízo. Deduplicar por conjunto de pools (ignorando a ordem) descartaria
+ * metade das oportunidades, e nada no relatório denunciaria a perda: sairia
+ * "nenhum ciclo lucrativo" com a mesma cara de um mercado sem oportunidade.
+ *
+ * A chave canônica preserva a ORDEM justamente por isso — ela existe só para
+ * não emitir a mesma rota, no mesmo sentido, duas vezes.
  */
 export function findTriangularCycles(pools: PoolInfo[], startToken: string): Cycle[] {
     const start = startToken.toLowerCase();
@@ -123,9 +128,10 @@ export function findTriangularCycles(pools: PoolInfo[], startToken: string): Cyc
                 if (poolC.address === poolA.address || poolC.address === poolB.address) continue;
                 if (counterToken(poolC, tokenC) !== start) continue;
 
-                // Chave canônica: o conjunto de pools, independente da ordem
-                // ou do sentido em que o triângulo foi percorrido.
-                const key = [poolA.address, poolB.address, poolC.address].sort().join('|');
+                // Chave preservando a ORDEM: os dois sentidos do triângulo são
+                // ciclos distintos e ambos precisam ser avaliados. Ordenar
+                // aqui descartaria silenciosamente metade das oportunidades.
+                const key = [poolA.address, poolB.address, poolC.address].join('|');
                 if (seen.has(key)) continue;
                 seen.add(key);
 
@@ -146,6 +152,11 @@ export function findTriangularCycles(pools: PoolInfo[], startToken: string): Cyc
  * diferentes. É a forma mais simples e mais comum de arbitragem on-chain —
  * dois pools do mesmo par que discordam de preço — e paga só duas taxas em
  * vez de três, então o piso de desalinhamento é bem menor que o do triângulo.
+ *
+ * Devolve OS DOIS sentidos de cada par de pools. Qual deles dá lucro depende
+ * de onde o ativo está caro, o que só a avaliação de tamanho responde — e
+ * emitir apenas um sentido, escolhido pela ordem em que os pools apareceram,
+ * acertaria por sorte metade das vezes.
  */
 export function findTwoPoolCycles(pools: PoolInfo[], startToken: string): Cycle[] {
     const start = startToken.toLowerCase();
@@ -160,7 +171,9 @@ export function findTwoPoolCycles(pools: PoolInfo[], startToken: string): Cycle[
             if (poolB.address === poolA.address) continue;
             if (counterToken(poolB, start) !== other) continue;
 
-            const key = [poolA.address, poolB.address].sort().join('|');
+            // Ordem preservada: vender no pool A e recomprar no B é o oposto
+            // de vender no B e recomprar no A — só um dos dois dá lucro.
+            const key = [poolA.address, poolB.address].join('|');
             if (seen.has(key)) continue;
             seen.add(key);
 

@@ -53,7 +53,7 @@ let rpcId = 0;
  * lidas no começo já estarem obsoletas quando as últimas chegassem, o que
  * produziria "arbitragem" entre dois instantes diferentes do mercado.
  */
-async function batchEthCall(rpcUrl: string, calls: RpcCall[]): Promise<string[]> {
+export async function batchEthCall(rpcUrl: string, calls: RpcCall[]): Promise<string[]> {
     const payload = calls.map((c) => ({
         jsonrpc: '2.0',
         id: ++rpcId,
@@ -90,7 +90,7 @@ async function batchEthCall(rpcUrl: string, calls: RpcCall[]): Promise<string[]>
 const MAX_BATCH_SIZE = 100;
 
 /** Divide em lotes aceitáveis, preservando a ordem das respostas. */
-async function chunkedEthCall(rpcUrl: string, calls: RpcCall[]): Promise<string[]> {
+export async function chunkedEthCall(rpcUrl: string, calls: RpcCall[]): Promise<string[]> {
     const results: string[] = [];
     for (let i = 0; i < calls.length; i += MAX_BATCH_SIZE) {
         results.push(...(await batchEthCall(rpcUrl, calls.slice(i, i + MAX_BATCH_SIZE))));
@@ -115,7 +115,7 @@ async function fetchGasPriceWei(rpcUrl: string): Promise<Decimal> {
  * de produto constante é reportado e descartado — nunca silenciosamente
  * tratado como pool vazio, que entraria no grafo como preço fantasma.
  */
-async function loadPools(rpcUrl: string, addresses: string[], feeFraction: Decimal): Promise<PoolInfo[]> {
+export async function loadPools(rpcUrl: string, addresses: string[], feeFraction: Decimal): Promise<PoolInfo[]> {
     const calls: RpcCall[] = [];
     for (const address of addresses) {
         calls.push({ to: address, data: SELECTORS.token0 });
@@ -200,9 +200,20 @@ async function loadPools(rpcUrl: string, addresses: string[], feeFraction: Decim
  * já que o risco clássico de ficar preso num token ilíquido desaparece
  * quando a transação inteira reverte.
  */
-async function discoverPoolAddresses(rpcUrl: string, factory: string): Promise<string[]> {
+export async function discoverPoolAddresses(rpcUrl: string, factory: string): Promise<string[]> {
     const [lengthResult] = await batchEthCall(rpcUrl, [{ to: factory, data: SELECTORS.allPairsLength }]);
-    const total = decodeUintWord(lengthResult, 0).toNumber();
+    // Um endereço que não é factory devolve `0x`, e a decodificação estoura
+    // com "palavra ausente" — mensagem correta mas inútil para quem opera, que
+    // iria investigar o RPC em vez do endereço. Traduz para a causa provável.
+    let total: number;
+    try {
+        total = decodeUintWord(lengthResult, 0).toNumber();
+    } catch {
+        throw new Error(
+            `allPairsLength() não devolveu número em ${factory} (resposta: "${lengthResult}"). ` +
+                `O endereço provavelmente não é uma factory V2, ou é de outra rede.`,
+        );
+    }
     assertPlausiblePoolCount(total, factory);
 
     const mode = parseScanMode(process.env.DEX_SCAN_MODE);
@@ -356,7 +367,12 @@ async function main() {
     process.exit(0);
 }
 
-main().catch((err) => {
-    log.error('Falha ao medir arbitragem on-chain.', { error: err instanceof Error ? err.message : String(err) });
-    process.exit(1);
-});
+// Guardado como os demais executáveis do projeto: sem isto, qualquer
+// `import` deste módulo (inclusive de um teste) dispararia a medição de
+// verdade, indo à rede no meio da suíte.
+if (require.main === module) {
+    main().catch((err) => {
+        log.error('Falha ao medir arbitragem on-chain.', { error: err instanceof Error ? err.message : String(err) });
+        process.exit(1);
+    });
+}
