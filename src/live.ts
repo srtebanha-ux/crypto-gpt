@@ -189,11 +189,22 @@ async function bootstrap() {
                     error: err instanceof Error ? err.message : String(err),
                 });
             });
+            const stats = engine.takeOpportunityStats();
             log.info('Heartbeat — engine ativo.', {
                 halted: engine.isHalted(),
                 capital: engine.getCurrentCapital().toFixed(6),
                 triangulosMonitorados: triangles.length,
                 taxaTakerEfetiva: exchange.getFeeRate().toString(),
+                // Censo da janela: o que o mercado ofereceu de verdade. Sem
+                // isto, "não operou" não distingue "não havia oportunidade" de
+                // "havia e um gate barrou".
+                avaliacoesNaJanela: stats.evaluations,
+                passaramNoGateEstatistico: stats.statGatePassed,
+                melhorMargemLiquida: stats.bestNetMarginFraction
+                    ? `${stats.bestNetMarginFraction.mul(100).toFixed(4)}%`
+                    : 'n/d',
+                melhorTriangulo: stats.bestTriangleId ?? 'n/d',
+                margemNecessaria: `${new Decimal(MAX_SLIPPAGE).mul(100).toFixed(4)}%`,
             });
         }, heartbeatIntervalMin * 60_000).unref();
     }

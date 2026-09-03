@@ -96,6 +96,24 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
 // robô às cegas sobre uma posição não neutralizada ou uma estratégia que
 // está sistematicamente perdendo dinheiro.
 // ============================================================================
+/**
+ * Censo de uma janela de observação: o que o mercado real ofereceu enquanto o
+ * motor rodava, tenha ele operado ou não. É o que transforma "ficou parado" em
+ * um número auditável.
+ */
+export interface OpportunityStats {
+    /** Avaliações de triângulo feitas na janela (uma por tick relevante por triângulo). */
+    evaluations: number;
+    /** Quantas dessas passaram pelo gate estatístico (kill switch #1). */
+    statGatePassed: number;
+    /** Melhor lucro líquido projetado visto na janela, em USDT. Negativo = nem cobriu as taxas. */
+    bestNetProfit: Decimal | null;
+    /** Triângulo que produziu esse melhor valor. */
+    bestTriangleId: string | null;
+    /** O mesmo melhor valor como fração do capital — comparável direto com MAX_SLIPPAGE. */
+    bestNetMarginFraction: Decimal | null;
+}
+
 export class TriangularArbitrageEngine extends EventEmitter {
     private readonly exchange: IExchangeProvider;
     private readonly riskManager: RiskManager;
@@ -111,6 +129,8 @@ export class TriangularArbitrageEngine extends EventEmitter {
     private isExecutingCycle = false;
     private haltedPermanently = false;
     private currentCapital: Decimal;
+    /** Acumulador da janela atual de observação — ver takeOpportunityStats(). */
+    private opportunityStats = TriangularArbitrageEngine.emptyOpportunityStats();
 
     constructor(exchange: IExchangeProvider, riskManager: RiskManager, triangles: Triangle[], initialCapital: string, config: Partial<EngineConfig> = {}) {
         super();
@@ -146,6 +166,50 @@ export class TriangularArbitrageEngine extends EventEmitter {
 
     public isHalted(): boolean {
         return this.haltedPermanently;
+    }
+
+    private static emptyOpportunityStats(): OpportunityStats {
+        return {
+            evaluations: 0,
+            statGatePassed: 0,
+            bestNetProfit: null,
+            bestTriangleId: null,
+            bestNetMarginFraction: null,
+        };
+    }
+
+    /**
+     * Registra o quão perto ESTA avaliação chegou de valer a pena, para o
+     * relatório periódico do heartbeat.
+     *
+     * Existe porque "o robô não operou" é ambíguo e a ambiguidade é cara: pode
+     * significar "o mercado não ofereceu nada" (estratégia sem espaço) ou
+     * "ofereceu e algum gate barrou" (parâmetro mal calibrado). Sem esta
+     * medição, as duas situações produzem exatamente o mesmo log — capital
+     * parado — e não há como distinguir uma da outra a não ser adivinhando.
+     */
+    private recordOpportunitySample(triangleId: string, expectedNetProfit: Decimal, statGatePassed: boolean): void {
+        this.opportunityStats.evaluations += 1;
+        if (statGatePassed) this.opportunityStats.statGatePassed += 1;
+        const best = this.opportunityStats.bestNetProfit;
+        if (best === null || expectedNetProfit.greaterThan(best)) {
+            this.opportunityStats.bestNetProfit = expectedNetProfit;
+            this.opportunityStats.bestTriangleId = triangleId;
+            this.opportunityStats.bestNetMarginFraction = this.currentCapital.greaterThan(0)
+                ? expectedNetProfit.dividedBy(this.currentCapital)
+                : null;
+        }
+    }
+
+    /**
+     * Devolve o resumo da janela de observação e zera o acumulador, para que a
+     * próxima janela meça só o período seguinte (e não o acumulado desde o
+     * boot, que diluiria um pico recente numa média morna).
+     */
+    public takeOpportunityStats(): OpportunityStats {
+        const stats = this.opportunityStats;
+        this.opportunityStats = TriangularArbitrageEngine.emptyOpportunityStats();
+        return stats;
     }
 
     /**
@@ -230,10 +294,22 @@ export class TriangularArbitrageEngine extends EventEmitter {
         const statisticallySignificant =
             statGateDisabled ||
             (sampleCountBeforeUpdate >= this.config.statMinSamples && zScore.greaterThanOrEqualTo(this.config.statZThreshold));
-        if (!statisticallySignificant) return;
 
         // Kill switch #2 — determinístico (topo do book).
+        //
+        // Calculado ANTES do gate estatístico de propósito, mesmo que o gate
+        // vá barrar este tick: `expectedNetProfit` é a medição de quão perto o
+        // mercado real chegou de valer a pena, e ela precisa ser um censo de
+        // TODAS as avaliações. Medir só o que passou pelo gate estatístico
+        // daria uma amostra enviesada — justamente cega para o caso que
+        // importa diagnosticar ("apareceu oportunidade de verdade e algum
+        // gate barrou?" vs. "nunca apareceu nada"). O custo é um punhado de
+        // operações Decimal por avaliação; a decisão final é idêntica, só a
+        // ordem da aritmética muda.
         const analysis = this.riskManager.isTriangularArbitrageViable(this.currentCapital, p1Ask, p2Ask, p3Bid, this.exchange.getFeeRate());
+        this.recordOpportunitySample(triangle.id, analysis.expectedNetProfit, statisticallySignificant);
+
+        if (!statisticallySignificant) return;
         if (!analysis.viable) return;
 
         // Kill switch #3 — confirmação por profundidade real do book, só

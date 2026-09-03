@@ -63,7 +63,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 95 testes, todos sem acesso a rede).
+  `npm test` — 103 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -192,7 +192,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 95 testes, todos sem rede, devem passar.
+1. `npm test` — 103 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -227,7 +227,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 95 testes, sem rede
+npm test            # suíte de testes (node:test) — 103 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
@@ -643,3 +643,33 @@ O desconto é condicionado ao saldo real de BNB, revalidado a cada heartbeat:
 
 Para ativar: compre BNB no Spot, ligue "pagar taxas com BNB" na Binance
 (Configurações → Taxa de comissão) e defina `BNB_FEE_DISCOUNT=true`.
+
+## Censo de oportunidades no heartbeat
+
+"O robô não operou" é ambíguo, e a ambiguidade é cara: pode significar que o
+mercado não ofereceu nada (estratégia sem espaço) ou que ofereceu e um gate
+barrou (parâmetro mal calibrado). Sem medição, as duas situações produzem
+exatamente o mesmo log — capital parado — e só dá para distinguir adivinhando.
+
+Por isso cada heartbeat publica um censo da janela:
+
+| Campo | Significado |
+| --- | --- |
+| `avaliacoesNaJanela` | Avaliações de triângulo feitas desde o heartbeat anterior. |
+| `passaramNoGateEstatistico` | Quantas dessas passaram pelo kill switch #1. |
+| `melhorMargemLiquida` | Melhor retorno líquido projetado da janela, já descontadas as três taxas, como % do capital. **Negativo é o normal** — significa que o desalinhamento não cobriu nem as taxas. |
+| `melhorTriangulo` | Qual triângulo produziu esse melhor valor. |
+| `margemNecessaria` | O que seria preciso para disparar (`MAX_SLIPPAGE`). |
+
+Como ler:
+
+- `melhorMargemLiquida` sempre bem negativa (ex. `-0.2500%`) → o mercado não
+  chegou perto; afrouxar parâmetro não cria oportunidade, só faz operar no
+  prejuízo.
+- `melhorMargemLiquida` positiva mas abaixo de `margemNecessaria`, ou acima
+  dela com `passaramNoGateEstatistico` em zero → havia oportunidade real e um
+  gate barrou. **Aqui sim** faz sentido recalibrar.
+
+O `expectedNetProfit` que alimenta essa métrica é calculado **antes** do gate
+estatístico de propósito: medir só o que passou pelo gate daria uma amostra
+enviesada, cega justamente para o segundo caso acima.
