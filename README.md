@@ -780,6 +780,22 @@ O que compensa: faixas de taxa menores existem (0,05%/0,01%, pools de
 stablecoin — ajuste `DEX_POOL_FEE`), o preço on-chain é genuinamente mais lento
 que o de uma CEX, e o gas em L2 é barato.
 
+### O tamanho do lote de RPC se adapta sozinho
+
+Ler 200 pools são 600 chamadas `eth_call`. Fazer 600 requisições separadas
+demoraria o suficiente para as primeiras leituras ficarem obsoletas antes das
+últimas chegarem — e "arbitragem" entre dois instantes diferentes do mercado é
+invenção, não medição. Por isso as chamadas vão em lote.
+
+Cada provedor de RPC tem um limite próprio de chamadas por lote, e nenhum
+anuncia esse limite: o RPC público da Base aceita 10, provedores pagos aceitam
+centenas. Um número fixo no código quebrou na prática (`maximum 10 calls in 1
+batch`, varredura abortada). O scanner agora começa em `DEX_RPC_BATCH_SIZE`
+(padrão 10, seguro em endpoint público) e **reduz pela metade a cada recusa**,
+mantendo o tamanho que funcionou para os lotes seguintes. Endpoint que recusa
+até uma chamada única não faz lote nenhum, e aí o erro diz isso e manda trocar
+de `DEX_RPC_URL`.
+
 ### Nenhum endereço vem embutido no código
 
 `DEX_POOLS` é obrigatório. Endereço errado **não estoura** — lê outro contrato

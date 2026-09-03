@@ -322,3 +322,62 @@ test('factory() devolvendo endereço zero é recusado', async () => {
         restore();
     }
 });
+
+test('o tamanho do lote se adapta quando o RPC recusa lotes grandes', async () => {
+    // Defeito real: o tamanho do lote era fixo em 100. Funcionava no provedor
+    // que eu tinha em mente e quebrava no RPC público da Base, que aceita 10 —
+    // "maximum 10 calls in 1 batch", varredura abortada. O limite varia por
+    // provedor e não é anunciado, então o scanner precisa descobri-lo tentando.
+    const LIMITE = 10;
+    const original = globalThis.fetch;
+    const tamanhosPedidos: number[] = [];
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number }>;
+        tamanhosPedidos.push(payload.length);
+        if (payload.length > LIMITE) {
+            // Resposta de erro ÚNICA, não array — que é como um RPC real
+            // recusa um lote grande demais.
+            return {
+                ok: true,
+                json: async () => ({ jsonrpc: '2.0', error: { code: -32014, message: `maximum ${LIMITE} calls in 1 batch` }, id: null }),
+            };
+        }
+        return {
+            ok: true,
+            json: async () => payload.map((p, idx) => ({ jsonrpc: '2.0', id: p.id, result: '0x' + word(String(idx + 1)) })),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        const calls = Array.from({ length: 45 }, (_v, i) => ({ to: `0x${i.toString(16).padStart(40, '0')}`, data: SELECTORS.token0 }));
+        const results = await chunkedEthCall('http://fake', calls, 100);
+
+        assert.equal(results.length, 45, 'nenhuma chamada pode se perder na redução');
+        assert.ok(tamanhosPedidos.some((t) => t > LIMITE), 'a primeira tentativa usa o tamanho pedido');
+        assert.ok(
+            tamanhosPedidos.filter((t) => t > LIMITE).length <= 4,
+            'a redução vale para os lotes seguintes — não se re-tenta o tamanho grande a cada lote',
+        );
+    } finally {
+        globalThis.fetch = original;
+    }
+});
+
+test('endpoint que recusa até uma chamada única falha com orientação, não em silêncio', async () => {
+    // Encolher o lote não resolve endpoint sem suporte a batch. Aí a mensagem
+    // precisa dizer o que fazer, em vez de repetir "lote recusado" para sempre.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({ jsonrpc: '2.0', error: { code: -32600, message: 'batch not supported' }, id: null }),
+    })) as unknown as typeof fetch;
+
+    try {
+        await assert.rejects(
+            () => chunkedEthCall('http://fake', [{ to: '0x' + '11'.repeat(20), data: SELECTORS.token0 }], 8),
+            /recusou até uma única chamada|DEX_RPC_URL/,
+        );
+    } finally {
+        globalThis.fetch = original;
+    }
+});

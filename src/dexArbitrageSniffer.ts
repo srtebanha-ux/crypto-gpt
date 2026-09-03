@@ -70,7 +70,15 @@ export async function batchEthCall(rpcUrl: string, calls: RpcCall[]): Promise<st
 
     const body = (await res.json()) as Array<{ id: number; result?: string; error?: { message: string } }>;
     if (!Array.isArray(body)) {
-        throw new Error(`RPC não devolveu lote (o endpoint pode não suportar batch): ${JSON.stringify(body).slice(0, 300)}`);
+        // Um erro no lugar do array significa lote recusado. A causa mais comum
+        // é limite de tamanho — o RPC público da Base aceita 10 chamadas por
+        // lote, provedores pagos aceitam centenas —, e a mensagem varia por
+        // provedor. Em vez de tentar reconhecer cada texto, sinalizamos a
+        // possibilidade e deixamos o chamador encolher e tentar de novo: se
+        // falhar até com uma chamada, aí sim o endpoint não faz lote.
+        throw new BatchRejectedError(
+            `RPC recusou o lote de ${calls.length}: ${JSON.stringify(body).slice(0, 300)}`,
+        );
     }
 
     const byId = new Map(body.map((r) => [r.id, r]));
@@ -87,13 +95,56 @@ export async function batchEthCall(rpcUrl: string, calls: RpcCall[]): Promise<st
  * lotes muito grandes, e varrer 200 pools são 600 chamadas — bem acima do que
  * a maioria aceita de uma vez.
  */
-const MAX_BATCH_SIZE = 100;
+const DEFAULT_BATCH_SIZE = 10;
 
-/** Divide em lotes aceitáveis, preservando a ordem das respostas. */
-export async function chunkedEthCall(rpcUrl: string, calls: RpcCall[]): Promise<string[]> {
+/**
+ * Lote recusado pelo endpoint — provavelmente grande demais.
+ *
+ * Existe como tipo próprio para o chamador poder reagir encolhendo o lote, em
+ * vez de confundir isso com um erro de leitura de contrato.
+ */
+export class BatchRejectedError extends Error {}
+
+/**
+ * Divide em lotes aceitáveis, preservando a ordem das respostas.
+ *
+ * O tamanho do lote se ADAPTA: começa no configurado e cai pela metade a cada
+ * recusa, até 1. Fixar um número foi um erro real — 100 funcionava no provedor
+ * que eu tinha em mente e quebrava no RPC público da Base, que aceita 10. Como
+ * o limite varia por provedor e não é anunciado em lugar nenhum, descobri-lo
+ * na prática é mais confiável do que pedir para o operador adivinhar.
+ *
+ * O tamanho que funcionou vale para os lotes seguintes, então a redução é paga
+ * uma vez por execução, não a cada lote.
+ */
+export async function chunkedEthCall(
+    rpcUrl: string,
+    calls: RpcCall[],
+    initialBatchSize = Number(process.env.DEX_RPC_BATCH_SIZE ?? String(DEFAULT_BATCH_SIZE)),
+): Promise<string[]> {
     const results: string[] = [];
-    for (let i = 0; i < calls.length; i += MAX_BATCH_SIZE) {
-        results.push(...(await batchEthCall(rpcUrl, calls.slice(i, i + MAX_BATCH_SIZE))));
+    let size = Math.max(1, Math.floor(initialBatchSize));
+    let i = 0;
+    while (i < calls.length) {
+        try {
+            results.push(...(await batchEthCall(rpcUrl, calls.slice(i, i + size))));
+            i += size;
+        } catch (err) {
+            if (!(err instanceof BatchRejectedError) || size === 1) {
+                if (err instanceof BatchRejectedError) {
+                    throw new Error(
+                        `${err.message} — o endpoint recusou até uma única chamada em lote. ` +
+                            `Use outro DEX_RPC_URL (um provedor com suporte a JSON-RPC batch).`,
+                    );
+                }
+                throw err;
+            }
+            size = Math.max(1, Math.floor(size / 2));
+            log.warn('Lote recusado pelo RPC; reduzindo o tamanho e tentando de novo.', {
+                novoTamanho: size,
+                dica: 'Defina DEX_RPC_BATCH_SIZE para começar já no tamanho certo e evitar as tentativas.',
+            });
+        }
     }
     return results;
 }
