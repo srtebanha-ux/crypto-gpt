@@ -427,6 +427,29 @@ Variáveis de ambiente aceitas por `src/live.ts` (ver também `.env.example`):
 | `MIN_VIABLE_CAPITAL_USD` | `10` | Piso de capital operável (MIN_NOTIONAL da Binance × 3 pernas). Abaixo disso o motor loga ERRO a cada heartbeat em vez de aparentar saúde. |
 | `HEARTBEAT_INTERVAL_MIN` | `5` | Intervalo do log de heartbeat; `0` desativa. |
 
+### Rodando as ferramentas dentro do container do Railway
+
+O container é build de **produção**: `npm ci` roda sem as devDependencies, então
+`ts-node` e `tsc` não existem lá. Um `npm run directional` no console do Railway
+falha com `sh: 1: ts-node: not found` — e falharia igual para `sniff`,
+`backtest` e `sniff-dex`.
+
+Por isso cada ferramenta tem uma variante `:prod`, que roda o JavaScript já
+compilado em `dist/`:
+
+```bash
+# No console do Railway (produção)
+npm run directional:prod
+npm run backtest:prod
+npm run sniff-dex:prod
+
+# Na sua máquina (com devDependencies instaladas)
+npm run directional
+```
+
+As variantes sem sufixo continuam sendo as de desenvolvimento local. As
+variáveis de ambiente são idênticas nos dois casos.
+
 ## Medindo a oportunidade real (`opportunitySniffer.ts`)
 
 O motor de execução já descobre dinamicamente todos os triângulos operáveis
@@ -979,6 +1002,9 @@ stop e stop móvel em ATR.
 ```bash
 # Papel — nenhuma ordem, nenhuma chave, nenhum risco. É o padrão.
 DIRECTIONAL_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT npm run directional
+
+# No console do Railway, use a variante compilada (lá não há ts-node):
+DIRECTIONAL_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT npm run directional:prod
 ```
 
 ### Ele usa exatamente o mesmo código do backtest
