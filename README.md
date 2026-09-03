@@ -1027,6 +1027,29 @@ Três equivalências que preservam essa propriedade ao vivo:
    cobrada, não da estratégia. Ao vivo, a taxa vem da conta real (com desconto
    de BNB, se ativo), não de um palpite.
 
+### O heartbeat diz por que NÃO entrou
+
+Um motor direcional passa a maior parte do tempo sem operar, e zeros no
+heartbeat são ambíguos: "o mercado não ofereceu sinal" e "o motor está
+recusando tudo" produzem exatamente o mesmo log. Foi essa cegueira que deixou o
+motor de arbitragem rodar um dia inteiro com capital zero parecendo saudável.
+
+Por isso cada heartbeat traz o censo do ciclo — quantos sinais dispararam,
+quantos o filtro de tendência barrou, quantos o risco recusou — e uma linha por
+ativo com o motivo concreto:
+
+```
+porAtivo: "BTCUSDT: sem sinal (RSI 52.4, precisa < 45 e já subindo) |
+           ETHUSDT: SINAL barrado pelo filtro de tendência (abaixo da média de 50) |
+           SOLUSDT: SINAL recusado pelo risco: Notional 3.20 abaixo do mínimo da corretora (5.00) |
+           BNBUSDT: em posição (stop 612.40)"
+```
+
+Cada um desses quatro estados pede uma ação diferente, e sem o censo os quatro
+são indistinguíveis. O diagnóstico é da **última vela fechada**, não do
+instante: com vela de 1h há uma avaliação por hora, e o heartbeat diz isso em
+vez de deixar a leitura parecer mais fresca do que é.
+
 ### Caixa livre: o motor multi-ativo não se alavanca sozinho
 
 Cada posição é dimensionada contra o **caixa ainda livre**, não contra o

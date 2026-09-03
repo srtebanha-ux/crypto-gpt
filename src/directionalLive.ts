@@ -166,6 +166,19 @@ async function main() {
      * quatro vezes o dinheiro que existe — alavancagem acidental.
      */
     let committed = new Decimal(0);
+    /**
+     * Censo do ciclo: por que NÃO houve entrada.
+     *
+     * Sem isto o heartbeat mostra zeros para sempre e não dá para distinguir
+     * "o mercado não ofereceu sinal" de "o motor está recusando tudo" — foi
+     * exatamente essa cegueira que deixou o motor de arbitragem rodando um dia
+     * inteiro com capital zero parecendo saudável. Zeros só são boa notícia
+     * quando dá para ver o que os produziu.
+     */
+    const diagnostico = new Map<string, string>();
+    let sinaisDisparados = 0;
+    let bloqueadosPorTendencia = 0;
+    let recusadosPorRisco = 0;
     /** Fecha a última vela já processada por símbolo — evita reavaliar a mesma. */
     const lastSeenCandle = new Map<string, number>();
 
@@ -208,11 +221,16 @@ async function main() {
         if (candles.length < cfg.trendPeriod + cfg.atrPeriod + 5) return;
         const last = candles.length - 1;
         const candle = candles[last];
-        if (lastSeenCandle.get(symbol) === candle.openTime) return; // já avaliada
+        // Uma avaliação por vela fechada. Nos ciclos entre um fechamento e o
+        // seguinte não há decisão nova a tomar, e o diagnóstico exibido no
+        // heartbeat continua sendo o da última vela — por isso o heartbeat diz
+        // de quando ele é, em vez de deixar parecer leitura do instante.
+        if (lastSeenCandle.get(symbol) === candle.openTime) return;
         lastSeenCandle.set(symbol, candle.openTime);
 
         const pos = positions.get(symbol);
         if (pos) {
+            diagnostico.set(symbol, `em posição (stop ${pos.stopPrice.toFixed(2)})`);
             // Stop pela MÍNIMA da vela, igual ao backtest: se furou no meio do
             // caminho, a posição acabou ali.
             if (candle.low.lessThanOrEqualTo(pos.stopPrice)) {
@@ -236,11 +254,32 @@ async function main() {
             cfg.entryStrategy === 'reversion'
                 ? detectOversoldReversion(candles, last, rsiSeries(candles, cfg.rsiPeriod), cfg.rsiThreshold, cfg.atrPeriod)
                 : detectBreakout(candles, last, cfg.breakoutLookback, cfg.atrPeriod);
-        if (!signal.triggered || signal.atrValue === null) return;
+        const rsiAtual =
+            cfg.entryStrategy === 'reversion' && 'rsiValue' in signal && signal.rsiValue
+                ? signal.rsiValue.toFixed(1)
+                : null;
+
+        if (!signal.triggered || signal.atrValue === null) {
+            diagnostico.set(
+                symbol,
+                rsiAtual !== null
+                    ? `sem sinal (RSI ${rsiAtual}, precisa < ${cfg.rsiThreshold} e já subindo)`
+                    : 'sem sinal',
+            );
+            return;
+        }
+        sinaisDisparados += 1;
 
         if (cfg.trendPeriod > 0) {
             const closes = candles.map((c) => c.close);
-            if (isAboveTrend(closes, last, cfg.trendPeriod) !== true) return;
+            if (isAboveTrend(closes, last, cfg.trendPeriod) !== true) {
+                bloqueadosPorTendencia += 1;
+                // Comprar queda dentro de tendência de baixa é comprar algo que
+                // cai porque continua caindo. O filtro barrar é o filtro
+                // funcionando, não um problema a ser afrouxado sem medir.
+                diagnostico.set(symbol, `SINAL barrado pelo filtro de tendência (abaixo da média de ${cfg.trendPeriod})`);
+                return;
+            }
         }
 
         // Entrada ao preço corrente. No backtest é a abertura da vela seguinte;
@@ -257,7 +296,9 @@ async function main() {
             minNotional: cfg.minNotional,
         });
         if (plan.quantity.lessThanOrEqualTo(0)) {
-            log.debug(`${symbol}: sinal válido mas operação recusada pelo risco.`, { motivo: plan.reason });
+            recusadosPorRisco += 1;
+            diagnostico.set(symbol, `SINAL recusado pelo risco: ${plan.reason}`);
+            log.warn(`${symbol}: sinal válido mas operação recusada pelo risco.`, { motivo: plan.reason });
             return;
         }
 
@@ -274,6 +315,7 @@ async function main() {
         const filledStop = filledPrice.minus(signal.atrValue.mul(cfg.atrStopMultiplier));
         const notional = filledQty.mul(filledPrice);
         committed = committed.plus(notional);
+        diagnostico.set(symbol, 'ENTRADA executada neste ciclo');
         positions.set(symbol, {
             symbol,
             entryPrice: filledPrice,
@@ -300,9 +342,9 @@ async function main() {
             } catch (err) {
                 // Falha em um ativo não pode parar os outros nem derrubar o
                 // motor: ele existe para rodar ininterruptamente.
-                log.warn(`Falha ao avaliar ${symbol}; segue no próximo ciclo.`, {
-                    erro: err instanceof Error ? err.message : String(err),
-                });
+                const motivo = err instanceof Error ? err.message : String(err);
+                diagnostico.set(symbol, `FALHA: ${motivo}`);
+                log.warn(`Falha ao avaliar ${symbol}; segue no próximo ciclo.`, { erro: motivo });
             }
         }
 
@@ -316,6 +358,11 @@ async function main() {
             operacoesFechadas: wins + losses,
             acertos: wins,
             erros: losses,
+            sinaisDisparados,
+            bloqueadosPorTendencia,
+            recusadosPorRisco,
+            leituraDaVela: `uma avaliação por vela de ${cfg.interval} — o diagnóstico abaixo é da última fechada`,
+            porAtivo: cfg.symbols.map((s) => `${s}: ${diagnostico.get(s) ?? 'aguardando fechar a vela'}`).join(' | '),
         });
 
         await new Promise((resolve) => setTimeout(resolve, cfg.pollSeconds * 1000));
