@@ -63,7 +63,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 196 testes, todos sem acesso a rede).
+  `npm test` — 226 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -192,7 +192,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 196 testes, todos sem rede, devem passar.
+1. `npm test` — 226 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -227,7 +227,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 196 testes, sem rede
+npm test            # suíte de testes (node:test) — 226 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
@@ -836,3 +836,81 @@ Escopo: pools de **produto constante** (V2 e forks). Liquidez concentrada (V3)
 exige percorrer ticks e é uma ordem de grandeza mais complexa — como isto é
 medição, um piso conservador sobre V2 responde a pergunta, e se não houver
 oportunidade nem aqui, V3 não salvaria.
+
+## Estratégia direcional e backtest
+
+Coisa diferente do resto do projeto. A arbitragem é delta-neutra: não ganha se
+o ativo sobe nem perde se cai. Uma estratégia **direcional** compra esperando
+alta — fica exposta ao preço, e pode dar prejuízo sem que nada tenha falhado
+tecnicamente.
+
+### "Correr mais risco" e "errar menos" são pedidos opostos
+
+Mais risco é literalmente mais variância: mais operações que dão errado. O que
+existe é a separação entre dois tipos de erro, e só um é eliminável:
+
+- **Erro de execução** — posição grande demais, entrar sem stop, dobrar aposta
+  perdendo, arredondar quantidade para cima e estourar o saldo. São bugs, e vão
+  a zero. É disso que trata `positionSizing.ts`.
+- **Risco de mercado** — comprou e o preço caiu. Irredutível: é o risco que se
+  escolheu correr.
+
+Uma estratégia direcional saudável erra 40-60% das vezes e ainda assim ganha,
+porque as perdas são pequenas e limitadas e os ganhos correm. Perseguir "taxa
+de acerto alta" leva ao caso oposto: acertar 90% com perdas 10x maiores que os
+ganhos quebra a conta, e `expectancyPerTrade` existe para tornar isso explícito.
+
+### Dimensionamento pela perda máxima (`positionSizing.ts`)
+
+```
+quantidade = (capital × risco_por_operação) / (entrada − stop)
+```
+
+O tamanho vem da **distância até o stop**, não do capital disponível. Isso
+mantém a perda por operação constante entre ativos de volatilidade diferente, e
+é o que permite errar várias vezes seguidas continuando vivo —
+`consecutiveLossesSurvivable` mostra quantas: a 2% por operação são dezenas, a
+10% são menos de dez.
+
+Recusar-se a operar é resposta legítima e frequente, não exceção: stop do lado
+errado, notional abaixo do mínimo da corretora, quantidade truncada a zero.
+Todas devolvem quantidade zero **com motivo**, e a recusa aparece no relatório
+como `recusadasPeloRisco` em vez de virar "nenhum sinal".
+
+### O backtest não pode mentir a favor (`backtest.ts`)
+
+Três decisões que impedem resultado bonito e irreproduzível ao vivo:
+
+1. **Taxa em toda entrada e toda saída.** Foi ignorar taxa que fez a arbitragem
+   triangular parecer viável no papel.
+2. **Decisão na vela N, execução na abertura da N+1.** Decidir e executar no
+   mesmo fechamento é *look-ahead*: ao vivo, quando o fechamento é conhecido,
+   aquele preço já passou.
+3. **Stop checado pela mínima da vela, não pelo fechamento.** Se o preço furou
+   o stop no meio da vela, a posição acabou ali — mesmo que tenha fechado
+   acima. O contrário esconde justamente as perdas.
+
+```bash
+BT_SYMBOL=ZECUSDT BT_INTERVAL=1h BT_CANDLES=2000 npm run backtest
+```
+
+O relatório sai em **três janelas** (período completo, primeira metade, segunda
+metade) e com a referência de **comprar e segurar**. Ambas as coisas são
+defesas contra autoengano: parâmetros que funcionam só na primeira metade foram
+moldados ao passado; e se comprar e segurar rende mais, a estratégia está
+pagando taxa para chegar a um lugar pior.
+
+| Variável | Padrão | Para quê |
+| --- | --- | --- |
+| `BT_SYMBOL` | `ZECUSDT` | Par a testar. |
+| `BT_INTERVAL` | `1h` | Tamanho da vela. |
+| `BT_CANDLES` | `2000` | Quantas velas de histórico. |
+| `BT_CAPITAL` | `20` | Capital inicial simulado. |
+| `BT_RISK_FRACTION` | `0.02` | Fração do capital arriscada por operação. |
+| `BT_BREAKOUT_LOOKBACK` | `20` | Velas olhadas para trás no rompimento. |
+| `BT_ATR_STOP_MULT` | `2` | Stop = entrada − (mult × ATR). |
+| `BT_TREND_PERIOD` | `50` | Média de tendência; `0` desliga o filtro. |
+| `BT_TRAIL_FRACTION` | `0.15` | Trailing stop; `0` desliga. |
+| `BT_FEE_RATE` | `0.00075` | Taker com desconto de BNB. |
+
+Backtest mede o passado. É o piso da decisão, não promessa de futuro.

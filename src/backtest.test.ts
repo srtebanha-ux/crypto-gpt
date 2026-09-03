@@ -1,0 +1,237 @@
+// Arquivo: src/backtest.test.ts
+//
+// Um backtest só vale se ele não mentir a favor. Estes testes cobrem
+// exatamente as três formas de um backtest produzir resultado bonito e
+// irreproduzível ao vivo: look-ahead, stop checado pelo fechamento, e taxa
+// esquecida.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { Decimal } from 'decimal.js';
+import { runBacktest, type StrategyParams } from './backtest';
+import type { Candle } from './signals';
+
+Decimal.set({ precision: 30, rounding: Decimal.ROUND_DOWN });
+
+const d = (v: string | number) => new Decimal(String(v));
+
+function candle(open: number, high: number, low: number, close: number, i = 0): Candle {
+    return {
+        openTime: i * 60_000,
+        open: d(open),
+        high: d(high),
+        low: d(low),
+        close: d(close),
+        volume: d(1000),
+    };
+}
+
+/** Série lateral, para servir de histórico antes do evento que interessa. */
+function flatSeries(count: number, price: number): Candle[] {
+    return Array.from({ length: count }, (_, i) => candle(price, price + 1, price - 1, price, i));
+}
+
+const BASE_PARAMS: StrategyParams = {
+    breakoutLookback: 10,
+    atrPeriod: 5,
+    atrStopMultiplier: d(2),
+    trendPeriod: 0,
+    riskFraction: d('0.02'),
+    trailFraction: d(0),
+    feeRate: d('0.001'),
+};
+
+test('sem rompimento nenhum, não opera e o capital fica intacto', () => {
+    const result = runBacktest(flatSeries(60, 100), d(1000), BASE_PARAMS);
+    assert.equal(result.trades.length, 0);
+    assert.equal(result.finalCapital.toString(), '1000');
+    assert.equal(result.totalFees.toString(), '0');
+});
+
+test('entra na ABERTURA da vela seguinte, nunca no fechamento do sinal', () => {
+    // Look-ahead é o erro que produz backtest excelente e irreproduzível: ao
+    // vivo, quando o fechamento é conhecido, aquele preço já passou.
+    const candles = [...flatSeries(20, 100)];
+    candles.push(candle(100, 120, 99, 118, 20)); // rompimento
+    candles.push(candle(115, 130, 114, 128, 21)); // abre em 115 — é aqui que entra
+    candles.push(...flatSeries(5, 128).map((c, i) => ({ ...c, openTime: (22 + i) * 60_000 })));
+
+    const result = runBacktest(candles, d(10000), BASE_PARAMS);
+    assert.equal(result.trades.length, 1);
+    assert.equal(result.trades[0].entryPrice.toString(), '115', 'entrada tem que ser a abertura da vela seguinte');
+    assert.equal(result.trades[0].entryIndex, 21);
+});
+
+test('stop é checado pela MÍNIMA da vela, não pelo fechamento', () => {
+    // Uma vela que fura o stop no meio e fecha acima encerrou a posição ali.
+    // Checar pelo fechamento esconderia justamente as perdas.
+    const candles = [...flatSeries(20, 100)];
+    candles.push(candle(100, 120, 99, 118, 20)); // sinal
+    candles.push(candle(115, 116, 114, 115, 21)); // entra em 115
+    // ATR(5) no índice 20 = (2+2+2+2+21)/5 = 5.8 — a vela do rompimento tem
+    // range grande e puxa a média. Stop = 115 − 2×5.8 = 103.4.
+    // Esta vela fura 103.4 na mínima mas fecha em 118, bem acima.
+    candles.push(candle(115, 119, 100, 118, 22));
+    candles.push(...flatSeries(3, 118).map((c, i) => ({ ...c, openTime: (23 + i) * 60_000 })));
+
+    const result = runBacktest(candles, d(10000), BASE_PARAMS);
+    assert.equal(result.trades.length, 1);
+    assert.equal(result.trades[0].exitReason, 'stop');
+    assert.ok(
+        result.trades[0].exitPrice.lessThan(d(115)),
+        'saiu no stop, apesar de a vela ter fechado acima da entrada',
+    );
+    assert.ok(result.trades[0].netProfit.lessThan(0));
+});
+
+test('toda operação paga taxa na entrada E na saída', () => {
+    // Foi ignorar taxa que fez a arbitragem triangular parecer viável no papel.
+    const candles = [...flatSeries(20, 100)];
+    candles.push(candle(100, 120, 99, 118, 20));
+    candles.push(candle(115, 116, 114, 115, 21));
+    candles.push(candle(115, 119, 100, 118, 22)); // fura o stop em 103.4
+    candles.push(...flatSeries(3, 118).map((c, i) => ({ ...c, openTime: (23 + i) * 60_000 })));
+
+    const comTaxa = runBacktest(candles, d(10000), BASE_PARAMS);
+    const semTaxa = runBacktest(candles, d(10000), { ...BASE_PARAMS, feeRate: d(0) });
+
+    assert.ok(comTaxa.totalFees.greaterThan(0));
+    assert.equal(semTaxa.totalFees.toString(), '0');
+    assert.ok(
+        comTaxa.finalCapital.lessThan(semTaxa.finalCapital),
+        'a mesma sequência tem que render menos quando se paga taxa',
+    );
+
+    const t = comTaxa.trades[0];
+    const taxaEsperada = t.quantity.mul(t.entryPrice).mul('0.001').plus(t.quantity.mul(t.exitPrice).mul('0.001'));
+    assert.equal(t.feesPaid.toFixed(8), taxaEsperada.toFixed(8));
+});
+
+test('posição aberta no fim dos dados é encerrada, não ignorada', () => {
+    // Ignorá-la esconderia uma perda em aberto e inflaria o resultado.
+    const candles = [...flatSeries(20, 100)];
+    candles.push(candle(100, 120, 99, 118, 20));
+    candles.push(candle(115, 130, 114, 128, 21));
+    candles.push(candle(128, 140, 127, 138, 22)); // ainda subindo quando os dados acabam
+
+    const result = runBacktest(candles, d(10000), BASE_PARAMS);
+    assert.equal(result.trades.length, 1);
+    assert.equal(result.trades[0].exitReason, 'fim-dos-dados');
+});
+
+test('filtro de tendência bloqueia rompimento abaixo da média longa', () => {
+    // Menos operações é o objetivo: cada operação evitada é uma taxa não paga.
+    const descendo: Candle[] = [];
+    for (let i = 0; i < 40; i++) {
+        const p = 200 - i * 2; // tendência de baixa
+        descendo.push(candle(p, p + 1, p - 1, p, i));
+    }
+    // Rompe a máxima dos 10 períodos anteriores (índice 30, máxima 141) mas
+    // fecha abaixo da média de 30 períodos (≈149,8): é exatamente o caso que
+    // o filtro existe para barrar — rompimento contra a tendência principal.
+    descendo.push(candle(140, 148, 139, 145, 40));
+    descendo.push(candle(145, 150, 144, 148, 41));
+    descendo.push(candle(148, 152, 147, 150, 42));
+
+    const semFiltro = runBacktest(descendo, d(10000), BASE_PARAMS);
+    const comFiltro = runBacktest(descendo, d(10000), { ...BASE_PARAMS, trendPeriod: 30 });
+
+    assert.ok(semFiltro.trades.length > 0, 'sem filtro, o rompimento dispara');
+    assert.equal(comFiltro.trades.length, 0, 'com filtro, não compra contra a tendência');
+});
+
+test('trailing stop protege lucro quando o preço sobe e depois volta', () => {
+    const candles = [...flatSeries(20, 100)];
+    candles.push(candle(100, 120, 99, 118, 20));
+    candles.push(candle(115, 116, 114, 115, 21)); // entra em 115
+    candles.push(candle(115, 200, 114, 198, 22)); // dispara forte
+    candles.push(candle(198, 199, 150, 155, 23)); // devolve boa parte
+
+    const semTrailing = runBacktest(candles, d(10000), BASE_PARAMS);
+    const comTrailing = runBacktest(candles, d(10000), { ...BASE_PARAMS, trailFraction: d('0.10') });
+
+    assert.ok(
+        comTrailing.finalCapital.greaterThan(semTrailing.finalCapital),
+        'o trailing tem que capturar parte da alta antes da devolução',
+    );
+});
+
+test('operação recusada pelo risco é contada, não silenciada', () => {
+    // Capital pequeno com notional mínimo alto: a resposta certa é não operar,
+    // e isso precisa aparecer no relatório em vez de virar "nenhum sinal".
+    const candles = [...flatSeries(20, 100)];
+    candles.push(candle(100, 120, 99, 118, 20));
+    candles.push(candle(115, 130, 114, 128, 21));
+    candles.push(...flatSeries(3, 128).map((c, i) => ({ ...c, openTime: (22 + i) * 60_000 })));
+
+    const result = runBacktest(candles, d(20), { ...BASE_PARAMS, minNotional: d(1000) });
+    assert.equal(result.trades.length, 0);
+    assert.ok(result.skippedByRisk > 0, 'a recusa precisa ser visível no resumo');
+});
+
+test('profitFactor é null sem nenhuma perda, em vez de "infinito"', () => {
+    // Dividir por zero daria a impressão de estratégia perfeita, quando na
+    // verdade a amostra é pequena demais para dizer qualquer coisa.
+    const candles = [...flatSeries(20, 100)];
+    candles.push(candle(100, 120, 99, 118, 20));
+    candles.push(candle(115, 130, 114, 128, 21));
+    candles.push(candle(128, 140, 127, 138, 22));
+
+    const result = runBacktest(candles, d(10000), BASE_PARAMS);
+    assert.ok(result.trades.every((t) => t.netProfit.greaterThan(0)));
+    assert.equal(result.profitFactor, null);
+});
+
+test('drawdown máximo é medido contra o PICO anterior, não contra o início', () => {
+    const candles = [...flatSeries(20, 100)];
+    candles.push(candle(100, 120, 99, 118, 20));
+    candles.push(candle(115, 116, 114, 115, 21));
+    candles.push(candle(115, 119, 100, 118, 22)); // fura o stop, perde
+    candles.push(...flatSeries(3, 118).map((c, i) => ({ ...c, openTime: (23 + i) * 60_000 })));
+
+    const result = runBacktest(candles, d(10000), BASE_PARAMS);
+    assert.ok(result.maxDrawdownFraction.greaterThan(0));
+    assert.ok(result.maxDrawdownFraction.lessThan(1));
+});
+
+test('capital final bate com a soma dos lucros líquidos das operações', () => {
+    // Invariante de contabilidade: se estes dois divergirem, algum custo está
+    // sendo contado duas vezes ou nenhuma.
+    const candles = [...flatSeries(20, 100)];
+    candles.push(candle(100, 120, 99, 118, 20));
+    candles.push(candle(115, 116, 114, 115, 21));
+    candles.push(candle(115, 119, 100, 118, 22));
+    candles.push(...flatSeries(10, 118).map((c, i) => ({ ...c, openTime: (23 + i) * 60_000 })));
+
+    const result = runBacktest(candles, d(10000), BASE_PARAMS);
+    const somaLucros = result.trades.reduce((acc, t) => acc.plus(t.netProfit), d(0));
+    assert.equal(result.finalCapital.toFixed(8), d(10000).plus(somaLucros).toFixed(8));
+    assert.equal(result.totalNetProfit.toFixed(8), somaLucros.toFixed(8));
+});
+
+// --- Validação da série (backtestRunner) -------------------------------------
+
+test('série com candles fora de ordem é rejeitada', async () => {
+    const { assertUsableSeries } = await import('./backtestRunner');
+    const fora = [candle(100, 101, 99, 100, 5), candle(100, 101, 99, 100, 2)];
+    assert.throws(() => assertUsableSeries(fora, 60_000), /fora de ordem/);
+});
+
+test('série curta demais é rejeitada em vez de gerar sinais sobre nada', () => {
+    return import('./backtestRunner').then(({ assertUsableSeries }) => {
+        assert.throws(() => assertUsableSeries([candle(100, 101, 99, 100, 0)], 60_000), /curta demais/);
+    });
+});
+
+test('parseKline lê o formato posicional da Binance sem trocar campos', async () => {
+    // O array da Binance é posicional: trocar high com low aqui inverteria
+    // stops e máximas sem lançar exceção nenhuma.
+    const { parseKline } = await import('./backtestRunner');
+    const c = parseKline([1700000000000, '10.5', '12.0', '9.5', '11.0', '1234.5', 1700003599999]);
+    assert.equal(c.openTime, 1700000000000);
+    assert.equal(c.open.toString(), '10.5');
+    assert.equal(c.high.toString(), '12');
+    assert.equal(c.low.toString(), '9.5');
+    assert.equal(c.close.toString(), '11');
+    assert.equal(c.volume.toString(), '1234.5');
+    assert.ok(c.high.greaterThanOrEqualTo(c.low), 'máxima nunca abaixo da mínima');
+});

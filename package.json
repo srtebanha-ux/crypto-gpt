@@ -13,6 +13,7 @@
     "sniff": "ts-node src/opportunitySniffer.ts",
     "sniff-funding": "ts-node src/fundingRateSniffer.ts",
     "sniff-dex": "ts-node src/dexArbitrageSniffer.ts",
+    "backtest": "ts-node src/backtestRunner.ts",
     "simulate": "ts-node src/monteCarloSimulation.ts",
     "paper-trade": "ts-node src/paperTradingSimulation.ts",
     "smoke-test-order": "ts-node src/smokeTestOrder.ts",
