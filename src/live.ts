@@ -102,6 +102,25 @@ export function resolveEngineConfig(): Partial<EngineConfig> {
     return config;
 }
 
+/**
+ * Piso abaixo do qual o motor não consegue operar de forma alguma: a Binance
+ * rejeita ordens abaixo do MIN_NOTIONAL do símbolo (tipicamente US$ 5-10), e um
+ * ciclo triangular precisa de TRÊS pernas válidas. Com capital abaixo disso
+ * nenhum ciclo pode existir — o processo fica de pé consumindo recurso e
+ * logando "engine ativo" enquanto é estruturalmente incapaz de operar.
+ */
+const DEFAULT_MIN_VIABLE_CAPITAL_USD = '10';
+
+/**
+ * Um motor sem capital utilizável não é um motor ocioso — é um motor quebrado
+ * que se parece com um ocioso. Os dois produzem exatamente o mesmo log
+ * ("nenhum ciclo disparou"), e confundir um com o outro custa horas
+ * investigando o mercado quando o problema é a conta estar vazia.
+ */
+export function isCapitalViable(capital: Decimal, minViable: Decimal): boolean {
+    return capital.greaterThanOrEqualTo(minViable);
+}
+
 export async function resolveStartingCapital(exchange: BinanceExchangeProvider, configuredCapital: Decimal): Promise<Decimal> {
     try {
         const freeUsdt = await exchange.fetchAvailableBalance('USDT');
@@ -156,6 +175,20 @@ async function bootstrap() {
     });
 
     const startingCapital = await resolveStartingCapital(exchange, configuredCapital);
+    const minViableCapital = new Decimal(process.env.MIN_VIABLE_CAPITAL_USD ?? DEFAULT_MIN_VIABLE_CAPITAL_USD);
+    const capitalViable = isCapitalViable(startingCapital, minViableCapital);
+    if (!capitalViable) {
+        // ERROR, não WARN: sem capital utilizável o processo não está operando
+        // em condições ruins — ele está incapaz de operar, e continuar
+        // reportando "engine ativo" nesse estado é o que faz alguém procurar o
+        // problema no mercado em vez de na conta.
+        log.error('*** CAPITAL INSUFICIENTE: o motor NÃO consegue operar. Nenhum ciclo pode disparar neste estado. ***', {
+            capitalDisponivel: startingCapital.toString(),
+            minimoViavel: minViableCapital.toString(),
+            causaProvavel:
+                'USDT livre insuficiente na carteira Spot. Verifique: (a) ordens abertas travando o saldo (o motor lê "free", não "locked"), (b) fundos em outra carteira (Funding/Earn) em vez de Spot, (c) saldo em outro ativo que não USDT.',
+        });
+    }
     const riskManager = new RiskManager(MAX_SLIPPAGE);
     const engine = new TriangularArbitrageEngine(exchange, riskManager, triangles, startingCapital.toString(), resolveEngineConfig());
 
@@ -190,6 +223,16 @@ async function bootstrap() {
                 });
             });
             const stats = engine.takeOpportunityStats();
+            const capitalAtual = engine.getCurrentCapital();
+            if (!isCapitalViable(capitalAtual, minViableCapital)) {
+                // Repetido a cada heartbeat de propósito: o erro de boot rola
+                // para fora da janela de log em minutos, e sem isto o operador
+                // volta a ver só heartbeats de aparência saudável.
+                log.error('*** CAPITAL INSUFICIENTE: o motor continua incapaz de operar — os números abaixo NÃO medem o mercado. ***', {
+                    capitalAtual: capitalAtual.toString(),
+                    minimoViavel: minViableCapital.toString(),
+                });
+            }
             log.info('Heartbeat — engine ativo.', {
                 halted: engine.isHalted(),
                 capital: engine.getCurrentCapital().toFixed(6),
@@ -200,9 +243,14 @@ async function bootstrap() {
                 // "havia e um gate barrou".
                 avaliacoesNaJanela: stats.evaluations,
                 passaramNoGateEstatistico: stats.statGatePassed,
+                // "n/d" com capital zerado não é ausência de oportunidade — é
+                // ausência de medição: a margem é fração do capital, e sobre
+                // zero não há fração que signifique alguma coisa.
                 melhorMargemLiquida: stats.bestNetMarginFraction
                     ? `${stats.bestNetMarginFraction.mul(100).toFixed(4)}%`
-                    : 'n/d',
+                    : capitalAtual.greaterThan(0)
+                      ? 'n/d (nenhuma avaliação na janela)'
+                      : 'n/d (SEM CAPITAL — não mede nada)',
                 melhorTriangulo: stats.bestTriangleId ?? 'n/d',
                 margemNecessaria: `${new Decimal(MAX_SLIPPAGE).mul(100).toFixed(4)}%`,
             });

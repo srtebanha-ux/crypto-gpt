@@ -7,7 +7,8 @@
 // conectar de verdade. Guardado agora com `if (require.main === module)`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRequiredNumberEnv, resolveEngineConfig, resolveIntermediateBases, resolveLiveMode } from './live';
+import { Decimal } from 'decimal.js';
+import { isCapitalViable, parseRequiredNumberEnv, resolveEngineConfig, resolveIntermediateBases, resolveLiveMode } from './live';
 
 function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
     const original: Record<string, string | undefined> = {};
@@ -90,4 +91,23 @@ test('resolveLiveMode exige BINANCE_LIVE_CONFIRM exato quando BINANCE_LIVE=true 
     withEnv({ BINANCE_LIVE: 'true', BINANCE_LIVE_CONFIRM: 'I_UNDERSTAND_THE_RISK' }, () => {
         assert.equal(resolveLiveMode(), true);
     });
+});
+
+// --- Piso de capital viável -------------------------------------------------
+// Um motor sem capital utilizável e um motor ocioso produzem o mesmo log
+// ("nenhum ciclo disparou"). Estes testes fixam a fronteira que separa os dois.
+test('isCapitalViable: capital zero nunca é viável', () => {
+    assert.equal(isCapitalViable(new Decimal('0'), new Decimal('10')), false);
+});
+
+test('isCapitalViable: abaixo do mínimo (MIN_NOTIONAL da Binance) não é viável', () => {
+    assert.equal(isCapitalViable(new Decimal('9.99'), new Decimal('10')), false);
+});
+
+test('isCapitalViable: exatamente no mínimo é viável', () => {
+    assert.equal(isCapitalViable(new Decimal('10'), new Decimal('10')), true);
+});
+
+test('isCapitalViable: acima do mínimo é viável', () => {
+    assert.equal(isCapitalViable(new Decimal('20'), new Decimal('10')), true);
 });
