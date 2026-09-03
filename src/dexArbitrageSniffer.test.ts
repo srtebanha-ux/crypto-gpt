@@ -385,6 +385,8 @@ test('endpoint que recusa até uma chamada única falha com orientação, não e
 // As esperas reais somam mais de meio minuto; o que os testes verificam é o
 // comportamento, não a duração.
 process.env.DEX_RPC_RETRY_BASE_MS = '1';
+// Sem isto, cada teste pagaria o ritmo real de 10 chamadas/s.
+process.env.DEX_RPC_CALLS_PER_SEC = '100000';
 
 test('limite de taxa é esperado e retentado, não tratado como falha do pool', async () => {
     // O RPC público da Base recusa por limite de taxa no meio da varredura.
@@ -432,7 +434,7 @@ test('limite de taxa persistente falha com as três saídas possíveis nomeadas'
     try {
         await assert.rejects(
             () => chunkedEthCall('http://fake', [{ to: '0x' + '22'.repeat(20), data: SELECTORS.token0 }], 1),
-            /DEX_SCAN_LIMIT.*DEX_RPC_DELAY_MS.*DEX_RPC_URL/s,
+            /DEX_SCAN_LIMIT.*DEX_RPC_CALLS_PER_SEC.*DEX_RPC_URL/s,
         );
     } finally {
         globalThis.fetch = original;
@@ -513,6 +515,75 @@ test('o aviso de limite carrega a mensagem do provedor', async () => {
             () => chunkedEthCall('http://fake', [{ to: '0x' + '44'.repeat(20), data: SELECTORS.token0 }], 1),
             /exceeded compute unit capacity/,
         );
+    } finally {
+        globalThis.fetch = original;
+    }
+});
+
+test('a taxa é respeitada ANTES do primeiro lote sair, não depois', async () => {
+    // O defeito: a pausa entre lotes tinha padrão zero, então 200 chamadas
+    // partiam na velocidade da rede e estouravam o limite do provedor antes de
+    // qualquer espera entrar em ação — "Your app has exceeded its compute units
+    // per second capacity" na primeira leva. Pausa entre lotes não é taxa: com
+    // lote grande, o pico continua sendo o lote inteiro de uma vez.
+    const original = globalThis.fetch;
+    const instantes: number[] = [];
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number }>;
+        instantes.push(Date.now());
+        return {
+            ok: true,
+            json: async () => payload.map((p, idx) => ({ jsonrpc: '2.0', id: p.id, result: '0x' + word(String(idx + 1)) })),
+        };
+    }) as unknown as typeof fetch;
+
+    const salvo = process.env.DEX_RPC_CALLS_PER_SEC;
+    process.env.DEX_RPC_CALLS_PER_SEC = '50'; // 5 chamadas por lote => 100ms entre lotes
+    try {
+        const calls = Array.from({ length: 15 }, (_v, i) => ({ to: `0x${i.toString(16).padStart(40, '0')}`, data: SELECTORS.token0 }));
+        const inicio = Date.now();
+        await chunkedEthCall('http://fake', calls, 5);
+        const decorrido = Date.now() - inicio;
+
+        assert.equal(instantes.length, 3, 'três lotes de cinco');
+        // 15 chamadas a 50/s = 300ms de custo total; o último lote não precisa
+        // esperar depois de enviado, então o piso é ~200ms.
+        assert.ok(decorrido >= 180, `a varredura foi ritmada (levou ${decorrido}ms)`);
+    } finally {
+        globalThis.fetch = original;
+        process.env.DEX_RPC_CALLS_PER_SEC = salvo;
+    }
+});
+
+test('recusa por ritmo corta a TAXA, não só a pausa', async () => {
+    // Aumentar a pausa entre lotes sem baixar a taxa mantém o mesmo pico e o
+    // provedor recusa de novo — foi o que aconteceu contra a Alchemy.
+    const original = globalThis.fetch;
+    let chamadas = 0;
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number }>;
+        chamadas += 1;
+        if (chamadas === 1) {
+            return {
+                ok: true,
+                json: async () => payload.map((p) => ({
+                    jsonrpc: '2.0',
+                    id: p.id,
+                    error: { message: 'Your app has exceeded its compute units per second capacity' },
+                })),
+            };
+        }
+        return {
+            ok: true,
+            json: async () => payload.map((p, idx) => ({ jsonrpc: '2.0', id: p.id, result: '0x' + word(String(idx + 1)) })),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        const calls = Array.from({ length: 8 }, (_v, i) => ({ to: `0x${i.toString(16).padStart(40, '0')}`, data: SELECTORS.token0 }));
+        const results = await chunkedEthCall('http://fake', calls, 8);
+        assert.equal(results.length, 8, 'a varredura completa depois de desacelerar');
+        assert.ok(chamadas >= 2, 'houve retentativa com ritmo menor');
     } finally {
         globalThis.fetch = original;
     }

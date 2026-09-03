@@ -796,17 +796,27 @@ mantendo o tamanho que funcionou para os lotes seguintes. Endpoint que recusa
 até uma chamada única não faz lote nenhum, e aí o erro diz isso e manda trocar
 de `DEX_RPC_URL`.
 
-### Limite de taxa é ritmo, não tamanho
+### Limite de taxa é ritmo, não tamanho — e pausa não é ritmo
 
 Encolher o lote resolve "lote grande demais" e não resolve "chamadas demais por
-segundo" — são problemas diferentes com o mesmo sintoma de varredura abortada.
-O RPC público da Base recusa das duas formas.
+segundo": são problemas diferentes com o mesmo sintoma de varredura abortada.
 
-Ao ver limite de taxa, o scanner espera (500 ms dobrando a cada recusa) e
-**desacelera permanentemente** o resto da varredura: bater no limite uma vez é
-sinal de que o ritmo atual não se sustenta. Depois de 6 recusas seguidas ele
-para e nomeia as três saídas — reduzir `DEX_SCAN_LIMIT`, aumentar
-`DEX_RPC_DELAY_MS`, ou usar um `DEX_RPC_URL` com chave própria.
+A primeira tentativa de resolver o segundo foi uma **pausa entre lotes**, com
+padrão zero. Não funcionou, e o motivo é instrutivo: pausa entre lotes não é
+taxa. Com lote de 100 e pausa de 200 ms, o pico continua sendo 100 chamadas de
+uma vez. Na prática as 200 chamadas partiam na velocidade da rede e estouravam
+o limite antes de qualquer espera entrar em ação — a Alchemy respondendo *"Your
+app has exceeded its compute units per second capacity"* na primeira leva.
+
+O scanner agora limita **chamadas por segundo** (`DEX_RPC_CALLS_PER_SEC`,
+padrão 10) e paga o custo de cada lote em tempo **antes** de enviá-lo. O padrão
+vem de uma restrição real: o tier gratuito da Alchemy dá ~330 unidades de
+computação por segundo e um `eth_call` custa 26, ou seja ~12 chamadas por
+segundo.
+
+Ao ser recusado mesmo assim, o scanner corta a taxa pela metade, encolhe o lote
+e espera (500 ms dobrando). Cortar a taxa é o que ataca a causa; aumentar a
+pausa só adiaria o mesmo pico. Depois de 6 recusas ele para e nomeia as saídas.
 
 Erro comum de contrato **não** é retentado: `eth_call` que reverte reverte
 sempre, e retentar cada pool morto numa varredura de 200 multiplicaria o tempo

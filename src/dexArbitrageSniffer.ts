@@ -119,6 +119,21 @@ const MAX_RATE_LIMIT_RETRIES = 6;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Chamadas por segundo que a varredura se permite fazer.
+ *
+ * O padrão vem da restrição real de um tier gratuito: a Alchemy dá ~330
+ * unidades de computação por segundo e um `eth_call` custa 26, o que dá ~12
+ * chamadas por segundo. 10 deixa margem.
+ *
+ * O que existia antes era uma PAUSA fixa entre lotes, com padrão zero — os
+ * lotes saíam na velocidade da rede e 200 chamadas partiam em um segundo,
+ * estourando o limite em vinte vezes antes de qualquer espera entrar em ação.
+ * Pausa entre lotes não é a mesma coisa que taxa: com lote de 100 e pausa de
+ * 200 ms o pico continua sendo 100 chamadas de uma vez.
+ */
+const DEFAULT_CALLS_PER_SEC = 10;
+
+/**
  * Lote recusado pelo endpoint — provavelmente grande demais.
  *
  * Existe como tipo próprio para o chamador poder reagir encolhendo o lote, em
@@ -177,22 +192,33 @@ export async function chunkedEthCall(
 ): Promise<string[]> {
     const results: string[] = [];
     let size = Math.max(1, Math.floor(initialBatchSize));
-    let delayMs = Math.max(0, Number(process.env.DEX_RPC_DELAY_MS ?? '0'));
+    const extraDelayMs = Math.max(0, Number(process.env.DEX_RPC_DELAY_MS ?? '0'));
+    let callsPerSec = Math.max(0.5, Number(process.env.DEX_RPC_CALLS_PER_SEC ?? String(DEFAULT_CALLS_PER_SEC)));
+    let delayMs = 0;
     let rateLimitRetries = 0;
+    let nextAllowedAt = 0;
     let i = 0;
     while (i < calls.length) {
+        const lote = calls.slice(i, i + size);
         try {
+            // Espera até a taxa permitir ESTE lote. É o que impede a rajada
+            // inicial: o custo de um lote é pago em tempo antes de ele sair,
+            // não depois.
+            const agora = Date.now();
+            if (agora < nextAllowedAt) await sleep(nextAllowedAt - agora);
             if (delayMs > 0) await sleep(delayMs);
-            results.push(...(await batchEthCall(rpcUrl, calls.slice(i, i + size))));
+            if (extraDelayMs > 0) await sleep(extraDelayMs);
+            nextAllowedAt = Date.now() + (lote.length / callsPerSec) * 1000;
+            results.push(...(await batchEthCall(rpcUrl, lote)));
             i += size;
         } catch (err) {
             if (err instanceof RateLimitedError) {
                 if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
                     throw new Error(
                         `RPC recusou ${rateLimitRetries} vezes seguidas, já com lote de ${size} e ` +
-                            `${delayMs}ms entre lotes. Mensagem do provedor: "${err.message}". ` +
-                            `O endpoint público não aguenta esta varredura: reduza DEX_SCAN_LIMIT, aumente ` +
-                            `DEX_RPC_DELAY_MS, ou use um DEX_RPC_URL com chave própria.`,
+                            `${callsPerSec} chamadas/s. Mensagem do provedor: "${err.message}". ` +
+                            `Reduza DEX_SCAN_LIMIT, baixe DEX_RPC_CALLS_PER_SEC, ou use um endpoint ` +
+                            `com mais capacidade em DEX_RPC_URL.`,
                     );
                 }
                 rateLimitRetries += 1;
@@ -201,16 +227,22 @@ export async function chunkedEthCall(
                 // que o ritmo atual não se sustenta pelo resto da varredura.
                 const base = rateLimitBaseDelayMs();
                 const espera = base * 2 ** (rateLimitRetries - 1);
-                delayMs = Math.max(delayMs, base) * 2;
-                // Encolher também: menos chamadas por lote é menos carga por
-                // segundo, e cobre o caso de a mensagem ter sido classificada
+                // O provedor recusou no ritmo atual, então o ritmo é que está
+                // errado: cortar a taxa pela metade ataca a causa, enquanto
+                // aumentar a pausa entre lotes só adia o mesmo pico.
+                callsPerSec = Math.max(0.5, callsPerSec / 2);
+                delayMs = Math.max(delayMs, base);
+                // Encolher o lote também: menos chamadas por lote é um pico
+                // menor, e cobre o caso de a mensagem ter sido classificada
                 // como ritmo quando na verdade era tamanho.
                 size = Math.max(1, Math.floor(size / 2));
+                nextAllowedAt = 0;
                 log.warn('RPC no limite de taxa; esperando e desacelerando a varredura.', {
                     tentativa: rateLimitRetries,
                     esperaMs: espera,
                     ritmoEntreLotesMs: delayMs,
                     tamanhoDoLote: size,
+                    chamadasPorSegundo: callsPerSec,
                     // Sem a mensagem do provedor não dá para distinguir limite
                     // real de erro que só PARECE limite — e aí a espera é
                     // tempo jogado fora contra uma causa que não existe.
