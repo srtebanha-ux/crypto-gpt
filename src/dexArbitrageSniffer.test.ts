@@ -381,3 +381,85 @@ test('endpoint que recusa até uma chamada única falha com orientação, não e
         globalThis.fetch = original;
     }
 });
+
+// As esperas reais somam mais de meio minuto; o que os testes verificam é o
+// comportamento, não a duração.
+process.env.DEX_RPC_RETRY_BASE_MS = '1';
+
+test('limite de taxa é esperado e retentado, não tratado como falha do pool', async () => {
+    // O RPC público da Base recusa por limite de taxa no meio da varredura.
+    // Encolher o lote não resolve — o problema é ritmo, não tamanho — e tratar
+    // como erro de leitura descartaria pools bons como se fossem inválidos.
+    const original = globalThis.fetch;
+    let chamadas = 0;
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number }>;
+        chamadas += 1;
+        if (chamadas <= 2) {
+            return {
+                ok: true,
+                json: async () => payload.map((p) => ({ jsonrpc: '2.0', id: p.id, error: { message: 'over rate limit' } })),
+            };
+        }
+        return {
+            ok: true,
+            json: async () => payload.map((p, idx) => ({ jsonrpc: '2.0', id: p.id, result: '0x' + word(String(idx + 1)) })),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        const calls = Array.from({ length: 4 }, (_v, i) => ({ to: `0x${i.toString(16).padStart(40, '0')}`, data: SELECTORS.token0 }));
+        const results = await chunkedEthCall('http://fake', calls, 4);
+        assert.equal(results.length, 4, 'depois da espera, a varredura continua de onde parou');
+        assert.ok(chamadas >= 3, 'houve retentativa em vez de desistência');
+    } finally {
+        globalThis.fetch = original;
+    }
+});
+
+test('limite de taxa persistente falha com as três saídas possíveis nomeadas', async () => {
+    // Esperar para sempre num endpoint que não aguenta a varredura é pior que
+    // parar: o erro precisa dizer o que mudar.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number }>;
+        return {
+            ok: true,
+            json: async () => payload.map((p) => ({ jsonrpc: '2.0', id: p.id, error: { message: 'over rate limit' } })),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        await assert.rejects(
+            () => chunkedEthCall('http://fake', [{ to: '0x' + '22'.repeat(20), data: SELECTORS.token0 }], 1),
+            /DEX_SCAN_LIMIT.*DEX_RPC_DELAY_MS.*DEX_RPC_URL/s,
+        );
+    } finally {
+        globalThis.fetch = original;
+    }
+});
+
+test('erro comum de contrato NÃO é retentado — revert reverte sempre', async () => {
+    // Retentar cada pool morto numa varredura de 200 multiplicaria o tempo sem
+    // mudar resultado nenhum.
+    const original = globalThis.fetch;
+    let chamadas = 0;
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number }>;
+        chamadas += 1;
+        return {
+            ok: true,
+            json: async () => payload.map((p) => ({ jsonrpc: '2.0', id: p.id, error: { message: 'execution reverted' } })),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        await assert.rejects(
+            () => chunkedEthCall('http://fake', [{ to: '0x' + '33'.repeat(20), data: SELECTORS.token0 }], 1),
+            /execution reverted/,
+        );
+        assert.equal(chamadas, 1, 'uma tentativa só');
+    } finally {
+        globalThis.fetch = original;
+    }
+});

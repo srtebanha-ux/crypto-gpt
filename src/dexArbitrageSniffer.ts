@@ -66,7 +66,13 @@ export async function batchEthCall(rpcUrl: string, calls: RpcCall[]): Promise<st
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(`RPC HTTP ${res.status}: ${await res.text()}`);
+    if (!res.ok) {
+        const text = await res.text();
+        // 429 é a forma HTTP do mesmo problema que alguns provedores devolvem
+        // como erro JSON-RPC. Os dois caminhos precisam levar ao mesmo lugar.
+        if (res.status === 429 || isRateLimit(text)) throw new RateLimitedError(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+        throw new Error(`RPC HTTP ${res.status}: ${text}`);
+    }
 
     const body = (await res.json()) as Array<{ id: number; result?: string; error?: { message: string } }>;
     if (!Array.isArray(body)) {
@@ -85,7 +91,10 @@ export async function batchEthCall(rpcUrl: string, calls: RpcCall[]): Promise<st
     return payload.map((p) => {
         const r = byId.get(p.id);
         if (!r) throw new Error(`RPC não devolveu resposta para a chamada ${p.id}.`);
-        if (r.error) throw new Error(`RPC erro na chamada ${p.id}: ${r.error.message}`);
+        if (r.error) {
+            if (isRateLimit(r.error.message)) throw new RateLimitedError(r.error.message);
+            throw new Error(`RPC erro na chamada ${p.id}: ${r.error.message}`);
+        }
         return r.result ?? '0x';
     });
 }
@@ -96,6 +105,18 @@ export async function batchEthCall(rpcUrl: string, calls: RpcCall[]): Promise<st
  * a maioria aceita de uma vez.
  */
 const DEFAULT_BATCH_SIZE = 10;
+/**
+ * Primeira espera após um limite de taxa; dobra a cada nova recusa.
+ *
+ * Configurável porque a sequência completa de esperas leva mais de meio minuto
+ * de relógio — tempo justificado contra um RPC real, absurdo dentro de um
+ * teste que só precisa verificar que houve retentativa.
+ */
+const rateLimitBaseDelayMs = () => Number(process.env.DEX_RPC_RETRY_BASE_MS ?? '500');
+/** Depois disso, esperar mais não resolve — o endpoint não serve à varredura. */
+const MAX_RATE_LIMIT_RETRIES = 6;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Lote recusado pelo endpoint — provavelmente grande demais.
@@ -104,6 +125,33 @@ const DEFAULT_BATCH_SIZE = 10;
  * vez de confundir isso com um erro de leitura de contrato.
  */
 export class BatchRejectedError extends Error {}
+
+/** Limite de taxa do provedor — passa se esperar, ao contrário de um revert. */
+export class RateLimitedError extends Error {}
+
+/**
+ * Reconhece limite de taxa pelo texto do erro.
+ *
+ * É heurística, e assumidamente: cada provedor escreve de um jeito. O risco de
+ * errar é pequeno nos dois sentidos — classificar um revert como limite custa
+ * algumas tentativas antes de o erro aparecer mesmo assim, e classificar um
+ * limite como revert só devolve o comportamento anterior a esta função.
+ *
+ * Não se retenta erro genérico: `eth_call` que reverte reverte sempre, e
+ * retentar cada pool morto numa varredura de 200 multiplicaria o tempo sem
+ * mudar nenhum resultado.
+ */
+function isRateLimit(message: string): boolean {
+    const m = message.toLowerCase();
+    return (
+        m.includes('rate limit') ||
+        m.includes('ratelimit') ||
+        m.includes('too many requests') ||
+        m.includes('429') ||
+        m.includes('-32005') ||
+        m.includes('exceeded')
+    );
+}
 
 /**
  * Divide em lotes aceitáveis, preservando a ordem das respostas.
@@ -124,12 +172,38 @@ export async function chunkedEthCall(
 ): Promise<string[]> {
     const results: string[] = [];
     let size = Math.max(1, Math.floor(initialBatchSize));
+    let delayMs = Math.max(0, Number(process.env.DEX_RPC_DELAY_MS ?? '0'));
+    let rateLimitRetries = 0;
     let i = 0;
     while (i < calls.length) {
         try {
+            if (delayMs > 0) await sleep(delayMs);
             results.push(...(await batchEthCall(rpcUrl, calls.slice(i, i + size))));
             i += size;
         } catch (err) {
+            if (err instanceof RateLimitedError) {
+                if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
+                    throw new Error(
+                        `RPC recusou por limite de taxa ${rateLimitRetries} vezes seguidas (${err.message}). ` +
+                            `O endpoint público não aguenta esta varredura: reduza DEX_SCAN_LIMIT, aumente ` +
+                            `DEX_RPC_DELAY_MS, ou use um DEX_RPC_URL com chave própria.`,
+                    );
+                }
+                rateLimitRetries += 1;
+                // Espera crescente antes de repetir ESTE lote, e desaceleração
+                // permanente dos seguintes: bater no limite uma vez é sinal de
+                // que o ritmo atual não se sustenta pelo resto da varredura.
+                const base = rateLimitBaseDelayMs();
+                const espera = base * 2 ** (rateLimitRetries - 1);
+                delayMs = Math.max(delayMs, base) * 2;
+                log.warn('RPC no limite de taxa; esperando e desacelerando a varredura.', {
+                    tentativa: rateLimitRetries,
+                    esperaMs: espera,
+                    ritmoEntreLotesMs: delayMs,
+                });
+                await sleep(espera);
+                continue;
+            }
             if (!(err instanceof BatchRejectedError) || size === 1) {
                 if (err instanceof BatchRejectedError) {
                     throw new Error(

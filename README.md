@@ -796,6 +796,23 @@ mantendo o tamanho que funcionou para os lotes seguintes. Endpoint que recusa
 até uma chamada única não faz lote nenhum, e aí o erro diz isso e manda trocar
 de `DEX_RPC_URL`.
 
+### Limite de taxa é ritmo, não tamanho
+
+Encolher o lote resolve "lote grande demais" e não resolve "chamadas demais por
+segundo" — são problemas diferentes com o mesmo sintoma de varredura abortada.
+O RPC público da Base recusa das duas formas.
+
+Ao ver limite de taxa, o scanner espera (500 ms dobrando a cada recusa) e
+**desacelera permanentemente** o resto da varredura: bater no limite uma vez é
+sinal de que o ritmo atual não se sustenta. Depois de 6 recusas seguidas ele
+para e nomeia as três saídas — reduzir `DEX_SCAN_LIMIT`, aumentar
+`DEX_RPC_DELAY_MS`, ou usar um `DEX_RPC_URL` com chave própria.
+
+Erro comum de contrato **não** é retentado: `eth_call` que reverte reverte
+sempre, e retentar cada pool morto numa varredura de 200 multiplicaria o tempo
+sem mudar nenhum resultado. A distinção é feita pelo texto do erro — heurística
+assumida, com risco pequeno nos dois sentidos.
+
 ### Nenhum endereço vem embutido no código
 
 `DEX_POOLS` é obrigatório. Endereço errado **não estoura** — lê outro contrato
