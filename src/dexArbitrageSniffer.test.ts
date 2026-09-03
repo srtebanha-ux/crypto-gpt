@@ -463,3 +463,57 @@ test('erro comum de contrato NÃO é retentado — revert reverte sempre', async
         globalThis.fetch = original;
     }
 });
+
+test('mensagem que fala em LOTE encolhe, não espera', async () => {
+    // "batch size exceeded" contém 'exceeded' e não é limite de ritmo: esperar
+    // minutos não muda nada, encolher resolve na primeira tentativa. Foi o que
+    // custou um diagnóstico às cegas contra um provedor real.
+    const LIMITE = 5;
+    const original = globalThis.fetch;
+    const tamanhos: number[] = [];
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number }>;
+        tamanhos.push(payload.length);
+        if (payload.length > LIMITE) {
+            return {
+                ok: true,
+                json: async () => ({ jsonrpc: '2.0', error: { message: 'batch size exceeded' }, id: null }),
+            };
+        }
+        return {
+            ok: true,
+            json: async () => payload.map((p, idx) => ({ jsonrpc: '2.0', id: p.id, result: '0x' + word(String(idx + 1)) })),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        const calls = Array.from({ length: 10 }, (_v, i) => ({ to: `0x${i.toString(16).padStart(40, '0')}`, data: SELECTORS.token0 }));
+        const results = await chunkedEthCall('http://fake', calls, 20);
+        assert.equal(results.length, 10);
+        assert.ok(Math.min(...tamanhos) <= LIMITE, 'o lote encolheu até caber');
+    } finally {
+        globalThis.fetch = original;
+    }
+});
+
+test('o aviso de limite carrega a mensagem do provedor', async () => {
+    // Sem ela não dá para distinguir limite real de erro que só parece limite,
+    // e a espera vira tempo jogado fora contra uma causa inexistente.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number }>;
+        return {
+            ok: true,
+            json: async () => payload.map((p) => ({ jsonrpc: '2.0', id: p.id, error: { message: 'exceeded compute unit capacity' } })),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        await assert.rejects(
+            () => chunkedEthCall('http://fake', [{ to: '0x' + '44'.repeat(20), data: SELECTORS.token0 }], 1),
+            /exceeded compute unit capacity/,
+        );
+    } finally {
+        globalThis.fetch = original;
+    }
+});

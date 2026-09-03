@@ -143,13 +143,18 @@ export class RateLimitedError extends Error {}
  */
 function isRateLimit(message: string): boolean {
     const m = message.toLowerCase();
+    // Mensagem que fala em lote é problema de TAMANHO, não de ritmo — esperar
+    // não resolve, encolher resolve. Sem esta exceção, "batch size exceeded"
+    // cairia em 'exceeded' e o scanner esperaria minutos por nada.
+    if (m.includes('batch')) return false;
     return (
         m.includes('rate limit') ||
         m.includes('ratelimit') ||
         m.includes('too many requests') ||
         m.includes('429') ||
         m.includes('-32005') ||
-        m.includes('exceeded')
+        m.includes('capacity') ||
+        m.includes('compute unit')
     );
 }
 
@@ -184,7 +189,8 @@ export async function chunkedEthCall(
             if (err instanceof RateLimitedError) {
                 if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
                     throw new Error(
-                        `RPC recusou por limite de taxa ${rateLimitRetries} vezes seguidas (${err.message}). ` +
+                        `RPC recusou ${rateLimitRetries} vezes seguidas, já com lote de ${size} e ` +
+                            `${delayMs}ms entre lotes. Mensagem do provedor: "${err.message}". ` +
                             `O endpoint público não aguenta esta varredura: reduza DEX_SCAN_LIMIT, aumente ` +
                             `DEX_RPC_DELAY_MS, ou use um DEX_RPC_URL com chave própria.`,
                     );
@@ -196,10 +202,19 @@ export async function chunkedEthCall(
                 const base = rateLimitBaseDelayMs();
                 const espera = base * 2 ** (rateLimitRetries - 1);
                 delayMs = Math.max(delayMs, base) * 2;
+                // Encolher também: menos chamadas por lote é menos carga por
+                // segundo, e cobre o caso de a mensagem ter sido classificada
+                // como ritmo quando na verdade era tamanho.
+                size = Math.max(1, Math.floor(size / 2));
                 log.warn('RPC no limite de taxa; esperando e desacelerando a varredura.', {
                     tentativa: rateLimitRetries,
                     esperaMs: espera,
                     ritmoEntreLotesMs: delayMs,
+                    tamanhoDoLote: size,
+                    // Sem a mensagem do provedor não dá para distinguir limite
+                    // real de erro que só PARECE limite — e aí a espera é
+                    // tempo jogado fora contra uma causa que não existe.
+                    mensagemDoProvedor: err.message,
                 });
                 await sleep(espera);
                 continue;
