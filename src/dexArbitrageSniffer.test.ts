@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { loadPools, discoverPoolAddresses, chunkedEthCall } from './dexArbitrageSniffer';
+import { loadPools, discoverPoolAddresses, discoverFactoryFromPool, chunkedEthCall } from './dexArbitrageSniffer';
 import { SELECTORS } from './evmAbi';
 import { findTwoPoolCycles, hopsForCycle } from './dexGraph';
 import { evaluateCycle } from './ammMath';
@@ -274,6 +274,50 @@ test('chunkedEthCall preserva ordem através dos lotes', async () => {
         );
         assert.equal(results.length, 250);
         assert.ok(results.every((r) => r.toLowerCase().endsWith(WETH.slice(2).toLowerCase())));
+    } finally {
+        restore();
+    }
+});
+
+test('descobre a factory a partir de um pool semente via factory()', async () => {
+    // Endereço de pool aparece na interface de swap; endereço de factory se
+    // garimpa em documentação. Pedir o que é fácil de obter reduz a chance de
+    // alguém colar o endereço errado — que não estouraria, viraria relatório
+    // errado.
+    const seed = '0xseed'.padEnd(42, '0');
+    const fac = '0x' + 'fa'.repeat(20);
+    const restore = installFakeRpc([], DECIMALS, {
+        [`${seed}:${SELECTORS.factory}`]: '0x' + word(fac),
+    });
+    try {
+        assert.equal(await discoverFactoryFromPool('http://fake', seed), fac.toLowerCase());
+    } finally {
+        restore();
+    }
+});
+
+test('pool semente que não é V2 estoura apontando a causa provável', async () => {
+    const seed = '0xseed'.padEnd(42, '0');
+    const restore = installFakeRpc([], DECIMALS, { [`${seed}:${SELECTORS.factory}`]: '0x' });
+    try {
+        await assert.rejects(
+            () => discoverFactoryFromPool('http://fake', seed),
+            /não é um pool de produto constante/,
+        );
+    } finally {
+        restore();
+    }
+});
+
+test('factory() devolvendo endereço zero é recusado', async () => {
+    // Endereço zero passaria na decodificação e viraria uma "factory" que
+    // responde vazio a tudo — silenciosamente zero pools.
+    const seed = '0xseed'.padEnd(42, '0');
+    const restore = installFakeRpc([], DECIMALS, {
+        [`${seed}:${SELECTORS.factory}`]: '0x' + word('0'),
+    });
+    try {
+        await assert.rejects(() => discoverFactoryFromPool('http://fake', seed), /endereço zero/);
     } finally {
         restore();
     }

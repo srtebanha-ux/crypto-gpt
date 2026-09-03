@@ -36,6 +36,8 @@ export const SELECTORS = {
     allPairsLength: '0x574f2ba3',
     /** allPairs(uint256) -> address */
     allPairs: '0x1e3dd18b',
+    /** factory() -> address (exposto pelo par V2, aponta para quem o criou) */
+    factory: '0xc45a0155',
 } as const;
 
 /** Remove o "0x" e valida que sobrou hex puro. */

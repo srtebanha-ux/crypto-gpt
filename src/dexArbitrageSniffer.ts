@@ -200,6 +200,37 @@ export async function loadPools(rpcUrl: string, addresses: string[], feeFraction
  * já que o risco clássico de ficar preso num token ilíquido desaparece
  * quando a transação inteira reverte.
  */
+/**
+ * Descobre a factory a partir de UM pool conhecido, via `factory()`.
+ *
+ * Existe para eliminar fricção real: endereço de factory se garimpa em
+ * documentação, enquanto endereço de pool aparece na própria interface de
+ * swap da DEX. Pedir o que é fácil de obter e derivar o resto reduz a chance
+ * de alguém colar o endereço errado — que, como sempre neste projeto, não
+ * estouraria, viraria relatório errado.
+ *
+ * A cadeia se autovalida: se o pool semente não for um par V2, `factory()`
+ * não responde; se responder um endereço que não é factory,
+ * `allPairsLength()` reprova logo em seguida.
+ */
+export async function discoverFactoryFromPool(rpcUrl: string, seedPool: string): Promise<string> {
+    const [result] = await batchEthCall(rpcUrl, [{ to: seedPool, data: SELECTORS.factory }]);
+    let factory: string;
+    try {
+        factory = decodeAddressWord(result, 0);
+    } catch {
+        throw new Error(
+            `factory() não respondeu em ${seedPool} (resposta: "${result}"). ` +
+                `O endereço provavelmente não é um pool de produto constante (V2). Pool V3 não serve.`,
+        );
+    }
+    if (/^0x0+$/.test(factory)) {
+        throw new Error(`factory() devolveu endereço zero em ${seedPool} — não é um par V2 válido.`);
+    }
+    log.info('Factory descoberta a partir do pool semente.', { poolSemente: seedPool, factory });
+    return factory;
+}
+
 export async function discoverPoolAddresses(rpcUrl: string, factory: string): Promise<string[]> {
     const [lengthResult] = await batchEthCall(rpcUrl, [{ to: factory, data: SELECTORS.allPairsLength }]);
     // Um endereço que não é factory devolve `0x`, e a decodificação estoura
@@ -247,13 +278,16 @@ async function main() {
         .split(',')
         .map((s) => s.trim().toLowerCase())
         .filter((s) => s.length > 0);
-    const factory = process.env.DEX_FACTORY?.trim().toLowerCase();
+    const seedPool = process.env.DEX_SEED_POOL?.trim().toLowerCase();
+    let factory = process.env.DEX_FACTORY?.trim().toLowerCase();
     const feeFraction = new Decimal(process.env.DEX_POOL_FEE ?? '0.003');
     const flashLoanFee = new Decimal(process.env.FLASH_LOAN_FEE ?? '0.0005'); // Aave V3; Balancer = 0
     const gasUnits = new Decimal(process.env.DEX_GAS_UNITS ?? String(DEFAULT_GAS_UNITS));
 
-    if (explicitPools.length === 0 && !factory) {
-        log.error('Defina DEX_FACTORY (varredura ampla) ou DEX_POOLS (endereços específicos).', {
+    if (explicitPools.length === 0 && !factory && !seedPool) {
+        log.error('Defina DEX_SEED_POOL (mais simples), DEX_FACTORY ou DEX_POOLS.', {
+            maisSimples:
+                'DEX_SEED_POOL=0x... — um endereço de pool qualquer da DEX. A factory é descoberta a partir dele via factory().',
             porque:
                 'Nenhum endereço vem embutido de propósito: endereço errado não estoura, vira número plausível e errado no relatório.',
             varreduraAmpla:
@@ -266,14 +300,17 @@ async function main() {
 
     log.info('Lendo pools on-chain (nenhuma transação será enviada).', {
         rpc: rpcUrl,
-        modo: factory ? 'descoberta via factory' : 'lista explícita',
+        modo: factory ? 'descoberta via factory' : seedPool ? 'descoberta via pool semente' : 'lista explícita',
         tokenBase: baseToken,
         taxaPool: feeFraction.toString(),
         taxaFlashLoan: flashLoanFee.toString(),
     });
 
+    if (!factory && seedPool) {
+        factory = await discoverFactoryFromPool(rpcUrl, seedPool);
+    }
     const poolAddresses = factory
-        ? Array.from(new Set([...explicitPools, ...(await discoverPoolAddresses(rpcUrl, factory))]))
+        ? Array.from(new Set([...explicitPools, ...(seedPool ? [seedPool] : []), ...(await discoverPoolAddresses(rpcUrl, factory))]))
         : explicitPools;
 
     const pools = await loadPools(rpcUrl, poolAddresses, feeFraction);
