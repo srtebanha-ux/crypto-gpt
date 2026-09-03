@@ -20,8 +20,8 @@
 //
 // Sem I/O: recebe candles já carregados.
 import { Decimal } from 'decimal.js';
-import { detectBreakout, detectOversoldReversion, isAboveTrend, rsiSeries, type Candle } from './signals';
-import { planPosition, updateTrailingStop } from './positionSizing';
+import { atr, detectBreakout, detectOversoldReversion, isAboveTrend, rsiSeries, type Candle } from './signals';
+import { planPosition, updateTrailingStop, updateTrailingStopAtr } from './positionSizing';
 
 /**
  * As duas famílias são OPOSTAS, e qual funciona é pergunta empírica:
@@ -52,8 +52,14 @@ export interface StrategyParams {
     trendPeriod: number;
     /** Fração do capital arriscada por operação. */
     riskFraction: Decimal;
-    /** Fração de trailing stop (0 desliga). */
+    /** Fração de trailing stop por percentual fixo (0 desliga). */
     trailFraction: Decimal;
+    /**
+     * Multiplicador de ATR do stop móvel. Quando > 0, tem precedência sobre
+     * `trailFraction` — é o mecanismo correto, porque usa a mesma unidade do
+     * stop inicial e engata em qualquer timeframe sem calibração manual.
+     */
+    trailAtrMultiplier?: Decimal;
     /** Taxa taker por execução (entrada e saída pagam cada uma). */
     feeRate: Decimal;
     minNotional?: Decimal;
@@ -154,11 +160,24 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
                 if (candle.high.greaterThan(position.highestSinceEntry)) {
                     position.highestSinceEntry = candle.high;
                 }
-                position.stopPrice = updateTrailingStop(
-                    position.stopPrice,
-                    position.highestSinceEntry,
-                    params.trailFraction,
-                );
+                const trailMult = params.trailAtrMultiplier;
+                if (trailMult && trailMult.greaterThan(0)) {
+                    const currentAtr = atr(candles, i, params.atrPeriod);
+                    if (currentAtr !== null) {
+                        position.stopPrice = updateTrailingStopAtr(
+                            position.stopPrice,
+                            position.highestSinceEntry,
+                            currentAtr,
+                            trailMult,
+                        );
+                    }
+                } else {
+                    position.stopPrice = updateTrailingStop(
+                        position.stopPrice,
+                        position.highestSinceEntry,
+                        params.trailFraction,
+                    );
+                }
             }
         }
 

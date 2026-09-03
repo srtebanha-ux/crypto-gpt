@@ -135,6 +135,34 @@ export function updateTrailingStop(currentStop: Decimal, highestPrice: Decimal, 
 }
 
 /**
+ * Stop móvel ancorado em ATR (Chandelier Exit): `maior preço − mult × ATR`.
+ *
+ * Substitui o trailing por percentual fixo, que tinha um defeito fatal
+ * descoberto na primeira medição real: com ATR de 1h em torno de 0,5% do
+ * preço, o stop inicial fica ~1% abaixo da entrada, e um trailing de 15% só
+ * passaria a valer depois de +16,5% de alta. Na prática o trailing NUNCA
+ * engatava, não havia take-profit, e toda operação terminava no stop —
+ * produzindo 3% de taxa de acerto, que é assinatura de estratégia sem saída
+ * de lucro, não de estratégia ruim.
+ *
+ * Ancorar em ATR resolve porque usa a MESMA unidade do stop inicial: o stop
+ * começa a subir assim que o preço avança mais que a volatilidade típica, em
+ * qualquer timeframe, sem precisar de calibração por mão.
+ *
+ * Como todo stop móvel deste projeto, nunca desce.
+ */
+export function updateTrailingStopAtr(
+    currentStop: Decimal,
+    highestPrice: Decimal,
+    atrValue: Decimal,
+    multiplier: Decimal,
+): Decimal {
+    if (atrValue.lessThanOrEqualTo(0) || multiplier.lessThanOrEqualTo(0)) return currentStop;
+    const candidate = highestPrice.minus(atrValue.mul(multiplier));
+    return candidate.greaterThan(currentStop) ? candidate : currentStop;
+}
+
+/**
  * Retorno esperado da estratégia por operação, dado taxa de acerto e a razão
  * entre ganho médio e perda média.
  *

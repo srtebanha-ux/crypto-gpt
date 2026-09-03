@@ -106,7 +106,10 @@ function resolveParams(): StrategyParams {
         atrStopMultiplier: new Decimal(process.env.BT_ATR_STOP_MULT ?? '2'),
         trendPeriod: Number(process.env.BT_TREND_PERIOD ?? '50'),
         riskFraction: new Decimal(process.env.BT_RISK_FRACTION ?? '0.02'),
-        trailFraction: new Decimal(process.env.BT_TRAIL_FRACTION ?? '0.15'),
+        trailFraction: new Decimal(process.env.BT_TRAIL_FRACTION ?? '0'),
+        // Padrão em ATR, não em percentual: 3x ATR deixa a posição respirar o
+        // ruído normal enquanto sobe, e aperta sozinho conforme o preço avança.
+        trailAtrMultiplier: new Decimal(process.env.BT_TRAIL_ATR_MULT ?? '3'),
         // Taker com desconto de BNB. Sem o desconto, use 0.001.
         feeRate: new Decimal(process.env.BT_FEE_RATE ?? '0.00075'),
         minNotional: new Decimal(process.env.BT_MIN_NOTIONAL ?? '5'),

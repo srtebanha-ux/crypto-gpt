@@ -14,6 +14,7 @@ import {
     planPosition,
     truncateToStep,
     updateTrailingStop,
+    updateTrailingStopAtr,
 } from './positionSizing';
 
 Decimal.set({ precision: 30, rounding: Decimal.ROUND_DOWN });
@@ -199,4 +200,44 @@ test('risco menor por operação => sobrevive a mais perdas seguidas', () => {
 test('risco inválido devolve zero sobrevivências em vez de número sem sentido', () => {
     assert.equal(consecutiveLossesSurvivable(d('0')), 0);
     assert.equal(consecutiveLossesSurvivable(d('1')), 0);
+});
+
+// --- Stop móvel em ATR (a correção do trailing percentual) -------------------
+
+test('trailing em ATR engata assim que o preço avança mais que a volatilidade', () => {
+    // O defeito do trailing percentual: com ATR de 1h ~0,5% do preço, o stop
+    // inicial fica ~1% abaixo da entrada e um trailing de 15% só passaria a
+    // valer depois de +16,5%. Na prática nunca engatava, e toda operação
+    // morria no stop — 3% de taxa de acerto, assinatura de estratégia sem
+    // saída de lucro.
+    const entrada = d('100000');
+    const atrValue = d('500');
+    const stopInicial = entrada.minus(atrValue.mul(2)); // 99000
+
+    // Percentual: precisa de +16,5% para o candidato superar o stop inicial.
+    const percentual = updateTrailingStop(stopInicial, d('105000'), d('0.15'));
+    assert.equal(percentual.toString(), stopInicial.toString(), 'com +5% o trailing percentual nem se mexe');
+
+    // ATR: com o mesmo +5%, já sobe.
+    const porAtr = updateTrailingStopAtr(stopInicial, d('105000'), atrValue, d('3'));
+    assert.ok(porAtr.greaterThan(stopInicial), 'o trailing em ATR acompanha o avanço');
+    assert.equal(porAtr.toString(), '103500'); // 105000 − 3×500
+});
+
+test('trailing em ATR também nunca desce', () => {
+    const mantido = updateTrailingStopAtr(d('103500'), d('101000'), d('500'), d('3'));
+    assert.equal(mantido.toString(), '103500');
+});
+
+test('trailing em ATR com valores inválidos mantém o stop atual', () => {
+    assert.equal(updateTrailingStopAtr(d('99000'), d('105000'), d('0'), d('3')).toString(), '99000');
+    assert.equal(updateTrailingStopAtr(d('99000'), d('105000'), d('500'), d('0')).toString(), '99000');
+});
+
+test('trailing em ATR aperta sozinho quando a volatilidade cai', () => {
+    // Mesma alta, ATR menor => stop mais colado. É o comportamento desejado:
+    // mercado calmo permite proteger mais lucro sem ser estourado por ruído.
+    const volatil = updateTrailingStopAtr(d('99000'), d('110000'), d('1000'), d('3'));
+    const calmo = updateTrailingStopAtr(d('99000'), d('110000'), d('200'), d('3'));
+    assert.ok(calmo.greaterThan(volatil));
 });

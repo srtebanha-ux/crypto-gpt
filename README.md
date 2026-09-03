@@ -63,7 +63,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 250 testes, todos sem acesso a rede).
+  `npm test` — 254 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -192,7 +192,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 250 testes, todos sem rede, devem passar.
+1. `npm test` — 254 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -227,7 +227,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 250 testes, sem rede
+npm test            # suíte de testes (node:test) — 254 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
@@ -942,7 +942,8 @@ estratégia.
 | `BT_BREAKOUT_LOOKBACK` | `20` | Velas olhadas para trás no rompimento. |
 | `BT_ATR_STOP_MULT` | `2` | Stop = entrada − (mult × ATR). |
 | `BT_TREND_PERIOD` | `50` | Média de tendência; `0` desliga o filtro. |
-| `BT_TRAIL_FRACTION` | `0.15` | Trailing stop; `0` desliga. |
+| `BT_TRAIL_ATR_MULT` | `3` | Stop móvel em ATR (Chandelier). Tem precedência sobre o percentual. |
+| `BT_TRAIL_FRACTION` | `0` | Trailing por percentual fixo; alternativa ao ATR. |
 | `BT_FEE_RATE` | `0.00075` | Taker com desconto de BNB. |
 
 Backtest mede o passado. É o piso da decisão, não promessa de futuro.
