@@ -1130,6 +1130,28 @@ Três equivalências que preservam essa propriedade ao vivo:
    cobrada, não da estratégia. Ao vivo, a taxa vem da conta real (com desconto
    de BNB, se ativo), não de um palpite.
 
+### Rodar as duas famílias ao mesmo tempo, em livros separados
+
+`DIRECTIONAL_STRATEGY=both` roda `reversion` e `breakout` simultaneamente, cada
+uma com **capital, posições e placar próprios**, metade do capital para cada.
+
+Separar é o ponto. Num livro só, o resultado de uma esconderia o da outra e a
+comparação — que é o motivo de rodar as duas — desapareceria. As velas são
+buscadas uma vez por ativo e servidas às duas: buscar duas vezes dobraria as
+chamadas para obter a mesma resposta e, pior, deixaria as famílias decidindo
+sobre instantes diferentes.
+
+Existe porque a medição pediu. Em 52 dias de alta, `reversion` fez **zero**
+operações (nenhuma queda para comprar) e `breakout` teve expectativa positiva
+em **5 de 5** ativos — mas perdeu para comprar-e-segurar em **5 de 5**
+também, o que é assinatura de beta, não de vantagem. Em 14 meses de regime
+misto, a ordem se inverte: `reversion` rende \$588 contra \$72 de `breakout`.
+
+Nenhuma das duas leituras basta para escolher, e escolher pela mais recente é
+justamente moldar a estratégia ao passado próximo. Rodar as duas em papel custa
+zero e responde em algumas semanas com dado de mercado ao vivo, que não dá para
+sobreajustar.
+
 ### O heartbeat diz por que NÃO entrou
 
 Um motor direcional passa a maior parte do tempo sem operar, e zeros no

@@ -25,6 +25,7 @@ import { BinanceExchangeProvider } from './binanceExchangeProvider';
 import { atr, detectBreakout, detectOversoldReversion, isAboveTrend, rsiSeries, type Candle } from './signals';
 import { planPosition, tradeNetPnl, updateTrailingStopAtr } from './positionSizing';
 import { resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
+import type { EntryStrategy } from './backtest';
 
 
 Decimal.set({ precision: 30, rounding: Decimal.ROUND_DOWN });
@@ -61,6 +62,8 @@ interface Config {
      * divergiram sozinhos.
      */
     strategy: ResolvedStrategyParams;
+    /** Uma por família em execução; cada uma com livro e capital próprios. */
+    livros: ResolvedStrategyParams[];
 }
 
 function parseKline(raw: RawKline): Candle {
@@ -97,10 +100,14 @@ function resolveConfig(): Config {
                 'Ordens reais numa estratégia direcional podem perder dinheiro sem nenhuma falha técnica.',
         );
     }
-    const strategy = process.env.DIRECTIONAL_STRATEGY ?? 'reversion';
-    if (strategy !== 'breakout' && strategy !== 'reversion') {
-        throw new Error(`DIRECTIONAL_STRATEGY inválida: "${strategy}". Use breakout ou reversion.`);
+    const escolha = process.env.DIRECTIONAL_STRATEGY ?? 'reversion';
+    if (escolha !== 'breakout' && escolha !== 'reversion' && escolha !== 'both') {
+        throw new Error(`DIRECTIONAL_STRATEGY inválida: "${escolha}". Use breakout, reversion ou both.`);
     }
+    // 'both' roda as duas famílias em livros SEPARADOS, com o capital dividido.
+    // Separar é o ponto: misturadas, um resultado bom de uma esconderia um ruim
+    // da outra, e a comparação — que é o motivo de rodar as duas — sumiria.
+    const familias: EntryStrategy[] = escolha === 'both' ? ['reversion', 'breakout'] : [escolha];
     return {
         symbols: (process.env.DIRECTIONAL_SYMBOLS ?? 'BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT')
             .split(',')
@@ -110,7 +117,8 @@ function resolveConfig(): Config {
         capital: new Decimal(process.env.DIRECTIONAL_CAPITAL ?? '20'),
         pollSeconds: Number(process.env.DIRECTIONAL_POLL_SEC ?? '60'),
         live,
-        strategy: resolveStrategyParams(strategy),
+        strategy: resolveStrategyParams(familias[0]),
+        livros: familias.map((f) => resolveStrategyParams(f)),
     };
 }
 
@@ -133,7 +141,8 @@ async function main() {
 
     log.info(`Motor direcional iniciado em modo ${cfg.live ? 'LIVE — DINHEIRO REAL' : 'PAPEL (nenhuma ordem enviada)'}.`, {
         ativos: cfg.symbols.join(','),
-        estrategia: cfg.strategy.entryStrategy,
+        estrategias: cfg.livros.map((l) => l.entryStrategy).join(' + '),
+        capitalPorEstrategia: cfg.capital.dividedBy(cfg.livros.length).toFixed(2),
         intervalo: cfg.interval,
         capital: cfg.capital.toString(),
         riscoPorOperacao: `${cfg.strategy.riskFraction.mul(100).toFixed(2)}%`,
@@ -143,8 +152,17 @@ async function main() {
         log.warn('*** ORDENS REAIS SERÃO ENVIADAS. Perda é resultado possível sem nenhuma falha técnica. ***');
     }
 
+    /**
+     * Um LIVRO por família de entrada: posições, capital e placar próprios.
+     *
+     * Separar é o ponto de rodar as duas ao mesmo tempo. Num livro só, o
+     * resultado de uma esconderia o da outra e a comparação — que é o motivo de
+     * rodar as duas — desapareceria. Cada uma recebe uma fatia igual do
+     * capital, então elas competem em pé de igualdade.
+     */
+    const criarLivro = (params: ResolvedStrategyParams, capitalInicial: Decimal) => {
     const positions = new Map<string, OpenPosition>();
-    let capital = cfg.capital;
+    let capital = capitalInicial;
     let realizedPnl = new Decimal(0);
     let wins = 0;
     let losses = 0;
@@ -185,7 +203,7 @@ async function main() {
             // escorregam mais.
             if (fill.executedPrice.greaterThan(0)) exitPrice = fill.executedPrice;
         }
-        const { netProfit, feesPaid } = tradeNetPnl(pos.entryPrice, exitPrice, pos.quantity, cfg.strategy.feeRate);
+        const { netProfit, feesPaid } = tradeNetPnl(pos.entryPrice, exitPrice, pos.quantity, params.feeRate);
         // O dinheiro preso na posição volta ao caixa, junto com o resultado.
         committed = committed.minus(pos.notional);
         if (committed.lessThan(0)) committed = new Decimal(0);
@@ -194,7 +212,7 @@ async function main() {
         if (netProfit.greaterThan(0)) wins += 1;
         else losses += 1;
         positions.delete(pos.symbol);
-        log.info(`SAÍDA ${pos.symbol} — ${reason}`, {
+        log.info(`[${params.entryStrategy}] SAÍDA ${pos.symbol} — ${reason}`, {
             entrada: pos.entryPrice.toFixed(6),
             saida: exitPrice.toFixed(6),
             quantidade: pos.quantity.toString(),
@@ -204,9 +222,8 @@ async function main() {
         });
     };
 
-    const step = async (symbol: string) => {
-        const candles = await fetchClosedCandles(symbol, cfg.interval, HISTORY_CANDLES);
-        if (candles.length < cfg.strategy.trendPeriod + cfg.strategy.atrPeriod + 5) return;
+    const step = async (symbol: string, candles: Candle[]) => {
+        if (candles.length < params.trendPeriod + params.atrPeriod + 5) return;
         const last = candles.length - 1;
         const candle = candles[last];
         // Uma avaliação por vela fechada. Nos ciclos entre um fechamento e o
@@ -226,24 +243,24 @@ async function main() {
                 return;
             }
             if (candle.high.greaterThan(pos.highestSinceEntry)) pos.highestSinceEntry = candle.high;
-            const currentAtr = atr(candles, last, cfg.strategy.atrPeriod);
+            const currentAtr = atr(candles, last, params.atrPeriod);
             if (currentAtr) {
                 pos.stopPrice = updateTrailingStopAtr(
                     pos.stopPrice,
                     pos.highestSinceEntry,
                     currentAtr,
-                    cfg.strategy.trailAtrMultiplier,
+                    params.trailAtrMultiplier,
                 );
             }
             return;
         }
 
         const signal =
-            cfg.strategy.entryStrategy === 'reversion'
-                ? detectOversoldReversion(candles, last, rsiSeries(candles, cfg.strategy.rsiPeriod), cfg.strategy.rsiThreshold, cfg.strategy.atrPeriod)
-                : detectBreakout(candles, last, cfg.strategy.breakoutLookback, cfg.strategy.atrPeriod);
+            params.entryStrategy === 'reversion'
+                ? detectOversoldReversion(candles, last, rsiSeries(candles, params.rsiPeriod), params.rsiThreshold, params.atrPeriod)
+                : detectBreakout(candles, last, params.breakoutLookback, params.atrPeriod);
         const rsiAtual =
-            cfg.strategy.entryStrategy === 'reversion' && 'rsiValue' in signal && signal.rsiValue
+            params.entryStrategy === 'reversion' && 'rsiValue' in signal && signal.rsiValue
                 ? signal.rsiValue.toFixed(1)
                 : null;
 
@@ -251,21 +268,21 @@ async function main() {
             diagnostico.set(
                 symbol,
                 rsiAtual !== null
-                    ? `sem sinal (RSI ${rsiAtual}, precisa < ${cfg.strategy.rsiThreshold} e já subindo)`
+                    ? `sem sinal (RSI ${rsiAtual}, precisa < ${params.rsiThreshold} e já subindo)`
                     : 'sem sinal',
             );
             return;
         }
         sinaisDisparados += 1;
 
-        if (cfg.strategy.trendPeriod > 0) {
+        if (params.trendPeriod > 0) {
             const closes = candles.map((c) => c.close);
-            if (isAboveTrend(closes, last, cfg.strategy.trendPeriod) !== true) {
+            if (isAboveTrend(closes, last, params.trendPeriod) !== true) {
                 bloqueadosPorTendencia += 1;
                 // Comprar queda dentro de tendência de baixa é comprar algo que
                 // cai porque continua caindo. O filtro barrar é o filtro
                 // funcionando, não um problema a ser afrouxado sem medir.
-                diagnostico.set(symbol, `SINAL barrado pelo filtro de tendência (abaixo da média de ${cfg.strategy.trendPeriod})`);
+                diagnostico.set(symbol, `SINAL barrado pelo filtro de tendência (abaixo da média de ${params.trendPeriod})`);
                 return;
             }
         }
@@ -274,19 +291,19 @@ async function main() {
         // ao vivo, a vela seguinte é AGORA, e seu preço corrente é o melhor
         // equivalente disponível.
         const entryPrice = candle.close;
-        const stopPrice = entryPrice.minus(signal.atrValue.mul(cfg.strategy.atrStopMultiplier));
+        const stopPrice = entryPrice.minus(signal.atrValue.mul(params.atrStopMultiplier));
         const plan = planPosition({
             capital,
             availableCapital: capital.minus(committed),
-            riskFraction: cfg.strategy.riskFraction,
+            riskFraction: params.riskFraction,
             entryPrice,
             stopPrice,
-            minNotional: cfg.strategy.minNotional,
+            minNotional: params.minNotional,
         });
         if (plan.quantity.lessThanOrEqualTo(0)) {
             recusadosPorRisco += 1;
             diagnostico.set(symbol, `SINAL recusado pelo risco: ${plan.reason}`);
-            log.warn(`${symbol}: sinal válido mas operação recusada pelo risco.`, { motivo: plan.reason });
+            log.warn(`[${params.entryStrategy}] ${symbol}: sinal válido mas operação recusada pelo risco.`, { motivo: plan.reason });
             return;
         }
 
@@ -300,7 +317,7 @@ async function main() {
         // O stop acompanha o preço REALMENTE pago: mantê-lo ancorado no preço
         // pretendido mudaria silenciosamente a distância até o stop, e com ela
         // o risco que se aceitou correr.
-        const filledStop = filledPrice.minus(signal.atrValue.mul(cfg.strategy.atrStopMultiplier));
+        const filledStop = filledPrice.minus(signal.atrValue.mul(params.atrStopMultiplier));
         const notional = filledQty.mul(filledPrice);
         committed = committed.plus(notional);
         diagnostico.set(symbol, 'ENTRADA executada neste ciclo');
@@ -313,7 +330,7 @@ async function main() {
             highestSinceEntry: filledPrice,
             openedAt: Date.now(),
         });
-        log.info(`ENTRADA ${symbol}`, {
+        log.info(`[${params.entryStrategy}] ENTRADA ${symbol}`, {
             preco: filledPrice.toFixed(6),
             quantidade: filledQty.toString(),
             stop: filledStop.toFixed(6),
@@ -323,21 +340,17 @@ async function main() {
         });
     };
 
-    for (;;) {
-        for (const symbol of cfg.symbols) {
-            try {
-                await step(symbol);
-            } catch (err) {
-                // Falha em um ativo não pode parar os outros nem derrubar o
-                // motor: ele existe para rodar ininterruptamente.
-                const motivo = err instanceof Error ? err.message : String(err);
-                diagnostico.set(symbol, `FALHA: ${motivo}`);
-                log.warn(`Falha ao avaliar ${symbol}; segue no próximo ciclo.`, { erro: motivo });
-            }
-        }
-
-        log.info('Heartbeat — motor direcional ativo.', {
-            modo: cfg.live ? 'LIVE' : 'PAPEL',
+    return {
+        params,
+        step,
+        /**
+         * Falha de rede num ativo precisa aparecer no censo do livro. Sem isto
+         * o heartbeat mostraria "aguardando fechar a vela" para um ativo que na
+         * verdade não está sendo lido — silêncio que parece paciência.
+         */
+        marcarFalha: (symbol: string, motivo: string) => diagnostico.set(symbol, `FALHA: ${motivo}`),
+        resumo: () => ({
+            estrategia: params.entryStrategy,
             capital: capital.toFixed(6),
             caixaLivre: capital.minus(committed).toFixed(6),
             resultadoAcumulado: realizedPnl.toFixed(6),
@@ -349,9 +362,43 @@ async function main() {
             sinaisDisparados,
             bloqueadosPorTendencia,
             recusadosPorRisco,
-            leituraDaVela: `uma avaliação por vela de ${cfg.interval} — o diagnóstico abaixo é da última fechada`,
-            porAtivo: cfg.symbols.map((s) => `${s}: ${diagnostico.get(s) ?? 'aguardando fechar a vela'}`).join(' | '),
-        });
+            porAtivo: cfg.symbols.map((sym) => `${sym}: ${diagnostico.get(sym) ?? 'aguardando fechar a vela'}`).join(' | '),
+        }),
+    };
+    };
+
+    // Capital dividido igualmente: comparação justa exige mesmo ponto de
+    // partida. Com uma família só, ela fica com tudo.
+    const fatia = cfg.capital.dividedBy(cfg.livros.length);
+    const livros = cfg.livros.map((p) => criarLivro(p, fatia));
+
+    for (;;) {
+        for (const symbol of cfg.symbols) {
+            try {
+                // As velas são buscadas UMA vez por símbolo e servidas a todos
+                // os livros. Cada livro buscando as suas dobraria as chamadas à
+                // Binance para responder exatamente a mesma coisa — e, pior,
+                // as duas famílias poderiam decidir sobre instantes diferentes.
+                const candles = await fetchClosedCandles(symbol, cfg.interval, HISTORY_CANDLES);
+                for (const livro of livros) {
+                    await livro.step(symbol, candles);
+                }
+            } catch (err) {
+                // Falha em um ativo não pode parar os outros nem derrubar o
+                // motor: ele existe para rodar ininterruptamente.
+                const motivo = err instanceof Error ? err.message : String(err);
+                for (const livro of livros) livro.marcarFalha(symbol, motivo);
+                log.warn(`Falha ao avaliar ${symbol}; segue no próximo ciclo.`, { erro: motivo });
+            }
+        }
+
+        for (const livro of livros) {
+            log.info(`Heartbeat [${livro.params.entryStrategy}] — motor direcional ativo.`, {
+                modo: cfg.live ? 'LIVE' : 'PAPEL',
+                leituraDaVela: `uma avaliação por vela de ${cfg.interval} — o diagnóstico abaixo é da última fechada`,
+                ...livro.resumo(),
+            });
+        }
 
         await new Promise((resolve) => setTimeout(resolve, cfg.pollSeconds * 1000));
     }
