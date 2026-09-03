@@ -132,6 +132,8 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * 200 ms o pico continua sendo 100 chamadas de uma vez.
  */
 const DEFAULT_CALLS_PER_SEC = 10;
+/** Intervalo entre linhas de progresso numa varredura longa. */
+const PROGRESS_INTERVAL_MS = 10_000;
 
 /**
  * Lote recusado pelo endpoint — provavelmente grande demais.
@@ -189,6 +191,7 @@ export async function chunkedEthCall(
     rpcUrl: string,
     calls: RpcCall[],
     initialBatchSize = Number(process.env.DEX_RPC_BATCH_SIZE ?? String(DEFAULT_BATCH_SIZE)),
+    etapa?: string,
 ): Promise<string[]> {
     const results: string[] = [];
     let size = Math.max(1, Math.floor(initialBatchSize));
@@ -198,7 +201,24 @@ export async function chunkedEthCall(
     let rateLimitRetries = 0;
     let nextAllowedAt = 0;
     let i = 0;
+    // Ritmar 1200 chamadas a 10/s leva minutos. Sem sinal de vida, quem roda
+    // não distingue "trabalhando" de "travado" — e a resposta certa para os
+    // dois casos é oposta. O progresso sai por TEMPO, não por lote: a cada
+    // lote afogaria o relatório, e é o relógio parado que assusta.
+    const inicio = Date.now();
+    let ultimoProgresso = inicio;
     while (i < calls.length) {
+        if (etapa && Date.now() - ultimoProgresso >= PROGRESS_INTERVAL_MS) {
+            ultimoProgresso = Date.now();
+            const feito = i / calls.length;
+            const decorrido = (Date.now() - inicio) / 1000;
+            log.info(`${etapa}: ${i}/${calls.length} chamadas.`, {
+                percentual: `${(feito * 100).toFixed(0)}%`,
+                decorridoS: decorrido.toFixed(0),
+                faltamS: feito > 0 ? ((decorrido / feito) * (1 - feito)).toFixed(0) : '?',
+                chamadasPorSegundo: callsPerSec,
+            });
+        }
         const lote = calls.slice(i, i + size);
         try {
             // Espera até a taxa permitir ESTE lote. É o que impede a rajada
@@ -294,7 +314,7 @@ export async function loadPools(rpcUrl: string, addresses: string[], feeFraction
         calls.push({ to: address, data: SELECTORS.token1 });
         calls.push({ to: address, data: SELECTORS.getReserves });
     }
-    const results = await chunkedEthCall(rpcUrl, calls);
+    const results = await chunkedEthCall(rpcUrl, calls, undefined, 'Lendo reservas dos pools');
 
     const raw: Array<{ address: string; token0: string; token1: string; r0: Decimal; r1: Decimal }> = [];
     let dead = 0;
@@ -333,7 +353,12 @@ export async function loadPools(rpcUrl: string, addresses: string[], feeFraction
     // Decimais de cada token: sem normalizar, comparar USDC (6 casas) com WETH
     // (18) erra por 1e12 — e o erro sai como "arbitragem gigante".
     const tokens = Array.from(new Set(raw.flatMap((p) => [p.token0, p.token1])));
-    const decimalResults = await chunkedEthCall(rpcUrl, tokens.map((t) => ({ to: t, data: SELECTORS.decimals })));
+    const decimalResults = await chunkedEthCall(
+        rpcUrl,
+        tokens.map((t) => ({ to: t, data: SELECTORS.decimals })),
+        undefined,
+        'Lendo decimais dos tokens',
+    );
     const decimalsByToken = new Map<string, number>();
     tokens.forEach((token, i) => {
         try {
@@ -430,11 +455,18 @@ export async function discoverPoolAddresses(rpcUrl: string, factory: string): Pr
         varrendo: indices.length,
         modo: mode,
         nota: mode === 'newest' ? 'pools recém-criados: preço ainda não alinhado, menos indexados' : undefined,
+        // Estimativa grosseira, mas suficiente para a única pergunta que
+        // importa enquanto não sai linha nenhuma: isso é normal ou travou?
+        duracaoEstimadaS: Math.round(
+            (indices.length * 4) / Math.max(0.5, Number(process.env.DEX_RPC_CALLS_PER_SEC ?? String(DEFAULT_CALLS_PER_SEC))),
+        ),
     });
 
     const addressResults = await chunkedEthCall(
         rpcUrl,
         indices.map((i) => ({ to: factory, data: SELECTORS.allPairs + encodeUint256(i) })),
+        undefined,
+        'Enumerando endereços de pools',
     );
     return addressResults.map((r) => decodeAddressWord(r, 0));
 }
