@@ -84,6 +84,23 @@ export interface BinanceExchangeProviderOptions {
     /** Taxa taker de fallback caso o endpoint de fee não esteja disponível (ex.: testnet). */
     fallbackFeeRate?: string;
     /**
+     * Ative quando a conta tiver "pagar taxas com BNB" ligado na Binance.
+     *
+     * Por que isso precisa ser explícito: `/sapi/v1/asset/tradeFee` devolve a
+     * comissão BASE do símbolo — ele NÃO reflete o abatimento de BNB, que a
+     * Binance aplica só no momento da execução. Sem esta flag o motor calcula
+     * com 0,1% enquanto a conta paga 0,075%, ficando 25% mais conservador que
+     * a realidade e recusando ciclos que de fato dariam lucro.
+     *
+     * O desconto só é aplicado se houver BNB de verdade em saldo (ver
+     * MIN_BNB_BALANCE_FOR_DISCOUNT): sem BNB a Binance cobra a taxa cheia no
+     * ativo negociado, e assumir o desconto deixaria a matemática otimista —
+     * o motor aceitaria ciclos marginais que perdem dinheiro.
+     */
+    bnbFeeDiscount?: boolean;
+    /** Saldo mínimo de BNB (em BNB) para considerar o desconto ativo. Padrão "0.001". */
+    minBnbBalanceForDiscount?: string;
+    /**
      * Bases intermediárias usadas para descobrir dinamicamente todos os
      * triângulos USDT->base->alt->USDT realmente listados na Binance (ver
      * triangleTopology.ts). Padrão: BTC, ETH, BNB, FDUSD — mesmo padrão do
@@ -91,6 +108,9 @@ export interface BinanceExchangeProviderOptions {
      */
     intermediateBases?: string[];
 }
+
+/** Abatimento de 25% que a Binance dá no Spot quando as taxas são pagas em BNB. */
+const BNB_FEE_DISCOUNT_MULTIPLIER = '0.75';
 
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const STARTUP_RETRY_ATTEMPTS = 3;
@@ -129,7 +149,12 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     private readonly recvWindowMs: number;
     private readonly intermediateBases: string[];
 
+    /** Taxa efetivamente usada pelo motor (já com desconto de BNB, se aplicável). */
     private feeRate: Decimal;
+    /** Taxa base do símbolo, SEM desconto — origem para recalcular o desconto a cada refresh. */
+    private baseFeeRate: Decimal;
+    private readonly bnbFeeDiscount: boolean;
+    private readonly minBnbBalanceForDiscount: Decimal;
     private serverTimeOffsetMs = 0;
     private symbolFilters = new Map<string, SymbolFilters>();
     /** Profundidade mais recente por par interno ("BTC/USDT"), atualizada pelo stream @depth5. */
@@ -152,7 +177,10 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         this.apiKey = options.apiKey;
         this.apiSecret = options.apiSecret;
         this.recvWindowMs = options.recvWindowMs ?? 5000;
-        this.feeRate = new Decimal(options.fallbackFeeRate ?? '0.001');
+        this.baseFeeRate = new Decimal(options.fallbackFeeRate ?? '0.001');
+        this.feeRate = this.baseFeeRate;
+        this.bnbFeeDiscount = options.bnbFeeDiscount ?? false;
+        this.minBnbBalanceForDiscount = new Decimal(options.minBnbBalanceForDiscount ?? '0.001');
         this.intermediateBases = options.intermediateBases ?? DEFAULT_INTERMEDIATE_BASES;
 
         // A Binance separa REST e WebSocket em subdomínios diferentes em
@@ -355,13 +383,61 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
             if (!res.ok) return; // endpoint pode não existir no testnet: mantém fallbackFeeRate
             const fees = (await res.json()) as Array<{ symbol: string; takerCommission: string }>;
             const btcUsdtFee = fees.find((f) => f.symbol === 'BTCUSDT');
-            if (btcUsdtFee) this.feeRate = new Decimal(btcUsdtFee.takerCommission);
+            if (btcUsdtFee) this.baseFeeRate = new Decimal(btcUsdtFee.takerCommission);
         } catch (err) {
             log.warn('Não foi possível carregar a taxa taker real; usando fallback.', {
-                fallback: this.feeRate.toString(),
+                fallback: this.baseFeeRate.toString(),
                 error: err instanceof Error ? err.message : String(err),
             });
         }
+        await this.applyBnbDiscountIfFunded();
+    }
+
+    /**
+     * Recalcula a taxa efetiva a partir da taxa base, aplicando o abatimento de
+     * BNB apenas se a conta realmente tiver BNB para queimar.
+     *
+     * Precisa ser reavaliado periodicamente (o live.ts chama isto no heartbeat):
+     * se o BNB acabar no meio da operação, a Binance volta a cobrar a taxa cheia,
+     * e continuar calculando com 0,075% faria o motor aceitar ciclos marginais
+     * que na verdade perdem dinheiro.
+     */
+    public async applyBnbDiscountIfFunded(): Promise<void> {
+        if (!this.bnbFeeDiscount) {
+            this.feeRate = this.baseFeeRate;
+            return;
+        }
+        let bnbBalance: Decimal;
+        try {
+            bnbBalance = await this.fetchAvailableBalance('BNB');
+        } catch (err) {
+            // Não dá pra confirmar o saldo => assume o pior caso (taxa cheia).
+            this.feeRate = this.baseFeeRate;
+            log.warn('Não foi possível confirmar o saldo de BNB; usando a taxa CHEIA por segurança.', {
+                taxaEfetiva: this.feeRate.toString(),
+                error: err instanceof Error ? err.message : String(err),
+            });
+            return;
+        }
+        if (bnbBalance.lt(this.minBnbBalanceForDiscount)) {
+            const wasDiscounted = !this.feeRate.eq(this.baseFeeRate);
+            this.feeRate = this.baseFeeRate;
+            log.warn('BNB_FEE_DISCOUNT está ligado, mas o saldo de BNB é insuficiente — usando a taxa CHEIA.', {
+                saldoBnb: bnbBalance.toString(),
+                minimoExigido: this.minBnbBalanceForDiscount.toString(),
+                taxaEfetiva: this.feeRate.toString(),
+                aviso: wasDiscounted
+                    ? 'O BNB acabou durante a operação; a taxa voltou ao valor cheio.'
+                    : 'Compre BNB no Spot e ligue "pagar taxas com BNB" na Binance para o desconto valer.',
+            });
+            return;
+        }
+        this.feeRate = this.baseFeeRate.mul(BNB_FEE_DISCOUNT_MULTIPLIER);
+        log.info('Desconto de BNB aplicado à taxa taker usada pelo motor.', {
+            taxaBase: this.baseFeeRate.toString(),
+            taxaEfetiva: this.feeRate.toString(),
+            saldoBnb: bnbBalance.toString(),
+        });
     }
 
     public getFeeRate(): Decimal {

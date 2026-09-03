@@ -140,7 +140,14 @@ async function bootstrap() {
         log.warn('*** MODO LIVE ATIVO: ordens reais serão enviadas à Binance. ***');
     }
 
-    const exchange = new BinanceExchangeProvider({ apiKey, apiSecret, live, intermediateBases: resolveIntermediateBases() });
+    const exchange = new BinanceExchangeProvider({
+        apiKey,
+        apiSecret,
+        live,
+        intermediateBases: resolveIntermediateBases(),
+        bnbFeeDiscount: process.env.BNB_FEE_DISCOUNT === 'true',
+        minBnbBalanceForDiscount: process.env.MIN_BNB_BALANCE,
+    });
     await exchange.connect();
 
     const triangles = exchange.getDiscoveredTriangles();
@@ -173,10 +180,20 @@ async function bootstrap() {
 
     if (heartbeatIntervalMin > 0) {
         setInterval(() => {
+            // Revalida o desconto de BNB: se o BNB acabar, a Binance volta a
+            // cobrar a taxa cheia e o motor precisa saber disso, senão passa a
+            // aceitar ciclos marginais que na verdade perdem dinheiro.
+            // Não pode derrubar o heartbeat se a consulta falhar.
+            void exchange.applyBnbDiscountIfFunded().catch((err) => {
+                log.warn('Falha ao revalidar o desconto de BNB no heartbeat.', {
+                    error: err instanceof Error ? err.message : String(err),
+                });
+            });
             log.info('Heartbeat — engine ativo.', {
                 halted: engine.isHalted(),
                 capital: engine.getCurrentCapital().toFixed(6),
                 triangulosMonitorados: triangles.length,
+                taxaTakerEfetiva: exchange.getFeeRate().toString(),
             });
         }, heartbeatIntervalMin * 60_000).unref();
     }
