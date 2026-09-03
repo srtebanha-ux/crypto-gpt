@@ -111,75 +111,147 @@ function pct(fraction: Decimal): string {
     return `${fraction.mul(100).toFixed(2)}%`;
 }
 
-function report(label: string, result: ReturnType<typeof runBacktest>, capital: Decimal): void {
-    const exp = expectancyPerTrade(result.winRate, result.avgWin, result.avgLoss);
-    log.info(`=== ${label} ===`, {
-        operacoes: result.trades.length,
-        acertos: result.wins,
-        erros: result.losses,
-        taxaAcerto: pct(result.winRate),
-        ganhoMedio: `$${result.avgWin.toFixed(4)}`,
-        perdaMedia: `$${result.avgLoss.toFixed(4)}`,
-        // O número que decide: expectativa por operação. Positiva com 40% de
-        // acerto é melhor que negativa com 90%.
-        expectativaPorOperacao: `$${exp.toFixed(4)}`,
-        fatorLucro: result.profitFactor ? result.profitFactor.toFixed(3) : 'n/d (sem perdas na amostra)',
-        capitalInicial: `$${capital.toFixed(2)}`,
-        capitalFinal: `$${result.finalCapital.toFixed(2)}`,
-        retorno: pct(result.totalNetProfit.dividedBy(capital)),
-        piorQueda: pct(result.maxDrawdownFraction),
-        taxasPagas: `$${result.totalFees.toFixed(4)}`,
-        recusadasPeloRisco: result.skippedByRisk,
+interface SymbolOutcome {
+    symbol: string;
+    strategy: 'breakout' | 'reversion';
+    trades: number;
+    winRate: Decimal;
+    expectancy: Decimal;
+    netProfit: Decimal;
+    returnFraction: Decimal;
+    maxDrawdown: Decimal;
+    buyHold: Decimal;
+    /** A estratégia superou simplesmente comprar e segurar o ativo? */
+    beatBuyHold: boolean;
+}
+
+function evaluate(
+    symbol: string,
+    strategy: 'breakout' | 'reversion',
+    candles: Candle[],
+    capital: Decimal,
+    params: StrategyParams,
+): SymbolOutcome {
+    const result = runBacktest(candles, capital, { ...params, entryStrategy: strategy });
+    const buyHold = candles[candles.length - 1].close.dividedBy(candles[0].close).minus(1);
+    const returnFraction = result.totalNetProfit.dividedBy(capital);
+    return {
+        symbol,
+        strategy,
+        trades: result.trades.length,
+        winRate: result.winRate,
+        expectancy: expectancyPerTrade(result.winRate, result.avgWin, result.avgLoss),
+        netProfit: result.totalNetProfit,
+        returnFraction,
+        maxDrawdown: result.maxDrawdownFraction,
+        buyHold,
+        beatBuyHold: returnFraction.greaterThan(buyHold),
+    };
+}
+
+function reportOutcome(o: SymbolOutcome): void {
+    log.info(`${o.symbol} — ${o.strategy}`, {
+        operacoes: o.trades,
+        taxaAcerto: pct(o.winRate),
+        // O número que decide. Positivo com 40% de acerto vale mais que
+        // negativo com 90%.
+        expectativaPorOperacao: `$${o.expectancy.toFixed(4)}`,
+        lucroLiquido: `$${o.netProfit.toFixed(4)}`,
+        retorno: pct(o.returnFraction),
+        piorQueda: pct(o.maxDrawdown),
+        comprarESegurar: pct(o.buyHold),
+        bateuComprarESegurar: o.beatBuyHold ? 'sim' : 'NÃO',
     });
 }
 
 async function main() {
-    const symbol = (process.env.BT_SYMBOL ?? 'ZECUSDT').toUpperCase();
+    const symbols = (process.env.BT_SYMBOLS ?? 'BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,ZECUSDT')
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter((s) => s.length > 0);
     const interval = process.env.BT_INTERVAL ?? '1h';
     const limit = Number(process.env.BT_CANDLES ?? '2000');
     const capital = new Decimal(process.env.BT_CAPITAL ?? '20');
     const params = resolveParams();
 
-    log.info('Buscando candles reais na Binance (nenhuma ordem será enviada).', {
-        simbolo: symbol,
+    log.info('Backtest multi-ativo contra candles reais da Binance (nenhuma ordem será enviada).', {
+        ativos: symbols.join(','),
         intervalo: interval,
         candles: limit,
         capital: capital.toString(),
         risco: pct(params.riskFraction),
         perdasSeguidasSuportadas: consecutiveLossesSurvivable(params.riskFraction),
+        nota: 'Cada ativo roda as DUAS famílias de entrada sobre os mesmos dados.',
     });
 
-    const candles = await fetchKlines(symbol, interval, limit);
-    const intervalMs = candles.length > 1 ? candles[1].openTime - candles[0].openTime : 0;
-    assertUsableSeries(candles, intervalMs);
+    const outcomes: SymbolOutcome[] = [];
 
-    const inicio = new Date(candles[0].openTime).toISOString();
-    const fim = new Date(candles[candles.length - 1].openTime).toISOString();
-    log.info(`Série carregada: ${candles.length} candles, de ${inicio} a ${fim}.`);
+    for (const symbol of symbols) {
+        let candles: Candle[];
+        try {
+            candles = await fetchKlines(symbol, interval, limit);
+            const intervalMs = candles.length > 1 ? candles[1].openTime - candles[0].openTime : 0;
+            assertUsableSeries(candles, intervalMs);
+        } catch (err) {
+            // Um símbolo inexistente ou sem histórico não pode derrubar a
+            // varredura inteira — reporta e segue.
+            log.error(`Falha ao carregar ${symbol}; pulando.`, {
+                erro: err instanceof Error ? err.message : String(err),
+            });
+            continue;
+        }
 
-    // Duas janelas separadas de propósito. Parâmetros que só funcionam na
-    // primeira metade e falham na segunda são overfitting — a estratégia foi
-    // moldada ao passado, não descobriu nada sobre o mercado. Uma janela só
-    // não denuncia isso.
-    const meio = Math.floor(candles.length / 2);
-    report('PERÍODO COMPLETO', runBacktest(candles, capital, params), capital);
-    report('PRIMEIRA METADE', runBacktest(candles.slice(0, meio), capital, params), capital);
-    report('SEGUNDA METADE', runBacktest(candles.slice(meio), capital, params), capital);
+        const inicio = new Date(candles[0].openTime).toISOString().slice(0, 10);
+        const fim = new Date(candles[candles.length - 1].openTime).toISOString().slice(0, 10);
+        log.info(`=== ${symbol}: ${candles.length} candles, ${inicio} a ${fim} ===`);
 
-    // Referência obrigatória: se comprar e segurar rende mais, a estratégia
-    // não está agregando nada — está só pagando taxa para chegar ao mesmo
-    // lugar por um caminho pior.
-    const buyHold = candles[candles.length - 1].close.dividedBy(candles[0].close).minus(1);
-    log.info('=== REFERÊNCIA: COMPRAR E SEGURAR ===', {
-        retorno: pct(buyHold),
-        nota: 'A estratégia precisa bater ISTO para ter valido a pena. Bater o zero não basta.',
-    });
+        for (const strategy of ['breakout', 'reversion'] as const) {
+            const outcome = evaluate(symbol, strategy, candles, capital, params);
+            outcomes.push(outcome);
+            reportOutcome(outcome);
+        }
 
-    log.info('=== COMO LER ===', {
-        ponto1: 'Taxa de acerto baixa NÃO é problema. Expectativa por operação negativa é.',
-        ponto2: 'Se a primeira e a segunda metade discordam muito, os parâmetros foram moldados ao passado e não vão se repetir.',
-        ponto3: 'Se "comprar e segurar" rende mais, a estratégia está pagando taxa para chegar a um lugar pior.',
-        ponto4: 'Backtest mede o passado. É o piso da decisão, não promessa de futuro.',
+        // Metades separadas no ativo, para flagrar overfitting: parâmetros que
+        // só funcionam numa metade foram moldados ao passado.
+        const meio = Math.floor(candles.length / 2);
+        for (const strategy of ['breakout', 'reversion'] as const) {
+            const primeira = evaluate(symbol, strategy, candles.slice(0, meio), capital, params);
+            const segunda = evaluate(symbol, strategy, candles.slice(meio), capital, params);
+            const discordam = primeira.expectancy.greaterThan(0) !== segunda.expectancy.greaterThan(0);
+            log.info(`${symbol} — ${strategy} — consistência entre metades`, {
+                primeiraMetade: `$${primeira.expectancy.toFixed(4)}`,
+                segundaMetade: `$${segunda.expectancy.toFixed(4)}`,
+                veredito: discordam ? 'INCONSISTENTE — provável overfitting' : 'consistente',
+            });
+        }
+    }
+
+    if (outcomes.length === 0) {
+        log.error('Nenhum ativo pôde ser avaliado.');
+        process.exit(1);
+    }
+
+    // Agregado: é aqui que a comparação entre as duas famílias fica visível.
+    for (const strategy of ['breakout', 'reversion'] as const) {
+        const doGrupo = outcomes.filter((o) => o.strategy === strategy);
+        const positivos = doGrupo.filter((o) => o.expectancy.greaterThan(0));
+        const bateramBuyHold = doGrupo.filter((o) => o.beatBuyHold);
+        const somaLucro = doGrupo.reduce((acc, o) => acc.plus(o.netProfit), new Decimal(0));
+        log.info(`=== AGREGADO: ${strategy} ===`, {
+            ativosAvaliados: doGrupo.length,
+            comExpectativaPositiva: `${positivos.length}/${doGrupo.length}`,
+            bateramComprarESegurar: `${bateramBuyHold.length}/${doGrupo.length}`,
+            lucroSomadoEntreAtivos: `$${somaLucro.toFixed(4)}`,
+            operacoesTotais: doGrupo.reduce((acc, o) => acc + o.trades, 0),
+        });
+    }
+
+    log.info('=== COMO DECIDIR ===', {
+        ponto1: 'Uma família só merece ir a produção se tiver expectativa positiva na MAIORIA dos ativos, não em um sortudo.',
+        ponto2: 'Se as metades discordam num ativo, os parâmetros foram moldados ao passado daquele ativo.',
+        ponto3: 'bateuComprarESegurar = NÃO significa que a estratégia pagou taxa para chegar a um lugar pior que ficar parado comprado.',
+        ponto4: 'Taxa de acerto baixa não reprova nada. Expectativa por operação negativa reprova.',
+        ponto5: 'Backtest mede o passado. É o piso da decisão, nunca promessa de futuro.',
     });
 
     process.exit(0);

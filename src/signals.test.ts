@@ -1,0 +1,168 @@
+// Arquivo: src/signals.test.ts
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { Decimal } from 'decimal.js';
+import {
+    atr,
+    detectBreakout,
+    detectOversoldReversion,
+    highestHighBefore,
+    isAboveTrend,
+    lowestLowBefore,
+    rsi,
+    sma,
+    trueRange,
+    type Candle,
+} from './signals';
+
+Decimal.set({ precision: 30, rounding: Decimal.ROUND_DOWN });
+
+const d = (v: string | number) => new Decimal(String(v));
+
+function candle(open: number, high: number, low: number, close: number, i = 0): Candle {
+    return { openTime: i * 60_000, open: d(open), high: d(high), low: d(low), close: d(close), volume: d(1) };
+}
+
+/** Série a partir de fechamentos, com máx/mín coladas — isola o indicador. */
+function fromCloses(closes: number[]): Candle[] {
+    return closes.map((c, i) => candle(c, c + 0.5, c - 0.5, c, i));
+}
+
+// --- Médias e extremos ------------------------------------------------------
+
+test('sma devolve null sem histórico suficiente, nunca média parcial', () => {
+    // Média parcial disfarçada de completa faria as primeiras velas gerarem
+    // sinais baseados em quase nenhum dado.
+    const values = [d(1), d(2), d(3)];
+    assert.equal(sma(values, 1, 3), null);
+    assert.equal(sma(values, 2, 3)!.toString(), '2');
+});
+
+test('highestHighBefore EXCLUI a vela atual', () => {
+    // Incluí-la faria "fechou acima da máxima do período" ser quase sempre
+    // falso, quebrando o rompimento silenciosamente.
+    const candles = [candle(10, 12, 9, 11, 0), candle(11, 13, 10, 12, 1), candle(12, 50, 11, 49, 2)];
+    assert.equal(highestHighBefore(candles, 2, 2)!.toString(), '13', 'a máxima 50 da vela atual não pode entrar');
+});
+
+test('lowestLowBefore encontra a mínima do período anterior', () => {
+    const candles = [candle(10, 12, 5, 11, 0), candle(11, 13, 8, 12, 1), candle(12, 14, 1, 13, 2)];
+    assert.equal(lowestLowBefore(candles, 2, 2)!.toString(), '5');
+});
+
+// --- True range e ATR -------------------------------------------------------
+
+test('trueRange captura gap de abertura, não só o range interno da vela', () => {
+    // Sem isso, um stop dimensionado pelo range subestimaria o movimento real
+    // justamente nos momentos de maior volatilidade.
+    const comGap = candle(100, 105, 98, 104);
+    assert.equal(trueRange(comGap, d(80)).toString(), '25', '|105 − 80| = 25 supera o range interno de 7');
+    assert.equal(trueRange(comGap, null).toString(), '7', 'sem fechamento anterior, usa o range interno');
+});
+
+test('atr é a média dos true ranges e cresce com a volatilidade', () => {
+    const calmo = fromCloses([100, 100, 100, 100, 100, 100]);
+    const agitado = [
+        candle(100, 101, 99, 100, 0),
+        candle(100, 120, 80, 110, 1),
+        candle(110, 130, 90, 100, 2),
+        candle(100, 140, 70, 120, 3),
+        candle(120, 150, 100, 130, 4),
+        candle(130, 160, 110, 140, 5),
+    ];
+    assert.ok(atr(agitado, 5, 3)!.greaterThan(atr(calmo, 5, 3)!));
+});
+
+test('atr devolve null sem histórico suficiente', () => {
+    assert.equal(atr(fromCloses([100, 101, 102]), 1, 5), null);
+});
+
+// --- Rompimento -------------------------------------------------------------
+
+test('rompimento dispara pelo FECHAMENTO acima da máxima anterior', () => {
+    // Disparar pela máxima intradiária pareceria ótimo no backtest e ao vivo
+    // viraria compra no topo de um movimento já revertido.
+    const candles = [...fromCloses([100, 100, 100, 100, 100, 100, 100, 100, 100, 100])];
+    candles.push(candle(100, 120, 99, 118, 10));
+    const sinal = detectBreakout(candles, 10, 5, 5);
+    assert.ok(sinal.triggered);
+    assert.equal(sinal.breakoutLevel!.toString(), '100.5');
+});
+
+test('vela que TOCA a máxima mas fecha abaixo não dispara rompimento', () => {
+    const candles = [...fromCloses([100, 100, 100, 100, 100, 100, 100, 100, 100, 100])];
+    candles.push(candle(100, 130, 99, 100, 10)); // espetou e voltou
+    assert.equal(detectBreakout(candles, 10, 5, 5).triggered, false);
+});
+
+// --- Tendência --------------------------------------------------------------
+
+test('isAboveTrend separa acima e abaixo da média longa', () => {
+    const subindo = fromCloses([10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    assert.equal(isAboveTrend(subindo, 9, 5), true);
+    const caindo = fromCloses([100, 90, 80, 70, 60, 50, 40, 30, 20, 10]);
+    assert.equal(isAboveTrend(caindo, 9, 5), false);
+});
+
+// --- RSI --------------------------------------------------------------------
+
+test('RSI de série só de altas é 100 (sem divisão por zero vazando)', () => {
+    // Sem perda nenhuma o RS é infinito; devolver o resultado da divisão
+    // deixaria Infinity vazar para a comparação de limiar.
+    const soAltas = fromCloses([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+    assert.equal(rsi(soAltas, 15, 14)!.toString(), '100');
+});
+
+test('RSI de série só de quedas fica próximo de zero', () => {
+    const soQuedas = fromCloses([25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10]);
+    assert.ok(rsi(soQuedas, 15, 14)!.lessThan(d(5)));
+});
+
+test('RSI fica entre 0 e 100 numa série mista', () => {
+    const mista = fromCloses([100, 102, 101, 105, 103, 108, 106, 110, 107, 112, 109, 115, 111, 118, 114, 120]);
+    const valor = rsi(mista, 15, 14)!;
+    assert.ok(valor.greaterThan(0) && valor.lessThan(100));
+});
+
+test('RSI devolve null sem histórico suficiente', () => {
+    assert.equal(rsi(fromCloses([100, 101, 102]), 2, 14), null);
+});
+
+test('queda forte deixa o RSI abaixo do limiar de sobrevendido', () => {
+    const caindo = fromCloses([100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 78, 76, 74, 72, 70]);
+    assert.ok(rsi(caindo, 15, 14)!.lessThan(d(30)));
+});
+
+// --- Reversão ---------------------------------------------------------------
+
+test('reversão exige que o RSI tenha VIRADO para cima, não só estar baixo', () => {
+    // Comprar com o RSI ainda caindo é apostar num fundo não confirmado.
+    const aindaCaindo = fromCloses([100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 78, 76, 74, 72, 70, 68]);
+    assert.equal(
+        detectOversoldReversion(aindaCaindo, 16, 14, d(30), 5).triggered,
+        false,
+        'RSI baixo mas ainda caindo não dispara',
+    );
+});
+
+test('reversão dispara quando o RSI estava baixo e virou para cima', () => {
+    const viradaAposQueda = fromCloses([
+        100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 78, 76, 74, 72, 70, 78,
+    ]);
+    const sinal = detectOversoldReversion(viradaAposQueda, 16, 14, d(30), 5);
+    assert.ok(sinal.triggered, 'queda profunda seguida de virada é o sinal de "comprar na baixa"');
+    assert.ok(sinal.rsiValue!.greaterThan(0));
+    assert.notEqual(sinal.atrValue, null);
+});
+
+test('reversão não dispara em série lateral (nunca ficou sobrevendida)', () => {
+    const lateral = fromCloses([100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 102]);
+    assert.equal(detectOversoldReversion(lateral, 16, 14, d(30), 5).triggered, false);
+});
+
+test('reversão devolve não-disparado quando falta histórico, sem lançar', () => {
+    const curta = fromCloses([100, 99, 98]);
+    const sinal = detectOversoldReversion(curta, 2, 14, d(30), 5);
+    assert.equal(sinal.triggered, false);
+    assert.equal(sinal.rsiValue, null);
+});

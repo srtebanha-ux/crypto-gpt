@@ -63,7 +63,7 @@ HFT delta-neutral, com dois modos de execução: demo contra um feed mock
   `TriangularArbitrageEngine` real através de muitos ciclos em sequência
   contra um feed sintético — ver [Paper trading](#paper-trading-papertradingsimulationts).
 - `src/*.test.ts` — testes de unidade (`node:test`, sem dependência extra;
-  `npm test` — 226 testes, todos sem acesso a rede).
+  `npm test` — 244 testes, todos sem acesso a rede).
 - `Dockerfile`, `railway.json` — deploy como worker de longa duração.
 
 Todo cálculo financeiro usa `decimal.js` (nunca `Number`) para evitar perda
@@ -192,7 +192,7 @@ antes de crescer.
 
 ### Checklist antes de operar com dinheiro real
 
-1. `npm test` — 226 testes, todos sem rede, devem passar.
+1. `npm test` — 244 testes, todos sem rede, devem passar.
 2. `npm run paper-trade` (ver [Paper trading](#paper-trading-papertradingsimulationts))
    por vários dias simulados — exercita o engine real através de MUITOS
    ciclos em sequência, não só um. Foi rodando essa simulação por vários
@@ -227,7 +227,7 @@ npm run dev        # roda direto via ts-node contra o feed mock
 npm run build       # compila para dist/
 npm start           # roda o build
 npm run typecheck   # apenas checagem de tipos
-npm test            # suíte de testes (node:test) — 226 testes, sem rede
+npm test            # suíte de testes (node:test) — 244 testes, sem rede
 npm run simulate    # simulação de sensibilidade offline (ver seção própria)
 ```
 
@@ -890,19 +890,47 @@ Três decisões que impedem resultado bonito e irreproduzível ao vivo:
    o stop no meio da vela, a posição acabou ali — mesmo que tenha fechado
    acima. O contrário esconde justamente as perdas.
 
+### Duas famílias opostas, decididas por dado
+
+"Comprar na baixa e vender na alta" e "comprar o que está subindo" não são a
+mesma coisa — são estratégias **opostas**, e qual funciona é pergunta empírica:
+
+- **`breakout`** — compra quando o preço rompe a máxima de N períodos,
+  esperando que o movimento continue. Compra na alta.
+- **`reversion`** — compra quando o RSI mostra sobrevenda **e já virou para
+  cima**, esperando retorno à média. É a tradução mecânica de "comprar na
+  baixa".
+
+Duas decisões no sinal de reversão que mudam o resultado:
+
+- **Exige que o RSI tenha virado**, não apenas que esteja baixo. Comprar com o
+  RSI ainda caindo é apostar num fundo não confirmado.
+- **O filtro de tendência importa MAIS aqui do que no rompimento.** Comprar
+  queda dentro de uma tendência de baixa é comprar algo que cai porque continua
+  caindo — a forma mais comum de perder dinheiro achando que se compra barato.
+
+O runner roda **as duas famílias em vários ativos** sobre os mesmos dados e
+compara. Nenhuma foi escolhida por argumento.
+
 ```bash
-BT_SYMBOL=ZECUSDT BT_INTERVAL=1h BT_CANDLES=2000 npm run backtest
+BT_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,ZECUSDT BT_INTERVAL=1h BT_CANDLES=2000 npm run backtest
 ```
 
-O relatório sai em **três janelas** (período completo, primeira metade, segunda
-metade) e com a referência de **comprar e segurar**. Ambas as coisas são
-defesas contra autoengano: parâmetros que funcionam só na primeira metade foram
-moldados ao passado; e se comprar e segurar rende mais, a estratégia está
-pagando taxa para chegar a um lugar pior.
+O relatório traz, por ativo e por família: expectativa por operação,
+consistência **entre as duas metades** do período, e comparação com **comprar e
+segurar**. Depois agrega: em quantos ativos cada família teve expectativa
+positiva. Uma família só merece produção se vencer na maioria, não num sortudo.
+
+As três defesas contra autoengano: metades que discordam denunciam parâmetros
+moldados ao passado; perder para comprar-e-segurar significa pagar taxa para
+chegar a um lugar pior; e um único ativo lucrativo entre cinco é sorte, não
+estratégia.
 
 | Variável | Padrão | Para quê |
 | --- | --- | --- |
-| `BT_SYMBOL` | `ZECUSDT` | Par a testar. |
+| `BT_SYMBOLS` | `BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,ZECUSDT` | Ativos a testar, separados por vírgula. |
+| `BT_RSI_PERIOD` | `14` | Período do RSI (família `reversion`). |
+| `BT_RSI_THRESHOLD` | `30` | Abaixo disso é sobrevendido. |
 | `BT_INTERVAL` | `1h` | Tamanho da vela. |
 | `BT_CANDLES` | `2000` | Quantas velas de histórico. |
 | `BT_CAPITAL` | `20` | Capital inicial simulado. |

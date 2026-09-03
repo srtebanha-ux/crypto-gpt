@@ -20,10 +20,28 @@
 //
 // Sem I/O: recebe candles já carregados.
 import { Decimal } from 'decimal.js';
-import { detectBreakout, isAboveTrend, type Candle } from './signals';
+import { detectBreakout, detectOversoldReversion, isAboveTrend, type Candle } from './signals';
 import { planPosition, updateTrailingStop } from './positionSizing';
 
+/**
+ * As duas famílias são OPOSTAS, e qual funciona é pergunta empírica:
+ *
+ *   - 'breakout' compra o que já está subindo, esperando que continue.
+ *   - 'reversion' compra o que caiu demais, esperando que volte — a tradução
+ *     mecânica de "comprar na baixa e vender na alta".
+ *
+ * Nenhuma das duas é a resposta certa por argumento. O backtest roda as duas
+ * sobre os mesmos dados e a comparação decide.
+ */
+export type EntryStrategy = 'breakout' | 'reversion';
+
 export interface StrategyParams {
+    /** Qual família de entrada usar. Padrão: rompimento. */
+    entryStrategy?: EntryStrategy;
+    /** Período do RSI (só em 'reversion'). */
+    rsiPeriod?: number;
+    /** Abaixo deste RSI o ativo é considerado sobrevendido (só em 'reversion'). */
+    rsiThreshold?: Decimal;
     /** Velas olhadas para trás no rompimento de máxima. */
     breakoutLookback: number;
     /** Período do ATR usado para posicionar o stop. */
@@ -140,7 +158,16 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
         if (position) continue;
 
         // Sinal decidido nesta vela; execução só na abertura da próxima.
-        const signal = detectBreakout(candles, i, params.breakoutLookback, params.atrPeriod);
+        const signal =
+            params.entryStrategy === 'reversion'
+                ? detectOversoldReversion(
+                      candles,
+                      i,
+                      params.rsiPeriod ?? 14,
+                      params.rsiThreshold ?? new Decimal(30),
+                      params.atrPeriod,
+                  )
+                : detectBreakout(candles, i, params.breakoutLookback, params.atrPeriod);
         if (!signal.triggered || signal.atrValue === null) continue;
 
         if (params.trendPeriod > 0) {

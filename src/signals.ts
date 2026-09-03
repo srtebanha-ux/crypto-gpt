@@ -136,3 +136,89 @@ export function isAboveTrend(candles: Candle[], index: number, trendPeriod: numb
     if (trend === null) return null;
     return candles[index].close.greaterThan(trend);
 }
+
+/**
+ * RSI (Relative Strength Index) com suavização de Wilder.
+ *
+ *   RS = média de ganhos / média de perdas   |   RSI = 100 − 100/(1 + RS)
+ *
+ * Abaixo de 30 é convenção de "sobrevendido" — caiu muito rápido em relação
+ * ao próprio histórico recente. É a tradução mecânica de "comprar na baixa".
+ *
+ * Usa a suavização de Wilder (média exponencial com α = 1/period) e não média
+ * simples, porque a simples faz o indicador SALTAR quando uma vela antiga sai
+ * da janela: o RSI mudaria de patamar sem que nada tivesse acontecido no
+ * mercado, disparando entradas por um artefato de cálculo.
+ */
+export function rsi(candles: Candle[], endIndex: number, period: number): Decimal | null {
+    if (period <= 0 || endIndex < period || endIndex >= candles.length) return null;
+
+    // Primeira média: simples sobre as `period` variações iniciais.
+    let gainSum = new Decimal(0);
+    let lossSum = new Decimal(0);
+    for (let i = 1; i <= period; i++) {
+        const change = candles[i].close.minus(candles[i - 1].close);
+        if (change.greaterThan(0)) gainSum = gainSum.plus(change);
+        else lossSum = lossSum.plus(change.abs());
+    }
+    let avgGain = gainSum.dividedBy(period);
+    let avgLoss = lossSum.dividedBy(period);
+
+    // Depois, suavização de Wilder até endIndex.
+    for (let i = period + 1; i <= endIndex; i++) {
+        const change = candles[i].close.minus(candles[i - 1].close);
+        const gain = change.greaterThan(0) ? change : new Decimal(0);
+        const loss = change.lessThan(0) ? change.abs() : new Decimal(0);
+        avgGain = avgGain.mul(period - 1).plus(gain).dividedBy(period);
+        avgLoss = avgLoss.mul(period - 1).plus(loss).dividedBy(period);
+    }
+
+    // Sem nenhuma perda no período o RS é infinito; por definição o RSI é 100.
+    // Devolver o valor da divisão por zero deixaria Infinity vazar para a
+    // comparação de limiar.
+    if (avgLoss.isZero()) return new Decimal(100);
+
+    const rs = avgGain.dividedBy(avgLoss);
+    return new Decimal(100).minus(new Decimal(100).dividedBy(rs.plus(1)));
+}
+
+export interface ReversionSignal {
+    triggered: boolean;
+    rsiValue: Decimal | null;
+    atrValue: Decimal | null;
+}
+
+/**
+ * Entrada por reversão: o ativo caiu o bastante para ficar sobrevendido, MAS
+ * segue acima da tendência de longo prazo.
+ *
+ * O filtro de tendência é mais importante aqui do que no rompimento, e não
+ * menos: comprar queda dentro de uma tendência de baixa é comprar algo que
+ * está caindo porque continua caindo. Sem esse filtro, "comprar na baixa"
+ * vira comprar cada degrau de um tombo — a forma mais comum de perder dinheiro
+ * achando que se está comprando barato.
+ *
+ * Exige também que o RSI tenha VIRADO para cima (subiu em relação à vela
+ * anterior). Comprar no RSI ainda caindo é apostar num fundo que não se
+ * confirmou; esperar a virada troca um pouco de preço por evidência de que a
+ * queda perdeu força.
+ */
+export function detectOversoldReversion(
+    candles: Candle[],
+    index: number,
+    rsiPeriod: number,
+    rsiThreshold: Decimal,
+    atrPeriod: number,
+): ReversionSignal {
+    const atrValue = atr(candles, index, atrPeriod);
+    const current = rsi(candles, index, rsiPeriod);
+    const previous = rsi(candles, index - 1, rsiPeriod);
+
+    if (current === null || previous === null || atrValue === null) {
+        return { triggered: false, rsiValue: current, atrValue };
+    }
+
+    const estavaSobrevendido = previous.lessThan(rsiThreshold);
+    const virouParaCima = current.greaterThan(previous);
+    return { triggered: estavaSobrevendido && virouParaCima, rsiValue: current, atrValue };
+}
