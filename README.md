@@ -1078,8 +1078,13 @@ stop, que são as que mais importam.
 | `DIRECTIONAL_POLL_SEC` | `60` | Intervalo entre varreduras. |
 | `DIRECTIONAL_LIVE` | `false` | `true` + confirmação para ordens reais. |
 
-Os parâmetros de sinal e risco são os mesmos `BT_*` do backtest — de propósito:
-operar com parâmetros diferentes dos medidos é operar às cegas.
+Os parâmetros de sinal e risco são os mesmos `BT_*` do backtest — e isso é
+garantido por construção, não por disciplina: um resolvedor único
+(`strategyParams.ts`) é lido pelos dois. Antes eram duas leituras separadas das
+mesmas variáveis, e os padrões divergiram sozinhos: o motor entrava com
+RSI < 45 enquanto a medição usava RSI < 30, e cobrava 0,1% de taxa onde a
+medição usava 0,075%. Nada quebra nesse caso — o motor roda, o log parece
+saudável, e o que opera simplesmente não é o que foi validado.
 
 ### Alavancagem: a resposta está na medição, e ela é não
 

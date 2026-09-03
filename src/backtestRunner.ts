@@ -14,6 +14,7 @@
 // (overfitting) produzem exatamente isso e nada mais. Por isso o relatório
 // insiste em janelas separadas.
 import { Decimal } from 'decimal.js';
+import { resolveStrategyParams } from './strategyParams';
 import { createLogger } from './logger';
 import { runBacktest, type StrategyParams } from './backtest';
 import { consecutiveLossesSurvivable, expectancyPerTrade } from './positionSizing';
@@ -93,28 +94,6 @@ async function fetchKlines(symbol: string, interval: string, limit: number): Pro
     return candles;
 }
 
-function resolveParams(): StrategyParams {
-    return {
-        rsiPeriod: Number(process.env.BT_RSI_PERIOD ?? '14'),
-        // 30 é o valor de manual para mercado lateral. Para comprar correção
-        // DENTRO de uma tendência de alta ele quase nunca é atingido — as
-        // quedas param em 40-45 —, e o resultado é a estratégia não disparar
-        // nenhuma vez, que não é "perdeu": é "nunca foi testada".
-        rsiThreshold: new Decimal(process.env.BT_RSI_THRESHOLD ?? '30'),
-        breakoutLookback: Number(process.env.BT_BREAKOUT_LOOKBACK ?? '20'),
-        atrPeriod: Number(process.env.BT_ATR_PERIOD ?? '14'),
-        atrStopMultiplier: new Decimal(process.env.BT_ATR_STOP_MULT ?? '2'),
-        trendPeriod: Number(process.env.BT_TREND_PERIOD ?? '50'),
-        riskFraction: new Decimal(process.env.BT_RISK_FRACTION ?? '0.02'),
-        trailFraction: new Decimal(process.env.BT_TRAIL_FRACTION ?? '0'),
-        // Padrão em ATR, não em percentual: 3x ATR deixa a posição respirar o
-        // ruído normal enquanto sobe, e aperta sozinho conforme o preço avança.
-        trailAtrMultiplier: new Decimal(process.env.BT_TRAIL_ATR_MULT ?? '3'),
-        // Taker com desconto de BNB. Sem o desconto, use 0.001.
-        feeRate: new Decimal(process.env.BT_FEE_RATE ?? '0.00075'),
-        minNotional: new Decimal(process.env.BT_MIN_NOTIONAL ?? '5'),
-    };
-}
 
 function pct(fraction: Decimal): string {
     return `${fraction.mul(100).toFixed(2)}%`;
@@ -181,7 +160,7 @@ async function main() {
     const interval = process.env.BT_INTERVAL ?? '1h';
     const limit = Number(process.env.BT_CANDLES ?? '2000');
     const capital = new Decimal(process.env.BT_CAPITAL ?? '20');
-    const params = resolveParams();
+    const params = resolveStrategyParams();
 
     log.info('Backtest multi-ativo contra candles reais da Binance (nenhuma ordem será enviada).', {
         ativos: symbols.join(','),

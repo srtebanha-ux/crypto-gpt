@@ -24,6 +24,8 @@ import { createLogger } from './logger';
 import { BinanceExchangeProvider } from './binanceExchangeProvider';
 import { atr, detectBreakout, detectOversoldReversion, isAboveTrend, rsiSeries, type Candle } from './signals';
 import { planPosition, tradeNetPnl, updateTrailingStopAtr } from './positionSizing';
+import { resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
+
 
 Decimal.set({ precision: 30, rounding: Decimal.ROUND_DOWN });
 
@@ -49,20 +51,16 @@ interface OpenPosition {
 interface Config {
     symbols: string[];
     interval: string;
-    entryStrategy: 'breakout' | 'reversion';
-    rsiPeriod: number;
-    rsiThreshold: Decimal;
-    breakoutLookback: number;
-    atrPeriod: number;
-    atrStopMultiplier: Decimal;
-    trailAtrMultiplier: Decimal;
-    trendPeriod: number;
-    riskFraction: Decimal;
     capital: Decimal;
-    feeRate: Decimal;
-    minNotional: Decimal;
     pollSeconds: number;
     live: boolean;
+    /**
+     * Parâmetros de sinal e risco, resolvidos pelo MESMO código que o backtest
+     * usa. Operar com parâmetros diferentes dos medidos é operar às cegas — e
+     * já aconteceu aqui, quando as duas leituras eram separadas e os padrões
+     * divergiram sozinhos.
+     */
+    strategy: ResolvedStrategyParams;
 }
 
 function parseKline(raw: RawKline): Candle {
@@ -109,20 +107,10 @@ function resolveConfig(): Config {
             .map((s) => s.trim().toUpperCase())
             .filter(Boolean),
         interval: process.env.DIRECTIONAL_INTERVAL ?? '1h',
-        entryStrategy: strategy,
-        rsiPeriod: Number(process.env.BT_RSI_PERIOD ?? '14'),
-        rsiThreshold: new Decimal(process.env.BT_RSI_THRESHOLD ?? '45'),
-        breakoutLookback: Number(process.env.BT_BREAKOUT_LOOKBACK ?? '20'),
-        atrPeriod: Number(process.env.BT_ATR_PERIOD ?? '14'),
-        atrStopMultiplier: new Decimal(process.env.BT_ATR_STOP_MULT ?? '2'),
-        trailAtrMultiplier: new Decimal(process.env.BT_TRAIL_ATR_MULT ?? '3'),
-        trendPeriod: Number(process.env.BT_TREND_PERIOD ?? '50'),
-        riskFraction: new Decimal(process.env.BT_RISK_FRACTION ?? '0.02'),
         capital: new Decimal(process.env.DIRECTIONAL_CAPITAL ?? '20'),
-        feeRate: new Decimal(process.env.BT_FEE_RATE ?? '0.001'),
-        minNotional: new Decimal(process.env.BT_MIN_NOTIONAL ?? '5'),
         pollSeconds: Number(process.env.DIRECTIONAL_POLL_SEC ?? '60'),
         live,
+        strategy: resolveStrategyParams(strategy),
     };
 }
 
@@ -140,16 +128,16 @@ async function main() {
         // A taxa real da conta manda: cobrar 0,1% de papel numa conta com
         // desconto de BNB (0,075%) descreveria uma operação que não é a que
         // vai acontecer.
-        cfg.feeRate = exchange.getFeeRate();
+        cfg.strategy.feeRate = exchange.getFeeRate();
     }
 
     log.info(`Motor direcional iniciado em modo ${cfg.live ? 'LIVE — DINHEIRO REAL' : 'PAPEL (nenhuma ordem enviada)'}.`, {
         ativos: cfg.symbols.join(','),
-        estrategia: cfg.entryStrategy,
+        estrategia: cfg.strategy.entryStrategy,
         intervalo: cfg.interval,
         capital: cfg.capital.toString(),
-        riscoPorOperacao: `${cfg.riskFraction.mul(100).toFixed(2)}%`,
-        taxaPorPerna: `${cfg.feeRate.mul(100).toFixed(4)}%`,
+        riscoPorOperacao: `${cfg.strategy.riskFraction.mul(100).toFixed(2)}%`,
+        taxaPorPerna: `${cfg.strategy.feeRate.mul(100).toFixed(4)}%`,
     });
     if (cfg.live) {
         log.warn('*** ORDENS REAIS SERÃO ENVIADAS. Perda é resultado possível sem nenhuma falha técnica. ***');
@@ -197,7 +185,7 @@ async function main() {
             // escorregam mais.
             if (fill.executedPrice.greaterThan(0)) exitPrice = fill.executedPrice;
         }
-        const { netProfit, feesPaid } = tradeNetPnl(pos.entryPrice, exitPrice, pos.quantity, cfg.feeRate);
+        const { netProfit, feesPaid } = tradeNetPnl(pos.entryPrice, exitPrice, pos.quantity, cfg.strategy.feeRate);
         // O dinheiro preso na posição volta ao caixa, junto com o resultado.
         committed = committed.minus(pos.notional);
         if (committed.lessThan(0)) committed = new Decimal(0);
@@ -218,7 +206,7 @@ async function main() {
 
     const step = async (symbol: string) => {
         const candles = await fetchClosedCandles(symbol, cfg.interval, HISTORY_CANDLES);
-        if (candles.length < cfg.trendPeriod + cfg.atrPeriod + 5) return;
+        if (candles.length < cfg.strategy.trendPeriod + cfg.strategy.atrPeriod + 5) return;
         const last = candles.length - 1;
         const candle = candles[last];
         // Uma avaliação por vela fechada. Nos ciclos entre um fechamento e o
@@ -238,24 +226,24 @@ async function main() {
                 return;
             }
             if (candle.high.greaterThan(pos.highestSinceEntry)) pos.highestSinceEntry = candle.high;
-            const currentAtr = atr(candles, last, cfg.atrPeriod);
+            const currentAtr = atr(candles, last, cfg.strategy.atrPeriod);
             if (currentAtr) {
                 pos.stopPrice = updateTrailingStopAtr(
                     pos.stopPrice,
                     pos.highestSinceEntry,
                     currentAtr,
-                    cfg.trailAtrMultiplier,
+                    cfg.strategy.trailAtrMultiplier,
                 );
             }
             return;
         }
 
         const signal =
-            cfg.entryStrategy === 'reversion'
-                ? detectOversoldReversion(candles, last, rsiSeries(candles, cfg.rsiPeriod), cfg.rsiThreshold, cfg.atrPeriod)
-                : detectBreakout(candles, last, cfg.breakoutLookback, cfg.atrPeriod);
+            cfg.strategy.entryStrategy === 'reversion'
+                ? detectOversoldReversion(candles, last, rsiSeries(candles, cfg.strategy.rsiPeriod), cfg.strategy.rsiThreshold, cfg.strategy.atrPeriod)
+                : detectBreakout(candles, last, cfg.strategy.breakoutLookback, cfg.strategy.atrPeriod);
         const rsiAtual =
-            cfg.entryStrategy === 'reversion' && 'rsiValue' in signal && signal.rsiValue
+            cfg.strategy.entryStrategy === 'reversion' && 'rsiValue' in signal && signal.rsiValue
                 ? signal.rsiValue.toFixed(1)
                 : null;
 
@@ -263,21 +251,21 @@ async function main() {
             diagnostico.set(
                 symbol,
                 rsiAtual !== null
-                    ? `sem sinal (RSI ${rsiAtual}, precisa < ${cfg.rsiThreshold} e já subindo)`
+                    ? `sem sinal (RSI ${rsiAtual}, precisa < ${cfg.strategy.rsiThreshold} e já subindo)`
                     : 'sem sinal',
             );
             return;
         }
         sinaisDisparados += 1;
 
-        if (cfg.trendPeriod > 0) {
+        if (cfg.strategy.trendPeriod > 0) {
             const closes = candles.map((c) => c.close);
-            if (isAboveTrend(closes, last, cfg.trendPeriod) !== true) {
+            if (isAboveTrend(closes, last, cfg.strategy.trendPeriod) !== true) {
                 bloqueadosPorTendencia += 1;
                 // Comprar queda dentro de tendência de baixa é comprar algo que
                 // cai porque continua caindo. O filtro barrar é o filtro
                 // funcionando, não um problema a ser afrouxado sem medir.
-                diagnostico.set(symbol, `SINAL barrado pelo filtro de tendência (abaixo da média de ${cfg.trendPeriod})`);
+                diagnostico.set(symbol, `SINAL barrado pelo filtro de tendência (abaixo da média de ${cfg.strategy.trendPeriod})`);
                 return;
             }
         }
@@ -286,14 +274,14 @@ async function main() {
         // ao vivo, a vela seguinte é AGORA, e seu preço corrente é o melhor
         // equivalente disponível.
         const entryPrice = candle.close;
-        const stopPrice = entryPrice.minus(signal.atrValue.mul(cfg.atrStopMultiplier));
+        const stopPrice = entryPrice.minus(signal.atrValue.mul(cfg.strategy.atrStopMultiplier));
         const plan = planPosition({
             capital,
             availableCapital: capital.minus(committed),
-            riskFraction: cfg.riskFraction,
+            riskFraction: cfg.strategy.riskFraction,
             entryPrice,
             stopPrice,
-            minNotional: cfg.minNotional,
+            minNotional: cfg.strategy.minNotional,
         });
         if (plan.quantity.lessThanOrEqualTo(0)) {
             recusadosPorRisco += 1;
@@ -312,7 +300,7 @@ async function main() {
         // O stop acompanha o preço REALMENTE pago: mantê-lo ancorado no preço
         // pretendido mudaria silenciosamente a distância até o stop, e com ela
         // o risco que se aceitou correr.
-        const filledStop = filledPrice.minus(signal.atrValue.mul(cfg.atrStopMultiplier));
+        const filledStop = filledPrice.minus(signal.atrValue.mul(cfg.strategy.atrStopMultiplier));
         const notional = filledQty.mul(filledPrice);
         committed = committed.plus(notional);
         diagnostico.set(symbol, 'ENTRADA executada neste ciclo');
