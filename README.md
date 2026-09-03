@@ -823,11 +823,44 @@ sempre, e retentar cada pool morto numa varredura de 200 multiplicaria o tempo
 sem mudar nenhum resultado. A distinção é feita pelo texto do erro — heurística
 assumida, com risco pequeno nos dois sentidos.
 
+### A medição que fechou a cauda longa
+
+Duas varreduras reais na Uniswap V2 da Base, factory com **3.050.359 pools**:
+
+| Modo | Pools lidos | Válidos | Tokens distintos | Tokens em 2+ pools | Ciclos |
+| --- | --- | --- | --- | --- | --- |
+| `newest` | 200 | 100 | — | — | **0** |
+| `random` | 400 | 387 | **389** | **0** | **0** |
+
+387 pools e 389 tokens distintos, nenhum token repetido: é um **grafo estrela**
+perfeito, cada token pareado só com WETH. Não existe triângulo porque não existe
+grafo, e aumentar `DEX_SCAN_LIMIT` não ajuda — mais pools trazem mais tokens
+únicos, não mais conexões.
+
+Isso encerra a hipótese da cauda longa com número. "Ir onde ninguém está
+olhando" era a premissa do modo `newest`; ninguém está olhando porque não há o
+que olhar. De quebra, `newest` descartou 50% dos pools por reserva zerada contra
+3,3% da amostra aleatória: os mais recentes são lançamentos ainda sem liquidez.
+
+Sobra uma estrutura possível: **o mesmo par em duas DEXs**. E ela não é
+encontrável por amostragem — sortear o mesmo par dos dois lados entre milhões
+tem probabilidade praticamente zero. Por isso existe a busca dirigida:
+
+```bash
+DEX_TOKENS=0xTokenA,0xTokenB DEX_FACTORY=0xUmaDEX,0xOutraDEX npm run sniff-dex:prod
+```
+
+Uma chamada `getPair(token, WETH)` por (token, factory) encontra em segundos o
+que a varredura nunca encontraria. O seletor de `getPair` é conferido em
+execução — o endereço devolvido tem que se declarar criado por uma das
+factories informadas, senão a medição para. Seletor errado não estoura sozinho:
+devolveria lixo que decodifica como endereço, e o relatório mediria um contrato
+que ninguém escolheu.
+
 ### Uma factory só quase nunca fecha ciclo
 
-A primeira varredura real mediu isto: 200 pools lidos, 100 válidos, **zero
-ciclos**. Não foi defeito — é topologia, e vale entender porque decide como usar
-a ferramenta.
+Não foi defeito — é topologia, e vale entender porque decide como usar a
+ferramenta.
 
 Dentro de uma única factory V2, cada par existe **uma vez**. Se todos os pools
 carregados são `TOKEN/WETH`, não há segundo caminho de volta: o ciclo precisa de

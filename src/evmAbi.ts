@@ -38,6 +38,19 @@ export const SELECTORS = {
     allPairs: '0x1e3dd18b',
     /** factory() -> address (exposto pelo par V2, aponta para quem o criou) */
     factory: '0xc45a0155',
+    /**
+     * getPair(address,address) -> address (0x0 quando o par não existe).
+     *
+     * É o que permite perguntar a DUAS factories pelo MESMO par — a única
+     * estrutura que ainda pode fechar ciclo depois de a varredura aleatória
+     * ter medido que a Uniswap V2 na Base é um grafo estrela.
+     *
+     * Como todo seletor daqui, é constante documentada e não calculada
+     * (keccak-256 do Ethereum não é o SHA3-256 do Node). Diferente dos outros,
+     * este é conferido em execução contra um par conhecido antes de ser usado
+     * em massa — ver `assertGetPairSelector`.
+     */
+    getPair: '0xe6a43905',
 } as const;
 
 /** Remove o "0x" e valida que sobrou hex puro. */
@@ -107,6 +120,22 @@ export function encodeUint256(value: number | Decimal): string {
     }
     if (hex === '') hex = '0';
     return hex.padStart(WORD_HEX_LENGTH, '0');
+}
+
+/**
+ * Codifica um endereço como argumento (uma palavra de 32 bytes, alinhada à
+ * direita).
+ *
+ * Valida o formato em vez de só preencher com zeros: um endereço truncado
+ * viraria outro endereço válido, e a chamada devolveria dado de um contrato
+ * que ninguém pediu — sem erro nenhum.
+ */
+export function encodeAddress(address: string): string {
+    const raw = stripHexPrefix(address).toLowerCase();
+    if (raw.length !== 40) {
+        throw new Error(`Endereço deve ter 20 bytes (40 hex), recebeu ${raw.length / 2} bytes: ${address}`);
+    }
+    return raw.padStart(WORD_HEX_LENGTH, '0');
 }
 
 export interface PoolReserves {

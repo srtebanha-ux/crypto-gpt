@@ -27,7 +27,7 @@ import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
 import { evaluateCycle, cycleSpotRatio } from './ammMath';
 import { findTriangularCycles, findTwoPoolCycles, hopsForCycle, type Cycle, type PoolInfo } from './dexGraph';
-import { SELECTORS, decodeAddressWord, decodeDecimals, decodeReserves, decodeUintWord, encodeUint256, fromRawUnits } from './evmAbi';
+import { encodeAddress, SELECTORS, decodeAddressWord, decodeDecimals, decodeReserves, decodeUintWord, encodeUint256, fromRawUnits } from './evmAbi';
 import { assertPlausiblePoolCount, parseScanMode, selectPoolIndices } from './poolDiscovery';
 
 Decimal.set({ precision: 40, rounding: Decimal.ROUND_DOWN });
@@ -471,6 +471,98 @@ export async function discoverPoolAddresses(rpcUrl: string, factory: string): Pr
     return addressResults.map((r) => decodeAddressWord(r, 0));
 }
 
+/**
+ * Pergunta a VÁRIAS factories pelo MESMO par, via `getPair(tokenA, tokenB)`.
+ *
+ * É a resposta à topologia que a varredura aleatória mediu: a Uniswap V2 na
+ * Base é um grafo estrela — 3 milhões de tokens, cada um pareado só com WETH,
+ * nenhum token em dois pools. Nesse grafo não existe triângulo, e amostrar mais
+ * pools não muda isso. A única estrutura que ainda fecha ciclo é o mesmo par em
+ * duas DEXs diferentes, e achá-la por amostragem é impossível: sortear o mesmo
+ * par dos dois lados entre milhões tem probabilidade praticamente zero.
+ *
+ * Perguntar dirigido custa 1 chamada por (token, factory) e encontra o que a
+ * amostragem nunca encontraria.
+ */
+export async function discoverPairsAcrossFactories(
+    rpcUrl: string,
+    factories: string[],
+    tokens: string[],
+    baseToken: string,
+): Promise<string[]> {
+    const alvos: Array<{ factory: string; token: string }> = [];
+    for (const factory of factories) {
+        for (const token of tokens) {
+            if (token === baseToken) continue;
+            alvos.push({ factory, token });
+        }
+    }
+    if (alvos.length === 0) return [];
+
+    const results = await chunkedEthCall(
+        rpcUrl,
+        alvos.map((a) => ({
+            to: a.factory,
+            data: SELECTORS.getPair + encodeAddress(a.token) + encodeAddress(baseToken),
+        })),
+        undefined,
+        'Consultando o mesmo par em cada DEX',
+    );
+
+    const encontrados: string[] = [];
+    const porToken = new Map<string, number>();
+    for (let i = 0; i < alvos.length; i++) {
+        let endereco: string;
+        try {
+            endereco = decodeAddressWord(results[i], 0);
+        } catch {
+            continue; // resposta vazia: par inexistente nessa factory
+        }
+        if (/^0x0+$/.test(endereco)) continue;
+        encontrados.push(endereco);
+        porToken.set(alvos[i].token, (porToken.get(alvos[i].token) ?? 0) + 1);
+    }
+
+    if (encontrados.length === 0) {
+        // Zero resultados tem duas causas com ações opostas, e sem distinguir
+        // as duas o operador procuraria no lugar errado.
+        throw new Error(
+            `Nenhuma factory conhece nenhum dos ${tokens.length} tokens pareado com o token base. ` +
+                `Ou os tokens/factories informados não têm esses pares, ou o seletor de getPair está errado ` +
+                `para estas factories. Confira um par que você SABE que existe (ex.: WETH/USDC na DEX principal).`,
+        );
+    }
+
+    // Verificação do seletor com um par que voltou: se getPair estivesse
+    // errado, o "endereço" seria lixo e não responderia factory().
+    const [factoryDoPrimeiro] = await batchEthCall(rpcUrl, [{ to: encontrados[0], data: SELECTORS.factory }]);
+    let confere = false;
+    try {
+        confere = factories.includes(decodeAddressWord(factoryDoPrimeiro, 0));
+    } catch {
+        confere = false;
+    }
+    if (!confere) {
+        throw new Error(
+            `getPair devolveu ${encontrados[0]}, mas esse endereço não se declara criado por nenhuma das ` +
+                `factories informadas. O seletor de getPair provavelmente não corresponde a estas factories — ` +
+                `pare aqui em vez de medir sobre endereço não confirmado.`,
+        );
+    }
+
+    const emDuasOuMais = Array.from(porToken.values()).filter((n) => n > 1).length;
+    log.info('Pares encontrados por consulta dirigida.', {
+        consultas: alvos.length,
+        paresEncontrados: encontrados.length,
+        tokensPresentesEmDuasOuMaisDEXs: emDuasOuMais,
+        nota:
+            emDuasOuMais === 0
+                ? 'Nenhum token existe em duas DEXs ao mesmo tempo — sem isso não há ciclo de 2 pools.'
+                : 'São estes que podem fechar ciclo entre DEXs.',
+    });
+    return Array.from(new Set(encontrados));
+}
+
 function describeCycle(cycle: Cycle): string {
     return cycle.path.map((t) => t.slice(0, 6)).join('->') + ` [${cycle.pools.map((p) => p.address.slice(0, 8)).join(', ')}]`;
 }
@@ -483,6 +575,12 @@ async function main() {
         .map((s) => s.trim().toLowerCase())
         .filter((s) => s.length > 0);
     const seedPool = process.env.DEX_SEED_POOL?.trim().toLowerCase();
+    // Tokens estabelecidos, fornecidos por quem roda. É a entrada da busca
+    // dirigida entre DEXs — o que a amostragem aleatória não consegue achar.
+    const crossTokens = (process.env.DEX_TOKENS ?? '')
+        .split(',')
+        .map((t) => t.trim().toLowerCase())
+        .filter((t) => t.length > 0);
     // Lista, não endereço único: arbitragem entre DEXs é a estrutura que mais
     // produz ciclo on-chain, e ela exige pools de FACTORIES diferentes. Dentro
     // de uma factory só, o mesmo par existe uma vez — não há o que comparar.
@@ -494,7 +592,7 @@ async function main() {
     const flashLoanFee = new Decimal(process.env.FLASH_LOAN_FEE ?? '0.0005'); // Aave V3; Balancer = 0
     const gasUnits = new Decimal(process.env.DEX_GAS_UNITS ?? String(DEFAULT_GAS_UNITS));
 
-    if (explicitPools.length === 0 && factories.length === 0 && !seedPool) {
+    if (explicitPools.length === 0 && factories.length === 0 && !seedPool && crossTokens.length === 0) {
         log.error('Defina DEX_SEED_POOL (mais simples), DEX_FACTORY ou DEX_POOLS.', {
             maisSimples:
                 'DEX_SEED_POOL=0x... — um endereço de pool qualquer da DEX. A factory é descoberta a partir dele via factory().',
@@ -504,6 +602,8 @@ async function main() {
                 'DEX_FACTORY=0x...,0x... — enumera pools de UMA OU MAIS factories. Duas DEXs diferentes é o que permite arbitragem entre elas; uma só raramente fecha ciclo.',
             enderecosEspecificos:
                 'DEX_POOLS=0xabc...,0xdef... — quando você já sabe quais pools quer conferir. Precisam ser de produto constante (V2), não V3.',
+            entreDexs:
+                'DEX_TOKENS=0xUSDC,0xcbBTC + DEX_FACTORY=0xUmaDEX,0xOutraDEX — pergunta a cada DEX pelo MESMO par. É o modo com chance real de fechar ciclo.',
         });
         process.exit(1);
     }
@@ -520,8 +620,15 @@ async function main() {
         factories = [await discoverFactoryFromPool(rpcUrl, seedPool)];
     }
     const descobertos: string[] = [];
-    for (const f of factories) {
-        descobertos.push(...(await discoverPoolAddresses(rpcUrl, f)));
+    if (crossTokens.length > 0) {
+        // Busca dirigida substitui a varredura: enumerar milhões de pools para
+        // encontrar por acaso o mesmo par em duas DEXs é impossível, enquanto
+        // perguntar por ele custa uma chamada.
+        descobertos.push(...(await discoverPairsAcrossFactories(rpcUrl, factories, crossTokens, baseToken)));
+    } else {
+        for (const f of factories) {
+            descobertos.push(...(await discoverPoolAddresses(rpcUrl, f)));
+        }
     }
     const poolAddresses =
         factories.length > 0
@@ -567,7 +674,10 @@ async function main() {
             }
         }
         const tokensComMaisDeUmPool = Array.from(paresPorToken.values()).filter((n) => n > 1).length;
-        const todosContraBase = tocamBase === pools.length && tokensComMaisDeUmPool === 0;
+        // Proporcional, não exato: um único pool fora do padrão não muda o
+        // fato de o grafo ser uma estrela. Exigir 100% fez o diagnóstico certo
+        // não aparecer justamente na medição que o comprovou (386 de 387).
+        const todosContraBase = tocamBase >= pools.length * 0.95 && tokensComMaisDeUmPool === 0;
 
         log.warn('Nenhum ciclo fechado entre os pools carregados.', {
             pools: pools.length,
@@ -580,9 +690,8 @@ async function main() {
                   'segundo caminho de volta. É o retrato típico dos pools mais recentes, que são lançamentos TOKEN/WETH.'
                 : 'Os pools carregados não compartilham tokens suficientes para fechar um ciclo.',
             saidas: [
-                'DEX_FACTORY=0xUmaDEX,0xOutraDEX — o mesmo par em duas DEXs fecha ciclo de 2 pools. É a arbitragem on-chain mais comum.',
-                'DEX_SCAN_MODE=oldest ou random — pools estabelecidos têm pares TOKEN/TOKEN, que formam triângulos.',
-                'DEX_SCAN_LIMIT maior — mais pools, mais chance de dois deles se conectarem.',
+                'DEX_TOKENS=0xUSDC,0xcbBTC + DEX_FACTORY=0xUmaDEX,0xOutraDEX — pergunta dirigida pelo MESMO par em cada DEX. É o único modo com chance real aqui.',
+                'DEX_SCAN_LIMIT maior NÃO resolve grafo estrela: mais pools trazem mais tokens únicos, não mais conexões.',
             ],
         });
         process.exit(0);

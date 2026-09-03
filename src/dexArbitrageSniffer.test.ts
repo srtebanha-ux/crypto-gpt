@@ -15,7 +15,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { loadPools, discoverPoolAddresses, discoverFactoryFromPool, chunkedEthCall } from './dexArbitrageSniffer';
+import {
+    loadPools,
+    discoverPoolAddresses,
+    discoverFactoryFromPool,
+    discoverPairsAcrossFactories,
+    chunkedEthCall,
+} from './dexArbitrageSniffer';
 import { SELECTORS } from './evmAbi';
 import { findTwoPoolCycles, hopsForCycle } from './dexGraph';
 import { evaluateCycle } from './ammMath';
@@ -584,6 +590,96 @@ test('recusa por ritmo corta a TAXA, não só a pausa', async () => {
         const results = await chunkedEthCall('http://fake', calls, 8);
         assert.equal(results.length, 8, 'a varredura completa depois de desacelerar');
         assert.ok(chamadas >= 2, 'houve retentativa com ritmo menor');
+    } finally {
+        globalThis.fetch = original;
+    }
+});
+
+test('busca dirigida encontra o mesmo par em duas factories', async () => {
+    // A varredura aleatória mediu que a Uniswap V2 na Base é grafo estrela:
+    // 387 pools, 389 tokens, ZERO tokens em dois pools. Nesse grafo não existe
+    // triângulo e amostrar mais não muda — sobra o mesmo par em duas DEXs, que
+    // por amostragem tem probabilidade praticamente zero de aparecer.
+    const facA = '0x' + 'aa'.repeat(20);
+    const facB = '0x' + 'bb'.repeat(20);
+    const USDT = '0x' + 'cc'.repeat(20);
+    const poolA = '0x' + '1a'.repeat(20);
+    const poolB = '0x' + '1b'.repeat(20);
+
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number; params: [{ to: string; data: string }] }>;
+        return {
+            ok: true,
+            json: async () =>
+                payload.map((p) => {
+                    const { to, data } = p.params[0];
+                    if (data.startsWith(SELECTORS.getPair)) {
+                        const alvo = to.toLowerCase() === facA ? poolA : poolB;
+                        return { jsonrpc: '2.0', id: p.id, result: '0x' + word(alvo) };
+                    }
+                    if (data === SELECTORS.factory) {
+                        return { jsonrpc: '2.0', id: p.id, result: '0x' + word(to.toLowerCase() === poolA ? facA : facB) };
+                    }
+                    return { jsonrpc: '2.0', id: p.id, result: '0x' };
+                }),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        const pares = await discoverPairsAcrossFactories('http://fake', [facA, facB], [USDT], WETH);
+        assert.deepEqual(pares.sort(), [poolA, poolB].sort(), 'o mesmo par nas duas DEXs vira dois pools no grafo');
+    } finally {
+        globalThis.fetch = original;
+    }
+});
+
+test('getPair devolvendo endereço que não se declara da factory PARA a medição', async () => {
+    // Seletor errado não estoura: devolve lixo que decodifica como endereço, e
+    // o relatório sairia medindo um contrato que ninguém escolheu. É a mesma
+    // classe de erro que fez este projeto nunca embutir endereço de memória.
+    const facA = '0x' + 'aa'.repeat(20);
+    const intruso = '0x' + '99'.repeat(20);
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number; params: [{ to: string; data: string }] }>;
+        return {
+            ok: true,
+            json: async () =>
+                payload.map((p) => ({
+                    jsonrpc: '2.0',
+                    id: p.id,
+                    // getPair devolve algo; factory() nesse algo devolve outra coisa.
+                    result: '0x' + word(p.params[0].data.startsWith(SELECTORS.getPair) ? intruso : '0x' + 'ee'.repeat(20)),
+                })),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        await assert.rejects(
+            () => discoverPairsAcrossFactories('http://fake', [facA], ['0x' + 'cc'.repeat(20)], WETH),
+            /não se declara criado por nenhuma das factories/,
+        );
+    } finally {
+        globalThis.fetch = original;
+    }
+});
+
+test('nenhum par encontrado distingue "não existe" de "seletor errado"', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const payload = JSON.parse(init?.body ?? '[]') as Array<{ id: number }>;
+        return {
+            ok: true,
+            json: async () => payload.map((p) => ({ jsonrpc: '2.0', id: p.id, result: '0x' + word('0') })),
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        await assert.rejects(
+            () => discoverPairsAcrossFactories('http://fake', ['0x' + 'aa'.repeat(20)], ['0x' + 'cc'.repeat(20)], WETH),
+            /seletor de getPair está errado/,
+        );
     } finally {
         globalThis.fetch = original;
     }
