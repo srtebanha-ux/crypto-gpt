@@ -19,6 +19,8 @@
 // Decide no FECHAMENTO da vela e executa na abertura da seguinte — igual ao
 // backtest. Reagir no meio da vela produziria comportamento que o backtest
 // nunca mediu.
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
 import { BinanceExchangeProvider } from './binanceExchangeProvider';
@@ -38,6 +40,46 @@ const HISTORY_CANDLES = 300;
 
 type RawKline = [number, string, string, string, string, string, number, ...unknown[]];
 
+/** Estado que precisa sobreviver a um reinício do processo. */
+export interface BookState {
+    capital: string;
+    realizedPnl: string;
+    wins: number;
+    losses: number;
+    committed: string;
+    positions: Array<{
+        symbol: string;
+        entryPrice: string;
+        quantity: string;
+        notional: string;
+        stopPrice: string;
+        highestSinceEntry: string;
+        openedAt: number;
+    }>;
+}
+
+/**
+ * Grava o estado de forma atômica: escreve num temporário e renomeia.
+ *
+ * Sem isso, um reinício no meio da escrita deixaria um JSON truncado — e o
+ * motor subiria sem as posições que acabou de salvar, que é o cenário exato
+ * que a persistência existe para evitar.
+ */
+export function saveState(path: string, books: Record<string, BookState>): void {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(books, null, 2));
+    renameSync(tmp, path);
+}
+
+export function loadState(path: string): Record<string, BookState> {
+    try {
+        return JSON.parse(readFileSync(path, 'utf8')) as Record<string, BookState>;
+    } catch {
+        return {};
+    }
+}
+
 interface OpenPosition {
     symbol: string;
     entryPrice: Decimal;
@@ -55,6 +97,8 @@ interface Config {
     capital: Decimal;
     pollSeconds: number;
     live: boolean;
+    /** Onde o estado é gravado para sobreviver a reinício. */
+    stateFile: string;
     /**
      * Parâmetros de sinal e risco, resolvidos pelo MESMO código que o backtest
      * usa. Operar com parâmetros diferentes dos medidos é operar às cegas — e
@@ -117,6 +161,7 @@ function resolveConfig(): Config {
         capital: new Decimal(process.env.DIRECTIONAL_CAPITAL ?? '20'),
         pollSeconds: Number(process.env.DIRECTIONAL_POLL_SEC ?? '60'),
         live,
+        stateFile: process.env.DIRECTIONAL_STATE_FILE ?? './data/directional-state.json',
         strategy: resolveStrategyParams(familias[0]),
         livros: familias.map((f) => resolveStrategyParams(f)),
     };
@@ -160,18 +205,38 @@ async function main() {
      * rodar as duas — desapareceria. Cada uma recebe uma fatia igual do
      * capital, então elas competem em pé de igualdade.
      */
+    const estadoSalvo = loadState(cfg.stateFile);
     const criarLivro = (params: ResolvedStrategyParams, capitalInicial: Decimal) => {
+    const salvo = estadoSalvo[params.entryStrategy];
     const positions = new Map<string, OpenPosition>();
-    let capital = capitalInicial;
-    let realizedPnl = new Decimal(0);
-    let wins = 0;
-    let losses = 0;
+    let capital = salvo ? new Decimal(salvo.capital) : capitalInicial;
+    let realizedPnl = new Decimal(salvo?.realizedPnl ?? '0');
+    let wins = salvo?.wins ?? 0;
+    let losses = salvo?.losses ?? 0;
     /**
      * Dinheiro preso nas posições abertas. Sem isto, cada ativo dimensionaria
      * contra o capital TOTAL e quatro posições simultâneas comprometeriam
      * quatro vezes o dinheiro que existe — alavancagem acidental.
      */
-    let committed = new Decimal(0);
+    let committed = new Decimal(salvo?.committed ?? '0');
+    if (salvo) {
+        for (const p of salvo.positions) {
+            positions.set(p.symbol, {
+                symbol: p.symbol,
+                entryPrice: new Decimal(p.entryPrice),
+                quantity: new Decimal(p.quantity),
+                notional: new Decimal(p.notional),
+                stopPrice: new Decimal(p.stopPrice),
+                highestSinceEntry: new Decimal(p.highestSinceEntry),
+                openedAt: p.openedAt,
+            });
+        }
+        log.info(`[${params.entryStrategy}] Estado recuperado do disco.`, {
+            capital: capital.toFixed(6),
+            posicoesReabertas: positions.size,
+            ativos: Array.from(positions.keys()).join(',') || 'nenhum',
+        });
+    }
     /**
      * Censo do ciclo: por que NÃO houve entrada.
      *
@@ -349,6 +414,23 @@ async function main() {
          * verdade não está sendo lido — silêncio que parece paciência.
          */
         marcarFalha: (symbol: string, motivo: string) => diagnostico.set(symbol, `FALHA: ${motivo}`),
+        /** Snapshot serializável — o que precisa sobreviver a um reinício. */
+        snapshot: (): BookState => ({
+            capital: capital.toString(),
+            realizedPnl: realizedPnl.toString(),
+            wins,
+            losses,
+            committed: committed.toString(),
+            positions: Array.from(positions.values()).map((p) => ({
+                symbol: p.symbol,
+                entryPrice: p.entryPrice.toString(),
+                quantity: p.quantity.toString(),
+                notional: p.notional.toString(),
+                stopPrice: p.stopPrice.toString(),
+                highestSinceEntry: p.highestSinceEntry.toString(),
+                openedAt: p.openedAt,
+            })),
+        }),
         resumo: () => ({
             estrategia: params.entryStrategy,
             capital: capital.toFixed(6),
@@ -390,6 +472,22 @@ async function main() {
                 for (const livro of livros) livro.marcarFalha(symbol, motivo);
                 log.warn(`Falha ao avaliar ${symbol}; segue no próximo ciclo.`, { erro: motivo });
             }
+        }
+
+        // Gravado a cada ciclo, não só quando algo muda: o stop móvel sobe
+        // dentro do ciclo sem abrir nem fechar posição, e perder essa
+        // atualização num reinício reabriria a posição com stop mais frouxo do
+        // que o que estava valendo.
+        try {
+            saveState(
+                cfg.stateFile,
+                Object.fromEntries(livros.map((l) => [l.params.entryStrategy, l.snapshot()])),
+            );
+        } catch (err) {
+            log.warn('Não foi possível gravar o estado; um reinício perderia as posições abertas.', {
+                arquivo: cfg.stateFile,
+                erro: err instanceof Error ? err.message : String(err),
+            });
         }
 
         for (const livro of livros) {

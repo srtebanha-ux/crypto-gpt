@@ -1211,6 +1211,55 @@ RSI < 45 enquanto a medição usava RSI < 30, e cobrava 0,1% de taxa onde a
 medição usava 0,075%. Nada quebra nesse caso — o motor roda, o log parece
 saudável, e o que opera simplesmente não é o que foi validado.
 
+### Estado sobrevive a reinício — pré-requisito para dinheiro real
+
+O motor guarda posições, capital e placar em memória, e o Railway reinicia o
+container a cada deploy. Em papel isso custa a soma corrida. **Com dinheiro
+real custa a única proteção contra perda ilimitada**: uma posição aberta na
+corretora que o motor esqueceu que existe é uma posição sem ninguém
+acompanhando o stop, e nenhum erro aparece — o log segue saudável enquanto o
+preço cai.
+
+O estado é gravado a cada ciclo em `DIRECTIONAL_STATE_FILE` (padrão
+`./data/directional-state.json`) e recuperado no boot. A cada ciclo, não só
+quando abre ou fecha posição: o stop móvel sobe dentro do ciclo, e perder essa
+atualização reabriria a posição com stop mais frouxo do que o que estava
+valendo.
+
+A gravação é atômica (temporário + rename). Escrever direto no destino deixaria
+JSON truncado se o processo morresse no meio — e o motor subiria sem as posições
+que acabara de salvar, que é exatamente o cenário que a persistência existe para
+evitar. Arquivo ausente ou corrompido devolve estado vazio em vez de impedir o
+boot: subir sem posições é recuperável, não subir não é.
+
+**No Railway, anexe um Volume** montado no diretório do arquivo. Sem volume, o
+disco é do container e um deploy o descarta — a persistência protege contra
+restart do processo, não contra troca de container.
+
+### Os botões de risco, e o que cada um custa
+
+`BT_RISK_FRACTION` é a fração do capital arriscada por operação, e determina
+quantas perdas seguidas o capital aguenta antes de cair à metade:
+
+| Risco por operação | Perdas seguidas até perder metade |
+| --- | --- |
+| 2% (padrão) | 34 |
+| 5% | 13 |
+| 10% | 6 |
+| 20% | 3 |
+
+Sequências de 8 a 10 perdas seguidas acontecem em qualquer estratégia
+direcional. A 10% por operação, uma sequência dessas custa metade da conta; a
+20%, três perdas fazem o mesmo.
+
+`BT_RSI_THRESHOLD` decide o que conta como "baixa". Mais alto = compra quedas
+mais rasas = opera mais. Não é um botão de risco no sentido de tamanho: é uma
+mudança de estratégia, e afasta o motor do que o backtest mediu (30).
+
+`BT_TREND_PERIOD=0` desliga o filtro de tendência. Passa a comprar queda dentro
+de tendência de baixa, que é a forma mais comum de perder dinheiro achando que
+se compra barato.
+
 ### Alavancagem: a resposta está na medição, e ela é não
 
 Alavancar multiplica o retorno **e o drawdown**. Os drawdowns máximos medidos
