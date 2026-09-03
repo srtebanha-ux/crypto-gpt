@@ -779,7 +779,10 @@ calculados em tempo de execução.
 ### Dois modos: lista explícita e varredura da cauda longa
 
 ```bash
-# Mais simples: um endereço de pool qualquer da DEX. A factory sai dele.
+# Modo contínuo — 24/7, acumulando observação. É este que responde a pergunta.
+DEX_SEED_POOL=0x... DEX_WATCH_INTERVAL_SEC=60 npm run sniff-dex
+
+# Leitura única
 DEX_SEED_POOL=0x... npm run sniff-dex
 
 # Varredura ampla com a factory já conhecida
@@ -823,6 +826,7 @@ sorteio.
 
 | Variável | Padrão | Para quê |
 | --- | --- | --- |
+| `DEX_WATCH_INTERVAL_SEC` | `0` | Segundos entre varreduras. `0` = leitura única. Com valor > 0 roda indefinidamente, acumulando censo. |
 | `DEX_SEED_POOL` | — | Um pool V2 qualquer; a factory é descoberta dele via `factory()`. É o caminho mais simples: endereço de pool aparece na interface de swap, endereço de factory se garimpa em documentação. |
 | `DEX_FACTORY` | — | Factory V2 a enumerar, quando já se sabe. Verificada antes de ser usada (ver abaixo). |
 | `DEX_POOLS` | — | Endereços de pools V2, separados por vírgula. Um dos dois é obrigatório. |
@@ -835,6 +839,24 @@ sorteio.
 | `FLASH_LOAN_FEE` | `0.0005` | Aave V3. Balancer é `0`. |
 | `DEX_GAS_UNITS` | `450000` | Gas estimado da transação de arbitragem. |
 | `DEX_MAX_RESERVE_FRACTION` | `0.1` | Teto de entrada como fração da menor reserva do ciclo. |
+
+### Por que o modo contínuo importa mais que a leitura única
+
+Uma varredura isolada com zero ciclos lucrativos **não distingue** "não há
+oportunidade nesta DEX" de "não havia naquele instante". Só a série ao longo do
+tempo separa as duas, e é ela que decide se vale escrever o contrato Solidity —
+que é código financeiro executando atomicamente com valores emprestados, caro e
+arriscado de errar.
+
+Por isso o relatório de cada varredura carrega o **acumulado**:
+`varredurasComOportunidade` (ex.: `3/847`), melhor líquido desde o início, e
+horas observando. Um `0/500` depois de algumas horas é resposta; um `0/1` não é.
+
+O laço é sequencial e não `setInterval`: com varredura mais lenta que o
+intervalo, execuções concorrentes disputariam o mesmo RPC e as reservas de uma
+se misturariam com as de outra — produzindo "arbitragem" entre dois instantes
+distintos do mercado. Falha de RPC não derruba o monitor; ele existe para
+acumular observação ao longo de horas.
 
 Escopo: pools de **produto constante** (V2 e forks). Liquidez concentrada (V3)
 exige percorrer ticks e é uma ordem de grandeza mais complexa — como isto é

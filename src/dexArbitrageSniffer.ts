@@ -342,71 +342,125 @@ async function main() {
         });
         process.exit(0);
     }
-
     // Teto de entrada: fração das reservas do menor pool do ciclo. Não faz
     // sentido propor um empréstimo maior do que o pool consegue absorver — o
     // slippage já teria destruído o lucro muito antes.
     const maxFraction = new Decimal(process.env.DEX_MAX_RESERVE_FRACTION ?? '0.1');
+    const watchIntervalSec = Number(process.env.DEX_WATCH_INTERVAL_SEC ?? '0');
 
-    let profitableCount = 0;
-    let bestNet = new Decimal(0);
-    let bestDescription = 'nenhum';
+    // Censo acumulado entre varreduras. Uma leitura pontual não responde
+    // "oportunidade aparece de vez em quando?" — só a série ao longo do tempo
+    // responde, e é ela que decide se vale escrever o contrato Solidity.
+    let scans = 0;
+    let scansWithOpportunity = 0;
+    let bestEverNet = new Decimal(0);
+    let bestEverDescription = 'nenhum';
+    const startedAt = Date.now();
 
-    for (const cycle of cycles) {
-        const hops = hopsForCycle(cycle);
-        const spot = cycleSpotRatio(hops);
-        const smallestReserveIn = hops.reduce((min, h) => (h.reserveIn.lessThan(min) ? h.reserveIn : min), hops[0].reserveIn);
-        const maxAmountIn = smallestReserveIn.mul(maxFraction);
+    const runScan = async (): Promise<void> => {
+        scans += 1;
+        // Reservas são relidas a cada varredura: são elas que mudam. A
+        // topologia (quais pools existem) muda devagar e não justifica
+        // reenumerar a factory toda vez.
+        const fresh = await loadPools(rpcUrl, poolAddresses, feeFraction);
+        const freshCycles = [...findTwoPoolCycles(fresh, baseToken), ...findTriangularCycles(fresh, baseToken)];
 
-        const evaluation = evaluateCycle(hops, maxAmountIn, {
-            flashLoanFeeFraction: flashLoanFee,
-            gasCostInToken,
-        });
+        const gasWei = await fetchGasPriceWei(rpcUrl);
+        const gasInToken = process.env.DEX_GAS_COST_IN_TOKEN
+            ? new Decimal(process.env.DEX_GAS_COST_IN_TOKEN)
+            : fromRawUnits(gasWei.mul(gasUnits), 18);
 
-        if (evaluation.netProfit.greaterThan(bestNet)) {
-            bestNet = evaluation.netProfit;
-            bestDescription = describeCycle(cycle);
-        }
-        if (evaluation.profitable) {
-            profitableCount += 1;
-            log.info('*** CICLO LUCRATIVO ENCONTRADO ***', {
-                ciclo: describeCycle(cycle),
-                entradaOtima: evaluation.amountIn.toFixed(8),
-                lucroBruto: evaluation.grossProfit.toFixed(8),
-                taxaFlashLoan: evaluation.flashLoanFee.toFixed(8),
-                gas: evaluation.gasCost.toFixed(8),
-                lucroLiquido: evaluation.netProfit.toFixed(8),
+        let profitableCount = 0;
+        let bestNet = new Decimal(0);
+        let bestDescription = 'nenhum';
+
+        for (const cycle of freshCycles) {
+            const hops = hopsForCycle(cycle);
+            const smallestReserveIn = hops.reduce(
+                (min, h) => (h.reserveIn.lessThan(min) ? h.reserveIn : min),
+                hops[0].reserveIn,
+            );
+            const evaluation = evaluateCycle(hops, smallestReserveIn.mul(maxFraction), {
+                flashLoanFeeFraction: flashLoanFee,
+                gasCostInToken: gasInToken,
             });
-        } else {
-            log.debug('ciclo sem lucro líquido', {
-                ciclo: describeCycle(cycle),
-                razaoSpot: spot.toFixed(8),
-                lucroLiquido: evaluation.netProfit.toFixed(8),
+
+            if (evaluation.netProfit.greaterThan(bestNet)) {
+                bestNet = evaluation.netProfit;
+                bestDescription = describeCycle(cycle);
+            }
+            if (evaluation.profitable) {
+                profitableCount += 1;
+                log.info('*** CICLO LUCRATIVO ENCONTRADO ***', {
+                    ciclo: describeCycle(cycle),
+                    entradaOtima: evaluation.amountIn.toFixed(8),
+                    lucroBruto: evaluation.grossProfit.toFixed(8),
+                    taxaFlashLoan: evaluation.flashLoanFee.toFixed(8),
+                    gas: evaluation.gasCost.toFixed(8),
+                    lucroLiquido: evaluation.netProfit.toFixed(8),
+                    razaoSpot: cycleSpotRatio(hops).toFixed(8),
+                });
+            }
+        }
+
+        if (profitableCount > 0) scansWithOpportunity += 1;
+        if (bestNet.greaterThan(bestEverNet)) {
+            bestEverNet = bestNet;
+            bestEverDescription = bestDescription;
+        }
+
+        log.info('Varredura concluída.', {
+            varredura: scans,
+            poolsVivos: fresh.length,
+            ciclosAvaliados: freshCycles.length,
+            ciclosLucrativos: profitableCount,
+            melhorLiquidoNestaVarredura: bestNet.toFixed(8),
+            gasPorTentativa: gasInToken.toFixed(8),
+            // O acumulado é o que responde a pergunta de verdade: uma leitura
+            // isolada com zero não distingue "não há oportunidade" de "não
+            // havia NAQUELE instante".
+            varredurasComOportunidade: `${scansWithOpportunity}/${scans}`,
+            melhorLiquidoDesdeOInicio: bestEverNet.toFixed(8),
+            melhorCicloDesdeOInicio: bestEverDescription,
+            horasObservando: ((Date.now() - startedAt) / 3_600_000).toFixed(2),
+        });
+    };
+
+    await runScan();
+
+    if (watchIntervalSec <= 0) {
+        log.info('=== COMO LER ===', {
+            ponto1: 'Isto é UM instante do mercado. Zero ciclos lucrativos numa leitura não encerra a questão.',
+            ponto2: 'Para responder de verdade, rode em modo contínuo: DEX_WATCH_INTERVAL_SEC=60.',
+            ponto3: 'Ciclo lucrativo aqui NÃO é lucro capturável: on-chain a inclusão é leiloada (MEV) e searchers profissionais competem entregando o lucro ao validador.',
+            ponto4: 'O que este número mede é o piso: se nem o lucro BRUTO aparece, não há o que disputar e não vale escrever o contrato.',
+        });
+        process.exit(0);
+    }
+
+    log.info('Modo contínuo ativo — varrendo indefinidamente.', {
+        intervaloSegundos: watchIntervalSec,
+        nota: 'Nenhuma transação é enviada. Só leitura. Interrompa com Ctrl+C.',
+    });
+
+    // Laço sequencial em vez de setInterval: com varredura mais lenta que o
+    // intervalo, o setInterval empilharia execuções concorrentes disputando o
+    // mesmo RPC, e as reservas de uma varredura se misturariam com as de
+    // outra — produzindo "arbitragem" entre dois instantes distintos.
+    for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, watchIntervalSec * 1000));
+        try {
+            await runScan();
+        } catch (err) {
+            // Falha de RPC não pode derrubar o monitor: ele existe para
+            // acumular observação ao longo de horas.
+            log.warn('Varredura falhou; tentando de novo no próximo intervalo.', {
+                erro: err instanceof Error ? err.message : String(err),
             });
         }
     }
-
-    log.info('=== RESUMO ===', {
-        ciclosAvaliados: cycles.length,
-        ciclosLucrativos: profitableCount,
-        melhorLucroLiquido: bestNet.toFixed(8),
-        melhorCiclo: bestDescription,
-        gasPorTentativa: gasCostInToken.toFixed(8),
-    });
-
-    log.info('=== COMO LER ===', {
-        ponto1: 'Isto é UM instante do mercado. Zero ciclos lucrativos numa leitura não encerra a questão — rode em momentos diferentes, sobretudo em volatilidade.',
-        ponto2: 'Ciclo lucrativo aqui NÃO significa lucro capturável: on-chain a inclusão é leiloada (MEV), e searchers profissionais competem entregando o lucro ao validador.',
-        ponto3: 'O que este número mede é o piso: se nem o lucro BRUTO aparece, não há o que disputar e não vale escrever o contrato.',
-        ponto4: 'Taxa de 0,3% por pool é o pior caso. Faixas menores (0,05%/0,01%) e pools de stablecoin baixam muito o piso — vale medir esses também via DEX_POOL_FEE.',
-    });
-
-    process.exit(0);
 }
 
-// Guardado como os demais executáveis do projeto: sem isto, qualquer
-// `import` deste módulo (inclusive de um teste) dispararia a medição de
-// verdade, indo à rede no meio da suíte.
 if (require.main === module) {
     main().catch((err) => {
         log.error('Falha ao medir arbitragem on-chain.', { error: err instanceof Error ? err.message : String(err) });
