@@ -823,6 +823,33 @@ sempre, e retentar cada pool morto numa varredura de 200 multiplicaria o tempo
 sem mudar nenhum resultado. A distinção é feita pelo texto do erro — heurística
 assumida, com risco pequeno nos dois sentidos.
 
+### Uma factory só quase nunca fecha ciclo
+
+A primeira varredura real mediu isto: 200 pools lidos, 100 válidos, **zero
+ciclos**. Não foi defeito — é topologia, e vale entender porque decide como usar
+a ferramenta.
+
+Dentro de uma única factory V2, cada par existe **uma vez**. Se todos os pools
+carregados são `TOKEN/WETH`, não há segundo caminho de volta: o ciclo precisa de
+um `TOKEN_A/TOKEN_B` para fechar o triângulo, ou do **mesmo par em outra DEX**
+para fechar em dois pools. Os pools mais recentes de uma factory grande são
+quase todos lançamentos pareados contra WETH, então `DEX_SCAN_MODE=newest` numa
+factory só é justamente o pior caso.
+
+Por isso `DEX_FACTORY` aceita **lista**: pools de duas DEXs no mesmo grafo é o
+que produz arbitragem entre elas, que é a forma mais comum de arbitragem
+on-chain.
+
+```bash
+DEX_FACTORY=0xFactoryDeUmaDEX,0xFactoryDeOutra npm run sniff-dex:prod
+```
+
+Quando não há ciclo, o relatório traz o censo da topologia — quantos tokens
+distintos, quantos pools tocam o token base, quantos tokens aparecem em mais de
+um pool — e diz qual dos três casos ocorreu. "Zero ciclos" sozinho não distingue
+token base errado, escolha ruim de pools e topologia impossível, e a ação certa
+é diferente em cada um.
+
 ### Nenhum endereço vem embutido no código
 
 `DEX_POOLS` é obrigatório. Endereço errado **não estoura** — lê outro contrato

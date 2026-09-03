@@ -451,19 +451,25 @@ async function main() {
         .map((s) => s.trim().toLowerCase())
         .filter((s) => s.length > 0);
     const seedPool = process.env.DEX_SEED_POOL?.trim().toLowerCase();
-    let factory = process.env.DEX_FACTORY?.trim().toLowerCase();
+    // Lista, não endereço único: arbitragem entre DEXs é a estrutura que mais
+    // produz ciclo on-chain, e ela exige pools de FACTORIES diferentes. Dentro
+    // de uma factory só, o mesmo par existe uma vez — não há o que comparar.
+    let factories = (process.env.DEX_FACTORY ?? '')
+        .split(',')
+        .map((f) => f.trim().toLowerCase())
+        .filter((f) => f.length > 0);
     const feeFraction = new Decimal(process.env.DEX_POOL_FEE ?? '0.003');
     const flashLoanFee = new Decimal(process.env.FLASH_LOAN_FEE ?? '0.0005'); // Aave V3; Balancer = 0
     const gasUnits = new Decimal(process.env.DEX_GAS_UNITS ?? String(DEFAULT_GAS_UNITS));
 
-    if (explicitPools.length === 0 && !factory && !seedPool) {
+    if (explicitPools.length === 0 && factories.length === 0 && !seedPool) {
         log.error('Defina DEX_SEED_POOL (mais simples), DEX_FACTORY ou DEX_POOLS.', {
             maisSimples:
                 'DEX_SEED_POOL=0x... — um endereço de pool qualquer da DEX. A factory é descoberta a partir dele via factory().',
             porque:
                 'Nenhum endereço vem embutido de propósito: endereço errado não estoura, vira número plausível e errado no relatório.',
             varreduraAmpla:
-                'DEX_FACTORY=0x... — enumera pools da factory da DEX e procura onde ninguém está olhando. É o modo indicado para cauda longa.',
+                'DEX_FACTORY=0x...,0x... — enumera pools de UMA OU MAIS factories. Duas DEXs diferentes é o que permite arbitragem entre elas; uma só raramente fecha ciclo.',
             enderecosEspecificos:
                 'DEX_POOLS=0xabc...,0xdef... — quando você já sabe quais pools quer conferir. Precisam ser de produto constante (V2), não V3.',
         });
@@ -472,18 +478,23 @@ async function main() {
 
     log.info('Lendo pools on-chain (nenhuma transação será enviada).', {
         rpc: rpcUrl,
-        modo: factory ? 'descoberta via factory' : seedPool ? 'descoberta via pool semente' : 'lista explícita',
+        modo: factories.length > 0 ? `descoberta via ${factories.length} factory(s)` : seedPool ? 'descoberta via pool semente' : 'lista explícita',
         tokenBase: baseToken,
         taxaPool: feeFraction.toString(),
         taxaFlashLoan: flashLoanFee.toString(),
     });
 
-    if (!factory && seedPool) {
-        factory = await discoverFactoryFromPool(rpcUrl, seedPool);
+    if (factories.length === 0 && seedPool) {
+        factories = [await discoverFactoryFromPool(rpcUrl, seedPool)];
     }
-    const poolAddresses = factory
-        ? Array.from(new Set([...explicitPools, ...(seedPool ? [seedPool] : []), ...(await discoverPoolAddresses(rpcUrl, factory))]))
-        : explicitPools;
+    const descobertos: string[] = [];
+    for (const f of factories) {
+        descobertos.push(...(await discoverPoolAddresses(rpcUrl, f)));
+    }
+    const poolAddresses =
+        factories.length > 0
+            ? Array.from(new Set([...explicitPools, ...(seedPool ? [seedPool] : []), ...descobertos]))
+            : explicitPools;
 
     const pools = await loadPools(rpcUrl, poolAddresses, feeFraction);
     if (pools.length === 0) {
@@ -509,8 +520,38 @@ async function main() {
     const cycles = [...findTwoPoolCycles(pools, baseToken), ...findTriangularCycles(pools, baseToken)];
     log.info(`Ciclos possíveis a partir do token base: ${cycles.length}.`);
     if (cycles.length === 0) {
-        log.warn('Nenhum ciclo fechado entre os pools fornecidos.', {
-            dica: 'Forneça pools que compartilhem tokens — ex.: dois pools do MESMO par em DEXs diferentes, ou um triângulo WETH/USDC + USDC/X + X/WETH.',
+        // Zero ciclos não diz se o problema é o token base, a escolha dos pools
+        // ou a topologia — e a ação certa é diferente em cada caso. O censo
+        // abaixo distingue os três.
+        const tokens = new Set<string>();
+        let tocamBase = 0;
+        const paresPorToken = new Map<string, number>();
+        for (const p of pools) {
+            tokens.add(p.token0);
+            tokens.add(p.token1);
+            if (p.token0 === baseToken || p.token1 === baseToken) tocamBase += 1;
+            for (const t of [p.token0, p.token1]) {
+                if (t !== baseToken) paresPorToken.set(t, (paresPorToken.get(t) ?? 0) + 1);
+            }
+        }
+        const tokensComMaisDeUmPool = Array.from(paresPorToken.values()).filter((n) => n > 1).length;
+        const todosContraBase = tocamBase === pools.length && tokensComMaisDeUmPool === 0;
+
+        log.warn('Nenhum ciclo fechado entre os pools carregados.', {
+            pools: pools.length,
+            tokensDistintos: tokens.size,
+            poolsQueTocamOTokenBase: tocamBase,
+            tokensPresentesEmMaisDeUmPool: tokensComMaisDeUmPool,
+            diagnostico: todosContraBase
+                ? 'Todos os pools pareiam contra o token base e nenhum token aparece em dois pools. ' +
+                  'Numa única factory isso NUNCA fecha ciclo: cada par existe uma vez só, então não há ' +
+                  'segundo caminho de volta. É o retrato típico dos pools mais recentes, que são lançamentos TOKEN/WETH.'
+                : 'Os pools carregados não compartilham tokens suficientes para fechar um ciclo.',
+            saidas: [
+                'DEX_FACTORY=0xUmaDEX,0xOutraDEX — o mesmo par em duas DEXs fecha ciclo de 2 pools. É a arbitragem on-chain mais comum.',
+                'DEX_SCAN_MODE=oldest ou random — pools estabelecidos têm pares TOKEN/TOKEN, que formam triângulos.',
+                'DEX_SCAN_LIMIT maior — mais pools, mais chance de dois deles se conectarem.',
+            ],
         });
         process.exit(0);
     }
