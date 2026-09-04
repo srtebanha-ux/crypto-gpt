@@ -168,11 +168,20 @@ function parseKline(raw: RawKline): Candle {
  * mudar, e um sinal disparado sobre ele some no minuto seguinte. Por isso ela
  * é descartada.
  */
-async function fetchClosedCandles(symbol: string, interval: string, limit: number): Promise<Candle[]> {
+async function fetchClosedCandles(
+    symbol: string,
+    interval: string,
+    limit: number,
+): Promise<{ closed: Candle[]; precoAgora: Decimal }> {
     const res = await fetch(`${BINANCE_REST}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit + 1}`);
     if (!res.ok) throw new Error(`HTTP ${res.status} ao buscar klines de ${symbol}`);
     const raw = (await res.json()) as RawKline[];
-    return raw.slice(0, -1).map(parseKline);
+    const todas = raw.map(parseKline);
+    // A vela em formação sai das DECISÕES e fica só para EXIBIÇÃO. Decidir
+    // sobre ela é look-ahead ao vivo — o "fechamento" ainda vai mudar. Mas
+    // acompanhar quanto a posição aberta está ganhando agora não é decisão, e
+    // quem opera precisa desse número de minuto a minuto.
+    return { closed: todas.slice(0, -1), precoAgora: todas[todas.length - 1].close };
 }
 
 function resolveConfig(): Config {
@@ -583,6 +592,26 @@ async function main() {
          * verdade não está sendo lido — silêncio que parece paciência.
          */
         marcarFalha: (symbol: string, motivo: string) => diagnostico.set(symbol, `FALHA: ${motivo}`),
+        /**
+         * Posições abertas com o resultado NÃO REALIZADO ao preço de agora.
+         *
+         * Existe porque o placar do heartbeat só conta operação FECHADA, e uma
+         * posição pode ficar aberta por dias. Sem isto o log mostra zero
+         * enquanto há dinheiro se movendo — que é indistinguível de estar parado.
+         */
+        painel: (precos: Map<string, Decimal>): string[] =>
+            Array.from(positions.values()).map((p) => {
+                const agora = precos.get(p.symbol);
+                if (!agora) return `${p.symbol}: aberta a ${p.entryPrice.toFixed(6)} (sem preço atual)`;
+                const variacao = agora.minus(p.entryPrice).dividedBy(p.entryPrice).mul(100);
+                const { netProfit } = tradeNetPnl(p.entryPrice, agora, p.quantity, params.feeRate);
+                const ateOStop = agora.minus(p.stopPrice).dividedBy(agora).mul(100);
+                return (
+                    `${p.symbol}: ${p.entryPrice.toFixed(6)} → ${agora.toFixed(6)} ` +
+                    `(${variacao.toFixed(2)}%) | se fechasse agora: $${netProfit.toFixed(4)} | ` +
+                    `stop ${p.stopPrice.toFixed(6)} (${ateOStop.toFixed(2)}% abaixo)`
+                );
+            }),
         /** Snapshot serializável — o que precisa sobreviver a um reinício. */
         snapshot: (): BookState => ({
             capital: capital.toString(),
@@ -624,6 +653,9 @@ async function main() {
     const fatia = cfg.capital.dividedBy(cfg.livros.length);
     const livros = cfg.livros.map((p) => criarLivro(p, fatia));
 
+    /** Último preço visto por ativo — só para exibição, nunca para decisão. */
+    const precosAtuais = new Map<string, Decimal>();
+
     for (;;) {
         for (const symbol of cfg.symbols) {
             try {
@@ -631,9 +663,10 @@ async function main() {
                 // os livros. Cada livro buscando as suas dobraria as chamadas à
                 // Binance para responder exatamente a mesma coisa — e, pior,
                 // as duas famílias poderiam decidir sobre instantes diferentes.
-                const candles = await fetchClosedCandles(symbol, cfg.interval, HISTORY_CANDLES);
+                const { closed, precoAgora } = await fetchClosedCandles(symbol, cfg.interval, HISTORY_CANDLES);
+                precosAtuais.set(symbol, precoAgora);
                 for (const livro of livros) {
-                    await livro.step(symbol, candles);
+                    await livro.step(symbol, closed);
                 }
             } catch (err) {
                 // Falha em um ativo não pode parar os outros nem derrubar o
@@ -666,6 +699,10 @@ async function main() {
                 leituraDaVela: `uma avaliação por vela de ${cfg.interval} — o diagnóstico abaixo é da última fechada`,
                 ...livro.resumo(),
             });
+            // Painel ao vivo: atualiza a cada ciclo, com o preço de agora.
+            for (const linha of livro.painel(precosAtuais)) {
+                log.info(`  [${livro.params.entryStrategy}] EM POSIÇÃO — ${linha}`);
+            }
         }
 
         await new Promise((resolve) => setTimeout(resolve, cfg.pollSeconds * 1000));

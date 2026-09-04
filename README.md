@@ -1281,6 +1281,25 @@ justamente moldar a estratégia ao passado próximo. Rodar as duas em papel cust
 zero e responde em algumas semanas com dado de mercado ao vivo, que não dá para
 sobreajustar.
 
+### Painel ao vivo: a posição aberta, minuto a minuto
+
+O placar do heartbeat conta só operação **fechada**. Uma posição pode ficar
+aberta por dias, e nesse tempo o log mostra `resultadoAcumulado: 0.000000` —
+indistinguível de estar parado, embora haja dinheiro se movendo.
+
+Cada ciclo agora imprime a posição aberta com o preço de **agora**:
+
+```
+[reversion] EM POSIÇÃO — XRPUSDT: 2.451000 → 2.489300 (1.56%) |
+            se fechasse agora: $0.0912 | stop 2.398000 (3.67% abaixo)
+```
+
+O preço vem da vela **em formação**, que é descartada das decisões — usá-la para
+decidir seria look-ahead ao vivo, porque o "fechamento" ainda vai mudar.
+Acompanhar quanto a posição está ganhando agora não é decisão, e é justamente o
+número que falta para quem opera. A separação entre o que se exibe e o que se
+decide é o ponto.
+
 ### O heartbeat diz por que NÃO entrou
 
 Um motor direcional passa a maior parte do tempo sem operar, e zeros no
