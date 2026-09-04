@@ -891,6 +891,50 @@ um pool — e diz qual dos três casos ocorreu. "Zero ciclos" sozinho não disti
 token base errado, escolha ruim de pools e topologia impossível, e a ação certa
 é diferente em cada um.
 
+### O contrato de execução (`contracts/FlashArb.sol`)
+
+Arbitragem entre dois pools de produto constante, financiada por **flash swap do
+próprio pool** — não por Aave ou Balancer. Isso elimina a dependência do
+endereço de um protocolo externo, que precisaria vir de fora e ser conferido, e
+que errado não estoura: aponta para outro contrato e vira perda silenciosa.
+Também elimina a taxa extra do provedor, porque o custo do empréstimo passa a
+ser a mesma taxa de 0,3% que a matemática do projeto já considera.
+
+**A propriedade de segurança, garantida em código:** tudo acontece numa
+transação, e se o lucro final for menor que `lucroMinimo` a transação **reverte**.
+A perda máxima é o gás — nunca o principal, nunca o saldo do contrato. Isso vale
+mesmo que a estimativa do scanner esteja errada, porque a conferência está
+dentro do contrato e não fora dele.
+
+Três guardas além dessa:
+
+- `apenasDono` em quem pode iniciar e sacar.
+- O callback só aceita o pool que a execução em curso registrou — sem isso
+  qualquer endereço poderia invocá-lo com dados arbitrários.
+- O callback também exige que o iniciador tenha sido o próprio contrato, o que
+  impede um pool legítimo, chamado por outra pessoa, de arrastá-lo para uma
+  execução que ele não começou.
+
+O pagamento do empréstimo é arredondado **para cima**. Um wei a menos e o pool
+reverte por violação da invariante K, queimando o gás de uma arbitragem que era
+boa; arredondar para cima custa um wei e salva a transação.
+
+### O bytecode é testado contra a matemática do scanner
+
+`flashArbContract.test.ts` compila o contrato e **executa o bytecode** numa EVM
+local, comparando `amountOut` com `getAmountOut` de `ammMath.ts`.
+
+Isso importa mais que os outros testes: o scanner decide se um ciclo vale e o
+contrato executa. Se os dois calcularem a saída de um swap de forma diferente, o
+scanner aprova ciclos que a execução reverte — gás queimado — ou reprova ciclos
+bons. É a mesma classe de defeito que já apareceu aqui quando o motor ao vivo e
+o backtest liam parâmetros separados, agora com dinheiro on-chain.
+
+Roda o bytecode e não uma releitura do código-fonte: erro de arredondamento
+introduzido pelo compilador ou pelo otimizador apareceria aqui, e não apareceria
+numa comparação de fórmulas no papel. Os casos cobrem os extremos — entrada de 1
+wei, metade da reserva, e escala real de token de 18 casas.
+
 ### Nenhum endereço vem embutido no código
 
 `DEX_POOLS` é obrigatório. Endereço errado **não estoura** — lê outro contrato

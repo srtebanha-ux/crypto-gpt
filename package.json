@@ -33,8 +33,11 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@ethereumjs/evm": "^3.1.1",
+    "@ethereumjs/util": "^9.1.0",
     "@types/node": "^20.14.0",
     "@types/ws": "^8.5.12",
+    "solc": "^0.8.26",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.4"
   }
