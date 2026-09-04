@@ -198,13 +198,20 @@ function resolveConfig(): Config {
     // é invisível e derrubaria o motor no boot com "estratégia inválida" — falha
     // barulhenta por um erro de digitação que ninguém consegue ver.
     const escolha = (process.env.DIRECTIONAL_STRATEGY ?? 'reversion').trim().toLowerCase();
-    if (escolha !== 'breakout' && escolha !== 'reversion' && escolha !== 'both') {
-        throw new Error(`DIRECTIONAL_STRATEGY inválida: "${escolha}". Use breakout, reversion ou both.`);
+    const VALIDAS = ['breakout', 'reversion', 'momentum', 'both', 'all'];
+    if (!VALIDAS.includes(escolha)) {
+        throw new Error(`DIRECTIONAL_STRATEGY inválida: "${escolha}". Use ${VALIDAS.join(', ')}.`);
     }
-    // 'both' roda as duas famílias em livros SEPARADOS, com o capital dividido.
-    // Separar é o ponto: misturadas, um resultado bom de uma esconderia um ruim
-    // da outra, e a comparação — que é o motivo de rodar as duas — sumiria.
-    const familias: EntryStrategy[] = escolha === 'both' ? ['reversion', 'breakout'] : [escolha];
+    // 'both' e 'all' rodam as famílias em livros SEPARADOS, com o capital
+    // dividido. Separar é o ponto: misturadas, um resultado bom de uma
+    // esconderia um ruim da outra, e a comparação — que é o motivo de rodar
+    // mais de uma — sumiria.
+    const familias: EntryStrategy[] =
+        escolha === 'all'
+            ? ['reversion', 'breakout', 'momentum']
+            : escolha === 'both'
+            ? ['reversion', 'breakout']
+            : [escolha as EntryStrategy];
     return {
         symbols: (process.env.DIRECTIONAL_SYMBOLS ?? 'BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT')
             .split(',')
@@ -256,6 +263,22 @@ async function main() {
     });
     if (cfg.live) {
         log.warn('*** ORDENS REAIS SERÃO ENVIADAS. Perda é resultado possível sem nenhuma falha técnica. ***');
+    }
+    // Dividir capital entre famílias reduz o livro de cada uma, e um livro
+    // abaixo do notional mínimo da corretora recusa TUDO em silêncio — o motor
+    // pareceria vivo e nunca operaria. Melhor dizer isso no boot.
+    const livroPorFamilia = cfg.capital.dividedBy(cfg.livros.length).mul(cfg.maxPositionFraction);
+    if (livroPorFamilia.lessThan(cfg.strategy.minNotional)) {
+        log.error(
+            `Cada família fica com $${livroPorFamilia.toFixed(2)} por posição, abaixo do mínimo da ` +
+                `corretora ($${cfg.strategy.minNotional.toFixed(2)}). NENHUMA ordem vai passar.`,
+            {
+                oQueFazer:
+                    `Rode menos famílias (DIRECTIONAL_STRATEGY), aumente DIRECTIONAL_CAPITAL para pelo menos ` +
+                    `$${cfg.strategy.minNotional.mul(cfg.livros.length).dividedBy(cfg.maxPositionFraction).toFixed(2)}, ` +
+                    `ou suba DIRECTIONAL_MAX_POSITION_FRACTION.`,
+            },
+        );
     }
 
     /**

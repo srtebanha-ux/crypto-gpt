@@ -1259,10 +1259,34 @@ Três equivalências que preservam essa propriedade ao vivo:
    cobrada, não da estratégia. Ao vivo, a taxa vem da conta real (com desconto
    de BNB, se ativo), não de um palpite.
 
-### Rodar as duas famílias ao mesmo tempo, em livros separados
+### Rodar as três famílias ao mesmo tempo, em livros separados
 
-`DIRECTIONAL_STRATEGY=both` roda `reversion` e `breakout` simultaneamente, cada
-uma com **capital, posições e placar próprios**, metade do capital para cada.
+`DIRECTIONAL_STRATEGY=both` roda `reversion` e `breakout`; `all` roda as três.
+Cada uma com **capital, posições e placar próprios**, o capital dividido
+igualmente.
+
+Atividade e vantagem apontam para lados opostos, e vale saber disso antes de
+escolher. Convertendo a medição de 1h para 20 ativos:
+
+| Família | Entradas por dia | Resultado medido |
+| --- | --- | --- |
+| `breakout` | ~6 | 2/5 positivos, +\$0,96 (≈ zero), metades inconsistentes |
+| `momentum` | ~3 | 2/5 positivos, +\$9,90, concentrado em dois ativos |
+| `reversion` | ~1,7 | **3/5 positivos**, metades consistentes |
+
+A que mais opera é a que menos entrega. `all` dá as três ao mesmo tempo — máxima
+atividade e a comparação lado a lado, sem custo nenhum em papel.
+
+**Dividir capital tem um piso.** Cada livro precisa comportar o notional mínimo
+da corretora, senão recusa tudo em silêncio e o motor parece vivo sem nunca
+operar. O boot calcula e avisa:
+
+```
+ERROR Cada família fica com $3.33 por posição, abaixo do mínimo da corretora ($5.00).
+      NENHUMA ordem vai passar.
+      oQueFazer: "Rode menos famílias, aumente DIRECTIONAL_CAPITAL para pelo menos $15.00,
+                  ou suba DIRECTIONAL_MAX_POSITION_FRACTION."
+```
 
 Separar é o ponto. Num livro só, o resultado de uma esconderia o da outra e a
 comparação — que é o motivo de rodar as duas — desapareceria. As velas são

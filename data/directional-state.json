@@ -8,5 +8,25 @@
     "somaPerdas": "0",
     "committed": "0",
     "positions": []
+  },
+  "breakout": {
+    "capital": "6.66666666666666666666666666666",
+    "realizedPnl": "0",
+    "wins": 0,
+    "losses": 0,
+    "somaGanhos": "0",
+    "somaPerdas": "0",
+    "committed": "0",
+    "positions": []
+  },
+  "momentum": {
+    "capital": "6.66666666666666666666666666666",
+    "realizedPnl": "0",
+    "wins": 0,
+    "losses": 0,
+    "somaGanhos": "0",
+    "somaPerdas": "0",
+    "committed": "0",
+    "positions": []
   }
 }
