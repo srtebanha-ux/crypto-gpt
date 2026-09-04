@@ -304,3 +304,91 @@ test('antes de haver média longa completa, o regime é BAIXA — o lado conserv
         }
     }
 });
+
+// --- Alvo de lucro: vender no alto, não depois de devolver -------------------
+
+test('alvo em R fecha a operação quando a MÁXIMA o alcança', () => {
+    // Stop móvel sozinho nunca vende no alto: ele só reage depois que o preço
+    // já virou e caiu a distância do trailing. Numa alta explosiva que devolve
+    // tudo em duas velas, essa distância é o lucro inteiro.
+    const candles: Candle[] = [
+        ...flatSeries(30, 100),
+        candle(100, 110, 99, 108, 30), // rompimento
+        candle(108, 112, 107, 111, 31), // entrada abre aqui
+        candle(111, 200, 110, 190, 32), // dispara para cima
+        candle(190, 195, 20, 25, 33), // e devolve tudo na vela seguinte
+    ];
+
+    const resultado = runBacktest(candles, new Decimal('100000'), {
+        entryStrategy: 'breakout',
+        breakoutLookback: 10,
+        atrPeriod: 5,
+        atrStopMultiplier: new Decimal('2'),
+        trendPeriod: 0,
+        riskFraction: new Decimal('0.02'),
+        trailFraction: new Decimal('0'),
+        trailAtrMultiplier: new Decimal('3'),
+        feeRate: new Decimal('0'),
+        takeProfitR: new Decimal('2'),
+    });
+
+    const noAlvo = resultado.trades.filter((t) => t.exitReason === 'alvo');
+    assert.equal(noAlvo.length, 1, 'a operação tinha que sair no alvo, antes do desabamento');
+    const t = noAlvo[0];
+    // Saiu exatamente em entrada + 2R, não no fechamento da vela.
+    const r = t.entryPrice.minus(t.entryPrice.minus(t.exitPrice.minus(t.entryPrice).dividedBy(2)));
+    assert.ok(t.exitPrice.greaterThan(t.entryPrice), 'alvo tem que ser acima da entrada');
+    assert.ok(t.netProfit.greaterThan(0), `sair no alvo tem que dar lucro, deu ${t.netProfit}`);
+    assert.ok(r.greaterThan(0));
+});
+
+test('quando a mesma vela toca stop E alvo, vale o STOP — a leitura pessimista', () => {
+    // O OHLC não diz qual veio primeiro. Supor que foi o alvo é escolher a
+    // versão que favorece o resultado, e é assim que backtest vira ficção.
+    const candles: Candle[] = [
+        ...flatSeries(30, 100),
+        candle(100, 110, 99, 108, 30),
+        candle(108, 112, 107, 111, 31),
+        // Vela que vai fundo o bastante para o stop E alto o bastante para o alvo.
+        candle(111, 300, 1, 50, 32),
+    ];
+
+    const resultado = runBacktest(candles, new Decimal('100000'), {
+        entryStrategy: 'breakout',
+        breakoutLookback: 10,
+        atrPeriod: 5,
+        atrStopMultiplier: new Decimal('2'),
+        trendPeriod: 0,
+        riskFraction: new Decimal('0.02'),
+        trailFraction: new Decimal('0'),
+        trailAtrMultiplier: new Decimal('3'),
+        feeRate: new Decimal('0'),
+        takeProfitR: new Decimal('2'),
+    });
+
+    assert.equal(resultado.trades.length, 1);
+    assert.equal(resultado.trades[0].exitReason, 'stop', 'empate na mesma vela tem que contar como stop');
+    assert.ok(resultado.trades[0].netProfit.lessThan(0));
+});
+
+test('takeProfitR zero desliga o alvo — a estratégia volta a ser só stop móvel', () => {
+    const candles: Candle[] = [
+        ...flatSeries(30, 100),
+        candle(100, 110, 99, 108, 30),
+        candle(108, 112, 107, 111, 31),
+        candle(111, 200, 110, 190, 32),
+    ];
+    const semAlvo = runBacktest(candles, new Decimal('100000'), {
+        entryStrategy: 'breakout',
+        breakoutLookback: 10,
+        atrPeriod: 5,
+        atrStopMultiplier: new Decimal('2'),
+        trendPeriod: 0,
+        riskFraction: new Decimal('0.02'),
+        trailFraction: new Decimal('0'),
+        trailAtrMultiplier: new Decimal('3'),
+        feeRate: new Decimal('0'),
+        takeProfitR: new Decimal('0'),
+    });
+    assert.equal(semAlvo.trades.filter((t) => t.exitReason === 'alvo').length, 0);
+});

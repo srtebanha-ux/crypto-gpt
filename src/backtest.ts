@@ -20,7 +20,15 @@
 //
 // Sem I/O: recebe candles já carregados.
 import { Decimal } from 'decimal.js';
-import { atr, detectBreakout, detectOversoldReversion, isAboveTrend, rsiSeries, type Candle } from './signals';
+import {
+    atr,
+    detectBreakout,
+    detectMomentumSurge,
+    detectOversoldReversion,
+    isAboveTrend,
+    rsiSeries,
+    type Candle,
+} from './signals';
 import { planPosition, tradeNetPnl, updateTrailingStop, updateTrailingStopAtr } from './positionSizing';
 
 /**
@@ -33,7 +41,7 @@ import { planPosition, tradeNetPnl, updateTrailingStop, updateTrailingStopAtr } 
  * Nenhuma das duas é a resposta certa por argumento. O backtest roda as duas
  * sobre os mesmos dados e a comparação decide.
  */
-export type EntryStrategy = 'breakout' | 'reversion';
+export type EntryStrategy = 'breakout' | 'reversion' | 'momentum';
 
 export interface StrategyParams {
     /** Qual família de entrada usar. Padrão: rompimento. */
@@ -64,6 +72,19 @@ export interface StrategyParams {
     feeRate: Decimal;
     /** Média que separa regime de alta de regime de baixa (padrão 200). */
     regimePeriod?: number;
+    /** Velas usadas na média de volume da família `momentum`. */
+    volumePeriod?: number;
+    /** Volume mínimo, em múltiplos da média, para a família `momentum`. */
+    minVolumeRatio?: Decimal;
+    /**
+     * Alvo de lucro em múltiplos do risco inicial (R). `2` sai quando o ganho
+     * é o dobro da perda que se aceitou. Zero ou ausente desliga.
+     *
+     * Existe porque stop móvel sozinho nunca vende no alto: ele só reage depois
+     * que o preço já virou e caiu a distância do trailing. Numa alta explosiva
+     * que devolve tudo em duas velas, essa distância é o lucro inteiro.
+     */
+    takeProfitR?: Decimal;
     minNotional?: Decimal;
     stepSize?: Decimal;
 }
@@ -77,7 +98,7 @@ export interface Trade {
     /** Lucro líquido em moeda de cotação, já descontadas as duas taxas. */
     netProfit: Decimal;
     feesPaid: Decimal;
-    exitReason: 'stop' | 'fim-dos-dados';
+    exitReason: 'stop' | 'alvo' | 'fim-dos-dados';
     /**
      * Regime do mercado NA ENTRADA: preço acima ou abaixo da média longa.
      *
@@ -117,6 +138,8 @@ interface OpenPosition {
     quantity: Decimal;
     stopPrice: Decimal;
     highestSinceEntry: Decimal;
+    /** Distância entrada→stop inicial, em dinheiro por unidade. É o "R". */
+    initialRisk: Decimal;
 }
 
 export function runBacktest(candles: Candle[], initialCapital: Decimal, params: StrategyParams): BacktestResult {
@@ -189,6 +212,18 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
             if (candle.low.lessThanOrEqualTo(position.stopPrice)) {
                 closePosition(position, i, position.stopPrice, 'stop');
                 position = null;
+            } else if (
+                params.takeProfitR &&
+                params.takeProfitR.greaterThan(0) &&
+                position.initialRisk.greaterThan(0) &&
+                candle.high.greaterThanOrEqualTo(position.entryPrice.plus(position.initialRisk.mul(params.takeProfitR)))
+            ) {
+                // Alvo checado DEPOIS do stop, e não antes: quando a mesma vela
+                // toca os dois, o OHLC não diz qual veio primeiro, e supor que
+                // foi o alvo é escolher a versão que favorece o resultado. Supor
+                // o stop é a leitura pessimista, e é a única honesta.
+                closePosition(position, i, position.entryPrice.plus(position.initialRisk.mul(params.takeProfitR)), 'alvo');
+                position = null;
             } else {
                 if (candle.high.greaterThan(position.highestSinceEntry)) {
                     position.highestSinceEntry = candle.high;
@@ -218,7 +253,16 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
 
         // Sinal decidido nesta vela; execução só na abertura da próxima.
         const signal =
-            params.entryStrategy === 'reversion'
+            params.entryStrategy === 'momentum'
+                ? detectMomentumSurge(
+                      candles,
+                      i,
+                      params.breakoutLookback,
+                      params.atrPeriod,
+                      params.volumePeriod ?? 20,
+                      params.minVolumeRatio ?? new Decimal('3'),
+                  )
+                : params.entryStrategy === 'reversion'
                 ? detectOversoldReversion(
                       candles,
                       i,
@@ -258,6 +302,7 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
             quantity: plan.quantity,
             stopPrice,
             highestSinceEntry: entryPrice,
+            initialRisk: entryPrice.minus(stopPrice),
         };
         i = nextIndex; // a vela de entrada já foi consumida
     }

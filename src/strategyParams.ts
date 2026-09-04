@@ -61,5 +61,12 @@ export function resolveStrategyParams(entryStrategy: EntryStrategy = 'breakout')
         // Média que separa mercado de alta de mercado de baixa na
         // classificação das operações do relatório.
         regimePeriod: Number(process.env.BT_REGIME_PERIOD ?? '200'),
+        volumePeriod: Number(process.env.BT_VOLUME_PERIOD ?? '20'),
+        // 3x a média é a fronteira entre "mexeu" e "alguém está comprando".
+        minVolumeRatio: new Decimal(process.env.BT_MIN_VOLUME_RATIO ?? '3'),
+        // Zero desliga. Ligado só faz sentido onde o movimento é rápido e
+        // devolve tudo — em tendência longa, sair no alvo corta o ganho que
+        // paga os prejuízos.
+        takeProfitR: new Decimal(process.env.BT_TAKE_PROFIT_R ?? '0'),
     };
 }

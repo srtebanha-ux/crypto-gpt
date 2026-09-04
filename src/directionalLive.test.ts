@@ -33,6 +33,7 @@ const livroComPosicao: BookState = {
             entryPrice: '100000.12345678',
             quantity: '0.00008200',
             notional: '8.2001012',
+            initialRisk: '999.62345678',
             stopPrice: '99000.5',
             highestSinceEntry: '101000.75',
             openedAt: 1756900000000,

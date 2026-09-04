@@ -264,3 +264,77 @@ export function detectOversoldReversion(
     const virouParaCima = current.greaterThan(previous);
     return { triggered: estavaSobrevendido && virouParaCima, rsiValue: current, atrValue };
 }
+
+/**
+ * Volume da vela dividido pela média de volume das anteriores.
+ *
+ * Volume é a única informação do gráfico que diz se um movimento tem gente
+ * atrás dele. Preço subindo com volume normal é ruído que reverte; preço
+ * subindo com volume várias vezes acima do normal é dinheiro entrando — e é o
+ * que precede as altas explosivas de moeda pequena.
+ *
+ * A média EXCLUI a vela atual: incluí-la faria o próprio pico de volume puxar a
+ * média para cima e mascarar justamente o que se quer detectar.
+ */
+export function volumeRatio(candles: Candle[], index: number, period: number): Decimal | null {
+    if (period <= 0 || index < period || index >= candles.length) return null;
+    let soma = new Decimal(0);
+    for (let i = index - period; i < index; i++) soma = soma.plus(candles[i].volume);
+    if (soma.lessThanOrEqualTo(0)) return null;
+    return candles[index].volume.dividedBy(soma.dividedBy(period));
+}
+
+export interface MomentumSignal {
+    triggered: boolean;
+    /** Quantas vezes o volume da vela supera a média recente. */
+    volumeRatio: Decimal | null;
+    atrValue: Decimal | null;
+    /** Preenchido quando não disparou: o que faltou. */
+    reason?: string;
+}
+
+/**
+ * Rompimento COM confirmação de volume — a assinatura de uma alta explosiva
+ * começando, não de mais uma oscilação.
+ *
+ * É uma terceira família, oposta às outras duas em intenção: `reversion` compra
+ * o que caiu esperando volta, `breakout` compra força esperando continuação, e
+ * esta compra **aceleração** esperando um movimento curto e violento — e sai
+ * rápido, porque o que sobe assim costuma devolver tudo.
+ *
+ * Por que volume e não só preço: numa moeda pequena, o preço rompe a máxima
+ * dezenas de vezes por dia sem nada acontecer. O volume é o que separa o
+ * rompimento que tem comprador do que é só o book fino se mexendo. Sem esse
+ * filtro, a estratégia vira uma máquina de pagar taxa.
+ */
+export function detectMomentumSurge(
+    candles: Candle[],
+    index: number,
+    lookback: number,
+    atrPeriod: number,
+    volumePeriod: number,
+    minVolumeRatio: Decimal,
+): MomentumSignal {
+    const atrValue = atr(candles, index, atrPeriod);
+    const ratio = volumeRatio(candles, index, volumePeriod);
+    const priorHigh = highestHighBefore(candles, index, lookback);
+
+    if (atrValue === null || ratio === null || priorHigh === null) {
+        return { triggered: false, volumeRatio: ratio, atrValue, reason: 'histórico insuficiente' };
+    }
+    // Rompimento medido pelo FECHAMENTO, como em `detectBreakout`: uma máxima
+    // intradiária que não se sustenta até o fechamento é exatamente o pavio que
+    // engana quem compra no meio da vela.
+    if (!candles[index].close.greaterThan(priorHigh)) {
+        return { triggered: false, volumeRatio: ratio, atrValue, reason: `sem rompimento (máxima de ${lookback} não superada)` };
+    }
+    if (ratio.lessThan(minVolumeRatio)) {
+        return {
+            triggered: false,
+            volumeRatio: ratio,
+            atrValue,
+            reason: `volume ${ratio.toFixed(1)}x, precisa ${minVolumeRatio.toFixed(1)}x`,
+        };
+    }
+    return { triggered: true, volumeRatio: ratio, atrValue };
+}

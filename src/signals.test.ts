@@ -5,6 +5,7 @@ import { Decimal } from 'decimal.js';
 import {
     atr,
     detectBreakout,
+    detectMomentumSurge,
     detectOversoldReversion,
     highestHighBefore,
     isAboveTrend,
@@ -13,8 +14,14 @@ import {
     rsiSeries,
     sma,
     trueRange,
+    volumeRatio,
     type Candle,
 } from './signals';
+
+/** Igual a `candle`, mas com volume explícito — a família `momentum` depende dele. */
+function vela(open: number, high: number, low: number, close: number, i: number, volume: number): Candle {
+    return { openTime: i * 60_000, open: d(open), high: d(high), low: d(low), close: d(close), volume: d(volume) };
+}
 
 Decimal.set({ precision: 30, rounding: Decimal.ROUND_DOWN });
 
@@ -192,4 +199,78 @@ test('rsiSeries devolve null onde falta histórico', () => {
 
 test('rsiSeries com série curta demais devolve tudo null sem estourar', () => {
     assert.ok(rsiSeries(fromCloses([100, 101]), 14).every((v) => v === null));
+});
+
+// --- Volume: a confirmação que separa alta de verdade de ruído ---------------
+
+test('volume é medido contra a média das velas ANTERIORES, não incluindo a própria', () => {
+    // Incluir a vela atual na média faria o próprio pico puxar a média para
+    // cima e mascarar justamente o que se quer detectar. Com 5 velas de volume
+    // 100 e uma de 600: excluindo, a razão é 6x; incluindo, cairia para 3,6x.
+    const velas: Candle[] = [];
+    for (let i = 0; i < 5; i++) velas.push(vela(100, 101, 99, 100, i, 100));
+    velas.push(vela(100, 101, 99, 100, 5, 600));
+    const razao = volumeRatio(velas, 5, 5);
+    assert.equal(razao?.toString(), '6');
+});
+
+test('sem histórico suficiente, volumeRatio devolve null em vez de número inventado', () => {
+    const velas = Array.from({ length: 3 }, (_, i) => vela(100, 101, 99, 100, i, 100));
+    assert.equal(volumeRatio(velas, 2, 5), null);
+});
+
+test('volume médio zero devolve null, não divisão por zero', () => {
+    // Acontece em par sem negócio nenhum na janela — exatamente o tipo de ativo
+    // que uma varredura de moeda pequena encontra.
+    const velas = Array.from({ length: 6 }, (_, i) => vela(100, 101, 99, 100, i, 0));
+    assert.equal(volumeRatio(velas, 5, 5), null);
+});
+
+// --- Momentum: rompimento COM volume ----------------------------------------
+
+function serieComRompimento(volumeDoRompimento: number): Candle[] {
+    const velas: Candle[] = [];
+    // 30 velas laterais em 100, volume 100.
+    for (let i = 0; i < 30; i++) velas.push(vela(100, 101, 99, 100, i, 100));
+    // Vela que fecha acima da máxima das 10 anteriores.
+    velas.push(vela(101, 130, 100, 125, 30, volumeDoRompimento));
+    return velas;
+}
+
+test('rompimento SEM volume não dispara — é o que evita pagar taxa por ruído', () => {
+    // Numa moeda pequena o preço rompe a máxima dezenas de vezes por dia sem
+    // nada acontecer. Sem o filtro de volume a estratégia vira uma máquina de
+    // pagar taxa.
+    const sinal = detectMomentumSurge(serieComRompimento(110), 30, 10, 14, 20, new Decimal('3'));
+    assert.equal(sinal.triggered, false);
+    assert.match(sinal.reason!, /volume 1\.1x, precisa 3\.0x/);
+});
+
+test('rompimento COM volume dispara', () => {
+    const sinal = detectMomentumSurge(serieComRompimento(500), 30, 10, 14, 20, new Decimal('3'));
+    assert.equal(sinal.triggered, true);
+    assert.equal(sinal.volumeRatio?.toString(), '5');
+    assert.ok(sinal.atrValue && sinal.atrValue.greaterThan(0));
+});
+
+test('volume alto SEM rompimento não dispara', () => {
+    // Volume explodindo com preço parado é distribuição, não alta começando —
+    // e é o padrão de quem está vendendo para quem chegou atrasado.
+    const velas: Candle[] = [];
+    for (let i = 0; i < 30; i++) velas.push(vela(100, 101, 99, 100, i, 100));
+    velas.push(vela(100, 101, 99, 100, 30, 900));
+    const sinal = detectMomentumSurge(velas, 30, 10, 14, 20, new Decimal('3'));
+    assert.equal(sinal.triggered, false);
+    assert.match(sinal.reason!, /sem rompimento/);
+});
+
+test('o rompimento é pelo FECHAMENTO, não pela máxima da vela', () => {
+    // Pavio que sobe e volta é exatamente o que engana quem compra no meio da
+    // vela. A máxima chegou a 130, o fechamento voltou para 100: não é alta.
+    const velas: Candle[] = [];
+    for (let i = 0; i < 30; i++) velas.push(vela(100, 101, 99, 100, i, 100));
+    velas.push(vela(100, 130, 99, 100, 30, 900));
+    const sinal = detectMomentumSurge(velas, 30, 10, 14, 20, new Decimal('3'));
+    assert.equal(sinal.triggered, false);
+    assert.match(sinal.reason!, /sem rompimento/);
 });

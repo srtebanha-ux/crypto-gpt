@@ -24,7 +24,15 @@ import { dirname } from 'node:path';
 import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
 import { BinanceExchangeProvider } from './binanceExchangeProvider';
-import { atr, detectBreakout, detectOversoldReversion, isAboveTrend, rsiSeries, type Candle } from './signals';
+import {
+    atr,
+    detectBreakout,
+    detectMomentumSurge,
+    detectOversoldReversion,
+    isAboveTrend,
+    rsiSeries,
+    type Candle,
+} from './signals';
 import { planPosition, tradeNetPnl, updateTrailingStopAtr } from './positionSizing';
 import { resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
 import type { EntryStrategy } from './backtest';
@@ -52,6 +60,7 @@ export interface BookState {
         entryPrice: string;
         quantity: string;
         notional: string;
+        initialRisk: string;
         stopPrice: string;
         highestSinceEntry: string;
         openedAt: number;
@@ -112,6 +121,8 @@ interface OpenPosition {
     quantity: Decimal;
     /** Caixa preso nesta posição (quantidade × preço de entrada). */
     notional: Decimal;
+    /** Distância entrada→stop inicial por unidade. É o "R" do alvo de lucro. */
+    initialRisk: Decimal;
     stopPrice: Decimal;
     highestSinceEntry: Decimal;
     openedAt: number;
@@ -256,6 +267,11 @@ async function main() {
                 entryPrice: new Decimal(p.entryPrice),
                 quantity: new Decimal(p.quantity),
                 notional: new Decimal(p.notional),
+                // Estado antigo não tem o campo: reconstrói a partir do stop
+                // atual. Fica maior que o R original se o stop já subiu, e o
+                // efeito é um alvo mais distante — conservador, que é o lado
+                // certo de errar quando o dado se perdeu.
+                initialRisk: new Decimal(p.initialRisk ?? new Decimal(p.entryPrice).minus(p.stopPrice).toString()),
                 stopPrice: new Decimal(p.stopPrice),
                 highestSinceEntry: new Decimal(p.highestSinceEntry),
                 openedAt: p.openedAt,
@@ -387,6 +403,7 @@ async function main() {
                 entryPrice: price,
                 quantity: saldo,
                 notional,
+                initialRisk: price.minus(stop),
                 stopPrice: stop,
                 highestSinceEntry: price,
                 openedAt: Date.now(),
@@ -425,6 +442,17 @@ async function main() {
                 await closePosition(pos, pos.stopPrice, 'stop atingido');
                 return;
             }
+            const alvo =
+                params.takeProfitR && params.takeProfitR.greaterThan(0) && pos.initialRisk.greaterThan(0)
+                    ? pos.entryPrice.plus(pos.initialRisk.mul(params.takeProfitR))
+                    : null;
+            if (alvo && candle.high.greaterThanOrEqualTo(alvo)) {
+                // Depois do stop, nunca antes: quando a vela toca os dois, o
+                // OHLC não diz qual veio primeiro, e supor o alvo seria escolher
+                // a versão que favorece o resultado.
+                await closePosition(pos, alvo, `alvo de ${params.takeProfitR!.toString()}R atingido`);
+                return;
+            }
             if (candle.high.greaterThan(pos.highestSinceEntry)) pos.highestSinceEntry = candle.high;
             const currentAtr = atr(candles, last, params.atrPeriod);
             if (currentAtr) {
@@ -439,7 +467,16 @@ async function main() {
         }
 
         const signal =
-            params.entryStrategy === 'reversion'
+            params.entryStrategy === 'momentum'
+                ? detectMomentumSurge(
+                      candles,
+                      last,
+                      params.breakoutLookback,
+                      params.atrPeriod,
+                      params.volumePeriod ?? 20,
+                      params.minVolumeRatio ?? new Decimal('3'),
+                  )
+                : params.entryStrategy === 'reversion'
                 ? detectOversoldReversion(candles, last, rsiSeries(candles, params.rsiPeriod), params.rsiThreshold, params.atrPeriod)
                 : detectBreakout(candles, last, params.breakoutLookback, params.atrPeriod);
         const rsiAtual =
@@ -452,6 +489,8 @@ async function main() {
                 symbol,
                 rsiAtual !== null
                     ? `sem sinal (RSI ${rsiAtual}, precisa < ${params.rsiThreshold} e já subindo)`
+                    : 'reason' in signal && signal.reason
+                    ? `sem sinal (${signal.reason})`
                     : 'sem sinal',
             );
             return;
@@ -509,6 +548,7 @@ async function main() {
             entryPrice: filledPrice,
             quantity: filledQty,
             notional,
+            initialRisk: filledPrice.minus(filledStop),
             stopPrice: filledStop,
             highestSinceEntry: filledPrice,
             openedAt: Date.now(),
@@ -544,6 +584,7 @@ async function main() {
                 entryPrice: p.entryPrice.toString(),
                 quantity: p.quantity.toString(),
                 notional: p.notional.toString(),
+                initialRisk: p.initialRisk.toString(),
                 stopPrice: p.stopPrice.toString(),
                 highestSinceEntry: p.highestSinceEntry.toString(),
                 openedAt: p.openedAt,

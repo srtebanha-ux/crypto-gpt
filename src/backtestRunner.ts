@@ -16,7 +16,7 @@
 import { Decimal } from 'decimal.js';
 import { resolveStrategyParams } from './strategyParams';
 import { createLogger } from './logger';
-import { runBacktest, type StrategyParams, type Trade } from './backtest';
+import { runBacktest, type EntryStrategy, type StrategyParams, type Trade } from './backtest';
 import { consecutiveLossesSurvivable, expectancyPerTrade } from './positionSizing';
 import type { Candle } from './signals';
 
@@ -101,7 +101,7 @@ function pct(fraction: Decimal): string {
 
 interface SymbolOutcome {
     symbol: string;
-    strategy: 'breakout' | 'reversion';
+    strategy: EntryStrategy;
     trades: number;
     winRate: Decimal;
     expectancy: Decimal;
@@ -117,7 +117,7 @@ interface SymbolOutcome {
 
 function evaluate(
     symbol: string,
-    strategy: 'breakout' | 'reversion',
+    strategy: EntryStrategy,
     candles: Candle[],
     capital: Decimal,
     params: StrategyParams,
@@ -154,6 +154,16 @@ interface ResumoRegime {
  * de ver o resultado. Numa corrida longa os dois regimes aparecem, e as
  * operações se separam sozinhas.
  */
+/**
+ * As três famílias, rodadas sobre os mesmos dados.
+ *
+ * `momentum` entra por rompimento COM volume e sai no alvo — feita para moeda
+ * pequena que sobe explosivo e devolve. As outras duas continuam aqui de
+ * propósito: sem elas não há contra que comparar, e "essa é a boa" viraria
+ * opinião de novo.
+ */
+const FAMILIAS: EntryStrategy[] = ['breakout', 'reversion', 'momentum'];
+
 function resumirPorRegime(trades: Trade[]): Record<'alta' | 'baixa', ResumoRegime> {
     const vazio = (): ResumoRegime => ({ operacoes: 0, lucro: new Decimal(0), acertos: 0 });
     const out: Record<'alta' | 'baixa', ResumoRegime> = { alta: vazio(), baixa: vazio() };
@@ -231,7 +241,7 @@ async function main() {
         const fim = new Date(candles[candles.length - 1].openTime).toISOString().slice(0, 10);
         log.info(`=== ${symbol}: ${candles.length} candles, ${inicio} a ${fim} ===`);
 
-        for (const strategy of ['breakout', 'reversion'] as const) {
+        for (const strategy of FAMILIAS) {
             const outcome = evaluate(symbol, strategy, candles, capital, params);
             outcomes.push(outcome);
             reportOutcome(outcome);
@@ -240,7 +250,7 @@ async function main() {
         // Metades separadas no ativo, para flagrar overfitting: parâmetros que
         // só funcionam numa metade foram moldados ao passado.
         const meio = Math.floor(candles.length / 2);
-        for (const strategy of ['breakout', 'reversion'] as const) {
+        for (const strategy of FAMILIAS) {
             const primeira = evaluate(symbol, strategy, candles.slice(0, meio), capital, params);
             const segunda = evaluate(symbol, strategy, candles.slice(meio), capital, params);
             const discordam = primeira.expectancy.greaterThan(0) !== segunda.expectancy.greaterThan(0);
@@ -258,7 +268,7 @@ async function main() {
     }
 
     // Agregado: é aqui que a comparação entre as duas famílias fica visível.
-    for (const strategy of ['breakout', 'reversion'] as const) {
+    for (const strategy of FAMILIAS) {
         const doGrupo = outcomes.filter((o) => o.strategy === strategy);
         const positivos = doGrupo.filter((o) => o.expectancy.greaterThan(0));
         const bateramBuyHold = doGrupo.filter((o) => o.beatBuyHold);

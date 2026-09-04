@@ -1042,7 +1042,7 @@ Três decisões que impedem resultado bonito e irreproduzível ao vivo:
    o stop no meio da vela, a posição acabou ali — mesmo que tenha fechado
    acima. O contrário esconde justamente as perdas.
 
-### Duas famílias opostas, decididas por dado
+### Três famílias opostas, decididas por dado
 
 "Comprar na baixa e vender na alta" e "comprar o que está subindo" não são a
 mesma coisa — são estratégias **opostas**, e qual funciona é pergunta empírica:
@@ -1052,6 +1052,8 @@ mesma coisa — são estratégias **opostas**, e qual funciona é pergunta empí
 - **`reversion`** — compra quando o RSI mostra sobrevenda **e já virou para
   cima**, esperando retorno à média. É a tradução mecânica de "comprar na
   baixa".
+- **`momentum`** — compra rompimento **com confirmação de volume** e sai num
+  alvo fixo. Feita para moeda pequena que sobe explosivo e devolve tudo.
 
 Duas decisões no sinal de reversão que mudam o resultado:
 
@@ -1061,7 +1063,45 @@ Duas decisões no sinal de reversão que mudam o resultado:
   queda dentro de uma tendência de baixa é comprar algo que cai porque continua
   caindo — a forma mais comum de perder dinheiro achando que se compra barato.
 
-O runner roda **as duas famílias em vários ativos** sobre os mesmos dados e
+### `momentum`: a família das moedas que sobem rápido e caem rápido
+
+As outras duas erram o formato desse movimento. `reversion` compra a queda — e
+numa moeda que desabou depois do pico, "a queda" é o começo do fim, não uma
+correção. `breakout` compra a força mas sai pelo stop móvel, que só reage
+**depois** que o preço já virou e caiu a distância do trailing; numa alta que
+devolve tudo em duas velas, essa distância é o lucro inteiro.
+
+`momentum` muda as duas pontas:
+
+**Entrada exige volume.** Numa moeda pequena o preço rompe a máxima dezenas de
+vezes por dia sem nada acontecer — book fino se mexendo. O volume é o que
+separa o rompimento que tem comprador do que é só ruído; sem esse filtro a
+estratégia vira uma máquina de pagar taxa. O padrão exige **3× a média** de
+volume das 20 velas anteriores, e a média **exclui a vela atual** — incluí-la
+faria o próprio pico puxar a média e mascarar o que se quer detectar.
+
+**Saída tem alvo.** `BT_TAKE_PROFIT_R=2` vende quando o ganho é o dobro do risco
+aceito, sem esperar o stop móvel. Quando a mesma vela toca stop **e** alvo, vale
+o **stop**: o OHLC não diz qual veio primeiro, e supor que foi o alvo é escolher
+a versão que favorece o resultado — é assim que backtest vira ficção.
+
+```bash
+BT_SYMBOLS=SUAS,MOEDAS,AQUI BT_TAKE_PROFIT_R=2 BT_MIN_VOLUME_RATIO=3 npm run backtest:prod
+```
+
+| Variável | Padrão | Para quê |
+| --- | --- | --- |
+| `BT_VOLUME_PERIOD` | `20` | Velas na média de volume. |
+| `BT_MIN_VOLUME_RATIO` | `3` | Múltiplo da média exigido no rompimento. |
+| `BT_TAKE_PROFIT_R` | `0` | Alvo em múltiplos do risco. `0` desliga. |
+
+**A armadilha desta família, dita antes de você medir:** a lista de moedas que
+você vai testar é feita de moedas que **sobreviveram**. As que foram a zero não
+aparecem em lista nenhuma hoje, e é justamente nelas que essa estratégia perde.
+Qualquer resultado bonito aqui carrega esse viés, e nenhum backtest o corrige —
+só operar em papel para frente, onde a lista não pode ser escolhida depois.
+
+O runner roda **as três famílias em vários ativos** sobre os mesmos dados e
 compara. Nenhuma foi escolhida por argumento.
 
 ```bash
