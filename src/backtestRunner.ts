@@ -217,6 +217,30 @@ function descreverRegime(r: ResumoRegime): string {
     return `${r.operacoes} op, $${r.lucro.toFixed(4)}, ${taxa}% de acerto`;
 }
 
+/**
+ * Detecta configuração que se auto-cancela: o sinal dispara e o filtro barra
+ * quase tudo.
+ *
+ * Foi um defeito real e invisível. Para o RSI cair abaixo de 30 é preciso uma
+ * queda forte, e uma queda forte joga o preço abaixo da própria média de 50 —
+ * então o filtro de tendência rejeitava justamente o que o sinal acabara de
+ * encontrar. As duas condições eram quase mutuamente exclusivas, e o relatório
+ * mostrava "zero operações" como se fosse falta de oportunidade no mercado.
+ *
+ * Um filtro barrando ALGUNS sinais é o filtro trabalhando. Barrando quase
+ * todos, é conflito de configuração — e a diferença precisa aparecer sozinha.
+ */
+function alertaDeConflito(o: SymbolOutcome): string | null {
+    const { sinaisDisparados, barradosPorTendencia } = o.funnel;
+    if (sinaisDisparados < 5) return null;
+    if (barradosPorTendencia / sinaisDisparados < 0.9) return null;
+    return (
+        `CONFIGURAÇÃO SE AUTO-CANCELA: ${barradosPorTendencia} de ${sinaisDisparados} sinais barrados ` +
+        `pelo filtro de tendência. O sinal e o filtro estão pedindo coisas opostas — ` +
+        `use BT_TREND_PERIOD maior (a média longa não se rompe numa correção curta) ou 0 para desligar.`
+    );
+}
+
 function reportOutcome(o: SymbolOutcome): void {
     log.info(`${o.symbol} — ${o.strategy}`, {
         operacoes: o.trades,

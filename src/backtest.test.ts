@@ -453,3 +453,49 @@ test('sinal restritivo demais aparece como ZERO sinais, não como zero operaçõ
     assert.equal(resultado.funnel.recusadosPorRisco, 0);
     assert.ok(resultado.funnel.velasAvaliadas > 0, 'as velas foram avaliadas — o que faltou foi sinal');
 });
+
+test('sinal de reversão e filtro de tendência se cancelam — o funil torna isso visível', () => {
+    // Defeito real e invisível por dias: para o RSI cair abaixo do limiar é
+    // preciso uma queda forte, e uma queda forte joga o preço abaixo da própria
+    // média de 50 — então o filtro rejeitava exatamente o que o sinal acabara de
+    // encontrar. O relatório mostrava "zero operações" como se o mercado não
+    // tivesse oferecido nada.
+    const candles: Candle[] = [];
+    for (let i = 0; i < 80; i++) {
+        const p = 100 + i * 0.5;
+        candles.push(candle(p, p + 0.6, p - 0.4, p + 0.4, i));
+    }
+    let p = 140;
+    for (let i = 0; i < 12; i++) {
+        p -= 1.6;
+        candles.push(candle(p + 1.6, p + 1.7, p - 0.3, p, 80 + i));
+    }
+    for (let i = 0; i < 20; i++) {
+        p += 1.2;
+        candles.push(candle(p - 1.2, p + 0.4, p - 1.3, p, 92 + i));
+    }
+
+    const base = {
+        entryStrategy: 'reversion' as const,
+        rsiPeriod: 14,
+        rsiThreshold: new Decimal('45'),
+        breakoutLookback: 20,
+        atrPeriod: 14,
+        atrStopMultiplier: new Decimal('2'),
+        riskFraction: new Decimal('0.02'),
+        trailFraction: new Decimal('0'),
+        trailAtrMultiplier: new Decimal('3'),
+        feeRate: new Decimal('0'),
+        minNotional: new Decimal('5'),
+    };
+
+    const comFiltro = runBacktest(candles, new Decimal('1000'), { ...base, trendPeriod: 50 });
+    assert.ok(comFiltro.funnel.sinaisDisparados > 0, 'o sinal precisa disparar');
+    assert.equal(comFiltro.funnel.barradosPorTendencia, comFiltro.funnel.sinaisDisparados, 'e o filtro barra TODOS');
+    assert.equal(comFiltro.trades.length, 0);
+
+    // Sem o filtro, o mesmo sinal vira operação: prova que a causa era o
+    // conflito de configuração, não ausência de oportunidade.
+    const semFiltro = runBacktest(candles, new Decimal('1000'), { ...base, trendPeriod: 0 });
+    assert.ok(semFiltro.trades.length > 0, 'sem o filtro, o mesmo cenário opera');
+});

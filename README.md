@@ -1202,6 +1202,27 @@ funil: "4980 velas → 12 sinais → 9 barrados por tendência, 1 recusado por r
 
 Sem o funil, os três casos levariam a mexer no parâmetro errado.
 
+E quando o filtro barra **quase todos** os sinais, o relatório grita:
+
+```
+ALERTA: "CONFIGURAÇÃO SE AUTO-CANCELA: 6 de 6 sinais barrados pelo filtro de tendência."
+```
+
+Isso foi um defeito real, invisível por dias. Para o RSI cair abaixo de 30 é
+preciso uma queda forte; uma queda forte joga o preço abaixo da própria média de
+50; o filtro então rejeitava exatamente o que o sinal acabara de encontrar. As
+duas condições eram quase mutuamente exclusivas, e o relatório mostrava "zero
+operações" como se o mercado não tivesse oferecido nada — quando na verdade
+tinha oferecido seis vezes.
+
+Um filtro barrando **alguns** sinais é o filtro trabalhando. Barrando **quase
+todos**, é conflito de configuração, e a diferença precisa aparecer sozinha.
+
+A saída coerente é uma média de tendência **mais longa** que a correção que se
+quer comprar: `BT_TREND_PERIOD=200` não se rompe numa queda de doze velas, e
+preserva a intenção original do filtro — não comprar dentro de tendência de
+baixa de verdade.
+
 Backtest mede o passado. É o piso da decisão, não promessa de futuro.
 
 ## Motor direcional 24/7 (`directionalLive.ts`)
