@@ -13,7 +13,7 @@ import { mkdtempSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Decimal } from 'decimal.js';
-import { decideReconcile, loadState, saveState, type BookState } from './directionalLive';
+import { decideReconcile, loadState, paraPar, saveState, type BookState } from './directionalLive';
 
 Decimal.set({ precision: 30, rounding: Decimal.ROUND_DOWN });
 
@@ -185,4 +185,19 @@ test('adotar exige permissão explícita — o padrão é alertar', () => {
         podeAdotar: false,
     });
     assert.equal(semPermissao, 'alertar-orfa');
+});
+
+// ---------------------------------------------------------------------------
+// paraPar: a MESMA string no boot e na ordem.
+//
+// Os filtros são carregados no boot com paraPar(symbol) e a ordem é enviada
+// com paraPar(symbol). Se as duas pontas divergissem, o símbolo voltaria a ser
+// "desconhecido para a Binance" exatamente na hora da compra.
+// ---------------------------------------------------------------------------
+test('paraPar converte símbolo cru em par interno, ancorando USDT no FIM', () => {
+    assert.equal(paraPar('BTCUSDT'), 'BTC/USDT');
+    assert.equal(paraPar('XRPUSDT'), 'XRP/USDT');
+    // O caso que um replace() sem âncora quebraria: "USDT" aparece no começo do
+    // ativo. Sem `$`, viraria "C/USDT" — um par que não existe.
+    assert.equal(paraPar('USDTCUSDT'), 'USDTC/USDT');
 });

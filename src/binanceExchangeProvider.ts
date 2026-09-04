@@ -69,6 +69,15 @@ const DEFAULT_INTERMEDIATE_BASES = ['BTC', 'ETH', 'BNB', 'FDUSD'];
 // forma extremamente ampla (o padrão gera dezenas de streams, não centenas).
 const MAX_WS_STREAMS_PER_CONNECTION = 1024;
 
+/** Símbolo cru do /api/v3/exchangeInfo, com os filtros que a Binance impõe a ele. */
+interface RawSymbolInfo {
+    symbol: string;
+    baseAsset: string;
+    quoteAsset: string;
+    status: string;
+    filters: Array<Record<string, string>>;
+}
+
 interface SymbolFilters {
     stepSize: Decimal;
     minQty: Decimal;
@@ -202,6 +211,88 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         this.openWebSocket();
     }
 
+    /**
+     * Conexão MÍNIMA para quem só precisa executar ordens numa lista conhecida
+     * de pares — o motor direcional, que lê preço por REST (klines) e não usa
+     * book em tempo real nem triângulos.
+     *
+     * Existe porque `connect()` faz duas coisas que, para esse consumidor, vão
+     * de inúteis a fatais:
+     *
+     *   1. Só registra em `pairToBinanceSymbol` os símbolos que aparecem em
+     *      algum triângulo USDT->base->alt->USDT. Um ativo direcional só entra
+     *      nesse mapa por ACIDENTE — se por acaso ainda tiver par contra
+     *      BTC/ETH/BNB/FDUSD (a Binance aposentou muitos pares em BTC). Se não
+     *      tiver, `executeOrder` lança "Símbolo desconhecido para a Binance" —
+     *      e lança no pior momento possível: no primeiro sinal de compra real,
+     *      não no boot.
+     *   2. Abre um combined stream com DOIS streams por símbolo de triângulo.
+     *      Com as bases padrão isso passa de mil streams numa única URL, perto
+     *      ou acima do limite da Binance — tráfego que o motor direcional nunca
+     *      lê e um modo de falha que ele não deveria herdar.
+     *
+     * Aqui a lista de pares é explícita e a falha é no boot, nomeando o que
+     * está errado.
+     */
+    public async connectForSymbols(pairs: string[]): Promise<void> {
+        await withRetry('Sincronização de horário', () => this.syncServerTime());
+        await withRetry('Carga de filtros dos símbolos operados', () => this.ensureSymbolFilters(pairs));
+        await this.loadTradingFee(); // best-effort, não bloqueia o startup
+    }
+
+    /**
+     * O `minNotional` REAL da corretora para um par, ou `undefined` se o par
+     * não foi carregado. Quem dimensiona posição precisa desse número: um
+     * mínimo configurado por conta própria e menor que o da Binance produz
+     * ordens que a corretora rejeita uma a uma, sem que nada no motor acuse
+     * o motivo.
+     */
+    public getSymbolMinNotional(pair: string): Decimal | undefined {
+        const symbol = this.pairToBinanceSymbol.get(pair);
+        if (!symbol) return undefined;
+        return this.symbolFilters.get(symbol)?.minNotional;
+    }
+
+    /**
+     * Registra par<->símbolo e filtros LOT_SIZE/NOTIONAL para uma lista
+     * EXPLÍCITA de pares, sem passar pela descoberta de triângulos. Compõe com
+     * o que já estiver carregado (não limpa os mapas).
+     *
+     * Lança nomeando TODOS os pares que a Binance não lista em TRADING, de uma
+     * vez — descobrir isso um símbolo por vez, a cada reinício, seria uma
+     * sequência de falhas em vez de um diagnóstico.
+     */
+    public async ensureSymbolFilters(pairs: string[]): Promise<void> {
+        const activeSymbols = await this.fetchActiveSymbols();
+        const infoBySymbol = new Map(activeSymbols.map((s) => [s.symbol, s]));
+        const desconhecidos: string[] = [];
+
+        for (const pair of pairs) {
+            const [base, quote] = pair.split('/');
+            if (!base || !quote) {
+                desconhecidos.push(pair);
+                continue;
+            }
+            const rawSymbol = `${base}${quote}`;
+            const info = infoBySymbol.get(rawSymbol);
+            if (!info) {
+                desconhecidos.push(pair);
+                continue;
+            }
+            this.registerSymbol(pair, info, rawSymbol);
+        }
+
+        if (desconhecidos.length > 0) {
+            throw new Error(
+                `Pares não listados como TRADING na Binance: ${desconhecidos.join(', ')}. ` +
+                    'Nenhuma ordem seria aceita neles — corrija a lista de ativos antes de operar.'
+            );
+        }
+        log.info('Filtros de símbolo carregados para os pares operados.', {
+            pares: pairs.length,
+        });
+    }
+
     public shutdown(): void {
         this.isShuttingDown = true;
         this.ws?.close();
@@ -325,13 +416,28 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
      * par<->símbolo nativo e os filtros LOT_SIZE/MIN_NOTIONAL reais de cada
      * símbolo envolvido — nada disso fica mais hardcoded para 3 pares fixos.
      */
-    private async discoverTrianglesAndFilters(): Promise<void> {
+    private async fetchActiveSymbols(): Promise<RawSymbolInfo[]> {
         const res = await fetch(`${this.restBaseUrl}/api/v3/exchangeInfo`);
         if (!res.ok) throw new Error(`Falha ao carregar exchangeInfo: HTTP ${res.status}`);
-        const json = (await res.json()) as {
-            symbols: Array<{ symbol: string; baseAsset: string; quoteAsset: string; status: string; filters: Array<Record<string, string>> }>;
-        };
-        const activeSymbols = (json.symbols ?? []).filter((s) => s.status === 'TRADING');
+        const json = (await res.json()) as { symbols?: RawSymbolInfo[] };
+        return (json.symbols ?? []).filter((s) => s.status === 'TRADING');
+    }
+
+    /** Grava o mapeamento par<->símbolo e os filtros reais de um símbolo do exchangeInfo. */
+    private registerSymbol(pair: string, info: RawSymbolInfo | undefined, rawSymbol: string): void {
+        this.pairToBinanceSymbol.set(pair, rawSymbol);
+        this.binanceSymbolToPair.set(rawSymbol, pair);
+        const lotSize = info?.filters.find((f) => f.filterType === 'LOT_SIZE');
+        const notionalFilter = info?.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+        this.symbolFilters.set(rawSymbol, {
+            stepSize: new Decimal(lotSize?.stepSize ?? '0.00000001'),
+            minQty: new Decimal(lotSize?.minQty ?? '0'),
+            minNotional: new Decimal(notionalFilter?.minNotional ?? notionalFilter?.notional ?? '0'),
+        });
+    }
+
+    private async discoverTrianglesAndFilters(): Promise<void> {
+        const activeSymbols = await this.fetchActiveSymbols();
 
         this.discoveredTriangles = buildEnginePairTriangles(
             activeSymbols.map((s) => ({ symbol: s.symbol, baseAsset: s.baseAsset, quoteAsset: s.quoteAsset })),
@@ -353,17 +459,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
                 if (this.pairToBinanceSymbol.has(pair)) continue; // símbolo compartilhado por mais de um triângulo
                 const [base, quote] = pair.split('/');
                 const rawSymbol = `${base}${quote}`;
-                this.pairToBinanceSymbol.set(pair, rawSymbol);
-                this.binanceSymbolToPair.set(rawSymbol, pair);
-
-                const info = infoBySymbol.get(rawSymbol);
-                const lotSize = info?.filters.find((f) => f.filterType === 'LOT_SIZE');
-                const notionalFilter = info?.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
-                this.symbolFilters.set(rawSymbol, {
-                    stepSize: new Decimal(lotSize?.stepSize ?? '0.00000001'),
-                    minQty: new Decimal(lotSize?.minQty ?? '0'),
-                    minNotional: new Decimal(notionalFilter?.minNotional ?? notionalFilter?.notional ?? '0'),
-                });
+                this.registerSymbol(pair, infoBySymbol.get(rawSymbol), rawSymbol);
             }
         }
 

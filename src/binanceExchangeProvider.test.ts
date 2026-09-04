@@ -323,3 +323,110 @@ test('discoverTrianglesAndFilters lança erro claro quando nenhum triângulo rea
         /Nenhum triângulo/
     );
 });
+
+// ---------------------------------------------------------------------------
+// ensureSymbolFilters / connectForSymbols — caminho do motor DIRECIONAL.
+//
+// O motor direcional opera uma lista explícita de ativos (XRP, TIA, INJ...)
+// que não têm nada a ver com triângulos de arbitragem. Antes disso ele
+// dependia de `connect()`, que só registra símbolos vistos em algum triângulo
+// USDT->base->alt->USDT: um ativo sem par contra BTC/ETH/BNB/FDUSD nunca
+// entrava no mapa, e `executeOrder` lançava "Símbolo desconhecido" no
+// primeiro sinal de compra REAL — não no boot.
+// ---------------------------------------------------------------------------
+
+/** exchangeInfo mínimo com um alt SEM nenhum par intermediário (não forma triângulo). */
+function exchangeInfoComAltSolto(): unknown {
+    return {
+        symbols: [
+            {
+                symbol: 'XRPUSDT',
+                baseAsset: 'XRP',
+                quoteAsset: 'USDT',
+                status: 'TRADING',
+                filters: [
+                    { filterType: 'LOT_SIZE', stepSize: '0.1', minQty: '0.1' },
+                    { filterType: 'NOTIONAL', minNotional: '5' },
+                ],
+            },
+            {
+                symbol: 'TIAUSDT',
+                baseAsset: 'TIA',
+                quoteAsset: 'USDT',
+                status: 'TRADING',
+                filters: [
+                    { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+                    { filterType: 'NOTIONAL', minNotional: '20' },
+                ],
+            },
+            // Deslistado: precisa ser tratado como inexistente.
+            { symbol: 'LUNAUSDT', baseAsset: 'LUNA', quoteAsset: 'USDT', status: 'BREAK', filters: [] },
+        ],
+    };
+}
+
+test('ensureSymbolFilters registra ativos que não formam nenhum triângulo, viabilizando a ordem direcional', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () => provider.ensureSymbolFilters(['XRP/USDT', 'TIA/USDT'])
+    );
+
+    // Nenhum triângulo foi descoberto — e mesmo assim os pares são operáveis.
+    assert.equal(provider.getDiscoveredTriangles().length, 0);
+    const mapping = provider as unknown as { pairToBinanceSymbol: Map<string, string> };
+    assert.equal(mapping.pairToBinanceSymbol.get('XRP/USDT'), 'XRPUSDT');
+    assert.equal(mapping.pairToBinanceSymbol.get('TIA/USDT'), 'TIAUSDT');
+});
+
+test('ensureSymbolFilters expõe o minNotional REAL de cada símbolo, que difere entre ativos', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () => provider.ensureSymbolFilters(['XRP/USDT', 'TIA/USDT'])
+    );
+
+    // O ponto do teste: os mínimos NÃO são iguais. Dimensionar os dois pelo
+    // mesmo número configurado faria a corretora recusar todas as ordens de TIA.
+    assert.equal(provider.getSymbolMinNotional('XRP/USDT')?.toString(), '5');
+    assert.equal(provider.getSymbolMinNotional('TIA/USDT')?.toString(), '20');
+    assert.equal(provider.getSymbolMinNotional('DOGE/USDT'), undefined, 'par não carregado não inventa mínimo');
+});
+
+test('ensureSymbolFilters falha no boot nomeando TODOS os pares que a Binance não lista em TRADING', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        async () => {
+            await assert.rejects(
+                () => provider.ensureSymbolFilters(['XRP/USDT', 'LUNA/USDT', 'FAKE/USDT']),
+                (err: Error) => {
+                    // Os dois problemas de uma vez: descobrir um por reinício
+                    // seria uma sequência de falhas em vez de um diagnóstico.
+                    assert.match(err.message, /LUNA\/USDT/);
+                    assert.match(err.message, /FAKE\/USDT/);
+                    assert.doesNotMatch(err.message, /XRP\/USDT/, 'o par válido não deve ser acusado');
+                    return true;
+                }
+            );
+            // Falha parcial não deixa lixo: o par bom foi registrado, os ruins não.
+            assert.equal(provider.getSymbolMinNotional('LUNA/USDT'), undefined);
+        }
+    );
+});
+
+test('ensureSymbolFilters compõe com o que já estava carregado em vez de limpar os mapas', async () => {
+    const provider = newProvider(); // já tem BTC/USDT e ETH/USDT seedados
+
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () => provider.ensureSymbolFilters(['XRP/USDT'])
+    );
+
+    const mapping = provider as unknown as { pairToBinanceSymbol: Map<string, string> };
+    assert.equal(mapping.pairToBinanceSymbol.get('XRP/USDT'), 'XRPUSDT');
+    assert.equal(mapping.pairToBinanceSymbol.get('BTC/USDT'), 'BTCUSDT', 'o que já existia continua operável');
+});

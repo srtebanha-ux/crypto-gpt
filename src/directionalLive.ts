@@ -46,6 +46,22 @@ const BINANCE_REST = 'https://api.binance.com';
 /** Velas de histórico mantidas por ativo — suficiente para média de 50 + folga. */
 const HISTORY_CANDLES = 300;
 
+/**
+ * "BTCUSDT" -> "BTC/USDT", o formato de par interno que o
+ * BinanceExchangeProvider usa em `executeOrder`.
+ *
+ * Uma função só, usada TANTO para registrar os filtros no boot QUANTO para
+ * enviar as ordens. Se o boot registrasse uma string e a ordem procurasse
+ * outra, o símbolo voltaria a ser "desconhecido para a Binance" — e só na
+ * hora da compra, com sinal válido na mão.
+ *
+ * A âncora `$` importa: `replace('USDT', '')` sem ela troca a PRIMEIRA
+ * ocorrência, e um símbolo com "USDT" no meio viraria um par inexistente.
+ */
+export function paraPar(symbol: string): string {
+    return `${symbol.replace(/USDT$/, '')}/USDT`;
+}
+
 type RawKline = [number, string, string, string, string, string, number, ...unknown[]];
 
 /** Estado que precisa sobreviver a um reinício do processo. */
@@ -212,11 +228,21 @@ function resolveConfig(): Config {
             : escolha === 'both'
             ? ['reversion', 'breakout']
             : [escolha as EntryStrategy];
+    // Todo o motor assume cotação em USDT: o saldo é lido de
+    // `symbol.replace(USDT)` e o par é montado como `X/USDT`. Um símbolo com
+    // outra cotação passaria por aqui em silêncio e só falharia na ordem.
+    const symbols = (process.env.DIRECTIONAL_SYMBOLS ?? 'BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT')
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+    const semUsdt = symbols.filter((s) => !s.endsWith('USDT'));
+    if (semUsdt.length > 0) {
+        throw new Error(
+            `DIRECTIONAL_SYMBOLS só aceita pares cotados em USDT. Fora do padrão: ${semUsdt.join(', ')}.`,
+        );
+    }
     return {
-        symbols: (process.env.DIRECTIONAL_SYMBOLS ?? 'BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT')
-            .split(',')
-            .map((s) => s.trim().toUpperCase())
-            .filter(Boolean),
+        symbols,
         interval: process.env.DIRECTIONAL_INTERVAL ?? '1h',
         capital: new Decimal(process.env.DIRECTIONAL_CAPITAL ?? '20'),
         pollSeconds: Number(process.env.DIRECTIONAL_POLL_SEC ?? '60'),
@@ -238,12 +264,43 @@ async function main() {
           })
         : null;
     if (exchange) {
-        await exchange.connect();
-        // A taxa real da conta manda: cobrar 0,1% de papel numa conta com
-        // desconto de BNB (0,075%) descreveria uma operação que não é a que
-        // vai acontecer.
-        cfg.strategy.feeRate = exchange.getFeeRate();
+        // `connect()` NÃO serve aqui: ele só registra símbolos que aparecem em
+        // algum triângulo de arbitragem e abre um WebSocket de mais de mil
+        // streams que este motor nunca lê. Ver connectForSymbols().
+        await exchange.connectForSymbols(cfg.symbols.map(paraPar));
+        // A taxa real da conta manda: cobrar 0,075% de papel numa conta SEM
+        // desconto de BNB (0,1% de verdade) subestimaria o custo em um terço
+        // em toda operação — e é o custo que decide se a estratégia vive.
+        //
+        // Precisa ir para CADA livro: `cfg.strategy` e `cfg.livros` são objetos
+        // distintos (duas chamadas separadas a resolveStrategyParams), e são os
+        // livros que calculam o resultado. Escrever só em `cfg.strategy`
+        // acertaria o log de boot e deixaria a contabilidade errada.
+        const taxaReal = exchange.getFeeRate();
+        cfg.strategy.feeRate = taxaReal;
+        for (const livro of cfg.livros) livro.feeRate = taxaReal;
     }
+
+    /**
+     * O mínimo por ordem que vale para CADA ativo: o maior entre o configurado
+     * e o que a Binance realmente exige naquele símbolo.
+     *
+     * Sem isto o motor dimensiona pelo mínimo configurado (US$ 5 por padrão) e,
+     * onde a corretora exige mais, a ordem é recusada no servidor — uma
+     * rejeição por sinal, sem que nada no motor explique o motivo.
+     */
+    const minNotionalDe = (symbol: string): Decimal => {
+        const daCorretora = exchange?.getSymbolMinNotional(paraPar(symbol));
+        return daCorretora && daCorretora.greaterThan(cfg.strategy.minNotional)
+            ? daCorretora
+            : cfg.strategy.minNotional;
+    };
+    // O teto do boot usa o ativo mais exigente: se o livro não cobre esse, há
+    // ativo na lista que nunca vai operar.
+    const minNotionalMaisAlto = cfg.symbols.reduce(
+        (acc, sym) => Decimal.max(acc, minNotionalDe(sym)),
+        cfg.strategy.minNotional,
+    );
 
     log.info(`Motor direcional iniciado em modo ${cfg.live ? 'LIVE — DINHEIRO REAL' : 'PAPEL (nenhuma ordem enviada)'}.`, {
         ativos: cfg.symbols.join(','),
@@ -257,7 +314,7 @@ async function main() {
         posicoesSimultaneasPossiveis: cfg.capital
             .dividedBy(cfg.livros.length)
             .mul(cfg.maxPositionFraction)
-            .dividedBy(cfg.strategy.minNotional)
+            .dividedBy(minNotionalMaisAlto)
             .floor()
             .toString(),
     });
@@ -268,14 +325,14 @@ async function main() {
     // abaixo do notional mínimo da corretora recusa TUDO em silêncio — o motor
     // pareceria vivo e nunca operaria. Melhor dizer isso no boot.
     const livroPorFamilia = cfg.capital.dividedBy(cfg.livros.length).mul(cfg.maxPositionFraction);
-    if (livroPorFamilia.lessThan(cfg.strategy.minNotional)) {
+    if (livroPorFamilia.lessThan(minNotionalMaisAlto)) {
         log.error(
             `Cada família fica com $${livroPorFamilia.toFixed(2)} por posição, abaixo do mínimo da ` +
-                `corretora ($${cfg.strategy.minNotional.toFixed(2)}). NENHUMA ordem vai passar.`,
+                `corretora ($${minNotionalMaisAlto.toFixed(2)}). NENHUMA ordem vai passar.`,
             {
                 oQueFazer:
                     `Rode menos famílias (DIRECTIONAL_STRATEGY), aumente DIRECTIONAL_CAPITAL para pelo menos ` +
-                    `$${cfg.strategy.minNotional.mul(cfg.livros.length).dividedBy(cfg.maxPositionFraction).toFixed(2)}, ` +
+                    `$${minNotionalMaisAlto.mul(cfg.livros.length).dividedBy(cfg.maxPositionFraction).toFixed(2)}, ` +
                     `ou suba DIRECTIONAL_MAX_POSITION_FRACTION.`,
             },
         );
@@ -355,12 +412,7 @@ async function main() {
     const closePosition = async (pos: OpenPosition, price: Decimal, reason: string) => {
         let exitPrice = price;
         if (exchange) {
-            const fill = await exchange.executeOrder(
-                `${pos.symbol.replace('USDT', '')}/USDT`,
-                'SELL',
-                'MARKET',
-                pos.quantity,
-            );
+            const fill = await exchange.executeOrder(paraPar(pos.symbol), 'SELL', 'MARKET', pos.quantity);
             // Ordem a mercado quase nunca sai no preço planejado. Registrar o
             // preço pretendido em vez do executado produziria um histórico
             // otimista justamente nas saídas por stop, que são as que
@@ -411,14 +463,14 @@ async function main() {
         if (!exchange || reconciliados.has(symbol)) return;
         reconciliados.add(symbol);
 
-        const asset = symbol.replace('USDT', '');
+        const asset = symbol.replace(/USDT$/, '');
         const saldo = await exchange.fetchAvailableBalance(asset);
         const valor = saldo.mul(price);
         const pos = positions.get(symbol);
         const acao = decideReconcile({
             temPosicaoNoLivro: pos !== undefined,
             valorDoSaldo: valor,
-            minNotional: params.minNotional,
+            minNotional: minNotionalDe(symbol),
             podeAdotar: adoptOrphans && atrValue !== null,
         });
         if (acao === 'nada') return;
@@ -579,7 +631,7 @@ async function main() {
             riskFraction: params.riskFraction,
             entryPrice,
             stopPrice,
-            minNotional: params.minNotional,
+            minNotional: minNotionalDe(symbol),
         });
         if (plan.quantity.lessThanOrEqualTo(0)) {
             recusadosPorRisco += 1;
@@ -591,7 +643,7 @@ async function main() {
         let filledPrice = entryPrice;
         let filledQty = plan.quantity;
         if (exchange) {
-            const fill = await exchange.executeOrder(`${symbol.replace('USDT', '')}/USDT`, 'BUY', 'MARKET', plan.quantity);
+            const fill = await exchange.executeOrder(paraPar(symbol), 'BUY', 'MARKET', plan.quantity);
             if (fill.executedPrice.greaterThan(0)) filledPrice = fill.executedPrice;
             if (fill.executedQty.greaterThan(0)) filledQty = fill.executedQty;
         }
