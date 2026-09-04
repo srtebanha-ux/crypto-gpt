@@ -847,8 +847,16 @@ encontrável por amostragem — sortear o mesmo par dos dois lados entre milhõe
 tem probabilidade praticamente zero. Por isso existe a busca dirigida:
 
 ```bash
-DEX_TOKENS=0xTokenA,0xTokenB DEX_FACTORY=0xUmaDEX,0xOutraDEX npm run sniff-dex:prod
+DEX_FACTORY=0xUmaDEX,0xOutraDEX npm run sniff-dex:prod
 ```
+
+**Os tokens são descobertos sozinhos.** Pedir "os endereços de USDC, cbBTC e
+DAI" transferiria para quem opera um garimpo em explorador de bloco, com risco
+de colar o endereço errado — e endereço errado não estoura, vira medição de
+outro token. Com duas ou mais factories, o scanner lê os pools **mais antigos**
+da primeira e extrai os tokens dali: os primeiros pares criados numa factory são
+os principais, e são os únicos com chance real de existir também na outra DEX.
+`DEX_TOKENS` continua disponível para quem quiser escolher à mão.
 
 Uma chamada `getPair(token, WETH)` por (token, factory) encontra em segundos o
 que a varredura nunca encontraria. O seletor de `getPair` é conferido em

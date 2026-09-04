@@ -20,6 +20,7 @@ import {
     discoverPoolAddresses,
     discoverFactoryFromPool,
     discoverPairsAcrossFactories,
+    discoverTokensFromFactory,
     chunkedEthCall,
 } from './dexArbitrageSniffer';
 import { SELECTORS } from './evmAbi';
@@ -680,6 +681,52 @@ test('nenhum par encontrado distingue "não existe" de "seletor errado"', async 
             () => discoverPairsAcrossFactories('http://fake', ['0x' + 'aa'.repeat(20)], ['0x' + 'cc'.repeat(20)], WETH),
             /seletor de getPair está errado/,
         );
+    } finally {
+        globalThis.fetch = original;
+    }
+});
+
+test('com duas factories, os tokens saem dos pools da primeira — sem pedir endereço a ninguém', async () => {
+    // Pedir "os endereços de USDC, cbBTC e DAI" transfere para quem opera um
+    // garimpo em explorador de bloco, com risco de colar o endereço errado — e
+    // endereço errado não estoura, vira medição de outro token. A máquina lê
+    // isso da própria factory.
+    const fac = '0x' + 'aa'.repeat(20);
+    const USDC = '0x' + 'cc'.repeat(20);
+    const DAI = '0x' + 'dd'.repeat(20);
+    const pool1 = '0x' + '11'.repeat(20);
+    const pool2 = '0x' + '22'.repeat(20);
+
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+        const body = JSON.parse(init?.body ?? '{}');
+        const payload = Array.isArray(body) ? body : [body];
+        return {
+            ok: true,
+            json: async () => {
+                const respostas = payload.map((p: { id: number; params: [{ to: string; data: string }] }) => {
+                    const { data } = p.params[0];
+                    if (data === SELECTORS.allPairsLength) return { jsonrpc: '2.0', id: p.id, result: '0x' + word('2') };
+                    if (data.startsWith(SELECTORS.allPairs)) {
+                        const indice = parseInt(data.slice(-64), 16);
+                        return { jsonrpc: '2.0', id: p.id, result: '0x' + word(indice === 0 ? pool1 : pool2) };
+                    }
+                    if (data === SELECTORS.token0) return { jsonrpc: '2.0', id: p.id, result: '0x' + word(WETH) };
+                    if (data === SELECTORS.token1) {
+                        const alvo = p.params[0].to.toLowerCase() === pool1 ? USDC : DAI;
+                        return { jsonrpc: '2.0', id: p.id, result: '0x' + word(alvo) };
+                    }
+                    return { jsonrpc: '2.0', id: p.id, result: '0x' };
+                });
+                return Array.isArray(body) ? respostas : respostas[0];
+            },
+        };
+    }) as unknown as typeof fetch;
+
+    try {
+        const tokens = await discoverTokensFromFactory('http://fake', fac, WETH, 10);
+        assert.deepEqual(tokens.sort(), [USDC, DAI].sort(), 'os dois tokens dos pools, sem o token base');
+        assert.ok(!tokens.includes(WETH), 'o token base é o eixo do grafo — perguntar getPair(base, base) não faz sentido');
     } finally {
         globalThis.fetch = original;
     }

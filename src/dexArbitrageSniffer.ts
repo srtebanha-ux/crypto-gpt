@@ -563,6 +563,55 @@ export async function discoverPairsAcrossFactories(
     return Array.from(new Set(encontrados));
 }
 
+/**
+ * Descobre os TOKENS negociados nos pools de uma factory.
+ *
+ * Existe para tirar do operador uma tarefa que a máquina faz melhor. Pedir
+ * "os endereços de USDC, cbBTC e DAI" transfere para quem opera um trabalho de
+ * garimpo em explorador de blocos, com risco de colar o endereço errado — e
+ * endereço errado não estoura, vira medição de outro token.
+ *
+ * Os pools MAIS ANTIGOS de uma factory são os pares principais: foram os
+ * primeiros criados, e são justamente os que têm chance de existir também em
+ * outra DEX. É o oposto do modo `newest`, que a medição mostrou ser lixo.
+ */
+export async function discoverTokensFromFactory(
+    rpcUrl: string,
+    factory: string,
+    baseToken: string,
+    limite: number,
+): Promise<string[]> {
+    const pools = (await discoverPoolAddresses(rpcUrl, factory)).slice(0, limite);
+    if (pools.length === 0) return [];
+
+    const calls: RpcCall[] = [];
+    for (const p of pools) {
+        calls.push({ to: p, data: SELECTORS.token0 });
+        calls.push({ to: p, data: SELECTORS.token1 });
+    }
+    const results = await chunkedEthCall(rpcUrl, calls, undefined, 'Lendo tokens dos pools principais');
+
+    const tokens = new Set<string>();
+    for (let i = 0; i < pools.length; i++) {
+        for (const idx of [i * 2, i * 2 + 1]) {
+            try {
+                const t = decodeAddressWord(results[idx], 0);
+                // O token base é o eixo do grafo: pedir getPair(base, base) não
+                // faz sentido, e ele já entra em todo par por construção.
+                if (t !== baseToken && !/^0x0+$/.test(t)) tokens.add(t);
+            } catch {
+                // Pool que não responde token0/token1 já é descartado adiante.
+            }
+        }
+    }
+    log.info('Tokens extraídos dos pools principais da primeira factory.', {
+        poolsLidos: pools.length,
+        tokensDistintos: tokens.size,
+        nota: 'São estes que serão perguntados a cada DEX. Nenhum endereço veio de fora.',
+    });
+    return Array.from(tokens);
+}
+
 function describeCycle(cycle: Cycle): string {
     return cycle.path.map((t) => t.slice(0, 6)).join('->') + ` [${cycle.pools.map((p) => p.address.slice(0, 8)).join(', ')}]`;
 }
@@ -620,11 +669,28 @@ async function main() {
         factories = [await discoverFactoryFromPool(rpcUrl, seedPool)];
     }
     const descobertos: string[] = [];
-    if (crossTokens.length > 0) {
+    // Com DUAS OU MAIS factories, o modo padrão passa a ser a busca dirigida:
+    // varrer pools de cada uma separadamente e torcer para o mesmo par cair na
+    // amostra dos dois lados tem probabilidade praticamente zero. Os tokens
+    // saem dos pools mais antigos da primeira factory quando não forem dados.
+    let tokensParaCruzar = crossTokens;
+    if (tokensParaCruzar.length === 0 && factories.length > 1) {
+        // Os pares principais são os PRIMEIROS criados numa factory, e são os
+        // únicos com chance real de existir também em outra DEX. `newest` traz
+        // lançamentos que só existem num lugar — foi o que a medição mostrou.
+        if (!process.env.DEX_SCAN_MODE) process.env.DEX_SCAN_MODE = 'oldest';
+        tokensParaCruzar = await discoverTokensFromFactory(
+            rpcUrl,
+            factories[0],
+            baseToken,
+            Number(process.env.DEX_CROSS_SEED_POOLS ?? '60'),
+        );
+    }
+    if (tokensParaCruzar.length > 0) {
         // Busca dirigida substitui a varredura: enumerar milhões de pools para
         // encontrar por acaso o mesmo par em duas DEXs é impossível, enquanto
         // perguntar por ele custa uma chamada.
-        descobertos.push(...(await discoverPairsAcrossFactories(rpcUrl, factories, crossTokens, baseToken)));
+        descobertos.push(...(await discoverPairsAcrossFactories(rpcUrl, factories, tokensParaCruzar, baseToken)));
     } else {
         for (const f of factories) {
             descobertos.push(...(await discoverPoolAddresses(rpcUrl, f)));
