@@ -318,3 +318,78 @@ test('operação sem variação de preço perde exatamente as duas taxas', () =>
     assert.equal(netProfit.toString(), '-2');
     assert.equal(feesPaid.toString(), '2');
 });
+
+// --- Teto por posição: o que permite ter MAIS DE UMA ------------------------
+
+test('sem teto por posição, uma posição consome o livro inteiro', () => {
+    // Foi o que aconteceu ao vivo: XRP levou os $10 do livro e seis ativos com
+    // sinal válido foram recusados por falta de caixa. Vinte ativos viraram
+    // uma carteira de um, escolhido pela ordem da lista.
+    const plan = planPosition({
+        capital: d('10'),
+        riskFraction: d('0.05'),
+        entryPrice: d('1'),
+        stopPrice: d('0.99'), // stop apertado => a fórmula pede mais que o caixa
+    });
+    assert.equal(plan.notional.toString(), '10');
+});
+
+test('com teto de 1/3, sobra caixa para outras duas posições', () => {
+    const plan = planPosition({
+        capital: d('10'),
+        riskFraction: d('0.05'),
+        entryPrice: d('1'),
+        stopPrice: d('0.99'),
+        maxPositionFraction: d('0.34'),
+    });
+    assert.equal(plan.notional.toString(), '3.4');
+});
+
+test('o teto é sobre o PATRIMÔNIO, não sobre o caixa livre', () => {
+    // Se fosse sobre o caixa, cada nova posição seria menor que a anterior e a
+    // última viraria poeira — a carteira ficaria desbalanceada por construção.
+    const primeira = planPosition({
+        capital: d('10'),
+        availableCapital: d('10'),
+        riskFraction: d('0.05'),
+        entryPrice: d('1'),
+        stopPrice: d('0.99'),
+        maxPositionFraction: d('0.34'),
+    });
+    const segunda = planPosition({
+        capital: d('10'),
+        availableCapital: d('6.6'), // já com a primeira aberta
+        riskFraction: d('0.05'),
+        entryPrice: d('1'),
+        stopPrice: d('0.99'),
+        maxPositionFraction: d('0.34'),
+    });
+    assert.equal(primeira.notional.toString(), segunda.notional.toString());
+});
+
+test('o teto nunca deixa a posição passar do caixa que existe', () => {
+    // Teto generoso não pode virar licença para gastar dinheiro que não há.
+    const plan = planPosition({
+        capital: d('10'),
+        availableCapital: d('2'),
+        riskFraction: d('0.05'),
+        entryPrice: d('1'),
+        stopPrice: d('0.99'),
+        maxPositionFraction: d('1'),
+    });
+    assert.equal(plan.notional.toString(), '2');
+});
+
+test('o orçamento de risco continua mandando quando é menor que o teto', () => {
+    // Os dois limites valem ao mesmo tempo, e o menor decide. Stop largo =>
+    // posição pequena por risco, mesmo com teto folgado.
+    const plan = planPosition({
+        capital: d('1000'),
+        riskFraction: d('0.02'),
+        entryPrice: d('100'),
+        stopPrice: d('90'),
+        maxPositionFraction: d('0.5'),
+    });
+    assert.equal(plan.quantity.toString(), '2'); // pelo risco, não pelo teto
+    assert.equal(plan.riskAmount.toString(), '20');
+});

@@ -1304,6 +1304,33 @@ são indistinguíveis. O diagnóstico é da **última vela fechada**, não do
 instante: com vela de 1h há uma avaliação por hora, e o heartbeat diz isso em
 vez de deixar a leitura parecer mais fresca do que é.
 
+### Teto por posição: o que faz o multi-ativo ser multi-ativo
+
+Caixa livre impede alavancagem acidental, e não impede o oposto: a **primeira**
+posição consumir o livro inteiro. Foi o que aconteceu na primeira operação real
+do motor — XRP levou os $10 do livro e seis ativos com sinal válido foram
+recusados por falta de caixa. Vinte ativos viraram uma carteira de um, escolhido
+pela ordem da lista e não pela qualidade do sinal.
+
+`DIRECTIONAL_MAX_POSITION_FRACTION` (padrão `0.34`) limita o notional de uma
+posição a uma fração do **patrimônio** — não do caixa livre. Se fosse do caixa,
+cada nova posição seria menor que a anterior e a última viraria poeira: a
+carteira ficaria desbalanceada por construção.
+
+Os dois tetos valem ao mesmo tempo e o menor manda: o orçamento de risco
+continua decidindo quando o stop é largo, e o teto por posição decide quando o
+stop é apertado.
+
+O log de boot passa a dizer quantas posições simultâneas o capital comporta:
+
+```
+tetoPorPosicao: "34% do livro"   posicoesSimultaneasPossiveis: "0"
+```
+
+Se vier `0` ou `1`, a lista de ativos é grande demais para o capital — e a
+diversificação é aparência. Com mínimo de $5 na corretora, cada posição
+simultânea exige ~$15 de livro.
+
 ### Caixa livre: o motor multi-ativo não se alavanca sozinho
 
 Cada posição é dimensionada contra o **caixa ainda livre**, não contra o

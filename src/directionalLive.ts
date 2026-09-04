@@ -136,6 +136,8 @@ interface Config {
     live: boolean;
     /** Onde o estado é gravado para sobreviver a reinício. */
     stateFile: string;
+    /** Teto de uma posição como fração do livro. Permite ter mais de uma. */
+    maxPositionFraction: Decimal;
     /**
      * Parâmetros de sinal e risco, resolvidos pelo MESMO código que o backtest
      * usa. Operar com parâmetros diferentes dos medidos é operar às cegas — e
@@ -199,6 +201,7 @@ function resolveConfig(): Config {
         pollSeconds: Number(process.env.DIRECTIONAL_POLL_SEC ?? '60'),
         live,
         stateFile: process.env.DIRECTIONAL_STATE_FILE ?? './data/directional-state.json',
+        maxPositionFraction: new Decimal(process.env.DIRECTIONAL_MAX_POSITION_FRACTION ?? '0.34'),
         strategy: resolveStrategyParams(familias[0]),
         livros: familias.map((f) => resolveStrategyParams(f)),
     };
@@ -229,6 +232,13 @@ async function main() {
         capital: cfg.capital.toString(),
         riscoPorOperacao: `${cfg.strategy.riskFraction.mul(100).toFixed(2)}%`,
         taxaPorPerna: `${cfg.strategy.feeRate.mul(100).toFixed(4)}%`,
+        tetoPorPosicao: `${cfg.maxPositionFraction.mul(100).toFixed(0)}% do livro`,
+        posicoesSimultaneasPossiveis: cfg.capital
+            .dividedBy(cfg.livros.length)
+            .mul(cfg.maxPositionFraction)
+            .dividedBy(cfg.strategy.minNotional)
+            .floor()
+            .toString(),
     });
     if (cfg.live) {
         log.warn('*** ORDENS REAIS SERÃO ENVIADAS. Perda é resultado possível sem nenhuma falha técnica. ***');
@@ -517,6 +527,7 @@ async function main() {
         const plan = planPosition({
             capital,
             availableCapital: capital.minus(committed),
+            maxPositionFraction: cfg.maxPositionFraction,
             riskFraction: params.riskFraction,
             entryPrice,
             stopPrice,

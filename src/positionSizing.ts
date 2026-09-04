@@ -49,6 +49,17 @@ export interface RiskParams {
      * Omitido, equivale a `capital` (caso de ativo único).
      */
     availableCapital?: Decimal;
+    /**
+     * Teto do notional de UMA posição, como fração do patrimônio.
+     *
+     * Sem ele, num motor multi-ativo a primeira posição consome o caixa inteiro
+     * e as outras dezenove ficam de fora — e "a primeira" é a ordem da lista,
+     * não a qualidade do sinal. O resultado é uma carteira de um ativo escolhido
+     * por acaso, com a aparência de vinte.
+     *
+     * Não substitui o orçamento de risco: os dois valem, e o menor manda.
+     */
+    maxPositionFraction?: Decimal;
 }
 
 export interface PositionPlan {
@@ -118,7 +129,12 @@ export function planPosition(params: RiskParams): PositionPlan {
     // próximo, a fórmula pediria uma posição maior que o dinheiro disponível.
     const cash = params.availableCapital ?? capital;
     if (cash.lessThanOrEqualTo(0)) return zero('Sem caixa livre — o capital já está todo em posições abertas.');
-    const maxAffordable = cash.dividedBy(entryPrice);
+    // Dois tetos independentes: o caixa que existe, e o quanto UMA posição pode
+    // ocupar do patrimônio. O segundo é o que permite ter mais de uma.
+    const fracao = params.maxPositionFraction;
+    const tetoPorPosicao =
+        fracao && fracao.greaterThan(0) && fracao.lessThanOrEqualTo(1) ? capital.mul(fracao) : cash;
+    const maxAffordable = Decimal.min(cash, tetoPorPosicao).dividedBy(entryPrice);
     const capped = Decimal.min(rawQuantity, maxAffordable);
     const quantity = truncateToStep(capped, params.stepSize);
 
