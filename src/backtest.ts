@@ -62,6 +62,8 @@ export interface StrategyParams {
     trailAtrMultiplier?: Decimal;
     /** Taxa taker por execução (entrada e saída pagam cada uma). */
     feeRate: Decimal;
+    /** Média que separa regime de alta de regime de baixa (padrão 200). */
+    regimePeriod?: number;
     minNotional?: Decimal;
     stepSize?: Decimal;
 }
@@ -76,6 +78,15 @@ export interface Trade {
     netProfit: Decimal;
     feesPaid: Decimal;
     exitReason: 'stop' | 'fim-dos-dados';
+    /**
+     * Regime do mercado NA ENTRADA: preço acima ou abaixo da média longa.
+     *
+     * Existe para responder "isso sobrevive a um bear market?" sem precisar
+     * caçar uma janela de baixa à mão — o que sempre carrega a suspeita de ter
+     * sido escolhida depois de ver o resultado. Numa corrida longa os dois
+     * regimes aparecem, e as operações se separam sozinhas.
+     */
+    regimeAtEntry: 'alta' | 'baixa';
 }
 
 export interface BacktestResult {
@@ -96,6 +107,9 @@ export interface BacktestResult {
     /** Operações recusadas pelo controle de risco (notional mínimo, etc.). */
     skippedByRisk: number;
 }
+
+/** Período da média que separa mercado de alta de mercado de baixa. */
+export const DEFAULT_REGIME_PERIOD = 200;
 
 interface OpenPosition {
     entryIndex: number;
@@ -121,6 +135,26 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
     const rsiValues =
         params.entryStrategy === 'reversion' ? rsiSeries(candles, params.rsiPeriod ?? 14) : [];
 
+    // Regime por vela, pré-computado junto com o resto: preço acima da média
+    // longa é mercado de alta, abaixo é de baixa. Antes de haver média completa
+    // não dá para afirmar nada, e chamar isso de "alta" enviesaria o
+    // resultado a favor — então o início conta como baixa, que é o lado
+    // conservador.
+    const regimePeriod = params.regimePeriod ?? DEFAULT_REGIME_PERIOD;
+    // Soma corrente em vez de recalcular a média a cada vela: com 40 mil velas
+    // e período 200, a versão ingênua faria 8 milhões de somas para responder o
+    // que uma janela deslizante responde em 40 mil. Foi esse mesmo descuido que
+    // tornou o backtest O(n²) antes.
+    const regimes: Array<'alta' | 'baixa'> = new Array(closes.length).fill('baixa');
+    let janela = new Decimal(0);
+    for (let i = 0; i < closes.length; i++) {
+        janela = janela.plus(closes[i]);
+        if (i >= regimePeriod) janela = janela.minus(closes[i - regimePeriod]);
+        if (i >= regimePeriod - 1) {
+            regimes[i] = closes[i].greaterThan(janela.dividedBy(regimePeriod)) ? 'alta' : 'baixa';
+        }
+    }
+
     const closePosition = (pos: OpenPosition, exitIndex: number, exitPrice: Decimal, reason: Trade['exitReason']) => {
         // Mesma função que o motor ao vivo usa, para que papel e backtest não
         // possam divergir por uma taxa contada de um jeito só num dos dois.
@@ -136,6 +170,7 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
             netProfit,
             feesPaid,
             exitReason: reason,
+            regimeAtEntry: regimes[pos.entryIndex],
         });
 
         if (capital.greaterThan(peakCapital)) peakCapital = capital;

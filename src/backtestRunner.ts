@@ -16,7 +16,7 @@
 import { Decimal } from 'decimal.js';
 import { resolveStrategyParams } from './strategyParams';
 import { createLogger } from './logger';
-import { runBacktest, type StrategyParams } from './backtest';
+import { runBacktest, type StrategyParams, type Trade } from './backtest';
 import { consecutiveLossesSurvivable, expectancyPerTrade } from './positionSizing';
 import type { Candle } from './signals';
 
@@ -111,6 +111,8 @@ interface SymbolOutcome {
     buyHold: Decimal;
     /** A estratégia superou simplesmente comprar e segurar o ativo? */
     beatBuyHold: boolean;
+    /** Resultado separado por regime de mercado na entrada. */
+    porRegime: Record<'alta' | 'baixa', ResumoRegime>;
 }
 
 function evaluate(
@@ -134,7 +136,40 @@ function evaluate(
         maxDrawdown: result.maxDrawdownFraction,
         buyHold,
         beatBuyHold: returnFraction.greaterThan(buyHold),
+        porRegime: resumirPorRegime(result.trades),
     };
+}
+
+interface ResumoRegime {
+    operacoes: number;
+    lucro: Decimal;
+    acertos: number;
+}
+
+/**
+ * Separa as operações pelo regime de mercado NA ENTRADA.
+ *
+ * É o que responde "sobrevive a um bear market?" sem escolher uma janela de
+ * baixa à mão — escolha que sempre carrega a suspeita de ter sido feita depois
+ * de ver o resultado. Numa corrida longa os dois regimes aparecem, e as
+ * operações se separam sozinhas.
+ */
+function resumirPorRegime(trades: Trade[]): Record<'alta' | 'baixa', ResumoRegime> {
+    const vazio = (): ResumoRegime => ({ operacoes: 0, lucro: new Decimal(0), acertos: 0 });
+    const out: Record<'alta' | 'baixa', ResumoRegime> = { alta: vazio(), baixa: vazio() };
+    for (const t of trades) {
+        const r = out[t.regimeAtEntry];
+        r.operacoes += 1;
+        r.lucro = r.lucro.plus(t.netProfit);
+        if (t.netProfit.greaterThan(0)) r.acertos += 1;
+    }
+    return out;
+}
+
+function descreverRegime(r: ResumoRegime): string {
+    if (r.operacoes === 0) return 'nenhuma operação';
+    const taxa = ((r.acertos / r.operacoes) * 100).toFixed(1);
+    return `${r.operacoes} op, $${r.lucro.toFixed(4)}, ${taxa}% de acerto`;
 }
 
 function reportOutcome(o: SymbolOutcome): void {
@@ -149,6 +184,9 @@ function reportOutcome(o: SymbolOutcome): void {
         piorQueda: pct(o.maxDrawdown),
         comprarESegurar: pct(o.buyHold),
         bateuComprarESegurar: o.beatBuyHold ? 'sim' : 'NÃO',
+        // A pergunta que uma janela só não responde: e quando o mercado cai?
+        emMercadoDeALTA: descreverRegime(o.porRegime.alta),
+        emMercadoDeBAIXA: descreverRegime(o.porRegime.baixa),
     });
 }
 
@@ -231,10 +269,34 @@ async function main() {
             bateramComprarESegurar: `${bateramBuyHold.length}/${doGrupo.length}`,
             lucroSomadoEntreAtivos: `$${somaLucro.toFixed(4)}`,
             operacoesTotais: doGrupo.reduce((acc, o) => acc + o.trades, 0),
+            // O teste que a janela única não faz. Uma estratégia que só ganha
+            // em alta está capturando o mercado, não uma vantagem própria — e
+            // vai devolver tudo na primeira queda longa.
+            somandoTodosOsAtivos_emALTA: descreverRegime(
+                doGrupo.reduce(
+                    (acc, o) => ({
+                        operacoes: acc.operacoes + o.porRegime.alta.operacoes,
+                        lucro: acc.lucro.plus(o.porRegime.alta.lucro),
+                        acertos: acc.acertos + o.porRegime.alta.acertos,
+                    }),
+                    { operacoes: 0, lucro: new Decimal(0), acertos: 0 },
+                ),
+            ),
+            somandoTodosOsAtivos_emBAIXA: descreverRegime(
+                doGrupo.reduce(
+                    (acc, o) => ({
+                        operacoes: acc.operacoes + o.porRegime.baixa.operacoes,
+                        lucro: acc.lucro.plus(o.porRegime.baixa.lucro),
+                        acertos: acc.acertos + o.porRegime.baixa.acertos,
+                    }),
+                    { operacoes: 0, lucro: new Decimal(0), acertos: 0 },
+                ),
+            ),
         });
     }
 
     log.info('=== COMO DECIDIR ===', {
+        ponto0: 'Positiva SÓ em mercado de alta é beta, não vantagem: a estratégia capturou o mercado e devolve tudo na primeira queda longa. Compare as duas linhas de regime.',
         ponto1: 'Uma família só merece ir a produção se tiver expectativa positiva na MAIORIA dos ativos, não em um sortudo.',
         ponto2: 'Se as metades discordam num ativo, os parâmetros foram moldados ao passado daquele ativo.',
         ponto3: 'bateuComprarESegurar = NÃO significa que a estratégia pagou taxa para chegar a um lugar pior que ficar parado comprado.',

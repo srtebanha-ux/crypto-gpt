@@ -1094,6 +1094,40 @@ estratégia.
 | `BT_TRAIL_FRACTION` | `0` | Trailing por percentual fixo; alternativa ao ATR. |
 | `BT_FEE_RATE` | `0.00075` | Taker com desconto de BNB. |
 
+### Cada operação carrega o regime de mercado da entrada
+
+O relatório separa as operações por **regime na entrada**: preço acima da média
+de 200 é mercado de alta, abaixo é de baixa. Por ativo e no agregado.
+
+Existe para responder "isso sobrevive a um bear market?" sem escolher uma janela
+de baixa à mão — escolha que sempre carrega a suspeita de ter sido feita depois
+de ver o resultado. Numa corrida longa os dois regimes aparecem e as operações
+se separam sozinhas:
+
+```bash
+BT_CANDLES=40000 BT_INTERVAL=1h npm run backtest:prod
+```
+
+O que a separação revela: uma família **positiva só em alta** capturou o
+mercado, não uma vantagem própria, e devolve tudo na primeira queda longa. Foi
+exatamente esse o padrão do `breakout` numa janela de 52 dias de rally —
+expectativa positiva em 5 de 5 ativos e derrota para comprar-e-segurar em 5 de
+5. A linha de regime torna esse diagnóstico visível sem precisar de uma segunda
+corrida.
+
+Duas decisões que impedem o número de mentir a favor:
+
+- **O regime é o da ENTRADA, não o da saída.** Marcar pela saída faria uma
+  compra feita em plena queda contar como operação de alta só porque o mercado
+  virou enquanto a posição estava aberta.
+- **Antes de a média longa estar completa, o regime é "baixa".** Chamar o começo
+  da série de alta colocaria as primeiras operações na coluna que se quer provar
+  boa, sem base nenhuma.
+
+| Variável | Padrão | Para quê |
+| --- | --- | --- |
+| `BT_REGIME_PERIOD` | `200` | Média que separa alta de baixa na classificação. |
+
 Backtest mede o passado. É o piso da decisão, não promessa de futuro.
 
 ## Motor direcional 24/7 (`directionalLive.ts`)

@@ -58,5 +58,8 @@ export function resolveStrategyParams(entryStrategy: EntryStrategy = 'breakout')
         // que mantém o resultado comparável ao do backtest.
         feeRate: new Decimal(process.env.BT_FEE_RATE ?? '0.00075'),
         minNotional: new Decimal(process.env.BT_MIN_NOTIONAL ?? '5'),
+        // Média que separa mercado de alta de mercado de baixa na
+        // classificação das operações do relatório.
+        regimePeriod: Number(process.env.BT_REGIME_PERIOD ?? '200'),
     };
 }

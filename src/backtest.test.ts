@@ -235,3 +235,72 @@ test('parseKline lê o formato posicional da Binance sem trocar campos', async (
     assert.equal(c.volume.toString(), '1234.5');
     assert.ok(c.high.greaterThanOrEqualTo(c.low), 'máxima nunca abaixo da mínima');
 });
+
+// --- Regime de mercado por operação ------------------------------------------
+
+test('operações são marcadas pelo regime da ENTRADA, não da saída', () => {
+    // Serve para responder "sobrevive a um bear market?" sem escolher a janela
+    // de baixa à mão — escolha que sempre carrega a suspeita de ter sido feita
+    // depois de ver o resultado. Marcar pela saída seria pior: uma compra feita
+    // em plena queda contaria como operação de alta só porque o mercado virou
+    // enquanto a posição estava aberta.
+    const candles: Candle[] = [];
+    // 60 velas caindo, depois 60 subindo. A média usada aqui é curta (5) de
+    // propósito: com média longa, a janela ainda carrega os preços altos da
+    // queda quando o rompimento acontece, e a entrada cai legitimamente em
+    // regime de BAIXA — comportamento correto, mas que não exercita o caso
+    // que este teste quer cobrir.
+    for (let i = 0; i < 60; i++) candles.push(candle(200 - i, 200 - i + 1, 200 - i - 1, 200 - i, i));
+    for (let i = 0; i < 60; i++) candles.push(candle(140 + i * 2, 140 + i * 2 + 2, 140 + i * 2 - 1, 140 + i * 2 + 1, 60 + i));
+
+    const resultado = runBacktest(candles, new Decimal('10000'), {
+        entryStrategy: 'breakout',
+        breakoutLookback: 5,
+        atrPeriod: 5,
+        atrStopMultiplier: new Decimal('2'),
+        trendPeriod: 0,
+        riskFraction: new Decimal('0.02'),
+        trailFraction: new Decimal('0'),
+        trailAtrMultiplier: new Decimal('3'),
+        feeRate: new Decimal('0'),
+        regimePeriod: 5,
+    });
+
+    assert.ok(resultado.trades.length > 0, 'o cenário precisa gerar operações');
+    for (const t of resultado.trades) {
+        assert.ok(t.regimeAtEntry === 'alta' || t.regimeAtEntry === 'baixa');
+    }
+    // Rompimentos só acontecem na perna de alta, que começa no índice 60.
+    // Antes da média completa (índice 19) nada é classificado como alta.
+    const emAlta = resultado.trades.filter((t) => t.regimeAtEntry === 'alta');
+    assert.ok(emAlta.length > 0, 'a perna de subida tem que produzir operações em regime de alta');
+    for (const t of emAlta) {
+        assert.ok(t.entryIndex >= 60, `operação em "alta" no índice ${t.entryIndex} — antes da virada do mercado`);
+    }
+});
+
+test('antes de haver média longa completa, o regime é BAIXA — o lado conservador', () => {
+    // Chamar o início de "alta" enviesaria o resultado a favor: as primeiras
+    // operações entrariam na coluna que se quer provar boa, sem base nenhuma.
+    const candles: Candle[] = [];
+    for (let i = 0; i < 40; i++) candles.push(candle(100 + i * 3, 100 + i * 3 + 2, 100 + i * 3 - 1, 100 + i * 3 + 1, i));
+
+    const resultado = runBacktest(candles, new Decimal('10000'), {
+        entryStrategy: 'breakout',
+        breakoutLookback: 3,
+        atrPeriod: 3,
+        atrStopMultiplier: new Decimal('2'),
+        trendPeriod: 0,
+        riskFraction: new Decimal('0.02'),
+        trailFraction: new Decimal('0'),
+        trailAtrMultiplier: new Decimal('3'),
+        feeRate: new Decimal('0'),
+        regimePeriod: 30, // média longa só fica pronta no índice 29
+    });
+
+    for (const t of resultado.trades) {
+        if (t.entryIndex < 29) {
+            assert.equal(t.regimeAtEntry, 'baixa', `índice ${t.entryIndex} sem média completa deveria ser baixa`);
+        }
+    }
+});
