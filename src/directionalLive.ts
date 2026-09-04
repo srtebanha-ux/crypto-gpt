@@ -194,7 +194,10 @@ function resolveConfig(): Config {
                 'Ordens reais numa estratégia direcional podem perder dinheiro sem nenhuma falha técnica.',
         );
     }
-    const escolha = process.env.DIRECTIONAL_STRATEGY ?? 'reversion';
+    // Trim e minúsculas: um espaço sobrando numa variável do painel do Railway
+    // é invisível e derrubaria o motor no boot com "estratégia inválida" — falha
+    // barulhenta por um erro de digitação que ninguém consegue ver.
+    const escolha = (process.env.DIRECTIONAL_STRATEGY ?? 'reversion').trim().toLowerCase();
     if (escolha !== 'breakout' && escolha !== 'reversion' && escolha !== 'both') {
         throw new Error(`DIRECTIONAL_STRATEGY inválida: "${escolha}". Use breakout, reversion ou both.`);
     }
