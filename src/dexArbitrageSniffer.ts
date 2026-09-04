@@ -132,6 +132,11 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * 200 ms o pico continua sendo 100 chamadas de uma vez.
  */
 const DEFAULT_CALLS_PER_SEC = 10;
+/**
+ * Varreduras seguidas com o MESMO ciclo lucrativo antes de tratá-lo como
+ * suspeito. Numa rede com bots competindo por bloco, margem real não sobrevive.
+ */
+const PERSISTENCIA_SUSPEITA = 3;
 /** Intervalo entre linhas de progresso numa varredura longa. */
 const PROGRESS_INTERVAL_MS = 10_000;
 
@@ -775,9 +780,15 @@ async function main() {
     let scansWithOpportunity = 0;
     let bestEverNet = new Decimal(0);
     let bestEverDescription = 'nenhum';
-    /** Soma dos lucros líquidos de TODA oportunidade vista, para projetar o dia. */
-    let somaOportunidades = new Decimal(0);
-    let totalOportunidades = 0;
+    /**
+     * Oportunidades DISTINTAS, indexadas pelo ciclo.
+     *
+     * Somar cada avistamento inflaria a projeção pelo número de varreduras: uma
+     * oportunidade parada que ninguém executa aparece em toda leitura e viraria
+     * "dezenas por hora". O que interessa é quantas oportunidades DIFERENTES
+     * surgiram, e por quanto tempo cada uma sobreviveu.
+     */
+    const vistas = new Map<string, { lucro: Decimal; varreduras: number; avisada: boolean }>();
     const startedAt = Date.now();
     // Câmbio só para traduzir a projeção; não entra em decisão nenhuma.
     const brlPorUsd = new Decimal(process.env.BRL_POR_USD ?? '5.5');
@@ -801,6 +812,8 @@ async function main() {
         // Só o que é LUCRATIVO entra na projeção. Somar margem negativa
         // "quase lá" inventaria um ganho que nenhuma execução produziria.
         let somaDaVarredura = new Decimal(0);
+        /** Ciclos lucrativos DESTA varredura, para medir persistência. */
+        const lucrativosDaVarredura = new Map<string, Decimal>();
 
         for (const cycle of freshCycles) {
             const hops = hopsForCycle(cycle);
@@ -820,6 +833,7 @@ async function main() {
             if (evaluation.profitable) {
                 profitableCount += 1;
                 somaDaVarredura = somaDaVarredura.plus(evaluation.netProfit);
+                lucrativosDaVarredura.set(describeCycle(cycle), evaluation.netProfit);
                 log.info('*** CICLO LUCRATIVO ENCONTRADO ***', {
                     ciclo: describeCycle(cycle),
                     entradaOtima: evaluation.amountIn.toFixed(8),
@@ -833,8 +847,35 @@ async function main() {
         }
 
         if (profitableCount > 0) scansWithOpportunity += 1;
-        somaOportunidades = somaOportunidades.plus(somaDaVarredura);
-        totalOportunidades += profitableCount;
+        // Ciclos que sumiram nesta varredura deixam de acumular persistência.
+        for (const [chave, registro] of vistas) {
+            if (!lucrativosDaVarredura.has(chave)) registro.varreduras = 0;
+        }
+        for (const [chave, lucro] of lucrativosDaVarredura) {
+            const anterior = vistas.get(chave);
+            if (!anterior) {
+                vistas.set(chave, { lucro, varreduras: 1, avisada: false });
+                continue;
+            }
+            anterior.varreduras += 1;
+            if (lucro.greaterThan(anterior.lucro)) anterior.lucro = lucro;
+            if (anterior.varreduras >= PERSISTENCIA_SUSPEITA && !anterior.avisada) {
+                anterior.avisada = true;
+                log.warn('OPORTUNIDADE PARADA — trate como armadilha até provar o contrário.', {
+                    ciclo: chave,
+                    varredurasSeguidas: anterior.varreduras,
+                    porque:
+                        'Uma margem de verdade nesta rede é tomada em um ou dois blocos. Sobreviver minutos ' +
+                        'significa que algo impede a extração, e o candidato mais comum é token com taxa de ' +
+                        'transferência ou trava de venda: a matemática de produto constante assume que se recebe ' +
+                        'exatamente o que a fórmula diz, e um token que cobra na transferência quebra isso.',
+                    antesDeExecutar:
+                        'Confira o contrato do token no explorador — taxa de transferência, blacklist, pausa. ' +
+                        'A transação reverte se o lucro não sair, então o custo de tentar é o gás; mas tentar ' +
+                        'repetidamente numa armadilha é queimar gás em série.',
+                });
+            }
+        }
         if (bestNet.greaterThan(bestEverNet)) {
             bestEverNet = bestNet;
             bestEverDescription = bestDescription;
@@ -859,15 +900,21 @@ async function main() {
             // responder. Sem isto, "melhor líquido 0,00012 ETH" não diz se a
             // meta é alcançável ou está a três ordens de grandeza de distância.
             ...(horas > 0.02
-                ? {
-                      oportunidadesVistas: totalOportunidades,
-                      somaDosLucrosVistos: `${somaOportunidades.toFixed(6)} (unidade do token base)`,
-                      projecaoPorDia: `${somaOportunidades.dividedBy(horas).mul(24).toFixed(6)} por dia no ritmo observado`,
-                      aviso:
-                          'Projeção linear de uma janela curta. Oportunidade on-chain não chega em ritmo ' +
-                          'constante, e a disputa consome a maior parte na hora de executar. É piso de viabilidade, ' +
-                          'não previsão de ganho.',
-                  }
+                ? (() => {
+                      const distintas = Array.from(vistas.values());
+                      const soma = distintas.reduce((acc, v) => acc.plus(v.lucro), new Decimal(0));
+                      const paradas = distintas.filter((v) => v.varreduras >= PERSISTENCIA_SUSPEITA).length;
+                      return {
+                          oportunidadesDISTINTAS: distintas.length,
+                          dasQuaisParadas: `${paradas} (persistem há ${PERSISTENCIA_SUSPEITA}+ varreduras)`,
+                          somaDosLucrosDistintos: `${soma.toFixed(8)} (unidade do token base)`,
+                          projecaoPorDia: `${soma.dividedBy(horas).mul(24).toFixed(8)} por dia no ritmo observado`,
+                          aviso:
+                              'Conta oportunidades DISTINTAS, não avistamentos: uma margem parada aparece em toda ' +
+                              'varredura e inflaria a projeção pelo número de leituras. Ainda assim é projeção ' +
+                              'linear de janela curta, e a disputa consome a maior parte na execução.',
+                      };
+                  })()
                 : {}),
         });
     };

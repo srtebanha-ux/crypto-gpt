@@ -1018,6 +1018,38 @@ sorteio.
 | `DEX_GAS_UNITS` | `450000` | Gas estimado da transação de arbitragem. |
 | `DEX_MAX_RESERVE_FRACTION` | `0.1` | Teto de entrada como fração da menor reserva do ciclo. |
 
+### Oportunidade parada é armadilha, não presente
+
+A primeira varredura entre DEXs encontrou um ciclo lucrativo — e ele apareceu
+**idêntico em todas as leituras seguintes**, mesmo lucro, mesmo desalinhamento
+de 2,06%. Isso ensinou duas coisas.
+
+**A primeira é um defeito da própria medição.** Somar cada avistamento infla a
+projeção pelo número de varreduras: uma margem parada aparece em toda leitura e
+viraria "dezenas de oportunidades por hora". O relatório agora conta
+oportunidades **distintas**, indexadas pelo ciclo, e mede há quantas varreduras
+cada uma persiste.
+
+**A segunda é o achado que importa.** Numa rede com bots competindo bloco a
+bloco, uma margem de 2% não sobrevive minutos. Se sobreviveu, algo impede a
+extração — e o candidato mais comum é **token com taxa de transferência ou trava
+de venda**. A matemática de produto constante assume que se recebe exatamente o
+que a fórmula diz; um token que cobra na transferência quebra essa premissa, e a
+arbitragem que parecia render reverte ou sai no prejuízo.
+
+Depois de três varreduras com o mesmo ciclo, o scanner avisa:
+
+```
+WARN OPORTUNIDADE PARADA — trate como armadilha até provar o contrário.
+     porque: "Uma margem de verdade nesta rede é tomada em um ou dois blocos..."
+     antesDeExecutar: "Confira o contrato do token no explorador — taxa de
+                       transferência, blacklist, pausa."
+```
+
+A transação reverte se o lucro não sair, então o custo de tentar continua sendo
+o gás. Mas tentar repetidamente numa armadilha é queimar gás em série, e é
+exatamente o que um bot ingênuo faz.
+
 ### A projeção diária: traduzir a medição para a meta
 
 "Melhor líquido: 0,00012 ETH" não diz se uma meta de ganho diário é alcançável
