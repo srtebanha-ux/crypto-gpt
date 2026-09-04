@@ -54,6 +54,8 @@ export interface BookState {
     realizedPnl: string;
     wins: number;
     losses: number;
+    somaGanhos?: string;
+    somaPerdas?: string;
     committed: string;
     positions: Array<{
         symbol: string;
@@ -273,6 +275,12 @@ async function main() {
     let realizedPnl = new Decimal(salvo?.realizedPnl ?? '0');
     let wins = salvo?.wins ?? 0;
     let losses = salvo?.losses ?? 0;
+    // Somas separadas de ganho e perda. A taxa de acerto sozinha não decide
+    // nada: 40% de acerto com ganho 3x é lucrativo, 90% com perda 10x quebra.
+    // O que decide é ganho médio contra perda média, e sem estes dois números
+    // o heartbeat não permite comparar o papel com o backtest.
+    let somaGanhos = new Decimal(salvo?.somaGanhos ?? '0');
+    let somaPerdas = new Decimal(salvo?.somaPerdas ?? '0');
     /**
      * Dinheiro preso nas posições abertas. Sem isto, cada ativo dimensionaria
      * contra o capital TOTAL e quatro posições simultâneas comprometeriam
@@ -339,8 +347,13 @@ async function main() {
         if (committed.lessThan(0)) committed = new Decimal(0);
         capital = capital.plus(netProfit);
         realizedPnl = realizedPnl.plus(netProfit);
-        if (netProfit.greaterThan(0)) wins += 1;
-        else losses += 1;
+        if (netProfit.greaterThan(0)) {
+            wins += 1;
+            somaGanhos = somaGanhos.plus(netProfit);
+        } else {
+            losses += 1;
+            somaPerdas = somaPerdas.plus(netProfit.abs());
+        }
         positions.delete(pos.symbol);
         log.info(`[${params.entryStrategy}] SAÍDA ${pos.symbol} — ${reason}`, {
             entrada: pos.entryPrice.toFixed(6),
@@ -618,6 +631,8 @@ async function main() {
             realizedPnl: realizedPnl.toString(),
             wins,
             losses,
+            somaGanhos: somaGanhos.toString(),
+            somaPerdas: somaPerdas.toString(),
             committed: committed.toString(),
             positions: Array.from(positions.values()).map((p) => ({
                 symbol: p.symbol,
@@ -640,6 +655,17 @@ async function main() {
             operacoesFechadas: wins + losses,
             acertos: wins,
             erros: losses,
+            ...(wins + losses > 0
+                ? {
+                      taxaAcerto: `${((wins / (wins + losses)) * 100).toFixed(1)}%`,
+                      ganhoMedio: wins > 0 ? `$${somaGanhos.dividedBy(wins).toFixed(4)}` : '—',
+                      perdaMedia: losses > 0 ? `$${somaPerdas.dividedBy(losses).toFixed(4)}` : '—',
+                      // O número que reprova ou aprova. Positivo = a estratégia
+                      // ganha dinheiro por operação, independente da taxa de acerto.
+                      expectativaPorOperacao: `$${realizedPnl.dividedBy(wins + losses).toFixed(4)}`,
+                      compareComOBacktest: 'backtest 1h/reversion mediu 39,6% de acerto e $0,0245 por operação',
+                  }
+                : {}),
             sinaisDisparados,
             bloqueadosPorTendencia,
             recusadosPorRisco,

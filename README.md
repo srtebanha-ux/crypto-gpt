@@ -1281,6 +1281,27 @@ justamente moldar a estratégia ao passado próximo. Rodar as duas em papel cust
 zero e responde em algumas semanas com dado de mercado ao vivo, que não dá para
 sobreajustar.
 
+### O heartbeat mede o que o backtest mediu
+
+Taxa de acerto sozinha não decide nada: 40% de acerto com ganho 3× é lucrativo,
+90% com perda 10× quebra a conta. O que decide é **ganho médio contra perda
+média** — e sem esses dois números não dá para comparar o papel com o backtest.
+
+Assim que houver operação fechada, o heartbeat passa a trazer:
+
+```
+taxaAcerto: "37.5%"   ganhoMedio: "$0.5000"   perdaMedia: "$0.1800"
+expectativaPorOperacao: "$0.0750"
+compareComOBacktest: "backtest 1h/reversion mediu 39,6% de acerto e $0,0245 por operação"
+```
+
+A última linha existe para a comparação não depender de memória. Papel muito
+abaixo do backtest significa que a estratégia ao vivo não é a que foi medida — e
+isso é informação, não fracasso.
+
+As somas de ganho e perda entram no arquivo de estado, então sobrevivem a
+reinício junto com o resto do placar.
+
 ### Painel ao vivo: a posição aberta, minuto a minuto
 
 O placar do heartbeat conta só operação **fechada**. Uma posição pode ficar
