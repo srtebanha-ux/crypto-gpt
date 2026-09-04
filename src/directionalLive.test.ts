@@ -13,7 +13,7 @@ import { mkdtempSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Decimal } from 'decimal.js';
-import { loadState, saveState, type BookState } from './directionalLive';
+import { decideReconcile, loadState, saveState, type BookState } from './directionalLive';
 
 Decimal.set({ precision: 30, rounding: Decimal.ROUND_DOWN });
 
@@ -105,4 +105,83 @@ test('sobrescrever mantém apenas o estado mais recente', () => {
     const lido = loadState(arquivo);
     assert.equal(lido.reversion.capital, '42');
     assert.equal(lido.reversion.positions.length, 0);
+});
+
+// --- Reconciliação com o saldo real da corretora -----------------------------
+//
+// O arquivo de estado protege contra reinício do processo. Não protege contra
+// o arquivo se perder (container novo sem volume), contra alguém vender pela
+// interface da Binance, nem contra ordem executada com o motor fora do ar.
+// Nesses casos livro e realidade divergem — sem nenhum erro aparecer.
+
+const d = (v: string) => new Decimal(v);
+const MIN_NOTIONAL = d('5');
+
+test('saldo real sem posição no livro é ÓRFÃ — o caso mais perigoso', () => {
+    // Posição que o motor não conhece é posição sem stop. Se isto fosse tratado
+    // como "nada a fazer", dinheiro real ficaria exposto com o log saudável.
+    assert.equal(
+        decideReconcile({ temPosicaoNoLivro: false, valorDoSaldo: d('120'), minNotional: MIN_NOTIONAL, podeAdotar: false }),
+        'alertar-orfa',
+    );
+    assert.equal(
+        decideReconcile({ temPosicaoNoLivro: false, valorDoSaldo: d('120'), minNotional: MIN_NOTIONAL, podeAdotar: true }),
+        'adotar-orfa',
+    );
+});
+
+test('posição no livro sem saldo real é FANTASMA — remover, não vigiar', () => {
+    // Vendida na mão, ou fechada com o motor fora do ar. Mantê-la faria o motor
+    // vigiar um stop que não protege nada e bloquear o caixa para sempre.
+    assert.equal(
+        decideReconcile({ temPosicaoNoLivro: true, valorDoSaldo: d('0'), minNotional: MIN_NOTIONAL, podeAdotar: false }),
+        'remover-fantasma',
+    );
+});
+
+test('poeira de saldo NÃO é posição', () => {
+    // Restos de arredondamento ficam na conta depois de qualquer venda. Sem o
+    // piso do notional mínimo, cada um viraria uma posição fantasma nova a cada
+    // ciclo — e a corretora nem aceitaria vendê-los.
+    assert.equal(
+        decideReconcile({ temPosicaoNoLivro: false, valorDoSaldo: d('0.13'), minNotional: MIN_NOTIONAL, podeAdotar: true }),
+        'nada',
+    );
+    // E com posição no livro, poeira significa que a posição real acabou.
+    assert.equal(
+        decideReconcile({ temPosicaoNoLivro: true, valorDoSaldo: d('0.13'), minNotional: MIN_NOTIONAL, podeAdotar: false }),
+        'remover-fantasma',
+    );
+});
+
+test('livro e corretora de acordo não mexem em nada', () => {
+    assert.equal(
+        decideReconcile({ temPosicaoNoLivro: true, valorDoSaldo: d('120'), minNotional: MIN_NOTIONAL, podeAdotar: true }),
+        'nada',
+    );
+    assert.equal(
+        decideReconcile({ temPosicaoNoLivro: false, valorDoSaldo: d('0'), minNotional: MIN_NOTIONAL, podeAdotar: true }),
+        'nada',
+    );
+});
+
+test('exatamente no notional mínimo conta como posição', () => {
+    // A fronteira decide entre "sem stop" e "vigiada". Na dúvida, vigiar.
+    assert.equal(
+        decideReconcile({ temPosicaoNoLivro: false, valorDoSaldo: d('5'), minNotional: MIN_NOTIONAL, podeAdotar: false }),
+        'alertar-orfa',
+    );
+});
+
+test('adotar exige permissão explícita — o padrão é alertar', () => {
+    // Adotar distorce o placar: o preço pago é desconhecido e o resultado passa
+    // a ser medido do zero. É a escolha certa para proteger a posição e a
+    // errada para medir, então quem decide é quem opera.
+    const semPermissao = decideReconcile({
+        temPosicaoNoLivro: false,
+        valorDoSaldo: d('50'),
+        minNotional: MIN_NOTIONAL,
+        podeAdotar: false,
+    });
+    assert.equal(semPermissao, 'alertar-orfa');
 });

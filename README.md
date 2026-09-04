@@ -1236,6 +1236,40 @@ boot: subir sem posições é recuperável, não subir não é.
 disco é do container e um deploy o descarta — a persistência protege contra
 restart do processo, não contra troca de container.
 
+### A corretora é a fonte da verdade, não o arquivo
+
+O arquivo de estado protege contra reinício do processo. Ele **não** protege
+contra o arquivo se perder (container novo sem volume), contra alguém vender
+pela interface da Binance, nem contra uma ordem executada enquanto o motor
+estava fora do ar. Nesses casos livro e realidade divergem — e a divergência
+não gera erro nenhum: o motor simplesmente deixa de vigiar uma posição que
+existe, ou vigia uma que não existe mais.
+
+Por isso, no primeiro ciclo de cada ativo em modo `live`, o motor confere o
+livro contra o **saldo real da conta**. Quatro casos, com ações opostas:
+
+| Livro | Saldo real | Ação |
+| --- | --- | --- |
+| tem posição | tem saldo | nada |
+| tem posição | sem saldo | **remove o fantasma** — vigiar um stop que não protege nada só bloqueia o caixa |
+| sem posição | tem saldo | **ÓRFÃ**: posição real sem stop, sem ninguém olhando |
+| sem posição | sem saldo | nada |
+
+Poeira de arredondamento não conta como posição: o piso é o mesmo notional
+mínimo que impede abrir uma. Sem ele, restos de venda virariam posição fantasma
+nova a cada ciclo.
+
+Órfã é o caso perigoso, e o padrão é **gritar, não agir**: o log sai como ERRO
+dizendo o quanto está exposto e sem stop. Com `DIRECTIONAL_ADOPT_ORPHANS=true`
+o motor adota a posição com stop em ATR a partir do preço atual — melhor que
+deixá-la desprotegida, mas distorce o placar, porque o preço realmente pago é
+desconhecido e o resultado passa a ser medido do zero. Proteger e medir puxam
+para lados opostos aqui, então quem escolhe é quem opera.
+
+Consequência prática: **o Volume do Railway deixa de ser obrigatório**. Sem ele
+o placar acumulado zera a cada deploy, mas nenhuma posição fica órfã — a
+corretora conta o que existe.
+
 ### Os botões de risco, e o que cada um custa
 
 `BT_RISK_FRACTION` é a fração do capital arriscada por operação, e determina

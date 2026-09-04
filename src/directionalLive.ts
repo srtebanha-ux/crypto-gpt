@@ -80,6 +80,32 @@ export function loadState(path: string): Record<string, BookState> {
     }
 }
 
+/**
+ * O que fazer quando o livro e o saldo real da corretora divergem.
+ *
+ * Isolado como função pura porque é a decisão que importa e a que pode estar
+ * errada — o resto é I/O. Os quatro casos têm ações opostas, e confundir dois
+ * deles custa caro: tratar órfã como "nada a fazer" deixa dinheiro real sem
+ * stop; tratar fantasma como posição bloqueia o caixa para sempre.
+ */
+export type ReconcileAction = 'nada' | 'remover-fantasma' | 'adotar-orfa' | 'alertar-orfa';
+
+export function decideReconcile(params: {
+    temPosicaoNoLivro: boolean;
+    valorDoSaldo: Decimal;
+    minNotional: Decimal;
+    podeAdotar: boolean;
+}): ReconcileAction {
+    // "Relevante" é o mesmo piso que impede abrir posição: abaixo do notional
+    // mínimo a corretora nem aceitaria vender, então poeira de saldo não é
+    // posição. Sem esse piso, restos de arredondamento virariam posições
+    // fantasma a cada ciclo.
+    const relevante = params.valorDoSaldo.greaterThanOrEqualTo(params.minNotional);
+    if (params.temPosicaoNoLivro && !relevante) return 'remover-fantasma';
+    if (!params.temPosicaoNoLivro && relevante) return params.podeAdotar ? 'adotar-orfa' : 'alertar-orfa';
+    return 'nada';
+}
+
 interface OpenPosition {
     symbol: string;
     entryPrice: Decimal;
@@ -206,6 +232,10 @@ async function main() {
      * capital, então elas competem em pé de igualdade.
      */
     const estadoSalvo = loadState(cfg.stateFile);
+    // Adotar posição órfã é decisão de quem opera: o motor não sabe o preço
+    // pago e vai medir o resultado a partir de agora, o que distorce o placar.
+    // Ainda assim é melhor que deixá-la sem stop — mas quem escolhe é você.
+    const adoptOrphans = process.env.DIRECTIONAL_ADOPT_ORPHANS === 'true';
     const criarLivro = (params: ResolvedStrategyParams, capitalInicial: Decimal) => {
     const salvo = estadoSalvo[params.entryStrategy];
     const positions = new Map<string, OpenPosition>();
@@ -287,6 +317,91 @@ async function main() {
         });
     };
 
+    /** Símbolos já reconciliados contra o saldo real da corretora. */
+    const reconciliados = new Set<string>();
+
+    /**
+     * Confere o estado do livro contra o SALDO REAL da corretora.
+     *
+     * O arquivo de estado protege contra reinício do processo; não protege
+     * contra o arquivo se perder (container novo sem volume), contra alguém
+     * vender pela interface da Binance, nem contra uma ordem que foi executada
+     * enquanto o motor estava fora do ar. Em todos esses casos o livro e a
+     * realidade divergem — e a divergência não gera erro: o motor simplesmente
+     * deixa de vigiar uma posição que existe, ou vigia uma que não existe mais.
+     *
+     * A corretora é a única fonte da verdade sobre o que se tem. Isto roda uma
+     * vez por símbolo, no primeiro ciclo em que há preço disponível.
+     */
+    const reconcile = async (symbol: string, price: Decimal, atrValue: Decimal | null) => {
+        if (!exchange || reconciliados.has(symbol)) return;
+        reconciliados.add(symbol);
+
+        const asset = symbol.replace('USDT', '');
+        const saldo = await exchange.fetchAvailableBalance(asset);
+        const valor = saldo.mul(price);
+        const pos = positions.get(symbol);
+        const acao = decideReconcile({
+            temPosicaoNoLivro: pos !== undefined,
+            valorDoSaldo: valor,
+            minNotional: params.minNotional,
+            podeAdotar: adoptOrphans && atrValue !== null,
+        });
+        if (acao === 'nada') return;
+
+        if (pos && acao === 'remover-fantasma') {
+            // O livro acha que tem posição, a corretora diz que não. Manter
+            // seria vigiar um fantasma e bloquear o caixa para sempre.
+            log.warn(`[${params.entryStrategy}] ${symbol}: posição no estado não existe na corretora — removida.`, {
+                quantidadeNoEstado: pos.quantity.toString(),
+                saldoReal: saldo.toString(),
+                causaProvavel: 'venda manual, ou ordem executada com o motor fora do ar',
+            });
+            committed = committed.minus(pos.notional);
+            if (committed.lessThan(0)) committed = new Decimal(0);
+            positions.delete(symbol);
+            return;
+        }
+
+        if (!pos) {
+            // Existe posição de verdade que o motor não conhece: sem stop, sem
+            // ninguém olhando. É o cenário mais perigoso possível.
+            if (acao === 'alertar-orfa' || !atrValue) {
+                log.error(
+                    `[${params.entryStrategy}] ${symbol}: SALDO SEM POSIÇÃO NO ESTADO — ` +
+                        `${saldo.toString()} ${asset} (~${valor.toFixed(2)} USDT) sem stop nenhum.`,
+                    {
+                        oQueFazer:
+                            'Venda manualmente na Binance, OU rode com DIRECTIONAL_ADOPT_ORPHANS=true ' +
+                            'para o motor adotar a posição com stop em ATR a partir do preço atual.',
+                        porque: 'Posição que o motor não conhece é posição sem stop. Ignorar em silêncio é o pior caminho.',
+                    },
+                );
+                return;
+            }
+            const stop = price.minus(atrValue.mul(params.atrStopMultiplier));
+            const notional = saldo.mul(price);
+            committed = committed.plus(notional);
+            positions.set(symbol, {
+                symbol,
+                entryPrice: price,
+                quantity: saldo,
+                notional,
+                stopPrice: stop,
+                highestSinceEntry: price,
+                openedAt: Date.now(),
+            });
+            log.warn(`[${params.entryStrategy}] ${symbol}: posição órfã ADOTADA com stop novo.`, {
+                quantidade: saldo.toString(),
+                precoDeReferencia: price.toFixed(6),
+                stop: stop.toFixed(6),
+                aviso:
+                    'O preço de entrada real é desconhecido: o resultado desta operação será medido a partir de agora, ' +
+                    'não do que foi pago. O que importa é que ela passa a ter stop.',
+            });
+        }
+    };
+
     const step = async (symbol: string, candles: Candle[]) => {
         if (candles.length < params.trendPeriod + params.atrPeriod + 5) return;
         const last = candles.length - 1;
@@ -297,6 +412,9 @@ async function main() {
         // de quando ele é, em vez de deixar parecer leitura do instante.
         if (lastSeenCandle.get(symbol) === candle.openTime) return;
         lastSeenCandle.set(symbol, candle.openTime);
+
+        // Antes de qualquer decisão: o livro bate com a corretora?
+        await reconcile(symbol, candle.close, atr(candles, last, params.atrPeriod));
 
         const pos = positions.get(symbol);
         if (pos) {
