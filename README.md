@@ -974,6 +974,42 @@ sorteio.
 | `DEX_GAS_UNITS` | `450000` | Gas estimado da transação de arbitragem. |
 | `DEX_MAX_RESERVE_FRACTION` | `0.1` | Teto de entrada como fração da menor reserva do ciclo. |
 
+### A projeção diária: traduzir a medição para a meta
+
+"Melhor líquido: 0,00012 ETH" não diz se uma meta de ganho diário é alcançável
+ou está a três ordens de grandeza de distância. Em modo contínuo, o relatório
+soma **todo ciclo lucrativo visto** e projeta o ritmo:
+
+```
+oportunidadesVistas: 3
+somaDosLucrosVistos: "0.004210 (unidade do token base)"
+projecaoPorDia: "0.050520 por dia no ritmo observado"
+```
+
+Só entra na soma o que é **lucrativo**. Somar margem negativa "quase lá"
+inventaria um ganho que nenhuma execução produziria.
+
+A projeção é linear sobre uma janela curta, e isso é uma limitação de verdade:
+oportunidade on-chain não chega em ritmo constante, e a disputa consome a maior
+parte no momento de executar. **É piso de viabilidade, não previsão de ganho** —
+serve para descartar rápido quando o número está longe demais, que é o uso mais
+provável.
+
+A aritmética que a projeção deve ser comparada contra, para uma meta de \$90/dia:
+
+| Margem líquida | Notional necessário por dia |
+| --- | --- |
+| 0,05% | \$181.818 |
+| 0,10% | \$90.909 |
+| 0,30% | **\$30.303** |
+| 1,00% | \$9.091 |
+
+Uma única oportunidade de 0,30% num trade de \$30 mil basta. O flash loan
+fornece o capital e o gás medido foi ~\$0,01. O limite real é a profundidade do
+pool: com o teto de 10% das reservas, um pool de \$1 milhão comporta \$100 mil
+de trade. **A meta é aritmeticamente alcançável — o que falta medir é se a
+margem existe.**
+
 ### Por que o modo contínuo importa mais que a leitura única
 
 Uma varredura isolada com zero ciclos lucrativos **não distingue** "não há

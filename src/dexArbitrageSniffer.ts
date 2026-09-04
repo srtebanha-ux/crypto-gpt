@@ -775,7 +775,12 @@ async function main() {
     let scansWithOpportunity = 0;
     let bestEverNet = new Decimal(0);
     let bestEverDescription = 'nenhum';
+    /** Soma dos lucros líquidos de TODA oportunidade vista, para projetar o dia. */
+    let somaOportunidades = new Decimal(0);
+    let totalOportunidades = 0;
     const startedAt = Date.now();
+    // Câmbio só para traduzir a projeção; não entra em decisão nenhuma.
+    const brlPorUsd = new Decimal(process.env.BRL_POR_USD ?? '5.5');
 
     const runScan = async (): Promise<void> => {
         scans += 1;
@@ -793,6 +798,9 @@ async function main() {
         let profitableCount = 0;
         let bestNet = new Decimal(0);
         let bestDescription = 'nenhum';
+        // Só o que é LUCRATIVO entra na projeção. Somar margem negativa
+        // "quase lá" inventaria um ganho que nenhuma execução produziria.
+        let somaDaVarredura = new Decimal(0);
 
         for (const cycle of freshCycles) {
             const hops = hopsForCycle(cycle);
@@ -811,6 +819,7 @@ async function main() {
             }
             if (evaluation.profitable) {
                 profitableCount += 1;
+                somaDaVarredura = somaDaVarredura.plus(evaluation.netProfit);
                 log.info('*** CICLO LUCRATIVO ENCONTRADO ***', {
                     ciclo: describeCycle(cycle),
                     entradaOtima: evaluation.amountIn.toFixed(8),
@@ -824,11 +833,14 @@ async function main() {
         }
 
         if (profitableCount > 0) scansWithOpportunity += 1;
+        somaOportunidades = somaOportunidades.plus(somaDaVarredura);
+        totalOportunidades += profitableCount;
         if (bestNet.greaterThan(bestEverNet)) {
             bestEverNet = bestNet;
             bestEverDescription = bestDescription;
         }
 
+        const horas = (Date.now() - startedAt) / 3_600_000;
         log.info('Varredura concluída.', {
             varredura: scans,
             poolsVivos: fresh.length,
@@ -842,7 +854,21 @@ async function main() {
             varredurasComOportunidade: `${scansWithOpportunity}/${scans}`,
             melhorLiquidoDesdeOInicio: bestEverNet.toFixed(8),
             melhorCicloDesdeOInicio: bestEverDescription,
-            horasObservando: ((Date.now() - startedAt) / 3_600_000).toFixed(2),
+            horasObservando: horas.toFixed(2),
+            // Traduz a observação para a pergunta que realmente se quer
+            // responder. Sem isto, "melhor líquido 0,00012 ETH" não diz se a
+            // meta é alcançável ou está a três ordens de grandeza de distância.
+            ...(horas > 0.02
+                ? {
+                      oportunidadesVistas: totalOportunidades,
+                      somaDosLucrosVistos: `${somaOportunidades.toFixed(6)} (unidade do token base)`,
+                      projecaoPorDia: `${somaOportunidades.dividedBy(horas).mul(24).toFixed(6)} por dia no ritmo observado`,
+                      aviso:
+                          'Projeção linear de uma janela curta. Oportunidade on-chain não chega em ritmo ' +
+                          'constante, e a disputa consome a maior parte na hora de executar. É piso de viabilidade, ' +
+                          'não previsão de ganho.',
+                  }
+                : {}),
         });
     };
 
