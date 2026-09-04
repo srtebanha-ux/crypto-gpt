@@ -16,7 +16,7 @@
 import { Decimal } from 'decimal.js';
 import { resolveStrategyParams } from './strategyParams';
 import { createLogger } from './logger';
-import { runBacktest, type EntryStrategy, type StrategyParams, type Trade } from './backtest';
+import { runBacktest, type BacktestResult, type EntryStrategy, type StrategyParams, type Trade } from './backtest';
 import { consecutiveLossesSurvivable, expectancyPerTrade } from './positionSizing';
 import type { Candle } from './signals';
 
@@ -113,6 +113,12 @@ interface SymbolOutcome {
     beatBuyHold: boolean;
     /** Resultado separado por regime de mercado na entrada. */
     porRegime: Record<'alta' | 'baixa', ResumoRegime>;
+    /** Funil do sinal até a operação — explica "zero operações". */
+    funnel: BacktestResult['funnel'];
+    /** Operações individuais, para listagem. */
+    trades_: Trade[];
+    /** Velas usadas, para converter índice em data. */
+    candles: Candle[];
 }
 
 function evaluate(
@@ -137,7 +143,36 @@ function evaluate(
         buyHold,
         beatBuyHold: returnFraction.greaterThan(buyHold),
         porRegime: resumirPorRegime(result.trades),
+        funnel: result.funnel,
+        trades_: result.trades,
+        candles,
     };
+}
+
+/**
+ * Imprime CADA operação: quando entrou, quando saiu, a que preço e com que
+ * resultado.
+ *
+ * O agregado responde "vale a pena?" e não responde "o que ele faz?". Quem
+ * ainda não viu a estratégia operar não tem como confiar num número resumido —
+ * e nem como perceber que ela está comprando algo absurdo. Uma lista de
+ * operações com data e preço é verificável contra o gráfico à mão.
+ */
+function reportTrades(o: SymbolOutcome, limite: number): void {
+    if (o.trades_.length === 0) return;
+    const mostrar = o.trades_.slice(-limite);
+    log.info(`${o.symbol} — ${o.strategy} — últimas ${mostrar.length} de ${o.trades_.length} operações`, {
+        legenda: 'data entrada → data saída | preços | motivo | resultado líquido',
+    });
+    for (const t of mostrar) {
+        const entrada = new Date(o.candles[t.entryIndex].openTime).toISOString().slice(0, 16).replace('T', ' ');
+        const saida = new Date(o.candles[t.exitIndex].openTime).toISOString().slice(0, 16).replace('T', ' ');
+        const variacao = t.exitPrice.minus(t.entryPrice).dividedBy(t.entryPrice).mul(100);
+        log.info(
+            `  ${entrada} → ${saida} | ${t.entryPrice.toFixed(6)} → ${t.exitPrice.toFixed(6)} ` +
+                `(${variacao.toFixed(2)}%) | ${t.exitReason} | $${t.netProfit.toFixed(4)} | regime ${t.regimeAtEntry}`,
+        );
+    }
 }
 
 interface ResumoRegime {
@@ -197,6 +232,13 @@ function reportOutcome(o: SymbolOutcome): void {
         // A pergunta que uma janela só não responde: e quando o mercado cai?
         emMercadoDeALTA: descreverRegime(o.porRegime.alta),
         emMercadoDeBAIXA: descreverRegime(o.porRegime.baixa),
+        // O funil responde "por que zero operações?", cuja causa tem ações
+        // opostas: sinal restritivo demais, filtro de tendência barrando, ou
+        // capital pequeno demais para o preço.
+        funil:
+            `${o.funnel.velasAvaliadas} velas → ${o.funnel.sinaisDisparados} sinais → ` +
+            `${o.funnel.barradosPorTendencia} barrados por tendência, ` +
+            `${o.funnel.recusadosPorRisco} recusados por risco → ${o.trades} operações`,
     });
 }
 
@@ -206,6 +248,8 @@ async function main() {
         .map((s) => s.trim().toUpperCase())
         .filter((s) => s.length > 0);
     const interval = process.env.BT_INTERVAL ?? '1h';
+    // Quantas operações listar por ativo/família. 0 desliga a listagem.
+    const mostrarOperacoes = Number(process.env.BT_SHOW_TRADES ?? '10');
     const limit = Number(process.env.BT_CANDLES ?? '2000');
     const capital = new Decimal(process.env.BT_CAPITAL ?? '20');
     const params = resolveStrategyParams();
@@ -245,6 +289,9 @@ async function main() {
             const outcome = evaluate(symbol, strategy, candles, capital, params);
             outcomes.push(outcome);
             reportOutcome(outcome);
+            // Ver a estratégia operar importa tanto quanto o número resumido:
+            // é o que permite conferir uma operação contra o gráfico à mão.
+            if (mostrarOperacoes > 0) reportTrades(outcome, mostrarOperacoes);
         }
 
         // Metades separadas no ativo, para flagrar overfitting: parâmetros que

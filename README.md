@@ -1168,6 +1168,40 @@ Duas decisões que impedem o número de mentir a favor:
 | --- | --- | --- |
 | `BT_REGIME_PERIOD` | `200` | Média que separa alta de baixa na classificação. |
 
+### Ver a estratégia operar, não só o placar
+
+O agregado responde "vale a pena?" e não responde "o que ele faz?". Quem ainda
+não viu a estratégia operar não tem como confiar num número resumido — nem como
+perceber que ela está comprando algo absurdo.
+
+Por isso o relatório lista as últimas operações de cada ativo e família, com
+data, preço de entrada e saída, variação, motivo da saída e resultado líquido.
+Cada linha é conferível contra o gráfico à mão:
+
+```
+2026-08-14 09:00 → 2026-08-14 19:00 | 2.451000 → 2.702000 (10.24%) | alvo | $0.3812 | regime alta
+```
+
+`BT_SHOW_TRADES=0` desliga; o padrão são as 10 últimas.
+
+### O funil: por que ZERO operações?
+
+"Zero operações" tem três causas com ações **opostas**, e todas produzem o mesmo
+relatório vazio:
+
+```
+funil: "4980 velas → 12 sinais → 9 barrados por tendência, 1 recusado por risco → 2 operações"
+```
+
+- **Zero sinais** → o parâmetro está restritivo demais para o mercado da janela.
+  Mexer no limiar, não no filtro.
+- **Sinais barrados por tendência** → a estratégia quer comprar queda dentro de
+  tendência de baixa. O filtro barrando é o filtro funcionando.
+- **Recusados por risco** → o capital é pequeno demais para o preço do ativo, e
+  a posição não atinge o notional mínimo da corretora.
+
+Sem o funil, os três casos levariam a mexer no parâmetro errado.
+
 Backtest mede o passado. É o piso da decisão, não promessa de futuro.
 
 ## Motor direcional 24/7 (`directionalLive.ts`)

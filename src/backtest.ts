@@ -127,6 +127,21 @@ export interface BacktestResult {
     maxDrawdownFraction: Decimal;
     /** Operações recusadas pelo controle de risco (notional mínimo, etc.). */
     skippedByRisk: number;
+    /**
+     * Funil do sinal até a operação.
+     *
+     * "Zero operações" tem causas com ações opostas: o sinal nunca disparou
+     * (parâmetro restritivo demais para o mercado), disparou e o filtro de
+     * tendência barrou (comprando queda em tendência de baixa), ou disparou e
+     * o risco recusou (capital pequeno demais para o preço). Sem o funil, os
+     * três casos produzem o mesmo relatório vazio.
+     */
+    funnel: {
+        velasAvaliadas: number;
+        sinaisDisparados: number;
+        barradosPorTendencia: number;
+        recusadosPorRisco: number;
+    };
 }
 
 /** Período da média que separa mercado de alta de mercado de baixa. */
@@ -147,6 +162,9 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
     let position: OpenPosition | null = null;
     const trades: Trade[] = [];
     let skippedByRisk = 0;
+    let velasAvaliadas = 0;
+    let sinaisDisparados = 0;
+    let barradosPorTendencia = 0;
 
     let peakCapital = initialCapital;
     let maxDrawdown = new Decimal(0);
@@ -271,11 +289,16 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
                       params.atrPeriod,
                   )
                 : detectBreakout(candles, i, params.breakoutLookback, params.atrPeriod);
+        velasAvaliadas += 1;
         if (!signal.triggered || signal.atrValue === null) continue;
+        sinaisDisparados += 1;
 
         if (params.trendPeriod > 0) {
             const aboveTrend = isAboveTrend(closes, i, params.trendPeriod);
-            if (aboveTrend !== true) continue;
+            if (aboveTrend !== true) {
+                barradosPorTendencia += 1;
+                continue;
+            }
         }
 
         const nextIndex = i + 1;
@@ -313,7 +336,12 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
         closePosition(position, candles.length - 1, candles[candles.length - 1].close, 'fim-dos-dados');
     }
 
-    return summarize(trades, initialCapital, capital, maxDrawdown, skippedByRisk);
+    return summarize(trades, initialCapital, capital, maxDrawdown, skippedByRisk, {
+        velasAvaliadas,
+        sinaisDisparados,
+        barradosPorTendencia,
+        recusadosPorRisco: skippedByRisk,
+    });
 }
 
 function summarize(
@@ -322,6 +350,7 @@ function summarize(
     finalCapital: Decimal,
     maxDrawdownFraction: Decimal,
     skippedByRisk: number,
+    funnel: BacktestResult['funnel'],
 ): BacktestResult {
     const wins = trades.filter((t) => t.netProfit.greaterThan(0));
     const losses = trades.filter((t) => t.netProfit.lessThanOrEqualTo(0));
@@ -347,5 +376,6 @@ function summarize(
         profitFactor: grossLoss.greaterThan(0) ? grossWin.dividedBy(grossLoss) : null,
         maxDrawdownFraction,
         skippedByRisk,
+        funnel,
     };
 }

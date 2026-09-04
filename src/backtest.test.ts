@@ -392,3 +392,64 @@ test('takeProfitR zero desliga o alvo — a estratégia volta a ser só stop mó
     });
     assert.equal(semAlvo.trades.filter((t) => t.exitReason === 'alvo').length, 0);
 });
+
+// --- Funil: por que ZERO operações? -----------------------------------------
+
+test('o funil separa "sinal nunca disparou" de "sinal barrado" de "risco recusou"', () => {
+    // As três causas produzem o mesmo relatório vazio e pedem ações opostas:
+    // afrouxar o parâmetro, desligar o filtro, ou aumentar o capital. Sem o
+    // funil, quem opera não tem como saber qual mexer.
+    const candles: Candle[] = [
+        ...flatSeries(60, 100),
+        candle(100, 110, 99, 108, 60),
+        candle(108, 112, 107, 111, 61),
+        ...flatSeries(10, 111).map((c, i) => ({ ...c, openTime: (62 + i) * 60_000 })),
+    ];
+
+    const base = {
+        entryStrategy: 'breakout' as const,
+        breakoutLookback: 10,
+        atrPeriod: 5,
+        atrStopMultiplier: new Decimal('2'),
+        riskFraction: new Decimal('0.02'),
+        trailFraction: new Decimal('0'),
+        trailAtrMultiplier: new Decimal('3'),
+        feeRate: new Decimal('0'),
+    };
+
+    // Capital normal, sem filtro: o sinal vira operação.
+    const normal = runBacktest(candles, new Decimal('100000'), { ...base, trendPeriod: 0 });
+    assert.ok(normal.funnel.sinaisDisparados > 0, 'o cenário precisa disparar sinal');
+    assert.equal(normal.funnel.recusadosPorRisco, 0);
+    assert.ok(normal.trades.length > 0);
+
+    // Mesmo sinal, capital minúsculo: o risco recusa, e o funil diz isso.
+    const semCapital = runBacktest(candles, new Decimal('1'), {
+        ...base,
+        trendPeriod: 0,
+        minNotional: new Decimal('5'),
+    });
+    assert.equal(semCapital.trades.length, 0);
+    assert.ok(semCapital.funnel.sinaisDisparados > 0, 'o sinal disparou igual');
+    assert.ok(semCapital.funnel.recusadosPorRisco > 0, 'e foi o risco que recusou — não o sinal que faltou');
+});
+
+test('sinal restritivo demais aparece como ZERO sinais, não como zero operações', () => {
+    // Distinção que decide a ação: sem sinal, mexer no parâmetro; com sinal
+    // barrado, mexer no filtro.
+    const candles = flatSeries(100, 100); // mercado parado: nada rompe
+    const resultado = runBacktest(candles, new Decimal('100000'), {
+        entryStrategy: 'breakout',
+        breakoutLookback: 10,
+        atrPeriod: 5,
+        atrStopMultiplier: new Decimal('2'),
+        trendPeriod: 0,
+        riskFraction: new Decimal('0.02'),
+        trailFraction: new Decimal('0'),
+        trailAtrMultiplier: new Decimal('3'),
+        feeRate: new Decimal('0'),
+    });
+    assert.equal(resultado.funnel.sinaisDisparados, 0);
+    assert.equal(resultado.funnel.recusadosPorRisco, 0);
+    assert.ok(resultado.funnel.velasAvaliadas > 0, 'as velas foram avaliadas — o que faltou foi sinal');
+});
