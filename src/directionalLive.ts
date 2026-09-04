@@ -705,6 +705,25 @@ async function main() {
     const fatia = cfg.capital.dividedBy(cfg.livros.length);
     const livros = cfg.livros.map((p) => criarLivro(p, fatia));
 
+    // Capital recuperado do disco MANDA sobre a divisão nova: o capital de um
+    // livro é o patrimônio dele, com lucro e prejuízo embutidos, e reescrevê-lo
+    // apagaria o histórico. A consequência é que mudar DIRECTIONAL_CAPITAL ou o
+    // número de famílias não redistribui o que já existe — e a soma pode passar
+    // do capital configurado sem ninguém perceber. Em papel é contabilidade; com
+    // dinheiro real seria alocar mais do que se tem.
+    const somaDosLivros = livros.reduce((acc, l) => acc.plus(new Decimal(l.snapshot().capital)), new Decimal(0));
+    if (!somaDosLivros.minus(cfg.capital).abs().lessThan('0.01')) {
+        log.warn('A soma dos livros não bate com DIRECTIONAL_CAPITAL.', {
+            somaDosLivros: somaDosLivros.toFixed(2),
+            capitalConfigurado: cfg.capital.toFixed(2),
+            porque:
+                'Livros com estado salvo mantêm o capital que já tinham — é o patrimônio deles, com resultado ' +
+                'embutido. A divisão nova só vale para livro novo.',
+            paraRedistribuir: `Apague ${cfg.stateFile} para todos os livros recomeçarem da divisão atual.`,
+        });
+    }
+
+
     /** Último preço visto por ativo — só para exibição, nunca para decisão. */
     const precosAtuais = new Map<string, Decimal>();
 

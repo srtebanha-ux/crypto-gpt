@@ -1277,6 +1277,33 @@ escolher. Convertendo a medição de 1h para 20 ativos:
 A que mais opera é a que menos entrega. `all` dá as três ao mesmo tempo — máxima
 atividade e a comparação lado a lado, sem custo nenhum em papel.
 
+**`momentum` é subconjunto de `breakout`, não uma alternativa a ele.** As duas
+usam a mesma condição de preço — fechamento acima da máxima de N velas — e
+`momentum` acrescenta a exigência de volume. Todo sinal de `momentum` é também
+um sinal de `breakout`, nunca o contrário. Rodar as duas não diversifica: elas
+compram o MESMO ativo na MESMA vela, e a exposição se concentra em vez de se
+espalhar.
+
+Isso não torna a combinação inútil — pelo contrário, é o experimento mais limpo
+possível sobre o filtro de volume: mesmos sinais, um livro com o filtro e outro
+sem. Mas quem espera três apostas independentes vai ter duas coladas e uma
+(`reversion`) genuinamente oposta.
+
+**Capital salvo manda sobre a divisão nova.** O capital de um livro é o
+patrimônio dele, com lucro e prejuízo embutidos, então recuperá-lo do disco não
+pode ser sobrescrito pela divisão configurada — isso apagaria o histórico. A
+consequência é que mudar `DIRECTIONAL_CAPITAL` ou o número de famílias **não
+redistribui o que já existe**, e a soma dos livros pode passar do configurado. O
+boot compara e avisa:
+
+```
+WARN A soma dos livros não bate com DIRECTIONAL_CAPITAL.
+     somaDosLivros: "26.66"   capitalConfigurado: "20.00"
+     paraRedistribuir: "Apague o arquivo de estado para todos recomeçarem da divisão atual."
+```
+
+Em papel é contabilidade; com dinheiro real seria alocar mais do que se tem.
+
 **Dividir capital tem um piso.** Cada livro precisa comportar o notional mínimo
 da corretora, senão recusa tudo em silêncio e o motor parece vivo sem nunca
 operar. O boot calcula e avisa:
