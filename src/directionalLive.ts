@@ -83,6 +83,18 @@ export interface BookState {
     losses: number;
     somaGanhos?: string;
     somaPerdas?: string;
+    /**
+     * Quantas operações fechadas chegaram a 1R, 2R, 3R e 5R de lucro ANTES de
+     * fechar — a excursão favorável máxima, em múltiplos do risco inicial.
+     *
+     * Existe para responder com DADO uma pergunta que só se responde com
+     * chute: "e se o motor buscasse alvos grandes em vez de stop móvel?".
+     * Um alvo de 5R só é lucrativo se for atingido em mais de 1 a cada 6
+     * operações; sem esta contagem, adotar ou rejeitar o alvo é aposta.
+     *
+     * Ausente em estados gravados antes desta medição existir.
+     */
+    excursaoMaxima?: { r1: number; r2: number; r3: number; r5: number };
     committed: string;
     positions: Array<{
         symbol: string;
@@ -708,6 +720,7 @@ async function main() {
     // o heartbeat não permite comparar o papel com o backtest.
     let somaGanhos = new Decimal(salvo?.somaGanhos ?? '0');
     let somaPerdas = new Decimal(salvo?.somaPerdas ?? '0');
+    const excursao = { ...(salvo?.excursaoMaxima ?? { r1: 0, r2: 0, r3: 0, r5: 0 }) };
     /**
      * Dinheiro preso nas posições abertas. Sem isto, cada ativo dimensionaria
      * contra o capital TOTAL e quatro posições simultâneas comprometeriam
@@ -793,6 +806,17 @@ async function main() {
         // continua dizendo "em posição" até o próximo sinal daquele símbolo —
         // e o heartbeat mostra uma posição fechada como se estivesse aberta,
         // contradizendo a própria lista de posicoesAbertas na mesma linha.
+        // Até onde ela CHEGOU antes de fechar, em múltiplos do risco inicial.
+        // O preço máximo já é acompanhado para o stop móvel; aqui ele vira
+        // medição. Com stop móvel a saída quase nunca acontece no topo, então
+        // este número diz o que um ALVO teria capturado e a saída real não.
+        if (pos.initialRisk.greaterThan(0)) {
+            const emR = pos.highestSinceEntry.minus(pos.entryPrice).dividedBy(pos.initialRisk);
+            if (emR.greaterThanOrEqualTo(1)) excursao.r1 += 1;
+            if (emR.greaterThanOrEqualTo(2)) excursao.r2 += 1;
+            if (emR.greaterThanOrEqualTo(3)) excursao.r3 += 1;
+            if (emR.greaterThanOrEqualTo(5)) excursao.r5 += 1;
+        }
         diagnostico.set(
             pos.symbol,
             `SAÍDA ${netProfit.greaterThanOrEqualTo(0) ? '+' : ''}$${netProfit.toFixed(4)} (${reason})`,
@@ -1241,6 +1265,7 @@ async function main() {
             losses,
             somaGanhos: somaGanhos.toString(),
             somaPerdas: somaPerdas.toString(),
+            excursaoMaxima: { ...excursao },
             committed: committed.toString(),
             positions: Array.from(positions.values()).map((p) => ({
                 symbol: p.symbol,
@@ -1315,6 +1340,15 @@ async function main() {
                       // ganha dinheiro por operação, independente da taxa de acerto.
                       expectativaPorOperacao: `$${realizedPnl.dividedBy(wins + losses).toFixed(4)}`,
                       compareComOBacktest: 'backtest 1h/reversion mediu 39,6% de acerto e $0,0245 por operação',
+                  }
+                : {}),
+            // Quantas operações fechadas TOCARAM cada múltiplo do risco antes
+            // de sair. É o que decide, com dado, se vale trocar o stop móvel
+            // por um alvo grande: um alvo de 5R precisa ser tocado em mais de
+            // 1 a cada 6 operações só para empatar.
+            ...(wins + losses > 0
+                ? {
+                      chegouA: `1R: ${excursao.r1}/${wins + losses} | 2R: ${excursao.r2} | 3R: ${excursao.r3} | 5R: ${excursao.r5}`,
                   }
                 : {}),
             sinaisDisparados,
