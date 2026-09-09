@@ -493,13 +493,22 @@ async function main() {
         capital: cfg.capital.toString(),
         riscoPorOperacao: `${cfg.strategy.riskFraction.mul(100).toFixed(2)}%`,
         taxaPorPerna: `${cfg.strategy.feeRate.mul(100).toFixed(4)}%`,
-        tetoPorPosicao: `${cfg.maxPositionFraction.mul(100).toFixed(0)}% do livro`,
+        tetoPorPosicao:
+            `${cfg.maxPositionFraction.mul(100).toFixed(0)}% do livro ` +
+            `($${cfg.capital.dividedBy(cfg.livros.length).mul(cfg.maxPositionFraction).toFixed(2)} por posição)`,
+        // Quantas posições cabem no livro, e não quantos mínimos cabem em UMA
+        // posição — que era a conta antiga e dizia "1" para um livro de $20 com
+        // mínimo de $5, onde cabem quatro. O teto por posição limita o TAMANHO
+        // de cada uma, não a quantidade delas.
         posicoesSimultaneasPossiveis: cfg.capital
             .dividedBy(cfg.livros.length)
-            .mul(cfg.maxPositionFraction)
             .dividedBy(minNotionalMaisAlto)
             .floor()
             .toString(),
+        saidaPorTempo:
+            (cfg.strategy.maxBarrasNaOperacao ?? 0) > 0
+                ? `${cfg.strategy.maxBarrasNaOperacao} barras de ${cfg.interval} sem cobrir a própria taxa`
+                : 'desligada',
     });
     if (cfg.live) {
         log.warn('*** ORDENS REAIS SERÃO ENVIADAS. Perda é resultado possível sem nenhuma falha técnica. ***');
