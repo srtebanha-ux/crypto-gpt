@@ -139,8 +139,22 @@ class OpportunitySniffer {
 
     private metrics = {
         ticksProcessed: 0,
+        avaliacoes: 0,
         opportunitiesFound: 0,
-        maxNetProfitPct: new Decimal(0),
+        /**
+         * Melhor líquido visto entre TODAS as avaliações, incluindo as
+         * negativas — e começa em -infinito por isso.
+         *
+         * A versão anterior só atualizava este número dentro do ramo de
+         * oportunidade, então ele ficava em 0,0000 para sempre enquanto não
+         * houvesse nenhuma. E 0,0000 é indistinguível entre dois mundos
+         * opostos: "o melhor ciclo ficou a 0,03% de valer" e "o melhor ficou
+         * a 5% de distância". O primeiro pede paciência, o segundo pede
+         * desistir — e o log dizia a mesma coisa nos dois.
+         */
+        melhorLiquidoPct: new Decimal(Number.NEGATIVE_INFINITY),
+        melhorLiquidoTriangulo: '',
+        melhorBruto: new Decimal(0),
         startTime: Date.now(),
     };
 
@@ -289,12 +303,22 @@ class OpportunitySniffer {
             // operar com número que ninguém conferiu.
             if (!custo) continue;
             const evaluation = evaluateTriangle(t, ob1, ob2, ob3, custo.retencao, custo.brutoExigido);
-            if (!evaluation || !evaluation.isOpportunity) continue;
+            if (!evaluation) continue;
 
-            this.metrics.opportunitiesFound += 1;
-            if (evaluation.netProfitPct.greaterThan(this.metrics.maxNetProfitPct)) {
-                this.metrics.maxNetProfitPct = evaluation.netProfitPct;
+            // Registrado ANTES do filtro, de propósito: o que interessa quando
+            // não há oportunidade nenhuma é QUÃO LONGE ela ficou. Medir só o
+            // que já passou do limiar é medir só o que a gente já sabia.
+            this.metrics.avaliacoes += 1;
+            if (evaluation.netProfitPct.greaterThan(this.metrics.melhorLiquidoPct)) {
+                this.metrics.melhorLiquidoPct = evaluation.netProfitPct;
+                this.metrics.melhorLiquidoTriangulo = evaluation.triangleId;
             }
+            if (evaluation.grossReturn.greaterThan(this.metrics.melhorBruto)) {
+                this.metrics.melhorBruto = evaluation.grossReturn;
+            }
+
+            if (!evaluation.isOpportunity) continue;
+            this.metrics.opportunitiesFound += 1;
 
             log.info('Ineficiência líquida encontrada.', {
                 triangulo: evaluation.triangleId,
@@ -309,12 +333,22 @@ class OpportunitySniffer {
 
     private printReport(): void {
         const uptimeSeconds = Math.floor((Date.now() - this.metrics.startTime) / 1000);
+        const houveAvaliacao = this.metrics.avaliacoes > 0 && this.metrics.melhorLiquidoPct.isFinite();
+        // A distância que falta para o melhor ciclo virar oportunidade. É o
+        // número que transforma "zero oportunidades" em informação: faltando
+        // 0,01% a resposta é esperar, faltando 5% a resposta é desistir.
+        const faltam = houveAvaliacao ? this.metrics.melhorLiquidoPct.negated() : null;
         log.info('Relatório periódico.', {
             uptimeSegundos: uptimeSeconds,
             ticksProcessados: this.metrics.ticksProcessed,
+            avaliacoesDeTriangulo: this.metrics.avaliacoes,
             oportunidadesLiquidas: this.metrics.opportunitiesFound,
-            maiorLucroLiquidoVistoPct: this.metrics.maxNetProfitPct.toFixed(4),
             oportunidadesPorHora: uptimeSeconds > 0 ? ((this.metrics.opportunitiesFound / uptimeSeconds) * 3600).toFixed(2) : '0',
+            melhorLiquidoVistoPct: houveAvaliacao ? this.metrics.melhorLiquidoPct.toFixed(4) : 'nenhuma avaliação ainda',
+            melhorTriangulo: this.metrics.melhorLiquidoTriangulo || '—',
+            faltaramPct:
+                faltam === null ? '—' : faltam.greaterThan(0) ? faltam.toFixed(4) : 'JÁ PASSOU DO CUSTO',
+            melhorBrutoVisto: this.metrics.melhorBruto.greaterThan(0) ? this.metrics.melhorBruto.toFixed(6) : '—',
         });
     }
 }
