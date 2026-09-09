@@ -347,6 +347,12 @@ async function main() {
               apiSecret: process.env.BINANCE_API_SECRET!,
               live: true,
               mode: cfg.margem ? 'margin' : 'spot',
+              // Sem isto o motor calcula com a taxa CHEIA mesmo numa conta que
+              // paga com desconto: o endpoint de taxa da Binance devolve a
+              // comissão base e não reflete o abatimento de BNB, que é aplicado
+              // só na execução. O efeito é subestimar o lucro e recusar, pelo
+              // filtro de custo, operações que de fato pagariam.
+              bnbFeeDiscount: process.env.BNB_FEE_DISCOUNT === 'true',
               // Sem alavancagem não há o que emprestar. Pedir empréstimo de
               // qualquer forma faz a Binance recusar TODAS as ordens quando a
               // conta não tem limite de empréstimo — e aí o motor fica sem
