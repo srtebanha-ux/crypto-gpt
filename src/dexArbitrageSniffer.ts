@@ -25,8 +25,15 @@
 // ficar preso num token ilíquido desaparece quando a transação reverte.
 import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
-import { evaluateCycle, cycleSpotRatio } from './ammMath';
+import { evaluateCycle, cycleSpotRatio, type CycleEvaluation, type Hop } from './ammMath';
 import { findTriangularCycles, findTwoPoolCycles, hopsForCycle, type Cycle, type PoolInfo } from './dexGraph';
+import {
+    ensaiarExecucao,
+    enviarExecucao,
+    lerSaldoDoContrato,
+    montarCalldata,
+    planejarExecucao,
+} from './flashArbExecutor';
 import { encodeAddress, SELECTORS, decodeAddressWord, decodeDecimals, decodeReserves, decodeUintWord, encodeUint256, fromRawUnits } from './evmAbi';
 import { assertPlausiblePoolCount, parseScanMode, selectPoolIndices } from './poolDiscovery';
 
@@ -312,7 +319,18 @@ async function fetchGasPriceWei(rpcUrl: string): Promise<Decimal> {
  * de produto constante é reportado e descartado — nunca silenciosamente
  * tratado como pool vazio, que entraria no grafo como preço fantasma.
  */
-export async function loadPools(rpcUrl: string, addresses: string[], feeFraction: Decimal): Promise<PoolInfo[]> {
+export async function loadPools(
+    rpcUrl: string,
+    addresses: string[],
+    feeFraction: Decimal,
+    /**
+     * Recebe os decimals() lidos, se informado. A execução real precisa deles
+     * para converter valor humano de volta em unidades cruas do token, e
+     * relê-los a cada ciclo lucrativo seria uma rodada de RPC no ponto mais
+     * sensível a latência que existe aqui.
+     */
+    decimaisDestino?: Map<string, number>,
+): Promise<PoolInfo[]> {
     const calls: RpcCall[] = [];
     for (const address of addresses) {
         calls.push({ to: address, data: SELECTORS.token0 });
@@ -374,6 +392,8 @@ export async function loadPools(rpcUrl: string, addresses: string[], feeFraction
             });
         }
     });
+
+    if (decimaisDestino) for (const [token, casas] of decimalsByToken) decimaisDestino.set(token, casas);
 
     const pools: PoolInfo[] = [];
     for (const p of raw) {
@@ -706,12 +726,114 @@ async function main() {
             ? Array.from(new Set([...explicitPools, ...(seedPool ? [seedPool] : []), ...descobertos]))
             : explicitPools;
 
-    const pools = await loadPools(rpcUrl, poolAddresses, feeFraction);
+    /** decimals() de cada token visto, para converter valor humano em unidade crua na hora de executar. */
+    const decimaisPorToken = new Map<string, number>();
+    const pools = await loadPools(rpcUrl, poolAddresses, feeFraction, decimaisPorToken);
     if (pools.length === 0) {
         log.error('Nenhum pool válido foi carregado — veja os erros acima.');
         process.exit(1);
     }
     log.info(`Pools válidos carregados: ${pools.length} de ${poolAddresses.length}.`);
+
+    // ------------------------------------------------------------------
+    // Execução real do flash swap (opcional).
+    //
+    // Com FLASH_ARB_CONTRACT definido, todo ciclo lucrativo passa por um
+    // ENSAIO: a mesma transação roda contra o estado atual por `eth_call`, que
+    // não custa gás e não altera nada. Isso vale mesmo sem FLASH_ARB_LIVE — e
+    // é a forma mais barata de responder a pergunta que o scanner sozinho não
+    // responde: essa margem parada é oportunidade ou armadilha? O ensaio
+    // devolve `LucroInsuficiente(sobra, minimo)` com a sobra REAL medida
+    // dentro da EVM. Sobra zero é token que não se deixa vender.
+    // ------------------------------------------------------------------
+    const contratoFlash = process.env.FLASH_ARB_CONTRACT?.trim();
+    const chavePrivada = process.env.FLASH_ARB_PRIVATE_KEY?.trim();
+    const flashLive = process.env.FLASH_ARB_LIVE === 'true';
+    // Abaixo de 1 de propósito: as reservas mudam entre a leitura e a
+    // execução, e exigir on-chain o lucro inteiro estimado faria a transação
+    // reverter a qualquer movimento a favor de outro participante — gás
+    // gasto sem operação. Metade preserva a garantia e sobrevive ao ruído.
+    const margemDeSeguranca = new Decimal(process.env.FLASH_ARB_SAFETY_FRACTION ?? '0.5');
+    if (flashLive) {
+        if (process.env.FLASH_ARB_CONFIRM !== 'I_UNDERSTAND_THE_RISK') {
+            log.error('FLASH_ARB_LIVE=true exige FLASH_ARB_CONFIRM=I_UNDERSTAND_THE_RISK.');
+            process.exit(1);
+        }
+        if (!contratoFlash || !chavePrivada) {
+            log.error('FLASH_ARB_LIVE=true exige FLASH_ARB_CONTRACT e FLASH_ARB_PRIVATE_KEY.');
+            process.exit(1);
+        }
+    }
+    if (contratoFlash) {
+        log.warn(`Execução de flash swap ARMADA em ${flashLive ? 'MODO REAL — TRANSAÇÕES SERÃO ENVIADAS' : 'ENSAIO (eth_call, nada é enviado)'}.`, {
+            contrato: contratoFlash,
+            margemDeSeguranca: margemDeSeguranca.toString(),
+            garantiaOnChain:
+                'O contrato confere lucroMinimo no fim do callback e reverte se não bater. ' +
+                'O pior caso de uma tentativa é o gás, nunca o capital emprestado.',
+        });
+    }
+
+    /**
+     * Ensaia — e, se armado para valer, executa — um ciclo lucrativo.
+     *
+     * Nunca lança: uma falha aqui não pode derrubar o scanner, que precisa
+     * seguir varrendo. O que ela produz é diagnóstico.
+     */
+    const tentarExecutar = async (cycle: Cycle, hops: Hop[], evaluation: CycleEvaluation): Promise<void> => {
+        if (!contratoFlash) return;
+        try {
+            // O contrato confere `balanceOf(address(this))`, não o lucro desta
+            // operação. Com saldo anterior parado nele, um piso igual ao lucro
+            // esperado passaria até numa operação que PERDEU — a garantia
+            // on-chain viraria decoração. Somar o saldo devolve o sentido dela.
+            const saldoAtualDoLucro = await lerSaldoDoContrato(rpcUrl, cycle.path[0], contratoFlash);
+            const plano = planejarExecucao({
+                cycle,
+                hops,
+                evaluation,
+                decimaisPorToken,
+                margemDeSeguranca,
+                saldoAtualDoLucro,
+            });
+            if ('motivo' in plano) {
+                log.info('Ciclo lucrativo NÃO executável por este contrato.', { ciclo: describeCycle(cycle), motivo: plano.motivo });
+                return;
+            }
+
+            const calldata = montarCalldata(plano);
+            const ensaio = await ensaiarExecucao(rpcUrl, contratoFlash, contratoFlash, calldata);
+            if (!ensaio.ok) {
+                log.warn('ENSAIO REPROVADO — nada foi enviado, nenhum gás gasto.', {
+                    ciclo: describeCycle(cycle),
+                    oQueAconteceriaDeVerdade: ensaio.motivo,
+                });
+                return;
+            }
+
+            if (!flashLive) {
+                log.info('*** ENSAIO APROVADO — esta operação daria certo AGORA ***', {
+                    ciclo: describeCycle(cycle),
+                    quantidadeEmprestada: plano.quantidade.toString(),
+                    lucroMinimoExigido: plano.lucroMinimo.toString(),
+                    paraExecutar: 'FLASH_ARB_LIVE=true e FLASH_ARB_CONFIRM=I_UNDERSTAND_THE_RISK',
+                });
+                return;
+            }
+
+            const recibo = await enviarExecucao({ rpcUrl, chavePrivada: chavePrivada!, contrato: contratoFlash, calldata });
+            log.info(recibo.sucesso ? '*** ARBITRAGEM EXECUTADA ***' : 'Transação enviada mas revertida na cadeia.', {
+                ciclo: describeCycle(cycle),
+                hash: recibo.hash,
+                gasUsado: recibo.gasUsado.toString(),
+            });
+        } catch (err) {
+            log.warn('Falha ao tentar executar o ciclo; o scanner segue.', {
+                ciclo: describeCycle(cycle),
+                erro: err instanceof Error ? err.message : String(err),
+            });
+        }
+    };
 
     // Gas em ETH: é custo FIXO por tentativa e define o piso de tamanho.
     const gasPriceWei = await fetchGasPriceWei(rpcUrl);
@@ -798,7 +920,7 @@ async function main() {
         // Reservas são relidas a cada varredura: são elas que mudam. A
         // topologia (quais pools existem) muda devagar e não justifica
         // reenumerar a factory toda vez.
-        const fresh = await loadPools(rpcUrl, poolAddresses, feeFraction);
+        const fresh = await loadPools(rpcUrl, poolAddresses, feeFraction, decimaisPorToken);
         const freshCycles = [...findTwoPoolCycles(fresh, baseToken), ...findTriangularCycles(fresh, baseToken)];
 
         const gasWei = await fetchGasPriceWei(rpcUrl);
@@ -843,6 +965,7 @@ async function main() {
                     lucroLiquido: evaluation.netProfit.toFixed(8),
                     razaoSpot: cycleSpotRatio(hops).toFixed(8),
                 });
+                await tentarExecutar(cycle, hops, evaluation);
             }
         }
 
