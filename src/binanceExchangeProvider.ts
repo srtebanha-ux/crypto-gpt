@@ -69,6 +69,16 @@ const DEFAULT_INTERMEDIATE_BASES = ['BTC', 'ETH', 'BNB', 'FDUSD'];
 // forma extremamente ampla (o padrão gera dezenas de streams, não centenas).
 const MAX_WS_STREAMS_PER_CONNECTION = 1024;
 
+/** Como tratar pares que a Binance não lista. */
+export interface OpcoesDeCarga {
+    /**
+     * Deixa passar os pares desconhecidos em vez de lançar, devolvendo só os
+     * utilizáveis. Para o motor direcional com dezenas de moedas pequenas:
+     * uma deslistagem não pode derrubar as outras trinta e nove junto.
+     */
+    ignorarDesconhecidos?: boolean;
+}
+
 /** Símbolo cru do /api/v3/exchangeInfo, com os filtros que a Binance impõe a ele. */
 interface RawSymbolInfo {
     symbol: string;
@@ -234,10 +244,13 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
      * Aqui a lista de pares é explícita e a falha é no boot, nomeando o que
      * está errado.
      */
-    public async connectForSymbols(pairs: string[]): Promise<void> {
+    public async connectForSymbols(pairs: string[], opcoes?: OpcoesDeCarga): Promise<string[]> {
         await withRetry('Sincronização de horário', () => this.syncServerTime());
-        await withRetry('Carga de filtros dos símbolos operados', () => this.ensureSymbolFilters(pairs));
+        const usaveis = await withRetry('Carga de filtros dos símbolos operados', () =>
+            this.ensureSymbolFilters(pairs, opcoes),
+        );
         await this.loadTradingFee(); // best-effort, não bloqueia o startup
+        return usaveis;
     }
 
     /**
@@ -262,7 +275,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
      * vez — descobrir isso um símbolo por vez, a cada reinício, seria uma
      * sequência de falhas em vez de um diagnóstico.
      */
-    public async ensureSymbolFilters(pairs: string[]): Promise<void> {
+    public async ensureSymbolFilters(pairs: string[], opcoes?: OpcoesDeCarga): Promise<string[]> {
         const activeSymbols = await this.fetchActiveSymbols();
         const infoBySymbol = new Map(activeSymbols.map((s) => [s.symbol, s]));
         const desconhecidos: string[] = [];
@@ -282,15 +295,34 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
             this.registerSymbol(pair, info, rawSymbol);
         }
 
-        if (desconhecidos.length > 0) {
+        const carregados = pairs.filter((p) => !desconhecidos.includes(p));
+
+        // Sem NENHUM par utilizável não há o que operar — isso é sempre fatal,
+        // com ou sem tolerância: seguir seria um motor vivo que nunca compra.
+        if (carregados.length === 0) {
             throw new Error(
-                `Pares não listados como TRADING na Binance: ${desconhecidos.join(', ')}. ` +
-                    'Nenhuma ordem seria aceita neles — corrija a lista de ativos antes de operar.'
+                `Nenhum dos pares informados está listado como TRADING na Binance: ${pairs.join(', ')}.`
             );
         }
-        log.info('Filtros de símbolo carregados para os pares operados.', {
-            pares: pairs.length,
-        });
+        if (desconhecidos.length > 0) {
+            if (!opcoes?.ignorarDesconhecidos) {
+                throw new Error(
+                    `Pares não listados como TRADING na Binance: ${desconhecidos.join(', ')}. ` +
+                        'Nenhuma ordem seria aceita neles — corrija a lista de ativos antes de operar.'
+                );
+            }
+            // Tolerante, mas nunca silencioso: um ativo que some da lista é uma
+            // mudança de estratégia, e quem opera precisa ver qual sumiu.
+            log.warn('Ativos IGNORADOS por não estarem listados como TRADING na Binance.', {
+                ignorados: desconhecidos.join(', '),
+                seguemOperando: carregados.length,
+                porque:
+                    'Moeda pequena é deslistada com frequência. Derrubar o motor inteiro por causa de ' +
+                    'uma delas deixaria as outras paradas junto.',
+            });
+        }
+        log.info('Filtros de símbolo carregados para os pares operados.', { pares: carregados.length });
+        return carregados;
     }
 
     public shutdown(): void {

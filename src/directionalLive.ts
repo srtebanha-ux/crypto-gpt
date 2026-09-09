@@ -267,7 +267,12 @@ async function main() {
         // `connect()` NÃO serve aqui: ele só registra símbolos que aparecem em
         // algum triângulo de arbitragem e abre um WebSocket de mais de mil
         // streams que este motor nunca lê. Ver connectForSymbols().
-        await exchange.connectForSymbols(cfg.symbols.map(paraPar));
+        // Tolerante de propósito: com dezenas de moedas pequenas, uma
+        // deslistagem é questão de tempo, e derrubar o motor inteiro por causa
+        // dela deixaria todas as outras paradas junto. O que sumiu aparece
+        // como aviso no boot, nunca em silêncio.
+        const usaveis = new Set(await exchange.connectForSymbols(cfg.symbols.map(paraPar), { ignorarDesconhecidos: true }));
+        cfg.symbols = cfg.symbols.filter((s) => usaveis.has(paraPar(s)));
         // A taxa real da conta manda: cobrar 0,075% de papel numa conta SEM
         // desconto de BNB (0,1% de verdade) subestimaria o custo em um terço
         // em toda operação — e é o custo que decide se a estratégia vive.

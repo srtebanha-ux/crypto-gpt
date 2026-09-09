@@ -430,3 +430,31 @@ test('ensureSymbolFilters compõe com o que já estava carregado em vez de limpa
     assert.equal(mapping.pairToBinanceSymbol.get('XRP/USDT'), 'XRPUSDT');
     assert.equal(mapping.pairToBinanceSymbol.get('BTC/USDT'), 'BTCUSDT', 'o que já existia continua operável');
 });
+
+test('ensureSymbolFilters tolerante deixa as moedas válidas operando quando uma foi deslistada', async () => {
+    // Moeda pequena é deslistada com frequência. Se uma delas derrubasse o
+    // boot, as outras trinta e nove parariam junto — e o motor 24/7 existe
+    // justamente para não parar.
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+
+    const usaveis = await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () => provider.ensureSymbolFilters(['XRP/USDT', 'LUNA/USDT', 'TIA/USDT'], { ignorarDesconhecidos: true })
+    );
+
+    assert.deepEqual(usaveis, ['XRP/USDT', 'TIA/USDT'], 'devolve só o que dá para operar');
+    assert.equal(provider.getSymbolMinNotional('LUNA/USDT'), undefined, 'a deslistada não vira par operável');
+});
+
+test('ensureSymbolFilters falha mesmo tolerante quando NENHUM par é utilizável', async () => {
+    // Tolerância não pode virar um motor vivo que nunca compra.
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () =>
+            assert.rejects(
+                () => provider.ensureSymbolFilters(['LUNA/USDT', 'FAKE/USDT'], { ignorarDesconhecidos: true }),
+                /Nenhum dos pares/
+            )
+    );
+});
