@@ -57,6 +57,7 @@ export const PRESETS = {
         // custo de oportunidade que esta regra existe para atacar.
         maxBarrasNaOperacao: '0',
         minAtrEmTaxas: '0',
+        takeProfitR: '0',
     },
     /**
      * Opera MUITO mais. Também perde mais, e não por acaso — por construção.
@@ -86,6 +87,7 @@ export const PRESETS = {
         minVolumeRatio: '1.8',
         maxBarrasNaOperacao: '0',
         minAtrEmTaxas: '3',
+        takeProfitR: '0',
         // Deliberadamente IGUAL ao padrão: apertar o stop não é coragem, é
         // menos tolerância a ruído, e alargar tem custo simétrico. Só o preset
         // `maximo` mexe nisso, e mexe para o lado de dar espaço.
@@ -130,6 +132,67 @@ export const PRESETS = {
         // é doar taxa. A medição de 15m mostrou a perda por operação
         // batendo com o custo de uma ida e volta.
         minAtrEmTaxas: '4',
+        takeProfitR: '0',
+    },
+
+    /**
+     * `explosivo` — buscar o movimento grande, não o movimento provável.
+     *
+     * A tese: com taxa de 0,15% por ida e volta, capturar 1% é entregar 15% do
+     * ganho ao pedágio. Capturar 17% entrega 0,9%. Se o pedágio é o que mata a
+     * estratégia — e a medição de 15 minutos mostrou exatamente isso, com a
+     * perda por operação batendo com o custo da ida e volta —, então o alvo
+     * grande é o único que sobra.
+     *
+     * O QUE DECIDE SE ISTO FUNCIONA NÃO É O ALVO. É O STOP.
+     *
+     * Alvo de 5R com stop largo é ruína aritmética, e a conta é simples. A 5x,
+     * um stop de 15% custa 75% da conta quando erra; o acerto dobra. Com 39,6%
+     * de acerto a média GEOMÉTRICA por operação fica em 0,57 — cada tacada
+     * multiplica a conta por 0,57 no longo prazo, mesmo acertando na proporção
+     * medida. Perder 75% exige +300% só para voltar ao ponto de partida.
+     *
+     * Com o stop a 1,5x ATR o erro custa uma fração disso, e a mesma taxa de
+     * acerto vira média geométrica acima de 1. Por isso `atrStopMultiplier`
+     * aqui é MENOR que no preset `maximo`, não maior: num preset que busca
+     * movimento grande, o stop apertado não é covardia — é o que torna o alvo
+     * grande matematicamente possível.
+     *
+     * O ponto de equilíbrio: um alvo de 5R precisa ser atingido em mais de
+     * 1 a cada 6 operações (16,7%) só para empatar. Se `chegouA` no heartbeat
+     * mostrar 5R em menos que isso depois de ~20 operações, este preset está
+     * reprovado pelo próprio dado e deve ser desligado.
+     *
+     * `trendPeriod` VOLTA a ficar ligado, ao contrário de `agressivo` e
+     * `maximo`. Não é recuo: é a condição de mercado direcional, em código.
+     * As três famílias mediram prejuízo em regime de baixa, e uma estratégia
+     * que depende de o preço esticar 15% não tem o que fazer num mercado que
+     * lateraliza batendo em stop.
+     *
+     * Feito para `DIRECTIONAL_STRATEGY=momentum` ou `breakout`. Rodar com
+     * `reversion` seria incoerente: reversão compra queda esperando volta ao
+     * normal, e este preset quer o oposto — o preço saindo do normal e indo
+     * embora.
+     */
+    explosivo: {
+        rsiThreshold: '55',
+        breakoutLookback: '10',
+        // A condição 3 da tese, em código: só opera com o mercado direcional.
+        trendPeriod: '50',
+        riskFraction: '0.15',
+        // Movimento explosivo vem com volume. Sem ele é ruído.
+        minVolumeRatio: '2',
+        // O número que faz a diferença entre crescimento e ruína.
+        atrStopMultiplier: '1.5',
+        // 8 velas de 15m = 2 horas. Explosão que não explodiu em 2 horas não
+        // era explosão; a vaga vale mais que a esperança.
+        maxBarrasNaOperacao: '8',
+        // Só ativos que já se movem 8x o pedágio. Num alvo de 5R, ativo parado
+        // não é candidato — é doação de taxa com passos extras.
+        minAtrEmTaxas: '8',
+        // O alvo. 5x o risco inicial: com stop a 1,5x ATR, é o preço esticando
+        // uns 17% desde a entrada.
+        takeProfitR: '5',
     },
 } as const;
 
@@ -185,7 +248,7 @@ export function resolveStrategyParams(entryStrategy: EntryStrategy = 'breakout')
         // Zero desliga. Ligado só faz sentido onde o movimento é rápido e
         // devolve tudo — em tendência longa, sair no alvo corta o ganho que
         // paga os prejuízos.
-        takeProfitR: new Decimal(process.env.BT_TAKE_PROFIT_R ?? '0'),
+        takeProfitR: new Decimal(process.env.BT_TAKE_PROFIT_R ?? preset.takeProfitR),
         // Saída por TEMPO: fecha o que não andou o bastante para pagar a
         // própria taxa. Zero desliga. Ver timeStop.ts para o porquê.
         maxBarrasNaOperacao: Number(process.env.BT_MAX_BARS ?? preset.maxBarrasNaOperacao),

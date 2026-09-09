@@ -207,3 +207,53 @@ test('só o preset maximo mexe no stop; padrão e agressivo usam o mesmo', () =>
     const agressivo = withEnv({ DIRECTIONAL_PRESET: 'agressivo' }, () => resolveStrategyParams('reversion'));
     assert.equal(agressivo.atrStopMultiplier!.toString(), padrao.atrStopMultiplier!.toString());
 });
+
+test('o preset explosivo aperta o stop em vez de afrouxar — é o que torna o alvo grande possível', () => {
+    // A intuição diz que um preset "explosivo" deve dar mais espaço. A conta
+    // diz o contrário: a 5x, um stop largo de 15% custa 75% da conta quando
+    // erra, e perder 75% exige +300% para voltar. Com 39,6% de acerto a média
+    // geométrica fica em 0,57 — ruína mesmo acertando na proporção medida.
+    process.env.DIRECTIONAL_PRESET = 'explosivo';
+    const explosivo = resolveStrategyParams();
+    process.env.DIRECTIONAL_PRESET = 'maximo';
+    const maximo = resolveStrategyParams();
+    delete process.env.DIRECTIONAL_PRESET;
+
+    assert.ok(
+        explosivo.atrStopMultiplier.lessThan(maximo.atrStopMultiplier),
+        'o preset que busca movimento grande precisa do stop MAIS curto, não do mais largo',
+    );
+    assert.equal(explosivo.takeProfitR?.toString(), '5');
+});
+
+test('o preset explosivo religa o filtro de tendência que agressivo e maximo desligam', () => {
+    // Não é recuo: é a condição de mercado direcional em código. Uma estratégia
+    // que depende de o preço esticar 17% não tem o que fazer num mercado que
+    // lateraliza batendo em stop.
+    process.env.DIRECTIONAL_PRESET = 'explosivo';
+    const explosivo = resolveStrategyParams();
+    process.env.DIRECTIONAL_PRESET = 'maximo';
+    const maximo = resolveStrategyParams();
+    delete process.env.DIRECTIONAL_PRESET;
+
+    assert.ok(explosivo.trendPeriod > 0, 'explosivo exige tendência');
+    assert.equal(maximo.trendPeriod, 0);
+});
+
+test('os presets antigos continuam SEM alvo, com stop móvel — nada muda para quem já roda', () => {
+    for (const nome of ['padrao', 'agressivo', 'maximo']) {
+        process.env.DIRECTIONAL_PRESET = nome;
+        const p = resolveStrategyParams();
+        assert.equal(p.takeProfitR?.toString(), '0', `${nome} não pode ganhar alvo por acidente`);
+    }
+    delete process.env.DIRECTIONAL_PRESET;
+});
+
+test('BT_TAKE_PROFIT_R explícito ainda ganha do preset', () => {
+    process.env.DIRECTIONAL_PRESET = 'explosivo';
+    process.env.BT_TAKE_PROFIT_R = '2';
+    const p = resolveStrategyParams();
+    delete process.env.BT_TAKE_PROFIT_R;
+    delete process.env.DIRECTIONAL_PRESET;
+    assert.equal(p.takeProfitR?.toString(), '2');
+});
