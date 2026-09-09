@@ -143,3 +143,28 @@ export function alavancagemEfetiva(params: {
 export function custoDeIdaEVoltaSobreCapital(alavancagem: Decimal, taxaPorPerna: Decimal): Decimal {
     return taxaPorPerna.mul(2).mul(alavancagem);
 }
+
+/**
+ * Quanto do patrimônio o motor pode DE FATO arriscar.
+ *
+ * A ideia é a escada: alcançado um degrau, o excedente para de trabalhar e
+ * vira lucro guardado, mesmo antes de sair da corretora. Sem isso, uma conta
+ * que vai de $20 a $5.000 continua arriscando os $5.000 inteiros — e a mesma
+ * volatilidade que a levou até lá a traz de volta. O degrau vira um número
+ * pelo qual a conta passou, não um lugar onde ela ficou.
+ *
+ * Fica separado do saque de verdade de propósito: a chave de API não tem (nem
+ * deve ter) permissão de saque. O motor congela o excedente; tirar do câmbio
+ * continua sendo ato humano.
+ */
+export function capitalDeTrabalho(params: { patrimonio: Decimal; teto: Decimal }): Decimal {
+    if (params.teto.lessThanOrEqualTo(0)) return params.patrimonio;
+    return Decimal.min(params.patrimonio, params.teto);
+}
+
+/** O que já passou do teto e não deve mais ser arriscado. */
+export function lucroCongelado(params: { patrimonio: Decimal; teto: Decimal }): Decimal {
+    if (params.teto.lessThanOrEqualTo(0)) return new Decimal(0);
+    const excedente = params.patrimonio.minus(params.teto);
+    return excedente.greaterThan(0) ? excedente : new Decimal(0);
+}

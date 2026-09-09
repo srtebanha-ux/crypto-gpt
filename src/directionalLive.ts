@@ -34,7 +34,13 @@ import {
     type Candle,
 } from './signals';
 import { planPosition, tradeNetPnl, updateTrailingStopAtr } from './positionSizing';
-import { alavancagemEfetiva, custoDeIdaEVoltaSobreCapital, stopDisparaAntesDaLiquidacao } from './leverage';
+import {
+    alavancagemEfetiva,
+    capitalDeTrabalho,
+    custoDeIdaEVoltaSobreCapital,
+    lucroCongelado,
+    stopDisparaAntesDaLiquidacao,
+} from './leverage';
 import { barrasDesde, decidirSaidaPorTempo } from './timeStop';
 import { operacaoValeATaxa } from './feeViability';
 import { decidirEntradaPassiva, precoDaCompraPassiva } from './makerEntry';
@@ -197,6 +203,13 @@ interface Config {
     alavancagem: Decimal;
     /** Patrimônio em que a alavancagem volta para 1x. Zero desliga a regra. */
     alvoDeDesalavancagem: Decimal;
+    /**
+     * Teto de capital que o motor pode arriscar. O que passar disso congela.
+     *
+     * É o degrau da escada: alcançado o valor, o excedente para de trabalhar e
+     * vira lucro guardado — mesmo antes de sair da corretora. Zero desliga.
+     */
+    tetoDeCapital: Decimal;
     /** Tenta entrar como MAKER (taxa de quem espera) antes de atravessar. */
     entradaPassiva: boolean;
     /** Quanto esperar a ordem passiva preencher, em ms. */
@@ -318,6 +331,7 @@ function resolveConfig(): Config {
         margem,
         alavancagem,
         alvoDeDesalavancagem: new Decimal(process.env.DIRECTIONAL_LEVERAGE_TARGET ?? '0'),
+        tetoDeCapital: new Decimal(process.env.DIRECTIONAL_CAPITAL_CAP ?? '0'),
         entradaPassiva: process.env.DIRECTIONAL_MAKER_ENTRY === 'true',
         esperaPassivaMs: Number(process.env.DIRECTIONAL_MAKER_WAIT_MS ?? '8000'),
         strategy: resolveStrategyParams(familias[0]),
@@ -996,9 +1010,12 @@ async function main() {
             return;
         }
 
+        // O que pode ser arriscado, não o que existe: acima do teto o excedente
+        // está congelado e não financia posição nova.
+        const capitalOperacional = capitalDeTrabalho({ patrimonio: capital, teto: cfg.tetoDeCapital });
         const plan = planPosition({
-            capital,
-            availableCapital: capital.minus(committed),
+            capital: capitalOperacional,
+            availableCapital: capitalOperacional.minus(committed),
             maxPositionFraction: cfg.maxPositionFraction,
             riskFraction: params.riskFraction,
             entryPrice,
@@ -1137,6 +1154,12 @@ async function main() {
             bloqueadosPorTendencia,
             barradosPorTaxa,
             recusadosPorRisco,
+            ...(cfg.tetoDeCapital.greaterThan(0)
+                ? {
+                      capitalQueTrabalha: capitalDeTrabalho({ patrimonio: capital, teto: cfg.tetoDeCapital }).toFixed(2),
+                      lucroCONGELADO: lucroCongelado({ patrimonio: capital, teto: cfg.tetoDeCapital }).toFixed(2),
+                  }
+                : {}),
             porAtivo: cfg.symbols.map((sym) => `${sym}: ${diagnostico.get(sym) ?? 'aguardando fechar a vela'}`).join(' | '),
         }),
     };

@@ -11,7 +11,9 @@ import { Decimal } from 'decimal.js';
 import {
     MARGEM_DE_MANUTENCAO_PADRAO,
     alavancagemEfetiva,
+    capitalDeTrabalho,
     custoDeIdaEVoltaSobreCapital,
+    lucroCongelado,
     distanciaAteLiquidacao,
     stopDisparaAntesDaLiquidacao,
 } from './leverage';
@@ -138,4 +140,31 @@ test('o custo por operação é sobre o CAPITAL, e a 10x ele é 1% — não 0,05
     assert.equal(custoDeIdaEVoltaSobreCapital(new Decimal(1), taxaFuturos).toString(), '0.001');
     // A margem de manutenção padrão é a mais alta da faixa, de propósito.
     assert.equal(MARGEM_DE_MANUTENCAO_PADRAO.toString(), '0.005');
+});
+
+test('o teto de capital congela o excedente em vez de arriscá-lo de novo', () => {
+    // A escada: alcançado o degrau, o lucro para de trabalhar. Sem isso, uma
+    // conta que foi de $20 a $5.000 continua arriscando os $5.000 inteiros — e
+    // a mesma volatilidade que a levou até lá a traz de volta.
+    const teto = new Decimal(5000);
+    assert.equal(capitalDeTrabalho({ patrimonio: new Decimal(8000), teto }).toString(), '5000');
+    assert.equal(lucroCongelado({ patrimonio: new Decimal(8000), teto }).toString(), '3000');
+});
+
+test('abaixo do teto tudo trabalha, e nada fica congelado', () => {
+    const teto = new Decimal(5000);
+    assert.equal(capitalDeTrabalho({ patrimonio: new Decimal(20), teto }).toString(), '20');
+    assert.equal(lucroCongelado({ patrimonio: new Decimal(20), teto }).toString(), '0');
+});
+
+test('teto zero desliga a regra — comportamento antigo intacto', () => {
+    const teto = new Decimal(0);
+    assert.equal(capitalDeTrabalho({ patrimonio: new Decimal(8000), teto }).toString(), '8000');
+    assert.equal(lucroCongelado({ patrimonio: new Decimal(8000), teto }).toString(), '0');
+});
+
+test('prejuízo abaixo do teto não vira congelamento negativo', () => {
+    // Sem a guarda, uma conta que caiu ficaria com "lucro congelado" negativo e
+    // o número apareceria no log como se houvesse reserva a recuperar.
+    assert.equal(lucroCongelado({ patrimonio: new Decimal(3000), teto: new Decimal(5000) }).toString(), '0');
 });
