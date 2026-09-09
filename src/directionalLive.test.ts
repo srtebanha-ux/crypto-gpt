@@ -259,3 +259,44 @@ test('com posição no livro, liquidar não se aplica — não é órfã', () =>
     });
     assert.equal(acao, 'nada');
 });
+
+test('gravar o estado NÃO apaga o livro da estratégia que não está rodando', () => {
+    // O defeito que isto fecha custou o histórico de um dia inteiro: trocar
+    // DIRECTIONAL_STRATEGY substituía o arquivo pelos livros em execução, e o
+    // livro da estratégia anterior sumia — capital, placar e posições abertas.
+    // Voltar para ela a ressuscitava do zero, adotando de novo as posições que
+    // já tinha, com preço de entrada errado a cada ida e volta.
+    const arquivo = join(mkdtempSync(join(tmpdir(), 'estado-')), 'livros.json');
+    const livro = (capital: string): BookState => ({
+        capital,
+        realizedPnl: '0',
+        wins: 0,
+        losses: 0,
+        committed: '0',
+        positions: [],
+    });
+
+    saveState(arquivo, { reversion: livro('19.55') });
+    saveState(arquivo, { momentum: livro('20.00') });
+
+    const lido = loadState(arquivo);
+    assert.equal(lido.reversion?.capital, '19.55', 'o livro parado tem que sobreviver');
+    assert.equal(lido.momentum?.capital, '20.00');
+});
+
+test('o livro em execução SOBRESCREVE a versão antiga dele, não acumula', () => {
+    const arquivo = join(mkdtempSync(join(tmpdir(), 'estado-')), 'livros.json');
+    const livro = (capital: string): BookState => ({
+        capital,
+        realizedPnl: '0',
+        wins: 0,
+        losses: 0,
+        committed: '0',
+        positions: [],
+    });
+
+    saveState(arquivo, { reversion: livro('19.55') });
+    saveState(arquivo, { reversion: livro('18.10') });
+
+    assert.equal(loadState(arquivo).reversion?.capital, '18.10');
+});

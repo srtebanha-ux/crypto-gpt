@@ -123,10 +123,24 @@ export interface BookState {
  * motor subiria sem as posições que acabou de salvar, que é o cenário exato
  * que a persistência existe para evitar.
  */
+/**
+ * Grava os livros MESCLANDO com o que já está no arquivo.
+ *
+ * A mescla é o ponto. Antes, gravar substituía o arquivo inteiro pelos livros
+ * em execução — e trocar `DIRECTIONAL_STRATEGY` APAGAVA para sempre o livro da
+ * estratégia anterior: capital, histórico de operações, posições abertas.
+ *
+ * O estrago não aparece na hora. Aparece quando se volta para a estratégia
+ * antiga e ela ressuscita do zero, com capital de fábrica, sem saber das
+ * posições que tem na corretora — e as adota de novo, com preço de entrada
+ * errado, uma vez a cada ida e volta entre estratégias. Comparar duas
+ * estratégias exige justamente ir e voltar; o arquivo apagava a comparação.
+ */
 export function saveState(path: string, books: Record<string, BookState>): void {
     mkdirSync(dirname(path), { recursive: true });
+    const anterior = loadState(path);
     const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(books, null, 2));
+    writeFileSync(tmp, JSON.stringify({ ...anterior, ...books }, null, 2));
     renameSync(tmp, path);
 }
 
