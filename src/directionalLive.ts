@@ -34,6 +34,7 @@ import {
     type Candle,
 } from './signals';
 import { planPosition, tradeNetPnl, updateTrailingStopAtr } from './positionSizing';
+import { alavancagemEfetiva, custoDeIdaEVoltaSobreCapital, stopDisparaAntesDaLiquidacao } from './leverage';
 import { resolverPreset, resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
 import type { EntryStrategy } from './backtest';
 
@@ -78,6 +79,8 @@ export interface BookState {
         entryPrice: string;
         quantity: string;
         notional: string;
+        /** Ausente em estados gravados antes da margem existir: eram todos à vista. */
+        margemUsada?: string;
         initialRisk: string;
         stopPrice: string;
         highestSinceEntry: string;
@@ -137,8 +140,19 @@ interface OpenPosition {
     symbol: string;
     entryPrice: Decimal;
     quantity: Decimal;
-    /** Caixa preso nesta posição (quantidade × preço de entrada). */
+    /** Tamanho da posição no mercado (quantidade × preço de entrada). */
     notional: Decimal;
+    /**
+     * Dinheiro PRÓPRIO imobilizado por ela: nocional dividido pela alavancagem
+     * usada na entrada.
+     *
+     * Guardado em vez de recalculado porque a alavancagem efetiva muda ao
+     * longo do tempo (a regra do alvo pode baixá-la para 1x entre a entrada e
+     * a saída). Recalcular na saída devolveria ao caixa um valor diferente do
+     * que foi reservado, e o erro se acumularia posição após posição sem nada
+     * acusar.
+     */
+    margemUsada: Decimal;
     /** Distância entrada→stop inicial por unidade. É o "R" do alvo de lucro. */
     initialRisk: Decimal;
     stopPrice: Decimal;
@@ -156,6 +170,12 @@ interface Config {
     stateFile: string;
     /** Teto de uma posição como fração do livro. Permite ter mais de uma. */
     maxPositionFraction: Decimal;
+    /** Opera na Margem Cruzada (empresta) em vez do Spot. */
+    margem: boolean;
+    /** Poder de compra por unidade de capital. 1 = à vista. */
+    alavancagem: Decimal;
+    /** Patrimônio em que a alavancagem volta para 1x. Zero desliga a regra. */
+    alvoDeDesalavancagem: Decimal;
     /**
      * Parâmetros de sinal e risco, resolvidos pelo MESMO código que o backtest
      * usa. Operar com parâmetros diferentes dos medidos é operar às cegas — e
@@ -210,6 +230,27 @@ function resolveConfig(): Config {
                 'Ordens reais numa estratégia direcional podem perder dinheiro sem nenhuma falha técnica.',
         );
     }
+    // Margem empresta dinheiro da corretora, e com isso vem a LIQUIDAÇÃO — a
+    // posição pode ser fechada pela Binance sem o stop ter sido tocado. Exigir
+    // as duas variáveis separadas impede que alguém ligue alavancagem achando
+    // que só aumentou o tamanho da posição.
+    const margem = process.env.DIRECTIONAL_MARGIN === 'true';
+    const alavancagem = new Decimal(process.env.DIRECTIONAL_LEVERAGE ?? '1');
+    if (alavancagem.lessThan(1)) {
+        throw new Error(`DIRECTIONAL_LEVERAGE inválida: ${alavancagem.toString()}. Mínimo 1 (à vista).`);
+    }
+    if (alavancagem.greaterThan(1) && !margem) {
+        throw new Error(
+            'DIRECTIONAL_LEVERAGE > 1 exige DIRECTIONAL_MARGIN=true. À vista não existe alavancagem: ' +
+                'sem a conta de margem a ordem usaria só o saldo próprio e o número configurado não faria nada.',
+        );
+    }
+    if (margem && !live) {
+        // Em papel a alavancagem é simulada e não há liquidação de verdade;
+        // deixar passar sem dizer isso faria o placar de papel parecer mais
+        // seguro do que a operação real seria.
+        log.warn('DIRECTIONAL_MARGIN=true em modo PAPEL: o tamanho é simulado com alavancagem, mas NÃO existe liquidação simulada.');
+    }
     // Trim e minúsculas: um espaço sobrando numa variável do painel do Railway
     // é invisível e derrubaria o motor no boot com "estratégia inválida" — falha
     // barulhenta por um erro de digitação que ninguém consegue ver.
@@ -249,6 +290,9 @@ function resolveConfig(): Config {
         live,
         stateFile: process.env.DIRECTIONAL_STATE_FILE ?? './data/directional-state.json',
         maxPositionFraction: new Decimal(process.env.DIRECTIONAL_MAX_POSITION_FRACTION ?? '0.34'),
+        margem,
+        alavancagem,
+        alvoDeDesalavancagem: new Decimal(process.env.DIRECTIONAL_LEVERAGE_TARGET ?? '0'),
         strategy: resolveStrategyParams(familias[0]),
         livros: familias.map((f) => resolveStrategyParams(f)),
     };
@@ -261,6 +305,7 @@ async function main() {
               apiKey: process.env.BINANCE_API_KEY!,
               apiSecret: process.env.BINANCE_API_SECRET!,
               live: true,
+              mode: cfg.margem ? 'margin' : 'spot',
           })
         : null;
     if (exchange) {
@@ -363,8 +408,29 @@ async function main() {
         stop: `${cfg.strategy.atrStopMultiplier}x ATR`,
     });
 
+    if (cfg.alavancagem.greaterThan(1)) {
+        // O custo por operação é sobre o CAPITAL, não sobre o nocional, e é
+        // esse número que decide se alavancar ajuda. A 5x, 0,075% por perna
+        // vira 0,75% do capital por operação completa: cerca de 130 operações
+        // consomem a conta em pedágio, sem ter perdido nenhuma.
+        const custo = custoDeIdaEVoltaSobreCapital(cfg.alavancagem, cfg.strategy.feeRate);
+        log.warn(`*** ALAVANCAGEM ${cfg.alavancagem}x NA MARGEM CRUZADA — existe LIQUIDAÇÃO. ***`, {
+            poderDeCompra: `$${cfg.capital.mul(cfg.alavancagem).toFixed(2)} sobre $${cfg.capital.toFixed(2)} de patrimônio`,
+            custoPorOperacao: `${custo.mul(100).toFixed(3)}% do capital (ida e volta)`,
+            operacoesAteZerarSoDeTaxa: custo.greaterThan(0) ? new Decimal(1).dividedBy(custo).floor().toString() : '—',
+            voltaPara1xEm: cfg.alvoDeDesalavancagem.greaterThan(0)
+                ? `$${cfg.alvoDeDesalavancagem.toFixed(2)} de patrimônio`
+                : 'NUNCA (DIRECTIONAL_LEVERAGE_TARGET não definido)',
+            guardaDeLiquidacao:
+                'Entradas em que a liquidação chegaria antes do stop são recusadas — aparecem como ' +
+                '"recusadosPorRisco" no heartbeat.',
+        });
+    }
+
     log.info(`Motor direcional iniciado em modo ${cfg.live ? 'LIVE — DINHEIRO REAL' : 'PAPEL (nenhuma ordem enviada)'}.`, {
         ativos: cfg.symbols.join(','),
+        carteira: cfg.margem ? 'MARGEM CRUZADA (empresta)' : 'SPOT (dinheiro próprio)',
+        alavancagem: `${cfg.alavancagem}x`,
         estrategias: cfg.livros.map((l) => l.entryStrategy).join(' + '),
         capitalPorEstrategia: cfg.capital.dividedBy(cfg.livros.length).toFixed(2),
         intervalo: cfg.interval,
@@ -438,6 +504,9 @@ async function main() {
                 entryPrice: new Decimal(p.entryPrice),
                 quantity: new Decimal(p.quantity),
                 notional: new Decimal(p.notional),
+                // Estado antigo não tem o campo, e não ter significa spot: lá
+                // a margem É o nocional.
+                margemUsada: new Decimal(p.margemUsada ?? p.notional),
                 // Estado antigo não tem o campo: reconstrói a partir do stop
                 // atual. Fica maior que o R original se o stop já subiu, e o
                 // efeito é um alvo mais distante — conservador, que é o lado
@@ -482,7 +551,7 @@ async function main() {
         }
         const { netProfit, feesPaid } = tradeNetPnl(pos.entryPrice, exitPrice, pos.quantity, params.feeRate);
         // O dinheiro preso na posição volta ao caixa, junto com o resultado.
-        committed = committed.minus(pos.notional);
+        committed = committed.minus(pos.margemUsada);
         if (committed.lessThan(0)) committed = new Decimal(0);
         capital = capital.plus(netProfit);
         realizedPnl = realizedPnl.plus(netProfit);
@@ -544,7 +613,7 @@ async function main() {
                 saldoReal: saldo.toString(),
                 causaProvavel: 'venda manual, ou ordem executada com o motor fora do ar',
             });
-            committed = committed.minus(pos.notional);
+            committed = committed.minus(pos.margemUsada);
             if (committed.lessThan(0)) committed = new Decimal(0);
             positions.delete(symbol);
             return;
@@ -568,12 +637,18 @@ async function main() {
             }
             const stop = price.minus(atrValue.mul(params.atrStopMultiplier));
             const notional = saldo.mul(price);
+            // Posição órfã: o motor não sabe com que alavancagem ela foi
+            // aberta. Assume o nocional inteiro como dinheiro próprio, que é o
+            // lado conservador — reserva MAIS caixa do que talvez precise, em
+            // vez de liberar caixa que não existe e permitir uma entrada a
+            // mais do que a conta suporta.
             committed = committed.plus(notional);
             positions.set(symbol, {
                 symbol,
                 entryPrice: price,
                 quantity: saldo,
                 notional,
+                margemUsada: notional,
                 initialRisk: price.minus(stop),
                 stopPrice: stop,
                 highestSinceEntry: price,
@@ -685,6 +760,33 @@ async function main() {
         // equivalente disponível.
         const entryPrice = candle.close;
         const stopPrice = entryPrice.minus(signal.atrValue.mul(params.atrStopMultiplier));
+
+        // A alavancagem é reavaliada A CADA ENTRADA, pelo patrimônio corrente.
+        // Decidir uma vez no boot deixaria a conta alavancada por horas depois
+        // de já ter passado do alvo.
+        const alavancagem = alavancagemEfetiva({
+            patrimonio: capital,
+            alvo: cfg.alvoDeDesalavancagem,
+            alavancagemMaxima: cfg.alavancagem,
+        });
+
+        // O guarda que só existe alavancado: se a liquidação chega antes do
+        // stop, o risco calculado abaixo é ficção — a perda seria a margem
+        // inteira. Recusar aqui é a diferença entre arriscar 2% e arriscar
+        // tudo. À vista nunca recusa (não existe liquidação no spot).
+        const veredicto = stopDisparaAntesDaLiquidacao({
+            distanciaDoStop: entryPrice.minus(stopPrice).dividedBy(entryPrice),
+            alavancagem,
+        });
+        if (!veredicto.seguro) {
+            recusadosPorRisco += 1;
+            diagnostico.set(symbol, `SINAL recusado: ${veredicto.motivo}`);
+            log.warn(`[${params.entryStrategy}] ${symbol}: sinal válido recusado pelo guarda de liquidação.`, {
+                motivo: veredicto.motivo,
+            });
+            return;
+        }
+
         const plan = planPosition({
             capital,
             availableCapital: capital.minus(committed),
@@ -693,6 +795,7 @@ async function main() {
             entryPrice,
             stopPrice,
             minNotional: minNotionalDe(symbol),
+            leverage: alavancagem,
         });
         if (plan.quantity.lessThanOrEqualTo(0)) {
             recusadosPorRisco += 1;
@@ -713,13 +816,19 @@ async function main() {
         // o risco que se aceitou correr.
         const filledStop = filledPrice.minus(signal.atrValue.mul(params.atrStopMultiplier));
         const notional = filledQty.mul(filledPrice);
-        committed = committed.plus(notional);
+        // O que fica PRESO é a margem, não o nocional: alavancado, uma posição
+        // de $40 imobiliza $8 do próprio dinheiro a 5x. Somar o nocional
+        // inteiro faria o motor achar que o caixa acabou e recusar as próximas
+        // entradas — a alavancagem existiria na ordem e sumiria no controle.
+        const margemUsada = notional.dividedBy(alavancagem);
+        committed = committed.plus(margemUsada);
         diagnostico.set(symbol, 'ENTRADA executada neste ciclo');
         positions.set(symbol, {
             symbol,
             entryPrice: filledPrice,
             quantity: filledQty,
             notional,
+            margemUsada,
             initialRisk: filledPrice.minus(filledStop),
             stopPrice: filledStop,
             highestSinceEntry: filledPrice,
@@ -778,6 +887,7 @@ async function main() {
                 entryPrice: p.entryPrice.toString(),
                 quantity: p.quantity.toString(),
                 notional: p.notional.toString(),
+                margemUsada: p.margemUsada.toString(),
                 initialRisk: p.initialRisk.toString(),
                 stopPrice: p.stopPrice.toString(),
                 highestSinceEntry: p.highestSinceEntry.toString(),

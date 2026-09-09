@@ -393,3 +393,85 @@ test('o orçamento de risco continua mandando quando é menor que o teto', () =>
     assert.equal(plan.quantity.toString(), '2'); // pelo risco, não pelo teto
     assert.equal(plan.riskAmount.toString(), '20');
 });
+
+// ---------------------------------------------------------------------------
+// Alavancagem no dimensionamento
+//
+// A propriedade que estes testes protegem: alavancagem aumenta o TAMANHO que o
+// caixa comporta, e NÃO o quanto se aceita perder. Escalar os dois juntos
+// subiria o risco por operação na mesma proporção sem ninguém ter pedido — a
+// 5x, um risco configurado de 2% viraria 10% em silêncio, e o log continuaria
+// dizendo 2%.
+// ---------------------------------------------------------------------------
+
+test('alavancagem destrava o tamanho que o RISCO pedia e o caixa não financiava — e para nele', () => {
+    // ATR baixo (BTC/ETH a 1h): stop a 1%, risco de 2% sobre $20 pede $40 de
+    // posição. À vista isso não cabe — o caixa é $20 e trunca ali.
+    //
+    // A 5x o caixa comportaria $100, mas a posição fica em $40: a alavancagem
+    // destrava o tamanho que o modelo de risco queria e NÃO passa dele. Se
+    // fosse aos $100, o risco por operação teria virado 5% sem ninguém pedir.
+    const base = {
+        capital: new Decimal('20'),
+        riskFraction: new Decimal('0.02'),
+        entryPrice: new Decimal('100'),
+        stopPrice: new Decimal('99'), // stop a 1%
+        minNotional: new Decimal('5'),
+    };
+    const aVista = planPosition(base);
+    const a5x = planPosition({ ...base, leverage: new Decimal(5) });
+
+    assert.equal(aVista.quantity.mul(100).toFixed(2), '20.00', 'à vista o caixa trunca em $20');
+    assert.equal(a5x.quantity.mul(100).toFixed(2), '40.00', 'a 5x chega no que o risco pedia, e para');
+    assert.equal(a5x.riskAmount.toFixed(4), '0.4000', 'e o risco continua sendo 2% de $20');
+});
+
+test('alavancagem NÃO aumenta o risco por operação', () => {
+    // O número que não pode se mexer. Com o stop longe o bastante para o risco
+    // ser o limitante, a posição é a MESMA com e sem alavancagem.
+    const base = {
+        capital: new Decimal('20'),
+        riskFraction: new Decimal('0.02'),
+        entryPrice: new Decimal('100'),
+        stopPrice: new Decimal('90'), // stop a 10%: o risco limita, não o caixa
+        minNotional: new Decimal('0'),
+    };
+    const aVista = planPosition(base);
+    const a5x = planPosition({ ...base, leverage: new Decimal(5) });
+
+    assert.equal(a5x.quantity.toString(), aVista.quantity.toString());
+    assert.equal(a5x.riskAmount.toFixed(4), '0.4000', '2% de $20 continua sendo $0,40 a 5x');
+});
+
+test('alavancagem respeita o teto por posição, escalado junto', () => {
+    // Com teto de 1/3 do livro e 5x, uma posição pode ocupar 5/3 do patrimônio
+    // — mas continua sendo um TERÇO do poder de compra, que é o que permite ter
+    // mais de uma posição aberta ao mesmo tempo.
+    const plano = planPosition({
+        capital: new Decimal('20'),
+        availableCapital: new Decimal('20'),
+        maxPositionFraction: new Decimal('0.34'),
+        riskFraction: new Decimal('0.02'),
+        entryPrice: new Decimal('100'),
+        stopPrice: new Decimal('99'),
+        minNotional: new Decimal('5'),
+        leverage: new Decimal(5),
+    });
+    assert.equal(plano.quantity.mul(100).toFixed(2), '34.00');
+});
+
+test('alavancagem 1 ou ausente não muda nada', () => {
+    // O caminho à vista não pode mudar de comportamento por causa deste campo.
+    const base = {
+        capital: new Decimal('20'),
+        riskFraction: new Decimal('0.02'),
+        entryPrice: new Decimal('100'),
+        stopPrice: new Decimal('99'),
+        minNotional: new Decimal('5'),
+    };
+    const semCampo = planPosition(base);
+    for (const valor of ['1', '0.5', '0']) {
+        const comValor = planPosition({ ...base, leverage: new Decimal(valor) });
+        assert.equal(comValor.quantity.toString(), semCampo.quantity.toString(), `leverage=${valor} não pode alterar`);
+    }
+});

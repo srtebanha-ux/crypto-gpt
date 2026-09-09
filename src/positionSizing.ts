@@ -36,6 +36,21 @@ export interface RiskParams {
     /** Passo de quantidade do símbolo (LOT_SIZE). A quantidade é truncada a ele. */
     stepSize?: Decimal;
     /**
+     * Poder de compra por unidade de capital (5 = margem 5x). Omitido = 1 (à vista).
+     *
+     * Multiplica APENAS os tetos de quanto dá para comprar, NUNCA o orçamento
+     * de risco. A distinção é o ponto: com alavancagem, o que muda é o tamanho
+     * que o caixa comporta; o quanto se aceita perder continua sendo uma
+     * fração do patrimônio REAL. Escalar os dois juntos subiria o risco por
+     * operação na mesma proporção sem ninguém ter pedido — a 5x, um risco
+     * configurado de 2% viraria 10% em silêncio.
+     *
+     * O que a alavancagem introduz de perigo novo não é tratado aqui: a
+     * LIQUIDAÇÃO não depende do stop, e quem confere se o stop dispara antes
+     * dela é `stopDisparaAntesDaLiquidacao` em leverage.ts.
+     */
+    leverage?: Decimal;
+    /**
      * Dinheiro LIVRE para esta posição, quando parte do capital já está preso
      * em outras posições abertas.
      *
@@ -127,13 +142,21 @@ export function planPosition(params: RiskParams): PositionPlan {
 
     // O caixa é um teto independente do orçamento de risco: com stop muito
     // próximo, a fórmula pediria uma posição maior que o dinheiro disponível.
-    const cash = params.availableCapital ?? capital;
-    if (cash.lessThanOrEqualTo(0)) return zero('Sem caixa livre — o capital já está todo em posições abertas.');
+    const cashProprio = params.availableCapital ?? capital;
+    if (cashProprio.lessThanOrEqualTo(0)) return zero('Sem caixa livre — o capital já está todo em posições abertas.');
+    // A alavancagem entra AQUI e só aqui: ela amplia o que o caixa comporta,
+    // não o que se aceita perder. `riskBudget` acima já foi calculado sobre o
+    // patrimônio real e não é tocado.
+    const alavancagem =
+        params.leverage && params.leverage.greaterThan(1) ? params.leverage : new Decimal(1);
+    const cash = cashProprio.mul(alavancagem);
     // Dois tetos independentes: o caixa que existe, e o quanto UMA posição pode
     // ocupar do patrimônio. O segundo é o que permite ter mais de uma.
     const fracao = params.maxPositionFraction;
     const tetoPorPosicao =
-        fracao && fracao.greaterThan(0) && fracao.lessThanOrEqualTo(1) ? capital.mul(fracao) : cash;
+        fracao && fracao.greaterThan(0) && fracao.lessThanOrEqualTo(1)
+            ? capital.mul(fracao).mul(alavancagem)
+            : cash;
     const maxAffordable = Decimal.min(cash, tetoPorPosicao).dividedBy(entryPrice);
     const capped = Decimal.min(rawQuantity, maxAffordable);
     const quantity = truncateToStep(capped, params.stepSize);
