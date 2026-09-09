@@ -121,13 +121,28 @@ export function loadState(path: string): Record<string, BookState> {
  * deles custa caro: tratar órfã como "nada a fazer" deixa dinheiro real sem
  * stop; tratar fantasma como posição bloqueia o caixa para sempre.
  */
-export type ReconcileAction = 'nada' | 'remover-fantasma' | 'adotar-orfa' | 'alertar-orfa';
+export type ReconcileAction =
+    | 'nada'
+    | 'remover-fantasma'
+    | 'adotar-orfa'
+    | 'liquidar-orfa'
+    | 'alertar-orfa';
 
 export function decideReconcile(params: {
     temPosicaoNoLivro: boolean;
     valorDoSaldo: Decimal;
     minNotional: Decimal;
     podeAdotar: boolean;
+    /**
+     * Vender a órfã imediatamente, em vez de adotá-la.
+     *
+     * Tem precedência sobre adotar porque as duas resolvem problemas
+     * diferentes: adotar mantém a exposição e coloca um stop; liquidar
+     * DEVOLVE O COLATERAL. Numa conta pequena e alavancada, uma órfã segurando
+     * o colateral inteiro impede qualquer operação nova — e aí o motor fica
+     * vivo, gerando sinal, e levando recusa da corretora em todos eles.
+     */
+    podeLiquidar?: boolean;
 }): ReconcileAction {
     // "Relevante" é o mesmo piso que impede abrir posição: abaixo do notional
     // mínimo a corretora nem aceitaria vender, então poeira de saldo não é
@@ -135,7 +150,10 @@ export function decideReconcile(params: {
     // fantasma a cada ciclo.
     const relevante = params.valorDoSaldo.greaterThanOrEqualTo(params.minNotional);
     if (params.temPosicaoNoLivro && !relevante) return 'remover-fantasma';
-    if (!params.temPosicaoNoLivro && relevante) return params.podeAdotar ? 'adotar-orfa' : 'alertar-orfa';
+    if (!params.temPosicaoNoLivro && relevante) {
+        if (params.podeLiquidar) return 'liquidar-orfa';
+        return params.podeAdotar ? 'adotar-orfa' : 'alertar-orfa';
+    }
     return 'nada';
 }
 
@@ -591,6 +609,12 @@ async function main() {
     // pago e vai medir o resultado a partir de agora, o que distorce o placar.
     // Ainda assim é melhor que deixá-la sem stop — mas quem escolhe é você.
     const adoptOrphans = process.env.DIRECTIONAL_ADOPT_ORPHANS === 'true';
+    // Vender a órfã em vez de adotá-la. Existe porque o problema mais urgente
+    // de uma órfã numa conta pequena não é ela estar sem stop — é ela estar
+    // segurando o colateral inteiro, o que faz TODA ordem nova ser recusada
+    // pela corretora. Adotar resolve o stop e mantém o bloqueio; liquidar
+    // devolve a conta ao operador.
+    const liquidarOrfas = process.env.DIRECTIONAL_CLOSE_ORPHANS === 'true';
     const criarLivro = (params: ResolvedStrategyParams, capitalInicial: Decimal) => {
     const salvo = estadoSalvo[params.entryStrategy];
     const positions = new Map<string, OpenPosition>();
@@ -716,6 +740,7 @@ async function main() {
             valorDoSaldo: valor,
             minNotional: minNotionalDe(symbol),
             podeAdotar: adoptOrphans && atrValue !== null,
+            podeLiquidar: liquidarOrfas,
         });
         if (acao === 'nada') return;
 
@@ -730,6 +755,45 @@ async function main() {
             committed = committed.minus(pos.margemUsada);
             if (committed.lessThan(0)) committed = new Decimal(0);
             positions.delete(symbol);
+            return;
+        }
+
+        if (!pos && acao === 'liquidar-orfa') {
+            // Vender a órfã. O que se resolve aqui não é a falta de stop — é o
+            // COLATERAL preso: numa conta pequena e alavancada, uma posição
+            // que o motor não conhece segura o dinheiro inteiro, e a corretora
+            // passa a recusar toda ordem nova. O motor fica vivo, gerando
+            // sinal, e levando não em todos eles.
+            //
+            // Em margem a venda sai com AUTO_REPAY, então a dívida é quitada
+            // pela própria operação.
+            //
+            // O livro NÃO é creditado: esta posição nunca esteve nele, e somar
+            // o resultado dela ao placar contaria um lucro que a estratégia não
+            // produziu.
+            log.warn(`[${params.entryStrategy}] ${symbol}: órfã encontrada — VENDENDO para liberar o colateral.`, {
+                quantidade: saldo.toString(),
+                valorAproximado: `$${valor.toFixed(2)}`,
+                porque:
+                    'DIRECTIONAL_CLOSE_ORPHANS=true. O resultado desta venda NÃO entra no placar do livro — ' +
+                    'a posição nunca esteve nele.',
+            });
+            try {
+                const venda = await exchange.executeOrder(paraPar(symbol), 'SELL', 'MARKET', saldo);
+                log.info(`[${params.entryStrategy}] ${symbol}: órfã vendida. Colateral liberado.`, {
+                    quantidadeVendida: venda.executedQty.toString(),
+                    precoMedio: venda.executedPrice.toFixed(8),
+                });
+            } catch (err) {
+                // Reconciliação roda uma vez por símbolo; se a venda falhar,
+                // liberar a marca faz a próxima passada tentar de novo em vez
+                // de deixar a órfã parada para sempre.
+                reconciliados.delete(symbol);
+                log.error(`[${params.entryStrategy}] ${symbol}: NÃO foi possível vender a órfã — ela continua lá.`, {
+                    erro: err instanceof Error ? err.message : String(err),
+                    oQueFazer: 'Venda manualmente na Binance, ou confira se a chave tem permissão de trading.',
+                });
+            }
             return;
         }
 

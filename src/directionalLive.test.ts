@@ -201,3 +201,61 @@ test('paraPar converte símbolo cru em par interno, ancorando USDT no FIM', () =
     // ativo. Sem `$`, viraria "C/USDT" — um par que não existe.
     assert.equal(paraPar('USDTCUSDT'), 'USDTC/USDT');
 });
+
+// ---------------------------------------------------------------------------
+// Liquidar órfã
+//
+// Adotar e liquidar resolvem problemas DIFERENTES, e confundi-los custa caro
+// numa conta pequena: adotar coloca um stop e mantém a exposição — e mantém
+// junto o colateral preso. Liquidar devolve a conta ao operador. Foi o caso
+// real: uma posição de $24,86 em WIF segurando os $20 inteiros, e a corretora
+// recusando TODA ordem nova com "borrow amount has exceed maximum" enquanto o
+// motor seguia gerando sinal.
+// ---------------------------------------------------------------------------
+
+test('liquidar tem precedência sobre adotar — o colateral preso é o problema mais urgente', () => {
+    const acao = decideReconcile({
+        temPosicaoNoLivro: false,
+        valorDoSaldo: new Decimal('24.86'),
+        minNotional: new Decimal('5'),
+        podeAdotar: true,
+        podeLiquidar: true,
+    });
+    assert.equal(acao, 'liquidar-orfa');
+});
+
+test('sem a flag de liquidar, o comportamento antigo continua exatamente igual', () => {
+    const comum = {
+        temPosicaoNoLivro: false,
+        valorDoSaldo: new Decimal('24.86'),
+        minNotional: new Decimal('5'),
+    };
+    assert.equal(decideReconcile({ ...comum, podeAdotar: true }), 'adotar-orfa');
+    assert.equal(decideReconcile({ ...comum, podeAdotar: false }), 'alertar-orfa');
+    assert.equal(decideReconcile({ ...comum, podeAdotar: false, podeLiquidar: false }), 'alertar-orfa');
+});
+
+test('poeira de saldo não vira venda: abaixo do mínimo continua sendo nada', () => {
+    // Restos de arredondamento abaixo do notional mínimo não são posição, e a
+    // corretora nem aceitaria a ordem de venda. Tentar vender a cada ciclo
+    // geraria uma fila de erros sem fim.
+    const acao = decideReconcile({
+        temPosicaoNoLivro: false,
+        valorDoSaldo: new Decimal('0.40'),
+        minNotional: new Decimal('5'),
+        podeAdotar: true,
+        podeLiquidar: true,
+    });
+    assert.equal(acao, 'nada');
+});
+
+test('com posição no livro, liquidar não se aplica — não é órfã', () => {
+    const acao = decideReconcile({
+        temPosicaoNoLivro: true,
+        valorDoSaldo: new Decimal('24.86'),
+        minNotional: new Decimal('5'),
+        podeAdotar: true,
+        podeLiquidar: true,
+    });
+    assert.equal(acao, 'nada');
+});
