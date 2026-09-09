@@ -94,7 +94,7 @@ export interface BookState {
      *
      * Ausente em estados gravados antes desta medição existir.
      */
-    excursaoMaxima?: { r1: number; r2: number; r3: number; r5: number };
+    excursaoMaxima?: { medidas: number; r1: number; r2: number; r3: number; r5: number };
     committed: string;
     positions: Array<{
         symbol: string;
@@ -720,7 +720,7 @@ async function main() {
     // o heartbeat não permite comparar o papel com o backtest.
     let somaGanhos = new Decimal(salvo?.somaGanhos ?? '0');
     let somaPerdas = new Decimal(salvo?.somaPerdas ?? '0');
-    const excursao = { ...(salvo?.excursaoMaxima ?? { r1: 0, r2: 0, r3: 0, r5: 0 }) };
+    const excursao = { medidas: 0, ...(salvo?.excursaoMaxima ?? {}), r1: salvo?.excursaoMaxima?.r1 ?? 0, r2: salvo?.excursaoMaxima?.r2 ?? 0, r3: salvo?.excursaoMaxima?.r3 ?? 0, r5: salvo?.excursaoMaxima?.r5 ?? 0 };
     /**
      * Dinheiro preso nas posições abertas. Sem isto, cada ativo dimensionaria
      * contra o capital TOTAL e quatro posições simultâneas comprometeriam
@@ -811,6 +811,12 @@ async function main() {
         // medição. Com stop móvel a saída quase nunca acontece no topo, então
         // este número diz o que um ALVO teria capturado e a saída real não.
         if (pos.initialRisk.greaterThan(0)) {
+            // Contado à parte do placar de ganhos e perdas de propósito. O
+            // placar veio do disco e inclui operações fechadas ANTES desta
+            // medição existir; usá-lo como denominador transformaria "ainda
+            // não medi nada" em "nenhuma chegou a 1R", que é uma conclusão
+            // sobre a estratégia tirada de código que nem estava rodando.
+            excursao.medidas += 1;
             const emR = pos.highestSinceEntry.minus(pos.entryPrice).dividedBy(pos.initialRisk);
             if (emR.greaterThanOrEqualTo(1)) excursao.r1 += 1;
             if (emR.greaterThanOrEqualTo(2)) excursao.r2 += 1;
@@ -1346,11 +1352,13 @@ async function main() {
             // de sair. É o que decide, com dado, se vale trocar o stop móvel
             // por um alvo grande: um alvo de 5R precisa ser tocado em mais de
             // 1 a cada 6 operações só para empatar.
-            ...(wins + losses > 0
+            ...(excursao.medidas > 0
                 ? {
-                      chegouA: `1R: ${excursao.r1}/${wins + losses} | 2R: ${excursao.r2} | 3R: ${excursao.r3} | 5R: ${excursao.r5}`,
+                      chegouA:
+                          `de ${excursao.medidas} medida(s) — 1R: ${excursao.r1} | 2R: ${excursao.r2} | ` +
+                          `3R: ${excursao.r3} | 5R: ${excursao.r5}`,
                   }
-                : {}),
+                : { chegouA: 'ainda nenhuma operação fechada COM esta medição ligada' }),
             sinaisDisparados,
             bloqueadosPorTendencia,
             barradosPorTaxa,
