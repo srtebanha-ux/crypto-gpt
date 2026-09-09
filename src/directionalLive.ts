@@ -36,6 +36,7 @@ import {
 import { planPosition, tradeNetPnl, updateTrailingStopAtr } from './positionSizing';
 import {
     alavancagemEfetiva,
+    alavancagemSustentada,
     capitalDeTrabalho,
     custoDeIdaEVoltaSobreCapital,
     lucroCongelado,
@@ -635,6 +636,20 @@ async function main() {
     // pela corretora. Adotar resolve o stop e mantém o bloqueio; liquidar
     // devolve a conta ao operador.
     const liquidarOrfas = process.env.DIRECTIONAL_CLOSE_ORPHANS === 'true';
+    /**
+     * O que a corretora disse que empresta, na última consulta do ciclo.
+     *
+     * Fica AQUI, fora dos livros, porque a capacidade é da CONTA e não de cada
+     * família: dois livros pedindo empréstimo disputam o mesmo colateral. Uma
+     * consulta por ciclo, servida a todos.
+     *
+     * Começa em zero de propósito. Zero significa "opera à vista", que é o
+     * comportamento seguro enquanto a resposta não chegou — o contrário
+     * (assumir a alavancagem cheia até ser desmentido) é justamente o que
+     * produz uma rodada inteira de ordens recusadas.
+     */
+    let capacidadeDeEmprestimo = new Decimal(0);
+
     const criarLivro = (params: ResolvedStrategyParams, capitalInicial: Decimal) => {
     const salvo = estadoSalvo[params.entryStrategy];
     const positions = new Map<string, OpenPosition>();
@@ -993,10 +1008,19 @@ async function main() {
         // A alavancagem é reavaliada A CADA ENTRADA, pelo patrimônio corrente.
         // Decidir uma vez no boot deixaria a conta alavancada por horas depois
         // de já ter passado do alvo.
-        const alavancagem = alavancagemEfetiva({
+        const alavancagemPedida = alavancagemEfetiva({
             patrimonio: capital,
             alvo: cfg.alvoDeDesalavancagem,
             alavancagemMaxima: cfg.alavancagem,
+        });
+        // E a alavancagem que a corretora financia, que é outra coisa. Sem
+        // este teto o motor dimensiona pelo pedido, a Binance recusa com
+        // -3006, e o ciclo inteiro vira recusa: caixa livre no log, nenhuma
+        // ordem aceita. Com ele, a posição só encolhe.
+        const alavancagem = alavancagemSustentada({
+            caixaProprio: capitalDeTrabalho({ patrimonio: capital, teto: cfg.tetoDeCapital }).minus(committed),
+            maximoEmprestavel: capacidadeDeEmprestimo,
+            alavancagemDesejada: alavancagemPedida,
         });
 
         // O guarda que só existe alavancado: se a liquidação chega antes do
@@ -1160,6 +1184,11 @@ async function main() {
             bloqueadosPorTendencia,
             barradosPorTaxa,
             recusadosPorRisco,
+            // O número que explica um -3006 sem precisar adivinhar: se está em
+            // zero, o colateral está preso e o motor opera à vista.
+            ...(cfg.margem && cfg.alavancagem.greaterThan(1)
+                ? { emprestimoDisponivel: `$${capacidadeDeEmprestimo.toFixed(2)}` }
+                : {}),
             ...(cfg.tetoDeCapital.greaterThan(0)
                 ? {
                       capitalQueTrabalha: capitalDeTrabalho({ patrimonio: capital, teto: cfg.tetoDeCapital }).toFixed(2),
@@ -1198,7 +1227,36 @@ async function main() {
     /** Último preço visto por ativo — só para exibição, nunca para decisão. */
     const precosAtuais = new Map<string, Decimal>();
 
+    /**
+     * Pergunta à corretora quanto ela empresta, uma vez por ciclo.
+     *
+     * Em PAPEL não há a quem perguntar, e a alavancagem é simulada: devolver
+     * folga de sobra mantém o papel medindo o que foi configurado. Ao vivo, a
+     * resposta é a real — e uma falha na consulta devolve ZERO, não a
+     * alavancagem cheia. Errar aqui para o lado do empréstimo custa uma rodada
+     * inteira de ordens recusadas; errar para o lado da operação à vista custa
+     * uma posição menor.
+     */
+    const medirCapacidadeDeEmprestimo = async (): Promise<Decimal> => {
+        if (!cfg.margem || cfg.alavancagem.lessThanOrEqualTo(1)) return new Decimal(0);
+        if (!exchange) return cfg.capital.mul(cfg.alavancagem);
+        try {
+            return await exchange.fetchMaxBorrowable('USDT');
+        } catch (err) {
+            log.warn('Não foi possível consultar o máximo emprestável; o ciclo opera à vista.', {
+                erro: err instanceof Error ? err.message : String(err),
+                consequencia: 'as entradas deste ciclo usam só o caixa próprio, sem alavancagem.',
+            });
+            return new Decimal(0);
+        }
+    };
+
     for (;;) {
+        // Antes de qualquer decisão de tamanho: quanto a corretora empresta
+        // AGORA. Consultar uma vez por ciclo, e não por ativo, evita gastar
+        // peso de API repetindo a mesma pergunta vinte vezes.
+        capacidadeDeEmprestimo = await medirCapacidadeDeEmprestimo();
+
         for (const symbol of cfg.symbols) {
             try {
                 // As velas são buscadas UMA vez por símbolo e servidas a todos

@@ -11,6 +11,7 @@ import { Decimal } from 'decimal.js';
 import {
     MARGEM_DE_MANUTENCAO_PADRAO,
     alavancagemEfetiva,
+    alavancagemSustentada,
     capitalDeTrabalho,
     custoDeIdaEVoltaSobreCapital,
     lucroCongelado,
@@ -167,4 +168,68 @@ test('prejuízo abaixo do teto não vira congelamento negativo', () => {
     // Sem a guarda, uma conta que caiu ficaria com "lucro congelado" negativo e
     // o número apareceria no log como se houvesse reserva a recuperar.
     assert.equal(lucroCongelado({ patrimonio: new Decimal(3000), teto: new Decimal(5000) }).toString(), '0');
+});
+
+test('a alavancagem cai para o que a corretora DE FATO empresta', () => {
+    // O caso real: $15 de caixa próprio, pedido de 5x (nocional de $75, o que
+    // exige $60 emprestados), e a Binance com $10 de capacidade. 5x não existe;
+    // o que existe é 1,66x. Pedir os 5x devolve -3006 e NENHUMA posição.
+    const sustentada = alavancagemSustentada({
+        caixaProprio: new Decimal(15),
+        maximoEmprestavel: new Decimal(10),
+        alavancagemDesejada: new Decimal(5),
+    });
+    assert.equal(sustentada.toFixed(4), '1.6666');
+});
+
+test('empréstimo zerado vira operação à vista, NÃO motor parado', () => {
+    // Este é o ponto do piso em 1. Com colateral todo preso, a capacidade de
+    // empréstimo vai a zero — e sem o piso o motor recusaria toda entrada,
+    // ficando com caixa livre no log e nenhuma ordem aceita pela corretora.
+    const sustentada = alavancagemSustentada({
+        caixaProprio: new Decimal(15),
+        maximoEmprestavel: new Decimal(0),
+        alavancagemDesejada: new Decimal(5),
+    });
+    assert.equal(sustentada.toString(), '1', 'com caixa próprio ainda dá para comprar — só que sem alavancagem');
+});
+
+test('capacidade de sobra NÃO eleva a alavancagem acima da pedida', () => {
+    // A corretora emprestar mais não é permissão para arriscar mais: o teto
+    // continua sendo o que foi configurado.
+    const sustentada = alavancagemSustentada({
+        caixaProprio: new Decimal(15),
+        maximoEmprestavel: new Decimal(1000),
+        alavancagemDesejada: new Decimal(5),
+    });
+    assert.equal(sustentada.toString(), '5');
+});
+
+test('sem caixa próprio a alavancagem é 1, não infinito', () => {
+    // Dividir por zero devolveria infinito e o motor pediria empréstimo sem
+    // lastro nenhum — o oposto exato do que a alavancagem é.
+    const sustentada = alavancagemSustentada({
+        caixaProprio: new Decimal(0),
+        maximoEmprestavel: new Decimal(100),
+        alavancagemDesejada: new Decimal(5),
+    });
+    assert.equal(sustentada.toString(), '1');
+});
+
+test('à vista a consulta de empréstimo não muda nada', () => {
+    const sustentada = alavancagemSustentada({
+        caixaProprio: new Decimal(15),
+        maximoEmprestavel: new Decimal(1000),
+        alavancagemDesejada: new Decimal(1),
+    });
+    assert.equal(sustentada.toString(), '1');
+});
+
+test('capacidade negativa é tratada como zero, não como dívida a alavancar', () => {
+    const sustentada = alavancagemSustentada({
+        caixaProprio: new Decimal(15),
+        maximoEmprestavel: new Decimal(-5),
+        alavancagemDesejada: new Decimal(5),
+    });
+    assert.equal(sustentada.toString(), '1');
 });

@@ -168,3 +168,41 @@ export function lucroCongelado(params: { patrimonio: Decimal; teto: Decimal }): 
     const excedente = params.patrimonio.minus(params.teto);
     return excedente.greaterThan(0) ? excedente : new Decimal(0);
 }
+
+/**
+ * A alavancagem que a corretora DE FATO financia AGORA.
+ *
+ * `DIRECTIONAL_LEVERAGE=5` é um pedido, não uma garantia. Quem decide quanto
+ * pode ser emprestado é a Binance, e o número muda a cada instante: colateral
+ * já preso numa posição aberta, teto da faixa da conta, disponibilidade do
+ * ativo. Pedir mais do que cabe NÃO devolve uma posição menor — devolve
+ * `-3006 Your borrow amount has exceed maximum borrow amount` e NENHUMA
+ * posição, sinal por sinal, ciclo após ciclo. O motor fica ativo, com caixa
+ * livre no log, recusado pela corretora em toda ordem.
+ *
+ * Com caixa próprio C e capacidade real de empréstimo B, o maior nocional
+ * financiável é C + B — ou seja, (C+B)/C de alavancagem.
+ *
+ * O piso é 1, e é ele que faz a diferença: o dinheiro próprio sempre pode ser
+ * gasto, mesmo com o empréstimo zerado. É o que transforma "nenhuma ordem
+ * passa" em "opera à vista até o colateral liberar".
+ *
+ * A conta vale para o CICLO inteiro, não por posição: como o dimensionamento
+ * já desconta do caixa próprio a margem de cada entrada, a soma dos nocionais
+ * de várias posições fica em C × L = C + B. Uma alavancagem por ciclo basta.
+ */
+export function alavancagemSustentada(params: {
+    /** Caixa próprio disponível (sem contar o emprestado). */
+    caixaProprio: Decimal;
+    /** O que a corretora diz que empresta agora. */
+    maximoEmprestavel: Decimal;
+    alavancagemDesejada: Decimal;
+}): Decimal {
+    if (params.alavancagemDesejada.lessThanOrEqualTo(1)) return new Decimal(1);
+    // Sem caixa próprio não há razão de alavancagem que faça sentido: dividir
+    // por zero devolveria infinito e o motor pediria empréstimo sem lastro.
+    if (params.caixaProprio.lessThanOrEqualTo(0)) return new Decimal(1);
+    const emprestavel = params.maximoEmprestavel.greaterThan(0) ? params.maximoEmprestavel : new Decimal(0);
+    const possivel = params.caixaProprio.plus(emprestavel).dividedBy(params.caixaProprio);
+    return Decimal.min(params.alavancagemDesejada, Decimal.max(possivel, 1));
+}

@@ -820,6 +820,33 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         };
     }
 
+    /**
+     * Quanto a Binance DE FATO empresta deste ativo agora.
+     *
+     * Existe porque `DIRECTIONAL_LEVERAGE` é um pedido e este número é a
+     * resposta. Eles divergem o tempo todo: colateral preso numa posição
+     * aberta derruba a capacidade para perto de zero sem nada mudar na
+     * configuração. Quando o motor pede mais do que cabe, a corretora não
+     * reduz a ordem — ela recusa com `-3006`, e o motor fica anunciando caixa
+     * livre enquanto nenhuma ordem passa.
+     *
+     * `amount` é a capacidade AGORA (já descontado o que está emprestado);
+     * `borrowLimit` é o teto da faixa da conta. O que interessa é o primeiro.
+     */
+    public async fetchMaxBorrowable(asset: string): Promise<Decimal> {
+        if (this.mode !== 'margin') throw new Error('fetchMaxBorrowable só existe em mode: "margin".');
+        const query = this.signParams({ asset, timestamp: this.serverTimestamp() });
+        const res = await fetch(`${this.restBaseUrl}/sapi/v1/margin/maxBorrowable?${query}`, {
+            headers: { 'X-MBX-APIKEY': this.apiKey },
+        });
+        if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`Falha ao consultar o máximo emprestável de ${asset}: HTTP ${res.status} — ${body}`);
+        }
+        const dado = (await res.json()) as { amount?: string; borrowLimit?: string };
+        return new Decimal(dado.amount ?? '0');
+    }
+
     // ------------------------------------------------------------------
     // REST: execução de ordens (assinada)
     // ------------------------------------------------------------------
