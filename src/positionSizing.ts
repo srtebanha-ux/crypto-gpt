@@ -153,10 +153,8 @@ export function planPosition(params: RiskParams): PositionPlan {
     // Dois tetos independentes: o caixa que existe, e o quanto UMA posição pode
     // ocupar do patrimônio. O segundo é o que permite ter mais de uma.
     const fracao = params.maxPositionFraction;
-    const tetoPorPosicao =
-        fracao && fracao.greaterThan(0) && fracao.lessThanOrEqualTo(1)
-            ? capital.mul(fracao).mul(alavancagem)
-            : cash;
+    const temFracao = fracao !== undefined && fracao.greaterThan(0) && fracao.lessThanOrEqualTo(1);
+    const tetoPorPosicao = temFracao ? capital.mul(fracao!).mul(alavancagem) : cash;
     const poderDeCompra = Decimal.min(cash, tetoPorPosicao);
     const maxAffordable = poderDeCompra.dividedBy(entryPrice);
     const capped = Decimal.min(rawQuantity, maxAffordable);
@@ -171,6 +169,28 @@ export function planPosition(params: RiskParams): PositionPlan {
     }
 
     const notional = quantity.mul(entryPrice);
+    // A terceira causa, e a mais traiçoeira: o TETO POR POSIÇÃO em si já é
+    // menor que o mínimo da corretora. Aqui nenhuma posição jamais abre — nem
+    // com o livro vazio, nem depois de fechar tudo —, e a mensagem de "caixa
+    // preso em posições abertas" mandaria esperar por algo que não vem.
+    //
+    // Ela nasce de um centavo: com teto em 25% e $20,00 de patrimônio o teto
+    // dá exatamente $5,00 e passa raspando; UMA operação perdida leva o
+    // patrimônio a $19,98, o teto a $4,99, e o motor trava para sempre sem
+    // nenhum erro — os sinais continuam aparecendo e todos são recusados.
+    if (temFracao && params.minNotional && tetoPorPosicao.lessThan(params.minNotional)) {
+        const fracaoNecessaria = params.minNotional
+            .dividedBy(capital.mul(alavancagem))
+            .mul(100)
+            .ceil();
+        return zero(
+            `Teto por posição ($${tetoPorPosicao.toFixed(2)}) abaixo do mínimo da corretora ` +
+                `($${params.minNotional.toFixed(2)}): com o teto em ${fracao!.mul(100).toFixed(0)}% sobre ` +
+                `$${capital.toFixed(2)} de patrimônio, NENHUMA posição alcança o mínimo. Fechar as posições ` +
+                `abertas NÃO resolve. Suba DIRECTIONAL_MAX_POSITION_FRACTION para pelo menos ` +
+                `${fracaoNecessaria.toString()}% ou aumente o capital.`,
+        );
+    }
     if (params.minNotional && notional.lessThan(params.minNotional)) {
         // Duas causas diferentes chegam neste mesmo ponto, e confundi-las manda
         // quem opera mexer no lugar errado. Com o caixa esgotado, a mensagem

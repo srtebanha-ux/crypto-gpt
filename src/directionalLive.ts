@@ -508,10 +508,24 @@ async function main() {
     // abaixo do notional mínimo da corretora recusa TUDO em silêncio — o motor
     // pareceria vivo e nunca operaria. Melhor dizer isso no boot.
     const livroPorFamilia = cfg.capital.dividedBy(cfg.livros.length).mul(cfg.maxPositionFraction);
-    if (livroPorFamilia.lessThan(minNotionalMaisAlto)) {
-        log.error(
-            `Cada família fica com $${livroPorFamilia.toFixed(2)} por posição, abaixo do mínimo da ` +
-                `corretora ($${minNotionalMaisAlto.toFixed(2)}). NENHUMA ordem vai passar.`,
+    // A comparação é contra o mínimo COM FOLGA, não contra o mínimo exato, e a
+    // folga é a parte que importa: esta checagem roda sobre o capital
+    // CONFIGURADO, enquanto o dimensionamento usa o patrimônio REAL, que cai a
+    // cada operação perdida. Com teto em 25% e $20,00, o teto dá exatos $5,00 e
+    // esta checagem passa — e uma única perda de um centavo derruba o teto para
+    // $4,99, travando o motor para sempre sem que este aviso jamais dispare.
+    const comFolga = minNotionalMaisAlto.mul('1.2');
+    if (livroPorFamilia.lessThan(comFolga)) {
+        const jaTravado = livroPorFamilia.lessThan(minNotionalMaisAlto);
+        const dizer = jaTravado ? log.error : log.warn;
+        dizer(
+            jaTravado
+                ? `Cada família fica com $${livroPorFamilia.toFixed(2)} por posição, abaixo do mínimo da ` +
+                      `corretora ($${minNotionalMaisAlto.toFixed(2)}). NENHUMA ordem vai passar.`
+                : `Cada família fica com $${livroPorFamilia.toFixed(2)} por posição, contra um mínimo de ` +
+                      `$${minNotionalMaisAlto.toFixed(2)}. Passa por pouco: o teto é calculado sobre o ` +
+                      `patrimônio, que CAI a cada operação perdida — e ao cruzar o mínimo o motor para de ` +
+                      `abrir posição sem gerar erro nenhum.`,
             {
                 oQueFazer:
                     `Rode menos famílias (DIRECTIONAL_STRATEGY), aumente DIRECTIONAL_CAPITAL para pelo menos ` +

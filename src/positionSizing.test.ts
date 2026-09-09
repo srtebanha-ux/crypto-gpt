@@ -507,3 +507,56 @@ test('posição pequena demais diz a causa CERTA: caixa esgotado ou risco aperta
     assert.match(riscoApertado.reason!, /violaria o limite de risco/);
     assert.doesNotMatch(riscoApertado.reason!, /Caixa livre/);
 });
+
+test('o teto por posição abaixo do mínimo é denunciado como ESTRUTURAL, não como caixa preso', () => {
+    // O defeito de um centavo, encontrado em produção: teto de 25% sobre
+    // $20,00 dá exatos $5,00 e passa raspando. Uma operação perdida leva o
+    // patrimônio a $19,98, o teto a $4,99, e daí em diante NENHUMA posição
+    // abre — nem com o livro vazio. A mensagem antiga culpava "capital preso
+    // em posições abertas" e mandava esperar por algo que nunca vem.
+    const plano = planPosition({
+        capital: new Decimal('19.986023'),
+        availableCapital: new Decimal('19.986023'), // livro VAZIO: nada preso
+        maxPositionFraction: new Decimal('0.25'),
+        riskFraction: new Decimal('0.15'),
+        entryPrice: new Decimal('2'),
+        stopPrice: new Decimal('1.9'),
+        minNotional: new Decimal('5'),
+    });
+    assert.equal(plano.quantity.toString(), '0');
+    assert.match(plano.reason ?? '', /Teto por posição/);
+    assert.match(plano.reason ?? '', /NÃO resolve/, 'precisa dizer que fechar posição não adianta');
+    assert.match(plano.reason ?? '', /pelo menos 26%/, 'precisa dizer a fração que destrava');
+});
+
+test('com o teto acima do mínimo, caixa esgotado continua sendo caixa esgotado', () => {
+    // A mensagem estrutural não pode sequestrar o caso legítimo: aqui o teto
+    // comporta o mínimo e o que falta é dinheiro livre de verdade.
+    const plano = planPosition({
+        capital: new Decimal('100'),
+        availableCapital: new Decimal('3'),
+        maxPositionFraction: new Decimal('0.25'),
+        riskFraction: new Decimal('0.15'),
+        entryPrice: new Decimal('2'),
+        stopPrice: new Decimal('1.9'),
+        minNotional: new Decimal('5'),
+    });
+    assert.equal(plano.quantity.toString(), '0');
+    assert.match(plano.reason ?? '', /Caixa livre insuficiente/);
+});
+
+test('alavancagem levanta o teto e destrava o mesmo capital', () => {
+    // O teto é multiplicado pela alavancagem, então $19,98 a 25% com 2x dá
+    // $9,99 — acima do mínimo. É a mesma conta, com empréstimo.
+    const plano = planPosition({
+        capital: new Decimal('19.986023'),
+        availableCapital: new Decimal('19.986023'),
+        maxPositionFraction: new Decimal('0.25'),
+        riskFraction: new Decimal('0.15'),
+        entryPrice: new Decimal('2'),
+        stopPrice: new Decimal('1.9'),
+        minNotional: new Decimal('5'),
+        leverage: new Decimal(2),
+    });
+    assert.ok(plano.quantity.greaterThan(0), 'a 2x o teto passa do mínimo e a posição abre');
+});
