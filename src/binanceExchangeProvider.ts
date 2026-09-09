@@ -69,6 +69,9 @@ const DEFAULT_INTERMEDIATE_BASES = ['BTC', 'ETH', 'BNB', 'FDUSD'];
 // forma extremamente ampla (o padrão gera dezenas de streams, não centenas).
 const MAX_WS_STREAMS_PER_CONNECTION = 1024;
 
+/** Status cru de ordem devolvido pela Binance. */
+type StatusCru = 'NEW' | 'PARTIALLY_FILLED' | 'FILLED' | 'CANCELED' | 'REJECTED' | 'EXPIRED';
+
 /** Como tratar pares que a Binance não lista. */
 export interface OpcoesDeCarga {
     /**
@@ -92,6 +95,8 @@ interface SymbolFilters {
     stepSize: Decimal;
     minQty: Decimal;
     minNotional: Decimal;
+    /** Passo de PREÇO (PRICE_FILTER). Preço fora da grade é recusado. */
+    tickSize: Decimal;
 }
 
 export interface BinanceExchangeProviderOptions {
@@ -501,10 +506,12 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         this.binanceSymbolToPair.set(rawSymbol, pair);
         const lotSize = info?.filters.find((f) => f.filterType === 'LOT_SIZE');
         const notionalFilter = info?.filters.find((f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+        const priceFilter = info?.filters.find((f) => f.filterType === 'PRICE_FILTER');
         this.symbolFilters.set(rawSymbol, {
             stepSize: new Decimal(lotSize?.stepSize ?? '0.00000001'),
             minQty: new Decimal(lotSize?.minQty ?? '0'),
             minNotional: new Decimal(notionalFilter?.minNotional ?? notionalFilter?.notional ?? '0'),
+            tickSize: new Decimal(priceFilter?.tickSize ?? '0.00000001'),
         });
     }
 
@@ -639,6 +646,153 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         };
         const lista = account.userAssets ?? account.balances ?? [];
         return new Decimal(lista.find((b) => b.asset === asset)?.free ?? '0');
+    }
+
+    /**
+     * Topo do book por REST, para posicionar a ordem passiva.
+     *
+     * O motor direcional não mantém WebSocket de profundidade — ele decide por
+     * vela fechada e opera poucas vezes por hora, então uma chamada REST no
+     * instante da entrada é mais barata que manter vinte streams abertos o dia
+     * inteiro para consultar cada um uma vez por hora.
+     */
+    public async fetchBookTicker(pairSymbol: string): Promise<{ melhorCompra: Decimal; melhorVenda: Decimal }> {
+        const symbol = this.pairToBinanceSymbol.get(pairSymbol);
+        if (!symbol) throw new Error(`Símbolo desconhecido para a Binance: ${pairSymbol}`);
+        const res = await fetch(`${this.restBaseUrl}/api/v3/ticker/bookTicker?symbol=${symbol}`);
+        if (!res.ok) throw new Error(`Falha ao ler o topo do book de ${symbol}: HTTP ${res.status}`);
+        const t = (await res.json()) as { bidPrice?: string; askPrice?: string };
+        return {
+            melhorCompra: new Decimal(t.bidPrice ?? '0'),
+            melhorVenda: new Decimal(t.askPrice ?? '0'),
+        };
+    }
+
+    /** Passo de PREÇO do par, necessário para alinhar a ordem passiva à grade. */
+    public getSymbolTickSize(pair: string): Decimal | undefined {
+        const symbol = this.pairToBinanceSymbol.get(pair);
+        if (!symbol) return undefined;
+        return this.symbolFilters.get(symbol)?.tickSize;
+    }
+
+    /**
+     * Envia uma compra PASSIVA (`LIMIT_MAKER`) e devolve o id, sem esperar.
+     *
+     * `LIMIT_MAKER` é recusada pela corretora se executaria na hora — é o que
+     * GARANTE a taxa de maker. Uma `LIMIT` comum ao mesmo preço poderia cruzar
+     * o book e cobrar taxa de agressor sem avisar, entregando o oposto do que
+     * esta função existe para conseguir.
+     *
+     * Não espera preenchimento de propósito: quem decide quanto esperar, e o
+     * que fazer no vencimento, é `makerEntry.ts`. Misturar a decisão com o I/O
+     * aqui tornaria a parte que pode estar errada impossível de testar sem rede.
+     */
+    public async placeMakerBuy(
+        pairSymbol: string,
+        qty: Decimal,
+        price: Decimal,
+    ): Promise<{ orderId: number; status: StatusCru; executedQty: Decimal }> {
+        const symbol = this.pairToBinanceSymbol.get(pairSymbol);
+        if (!symbol) throw new Error(`Símbolo desconhecido para a Binance: ${pairSymbol}`);
+        const filters = this.symbolFilters.get(symbol);
+        const roundedQty = this.roundToStepSize(qty, filters);
+        if (filters && roundedQty.lessThan(filters.minQty)) {
+            throw new Error(`Quantidade ${roundedQty.toString()} abaixo do minQty para ${symbol}.`);
+        }
+
+        const params: Record<string, string> = {
+            symbol,
+            side: 'BUY',
+            type: 'LIMIT_MAKER',
+            quantity: roundedQty.toFixed(),
+            price: price.toFixed(),
+            timestamp: this.serverTimestamp(),
+        };
+        if (this.mode === 'margin') {
+            params.isIsolated = 'FALSE';
+            params.sideEffectType = this.marginAutoBorrow ? 'MARGIN_BUY' : 'NO_SIDE_EFFECT';
+        }
+
+        const query = this.signParams(params);
+        const rota = this.mode === 'margin' ? '/sapi/v1/margin/order' : '/api/v3/order';
+        const res = await fetch(`${this.restBaseUrl}${rota}?${query}`, {
+            method: 'POST',
+            headers: { 'X-MBX-APIKEY': this.apiKey },
+        });
+        const body = (await res.json()) as {
+            orderId?: number;
+            status?: string;
+            executedQty?: string;
+            msg?: string;
+            code?: number;
+        };
+        if (!res.ok) {
+            // -2010 com LIMIT_MAKER significa "executaria imediatamente". Não é
+            // falha: é o preço ter andado a favor entre a decisão e o envio, e
+            // quem trata isso é a política de entrada.
+            if (body.code === -2010) {
+                return { orderId: 0, status: 'REJECTED', executedQty: new Decimal(0) };
+            }
+            throw new Error(
+                `Ordem passiva rejeitada (${symbol}): ${body.msg ?? res.statusText} (code ${body.code ?? res.status})`,
+            );
+        }
+        return {
+            orderId: body.orderId ?? 0,
+            status: (body.status as StatusCru) ?? 'NEW',
+            executedQty: new Decimal(body.executedQty ?? '0'),
+        };
+    }
+
+    /** Status atual de uma ordem. */
+    public async fetchOrder(pairSymbol: string, orderId: number): Promise<{ status: StatusCru; executedQty: Decimal; cummulativeQuoteQty: Decimal }> {
+        const symbol = this.pairToBinanceSymbol.get(pairSymbol);
+        if (!symbol) throw new Error(`Símbolo desconhecido para a Binance: ${pairSymbol}`);
+        const extra: Record<string, string> = this.mode === 'margin' ? { isIsolated: 'FALSE' } : {};
+        const query = this.signParams({ symbol, orderId: String(orderId), timestamp: this.serverTimestamp(), ...extra });
+        const rota = this.mode === 'margin' ? '/sapi/v1/margin/order' : '/api/v3/order';
+        const res = await fetch(`${this.restBaseUrl}${rota}?${query}`, { headers: { 'X-MBX-APIKEY': this.apiKey } });
+        if (!res.ok) throw new Error(`Falha ao consultar a ordem ${orderId} de ${symbol}: HTTP ${res.status}`);
+        const body = (await res.json()) as { status?: string; executedQty?: string; cummulativeQuoteQty?: string };
+        return {
+            status: (body.status as StatusCru) ?? 'NEW',
+            executedQty: new Decimal(body.executedQty ?? '0'),
+            cummulativeQuoteQty: new Decimal(body.cummulativeQuoteQty ?? '0'),
+        };
+    }
+
+    /**
+     * Cancela uma ordem e devolve o que ela tinha preenchido ATÉ o cancelamento.
+     *
+     * Devolver o preenchido importa mais que o sucesso do cancelamento: a
+     * corrida real é a ordem preencher no mesmo instante em que se pede o
+     * cancelamento. Nesse caso a corretora recusa o cancelamento, e tratar isso
+     * como "não comprei" deixaria moeda real sem stop — posição órfã. Por isso
+     * a falha de cancelamento não lança: ela reconsulta a ordem e devolve a
+     * verdade.
+     */
+    public async cancelOrder(pairSymbol: string, orderId: number): Promise<{ status: StatusCru; executedQty: Decimal; cummulativeQuoteQty: Decimal }> {
+        const symbol = this.pairToBinanceSymbol.get(pairSymbol);
+        if (!symbol) throw new Error(`Símbolo desconhecido para a Binance: ${pairSymbol}`);
+        const extra: Record<string, string> = this.mode === 'margin' ? { isIsolated: 'FALSE' } : {};
+        const query = this.signParams({ symbol, orderId: String(orderId), timestamp: this.serverTimestamp(), ...extra });
+        const rota = this.mode === 'margin' ? '/sapi/v1/margin/order' : '/api/v3/order';
+        const res = await fetch(`${this.restBaseUrl}${rota}?${query}`, {
+            method: 'DELETE',
+            headers: { 'X-MBX-APIKEY': this.apiKey },
+        });
+        if (!res.ok) {
+            // Cancelamento falhou — quase sempre porque a ordem saiu do book
+            // (preencheu ou já tinha sido cancelada). A pergunta que importa
+            // não é "cancelou?", é "quanto foi executado?".
+            return this.fetchOrder(pairSymbol, orderId);
+        }
+        const body = (await res.json()) as { status?: string; executedQty?: string; cummulativeQuoteQty?: string };
+        return {
+            status: (body.status as StatusCru) ?? 'CANCELED',
+            executedQty: new Decimal(body.executedQty ?? '0'),
+            cummulativeQuoteQty: new Decimal(body.cummulativeQuoteQty ?? '0'),
+        };
     }
 
     /**

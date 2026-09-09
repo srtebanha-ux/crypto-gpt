@@ -37,6 +37,7 @@ import { planPosition, tradeNetPnl, updateTrailingStopAtr } from './positionSizi
 import { alavancagemEfetiva, custoDeIdaEVoltaSobreCapital, stopDisparaAntesDaLiquidacao } from './leverage';
 import { barrasDesde, decidirSaidaPorTempo } from './timeStop';
 import { operacaoValeATaxa } from './feeViability';
+import { decidirEntradaPassiva, precoDaCompraPassiva } from './makerEntry';
 import { resolverPreset, resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
 import type { EntryStrategy } from './backtest';
 
@@ -178,6 +179,10 @@ interface Config {
     alavancagem: Decimal;
     /** Patrimônio em que a alavancagem volta para 1x. Zero desliga a regra. */
     alvoDeDesalavancagem: Decimal;
+    /** Tenta entrar como MAKER (taxa de quem espera) antes de atravessar. */
+    entradaPassiva: boolean;
+    /** Quanto esperar a ordem passiva preencher, em ms. */
+    esperaPassivaMs: number;
     /**
      * Parâmetros de sinal e risco, resolvidos pelo MESMO código que o backtest
      * usa. Operar com parâmetros diferentes dos medidos é operar às cegas — e
@@ -295,6 +300,8 @@ function resolveConfig(): Config {
         margem,
         alavancagem,
         alvoDeDesalavancagem: new Decimal(process.env.DIRECTIONAL_LEVERAGE_TARGET ?? '0'),
+        entradaPassiva: process.env.DIRECTIONAL_MAKER_ENTRY === 'true',
+        esperaPassivaMs: Number(process.env.DIRECTIONAL_MAKER_WAIT_MS ?? '8000'),
         strategy: resolveStrategyParams(familias[0]),
         livros: familias.map((f) => resolveStrategyParams(f)),
     };
@@ -438,6 +445,9 @@ async function main() {
         ativos: cfg.symbols.join(','),
         carteira: cfg.margem ? 'MARGEM CRUZADA (empresta)' : 'SPOT (dinheiro próprio)',
         alavancagem: `${cfg.alavancagem}x`,
+        entrada: cfg.entradaPassiva
+            ? `PASSIVA (taxa de maker), esperando até ${cfg.esperaPassivaMs}ms e atravessando se não pegar`
+            : 'A MERCADO (taxa de agressor)',
         estrategias: cfg.livros.map((l) => l.entryStrategy).join(' + '),
         capitalPorEstrategia: cfg.capital.dividedBy(cfg.livros.length).toFixed(2),
         intervalo: cfg.interval,
@@ -471,6 +481,102 @@ async function main() {
             },
         );
     }
+
+    /**
+     * Entra como MAKER e, se não preencher a tempo, ATRAVESSA a mercado.
+     *
+     * A economia é real — taxa de quem espera em vez de taxa de quem atravessa
+     * — mas o motivo de atravessar no vencimento é mais importante que ela:
+     * ordem passiva preenche preferencialmente quando o mercado vem contra
+     * (seleção adversa), e deixa de preencher justamente quando o preço
+     * dispara, que é a operação que paga a estratégia. Esperar até preencher
+     * economizaria taxa e perderia os melhores negócios.
+     *
+     * Devolve sempre a VERDADE sobre o que foi executado. Um erro aqui não
+     * estoura: vira posição fantasma (o livro acha que comprou e não comprou)
+     * ou órfã (comprou e o livro não sabe).
+     */
+    const entrarComoMaker = async (
+        exchange: BinanceExchangeProvider,
+        familia: string,
+        symbol: string,
+        quantidade: Decimal,
+    ): Promise<{ executedPrice: Decimal; executedQty: Decimal }> => {
+        const par = paraPar(symbol);
+        const atravessar = async () => {
+            const fill = await exchange.executeOrder(par, 'BUY', 'MARKET', quantidade);
+            return { executedPrice: fill.executedPrice, executedQty: fill.executedQty };
+        };
+
+        const tickSize = exchange.getSymbolTickSize(par);
+        if (!tickSize) return atravessar();
+
+        const { melhorCompra, melhorVenda } = await exchange.fetchBookTicker(par);
+        const preco = precoDaCompraPassiva({ melhorCompra, melhorVenda, tickSize });
+        if (!preco) {
+            // Book cruzado ou vazio: não dá para ser passivo sem inventar preço.
+            return atravessar();
+        }
+
+        const enviada = await exchange.placeMakerBuy(par, quantidade, preco);
+        const inicio = Date.now();
+        let status = enviada.status;
+        let preenchido = enviada.executedQty;
+        let quoteGasto = new Decimal(0);
+
+        for (;;) {
+            const decisao = decidirEntradaPassiva({
+                status,
+                preenchido,
+                msDecorridos: Date.now() - inicio,
+                msDeEspera: cfg.esperaPassivaMs,
+                atravessarNoVencimento: true,
+            });
+
+            if (decisao.acao === 'aguardar') {
+                await new Promise((r) => setTimeout(r, 1000));
+                const atual = await exchange.fetchOrder(par, enviada.orderId);
+                status = atual.status;
+                preenchido = atual.executedQty;
+                quoteGasto = atual.cummulativeQuoteQty;
+                continue;
+            }
+
+            if (decisao.acao === 'assumir-preenchida' || decisao.acao === 'assumir-parcial') {
+                if (quoteGasto.lessThanOrEqualTo(0) || preenchido.lessThanOrEqualTo(0)) {
+                    const atual = await exchange.fetchOrder(par, enviada.orderId);
+                    preenchido = atual.executedQty;
+                    quoteGasto = atual.cummulativeQuoteQty;
+                }
+                if (preenchido.lessThanOrEqualTo(0)) return atravessar();
+                log.info(`[${familia}] ${symbol}: entrada PASSIVA preenchida (taxa de maker).`, {
+                    preco: quoteGasto.dividedBy(preenchido).toFixed(8),
+                    quantidade: preenchido.toString(),
+                });
+                return { executedPrice: quoteGasto.dividedBy(preenchido), executedQty: preenchido };
+            }
+
+            // Cancelar e atravessar. O cancelamento pode falhar porque a ordem
+            // acabou de preencher — por isso o que vale é o que ele devolve, e
+            // não se ele deu certo.
+            if (enviada.orderId > 0) {
+                const aposCancelar = await exchange.cancelOrder(par, enviada.orderId);
+                if (aposCancelar.executedQty.greaterThan(0)) {
+                    log.info(`[${familia}] ${symbol}: preencheu durante o cancelamento; ficando com a posição.`, {
+                        quantidade: aposCancelar.executedQty.toString(),
+                    });
+                    return {
+                        executedPrice: aposCancelar.cummulativeQuoteQty.dividedBy(aposCancelar.executedQty),
+                        executedQty: aposCancelar.executedQty,
+                    };
+                }
+            }
+            log.info(`[${familia}] ${symbol}: entrada passiva não pegou — atravessando a mercado.`, {
+                motivo: decisao.acao === 'cancelar-e-atravessar' ? decisao.motivo : 'prazo vencido',
+            });
+            return atravessar();
+        }
+    };
 
     /**
      * Um LIVRO por família de entrada: posições, capital e placar próprios.
@@ -846,9 +952,18 @@ async function main() {
         let filledPrice = entryPrice;
         let filledQty = plan.quantity;
         if (exchange) {
-            const fill = await exchange.executeOrder(paraPar(symbol), 'BUY', 'MARKET', plan.quantity);
+            const fill = cfg.entradaPassiva
+                ? await entrarComoMaker(exchange, params.entryStrategy, symbol, plan.quantity)
+                : await exchange.executeOrder(paraPar(symbol), 'BUY', 'MARKET', plan.quantity);
+            if (fill.executedQty.lessThanOrEqualTo(0)) {
+                // Nada preencheu e nada foi atravessado: não há posição. Sair
+                // aqui é obrigatório — seguir registraria uma posição fantasma,
+                // que o motor vigiaria e tentaria vender sem ter o que vender.
+                diagnostico.set(symbol, 'ENTRADA passiva não preencheu e não foi atravessada.');
+                return;
+            }
             if (fill.executedPrice.greaterThan(0)) filledPrice = fill.executedPrice;
-            if (fill.executedQty.greaterThan(0)) filledQty = fill.executedQty;
+            filledQty = fill.executedQty;
         }
         // O stop acompanha o preço REALMENTE pago: mantê-lo ancorado no preço
         // pretendido mudaria silenciosamente a distância até o stop, e com ela

@@ -39,12 +39,13 @@ function newProvider(): BinanceExchangeProvider {
 function seedFilters(
     provider: BinanceExchangeProvider,
     symbol: string,
-    filters: { stepSize: string; minQty: string; minNotional: string }
+    filters: { stepSize: string; minQty: string; minNotional: string; tickSize?: string }
 ): void {
     (provider as unknown as { symbolFilters: Map<string, unknown> }).symbolFilters.set(symbol, {
         stepSize: new Decimal(filters.stepSize),
         minQty: new Decimal(filters.minQty),
         minNotional: new Decimal(filters.minNotional),
+        tickSize: new Decimal(filters.tickSize ?? '0.01'),
     });
 }
 
