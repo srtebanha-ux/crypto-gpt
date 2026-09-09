@@ -26,7 +26,9 @@
     "smoke-test-order": "ts-node src/smokeTestOrder.ts",
     "smoke-test-order:prod": "node dist/smokeTestOrder.js",
     "typecheck": "tsc -p . --noEmit",
-    "test": "node --require ts-node/register --test src/*.test.ts"
+    "test": "node --require ts-node/register --test src/*.test.ts",
+    "leadlag": "ts-node src/leadLagSniffer.ts",
+    "leadlag:prod": "node dist/leadLagSniffer.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",
