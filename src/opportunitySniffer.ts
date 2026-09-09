@@ -16,6 +16,14 @@ import { Decimal } from 'decimal.js';
 import WebSocket from 'ws';
 import { createLogger } from './logger';
 import { buildTriangles, RawTriangle as Triangle, SymbolInfo } from './triangleTopology';
+import {
+    brutoNecessario,
+    custoDoTriangulo,
+    montarTabelaDeTaxas,
+    pernasIsentas,
+    retencaoDoTriangulo,
+    type TabelaDeTaxas,
+} from './taxaPorPar';
 
 const log = createLogger('sniffer');
 
@@ -27,6 +35,20 @@ const MAX_LEG_AGE_MS = 3000; // idade máxima aceita de CADA perna para uma aval
 
 const TAKER_FEE = new Decimal(process.env.SNIFFER_TAKER_FEE ?? '0.001');
 const TARGET_NET_PROFIT = new Decimal(process.env.SNIFFER_TARGET_NET_PROFIT ?? '0.0002'); // 0.02% líquido
+
+/**
+ * Pares com taxa ZERO, separados por vírgula.
+ *
+ * É a variável que reabre este motor. A conclusão anterior — arbitragem
+ * triangular morta, melhor desalinhamento 0,124% contra custo de 0,225% —
+ * dependia de assumir a mesma taxa nas três pernas. Com os pares FDUSD
+ * isentos, um ciclo USDT → cripto → FDUSD → USDT paga taxa em UMA perna, e o
+ * custo desce para 0,075%.
+ */
+const PARES_ISENTOS = (process.env.SNIFFER_ZERO_FEE_PAIRS ?? '')
+    .split(',')
+    .map((p) => p.trim().toUpperCase())
+    .filter((p) => p.length > 0);
 const INTERMEDIATE_BASES = (process.env.SNIFFER_BASES ?? 'BTC,ETH,BNB,FDUSD').split(',').map((s) => s.trim().toUpperCase());
 
 // ============================================================================
@@ -58,13 +80,20 @@ export function evaluateTriangle(
     leg1: BookTick,
     leg2: BookTick,
     leg3: BookTick,
-    retentionCubed: Decimal,
+    /**
+     * Retenção DESTE triângulo — o produto de (1 − taxa) das três pernas.
+     *
+     * Era `(1 − taxa)³`, uma taxa só para o motor inteiro. Deixou de ser
+     * elevado ao cubo porque as pernas não custam a mesma coisa: com FDUSD
+     * isento, duas das três não custam nada.
+     */
+    retencaoDoCiclo: Decimal,
     requiredGrossSpread: Decimal
 ): TriangleEvaluation | null {
     if (!leg1.ask.greaterThan(0) || !leg2.ask.greaterThan(0) || !leg3.bid.greaterThan(0)) return null;
 
     const grossReturn = new Decimal(1).dividedBy(leg1.ask).dividedBy(leg2.ask).mul(leg3.bid);
-    const netProfitPct = grossReturn.mul(retentionCubed).minus(1).mul(100);
+    const netProfitPct = grossReturn.mul(retencaoDoCiclo).minus(1).mul(100);
 
     return {
         triangleId: triangle.id,
@@ -78,8 +107,15 @@ export function evaluateTriangle(
 // [2] MOTOR DE ESTADO: descoberta de topologia + ingestão WS + avaliação O(k)
 // ============================================================================
 class OpportunitySniffer {
-    private readonly retentionCubed: Decimal;
-    private readonly requiredGrossSpread: Decimal;
+    private readonly tabelaDeTaxas: TabelaDeTaxas;
+    private readonly lucroAlvo: Decimal;
+    /**
+     * Retenção e bruto exigido POR TRIÂNGULO, calculados uma vez na montagem
+     * da topologia. As taxas não mudam a cada tick, e recalcular no laço
+     * quente custaria três buscas em Set por avaliação, milhares de vezes por
+     * segundo, para sempre devolver o mesmo número.
+     */
+    private readonly custoPorTriangulo = new Map<string, { retencao: Decimal; brutoExigido: Decimal }>();
 
     private triangles: Triangle[] = [];
     /** Índice símbolo -> triângulos afetados, construído uma vez — evita re-varrer todos os triângulos a cada tick (O(k), não O(N)). */
@@ -96,15 +132,15 @@ class OpportunitySniffer {
         startTime: Date.now(),
     };
 
-    constructor(feeRate: Decimal, targetNetProfit: Decimal) {
-        this.retentionCubed = new Decimal(1).minus(feeRate).pow(3);
-        this.requiredGrossSpread = new Decimal(1).plus(targetNetProfit).dividedBy(this.retentionCubed);
+    constructor(feeRate: Decimal, targetNetProfit: Decimal, paresIsentos: string[] = []) {
+        this.tabelaDeTaxas = montarTabelaDeTaxas({ padrao: feeRate, isentos: paresIsentos });
+        this.lucroAlvo = targetNetProfit;
     }
 
     public async initialize(): Promise<void> {
         log.info('Iniciando mapeamento topológico real da Binance...', {
             bases: INTERMEDIATE_BASES.join(','),
-            requiredGrossSpread: this.requiredGrossSpread.toFixed(6),
+            lucroAlvo: `${this.lucroAlvo.mul(100).toFixed(4)}%`,
         });
         await this.buildTopologyGraph();
         this.connectWebSocket();
@@ -127,7 +163,13 @@ class OpportunitySniffer {
 
         this.triangles = buildTriangles(activeSymbols, INTERMEDIATE_BASES);
         this.trianglesBySymbol = new Map();
+        this.custoPorTriangulo.clear();
         for (const t of this.triangles) {
+            const pernas: [string, string, string] = [t.leg1, t.leg2, t.leg3];
+            this.custoPorTriangulo.set(t.id, {
+                retencao: retencaoDoTriangulo(pernas, this.tabelaDeTaxas),
+                brutoExigido: brutoNecessario({ pernas, tabela: this.tabelaDeTaxas, lucroAlvo: this.lucroAlvo }),
+            });
             for (const leg of [t.leg1, t.leg2, t.leg3]) {
                 const list = this.trianglesBySymbol.get(leg) ?? [];
                 list.push(t);
@@ -135,9 +177,28 @@ class OpportunitySniffer {
             }
         }
 
+        // Quais triângulos ficaram baratos, e por quê. Sem isto, um custo
+        // menor apareceria como um número sem explicação — e um número sem
+        // explicação é indistinguível de um erro de configuração.
+        const comIsencao = this.triangles
+            .map((t) => ({
+                id: t.id,
+                isentas: pernasIsentas([t.leg1, t.leg2, t.leg3], this.tabelaDeTaxas),
+                custo: custoDoTriangulo([t.leg1, t.leg2, t.leg3], this.tabelaDeTaxas),
+            }))
+            .filter((t) => t.isentas.length > 0)
+            .sort((a, b) => (a.custo.lessThan(b.custo) ? -1 : 1));
+
         log.info('Topologia real construída a partir dos pares de fato listados na Binance.', {
             triangulosOperaveis: this.triangles.length,
             simbolosUnicos: this.trianglesBySymbol.size,
+            paresIsentosConfigurados: Array.from(this.tabelaDeTaxas.isentos).join(',') || 'nenhum',
+            triangulosComPernaIsenta: comIsencao.length,
+            custoCheio: `${custoDoTriangulo(['X', 'Y', 'Z'], this.tabelaDeTaxas).mul(100).toFixed(4)}%`,
+            maisBaratos: comIsencao
+                .slice(0, 5)
+                .map((t) => `${t.id} (${t.custo.mul(100).toFixed(4)}%, isentas: ${t.isentas.join('+')})`)
+                .join(' | ') || 'nenhum',
         });
     }
 
@@ -200,7 +261,12 @@ class OpportunitySniffer {
                 continue;
             }
 
-            const evaluation = evaluateTriangle(t, ob1, ob2, ob3, this.retentionCubed, this.requiredGrossSpread);
+            const custo = this.custoPorTriangulo.get(t.id);
+            // Triângulo sem custo pré-calculado é triângulo que não passou pela
+            // montagem da topologia. Avaliar com um padrão inventado aqui seria
+            // operar com número que ninguém conferiu.
+            if (!custo) continue;
+            const evaluation = evaluateTriangle(t, ob1, ob2, ob3, custo.retencao, custo.brutoExigido);
             if (!evaluation || !evaluation.isOpportunity) continue;
 
             this.metrics.opportunitiesFound += 1;
@@ -232,7 +298,7 @@ class OpportunitySniffer {
 }
 
 async function main() {
-    const sniffer = new OpportunitySniffer(TAKER_FEE, TARGET_NET_PROFIT);
+    const sniffer = new OpportunitySniffer(TAKER_FEE, TARGET_NET_PROFIT, PARES_ISENTOS);
     await sniffer.initialize();
 
     const shutdown = () => {
