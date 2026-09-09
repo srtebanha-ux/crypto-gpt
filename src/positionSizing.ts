@@ -157,8 +157,13 @@ export function planPosition(params: RiskParams): PositionPlan {
         fracao && fracao.greaterThan(0) && fracao.lessThanOrEqualTo(1)
             ? capital.mul(fracao).mul(alavancagem)
             : cash;
-    const maxAffordable = Decimal.min(cash, tetoPorPosicao).dividedBy(entryPrice);
+    const poderDeCompra = Decimal.min(cash, tetoPorPosicao);
+    const maxAffordable = poderDeCompra.dividedBy(entryPrice);
     const capped = Decimal.min(rawQuantity, maxAffordable);
+    // Qual dos dois tetos mordeu. Guardado aqui porque, se a posição acabar
+    // pequena demais, a CAUSA muda completamente: "o risco não comporta mais"
+    // e "o caixa acabou" pedem ações opostas de quem opera.
+    const limitadoPeloCaixa = maxAffordable.lessThan(rawQuantity);
     const quantity = truncateToStep(capped, params.stepSize);
 
     if (quantity.lessThanOrEqualTo(0)) {
@@ -167,9 +172,17 @@ export function planPosition(params: RiskParams): PositionPlan {
 
     const notional = quantity.mul(entryPrice);
     if (params.minNotional && notional.lessThan(params.minNotional)) {
+        // Duas causas diferentes chegam neste mesmo ponto, e confundi-las manda
+        // quem opera mexer no lugar errado. Com o caixa esgotado, a mensagem
+        // antiga culpava o mínimo da corretora — e alguém leria aquilo e iria
+        // ajustar BT_MIN_NOTIONAL, que não tem nada a ver com o problema.
         return zero(
-            `Notional ${notional.toFixed(2)} abaixo do mínimo da corretora (${params.minNotional.toFixed(2)}). ` +
-                `Aumentar a posição para atingir o mínimo violaria o limite de risco — melhor não operar.`,
+            limitadoPeloCaixa
+                ? `Caixa livre insuficiente: restam $${poderDeCompra.toFixed(2)} de poder de compra e o mínimo da ` +
+                  `corretora é $${params.minNotional.toFixed(2)}. O capital está preso em posições abertas — ` +
+                  `é preciso fechar alguma para abrir outra.`
+                : `Notional ${notional.toFixed(2)} abaixo do mínimo da corretora (${params.minNotional.toFixed(2)}). ` +
+                  `Aumentar a posição para atingir o mínimo violaria o limite de risco — melhor não operar.`,
         );
     }
 

@@ -475,3 +475,35 @@ test('alavancagem 1 ou ausente não muda nada', () => {
         assert.equal(comValor.quantity.toString(), semCampo.quantity.toString(), `leverage=${valor} não pode alterar`);
     }
 });
+
+test('posição pequena demais diz a causa CERTA: caixa esgotado ou risco apertado', () => {
+    // As duas causas chegam no mesmo ponto do código e pedem ações opostas.
+    // Confundi-las manda quem opera mexer no lugar errado — com o caixa
+    // esgotado, a mensagem antiga culpava o mínimo da corretora, e alguém
+    // leria aquilo e iria ajustar o mínimo, que não tem nada a ver.
+    const semCaixa = planPosition({
+        capital: new Decimal('20'),
+        availableCapital: new Decimal('0.0001'), // tudo preso em posições abertas
+        riskFraction: new Decimal('0.02'),
+        entryPrice: new Decimal('100'),
+        stopPrice: new Decimal('99'),
+        minNotional: new Decimal('5'),
+    });
+    assert.equal(semCaixa.quantity.toString(), '0');
+    assert.match(semCaixa.reason!, /Caixa livre insuficiente/);
+    assert.match(semCaixa.reason!, /preso em posições abertas/);
+
+    // Caixa de sobra, mas o stop tão largo que a posição que respeita o risco
+    // não alcança o mínimo. Aqui a mensagem antiga é a certa.
+    const riscoApertado = planPosition({
+        capital: new Decimal('20'),
+        availableCapital: new Decimal('20'),
+        riskFraction: new Decimal('0.001'),
+        entryPrice: new Decimal('100'),
+        stopPrice: new Decimal('50'), // stop a 50%
+        minNotional: new Decimal('5'),
+    });
+    assert.equal(riscoApertado.quantity.toString(), '0');
+    assert.match(riscoApertado.reason!, /violaria o limite de risco/);
+    assert.doesNotMatch(riscoApertado.reason!, /Caixa livre/);
+});
