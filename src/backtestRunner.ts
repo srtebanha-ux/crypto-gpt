@@ -261,6 +261,7 @@ function reportOutcome(o: SymbolOutcome): void {
         // capital pequeno demais para o preço.
         funil:
             `${o.funnel.velasAvaliadas} velas → ${o.funnel.sinaisDisparados} sinais → ` +
+            `${o.funnel.barradosPorTaxa} não pagavam a taxa, ` +
             `${o.funnel.barradosPorTendencia} barrados por tendência, ` +
             `${o.funnel.recusadosPorRisco} recusados por risco → ${o.trades} operações`,
     });

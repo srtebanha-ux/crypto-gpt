@@ -29,6 +29,8 @@ import {
     rsiSeries,
     type Candle,
 } from './signals';
+import { decidirSaidaPorTempo } from './timeStop';
+import { operacaoValeATaxa } from './feeViability';
 import { planPosition, tradeNetPnl, updateTrailingStop, updateTrailingStopAtr } from './positionSizing';
 
 /**
@@ -58,6 +60,10 @@ export interface StrategyParams {
     atrStopMultiplier: Decimal;
     /** Período da média de tendência. 0 desliga o filtro. */
     trendPeriod: number;
+    /** Velas máximas numa operação parada antes de liberar a vaga. 0 desliga. */
+    maxBarrasNaOperacao?: number;
+    /** Amplitude mínima do ativo, em múltiplos do custo de ida e volta. 0 desliga. */
+    minAtrEmTaxas?: Decimal;
     /** Fração do capital arriscada por operação. */
     riskFraction: Decimal;
     /** Fração de trailing stop por percentual fixo (0 desliga). */
@@ -98,7 +104,7 @@ export interface Trade {
     /** Lucro líquido em moeda de cotação, já descontadas as duas taxas. */
     netProfit: Decimal;
     feesPaid: Decimal;
-    exitReason: 'stop' | 'alvo' | 'fim-dos-dados';
+    exitReason: 'stop' | 'alvo' | 'tempo' | 'fim-dos-dados';
     /**
      * Regime do mercado NA ENTRADA: preço acima ou abaixo da média longa.
      *
@@ -140,6 +146,8 @@ export interface BacktestResult {
         velasAvaliadas: number;
         sinaisDisparados: number;
         barradosPorTendencia: number;
+        /** Sinais recusados porque o movimento do ativo não paga a taxa. */
+        barradosPorTaxa: number;
         recusadosPorRisco: number;
     };
 }
@@ -165,6 +173,7 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
     let velasAvaliadas = 0;
     let sinaisDisparados = 0;
     let barradosPorTendencia = 0;
+    let barradosPorTaxa = 0;
 
     let peakCapital = initialCapital;
     let maxDrawdown = new Decimal(0);
@@ -242,6 +251,21 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
                 // o stop é a leitura pessimista, e é a única honesta.
                 closePosition(position, i, position.entryPrice.plus(position.initialRisk.mul(params.takeProfitR)), 'alvo');
                 position = null;
+            } else if (
+                // Saída por TEMPO, checada por ÚLTIMO entre as saídas: stop e
+                // alvo descrevem o que o preço fez, e o relógio só decide onde
+                // nenhum dos dois decidiu. Checá-la antes fecharia no
+                // fechamento da vela uma posição que já tinha stopado na
+                // mínima dela — inventando um resultado melhor que o real.
+                decidirSaidaPorTempo({
+                    barrasSeguradas: i - position.entryIndex,
+                    maxBarras: params.maxBarrasNaOperacao ?? 0,
+                    variacaoDesdeEntrada: candle.close.minus(position.entryPrice).dividedBy(position.entryPrice),
+                    taxaPorPerna: params.feeRate,
+                }).sair
+            ) {
+                closePosition(position, i, candle.close, 'tempo');
+                position = null;
             } else {
                 if (candle.high.greaterThan(position.highestSinceEntry)) {
                     position.highestSinceEntry = candle.high;
@@ -293,6 +317,21 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
         if (!signal.triggered || signal.atrValue === null) continue;
         sinaisDisparados += 1;
 
+        // Antes dos outros filtros: esta mesa paga a taxa? O motivo é
+        // econômico e não tem nada a ver com o sinal estar certo — comprar um
+        // ativo cuja vela típica anda menos que alguns múltiplos do pedágio é
+        // impossível de ganhar no longo prazo, por melhor que seja a entrada.
+        const taxaOk = operacaoValeATaxa({
+            atr: signal.atrValue,
+            preco: candles[i].close,
+            taxaPorPerna: params.feeRate,
+            minimoEmTaxas: params.minAtrEmTaxas ?? new Decimal(0),
+        });
+        if (!taxaOk.vale) {
+            barradosPorTaxa += 1;
+            continue;
+        }
+
         if (params.trendPeriod > 0) {
             const aboveTrend = isAboveTrend(closes, i, params.trendPeriod);
             if (aboveTrend !== true) {
@@ -340,6 +379,7 @@ export function runBacktest(candles: Candle[], initialCapital: Decimal, params: 
         velasAvaliadas,
         sinaisDisparados,
         barradosPorTendencia,
+        barradosPorTaxa,
         recusadosPorRisco: skippedByRisk,
     });
 }

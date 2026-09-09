@@ -35,6 +35,8 @@ import {
 } from './signals';
 import { planPosition, tradeNetPnl, updateTrailingStopAtr } from './positionSizing';
 import { alavancagemEfetiva, custoDeIdaEVoltaSobreCapital, stopDisparaAntesDaLiquidacao } from './leverage';
+import { barrasDesde, decidirSaidaPorTempo } from './timeStop';
+import { operacaoValeATaxa } from './feeViability';
 import { resolverPreset, resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
 import type { EntryStrategy } from './backtest';
 
@@ -540,6 +542,7 @@ async function main() {
     const diagnostico = new Map<string, string>();
     let sinaisDisparados = 0;
     let bloqueadosPorTendencia = 0;
+    let barradosPorTaxa = 0;
     let recusadosPorRisco = 0;
     /** Fecha a última vela já processada por símbolo — evita reavaliar a mesma. */
     const lastSeenCandle = new Map<string, number>();
@@ -704,6 +707,21 @@ async function main() {
                 await closePosition(pos, alvo, `alvo de ${params.takeProfitR!.toString()}R atingido`);
                 return;
             }
+            // Saída por TEMPO, por ÚLTIMO entre as saídas: stop e alvo dizem o
+            // que o preço fez; o relógio só decide onde nenhum dos dois
+            // decidiu. Barras contadas pelo RELÓGIO, não por ciclo do motor —
+            // com poll de 30s num gráfico de 15m, contar ciclos mediria
+            // quantas vezes o motor olhou, não quanto tempo passou.
+            const porTempo = decidirSaidaPorTempo({
+                barrasSeguradas: barrasDesde(pos.openedAt, candle.openTime, cfg.interval),
+                maxBarras: params.maxBarrasNaOperacao ?? 0,
+                variacaoDesdeEntrada: candle.close.minus(pos.entryPrice).dividedBy(pos.entryPrice),
+                taxaPorPerna: params.feeRate,
+            });
+            if (porTempo.sair) {
+                await closePosition(pos, candle.close, `saída por tempo — ${porTempo.motivo}`);
+                return;
+            }
             if (candle.high.greaterThan(pos.highestSinceEntry)) pos.highestSinceEntry = candle.high;
             const currentAtr = atr(candles, last, params.atrPeriod);
             if (currentAtr) {
@@ -747,6 +765,22 @@ async function main() {
             return;
         }
         sinaisDisparados += 1;
+
+        // Antes dos outros filtros: esta mesa paga a taxa? Recusar aqui é
+        // econômico, não tem a ver com o sinal estar certo. Um ativo cuja vela
+        // típica anda menos que alguns múltiplos do pedágio é impossível de
+        // ganhar no longo prazo, por melhor que seja a entrada.
+        const taxaOk = operacaoValeATaxa({
+            atr: signal.atrValue,
+            preco: candle.close,
+            taxaPorPerna: params.feeRate,
+            minimoEmTaxas: params.minAtrEmTaxas ?? new Decimal(0),
+        });
+        if (!taxaOk.vale) {
+            barradosPorTaxa += 1;
+            diagnostico.set(symbol, `SINAL barrado por não pagar a taxa: ${taxaOk.motivo}`);
+            return;
+        }
 
         if (params.trendPeriod > 0) {
             const closes = candles.map((c) => c.close);
@@ -922,6 +956,7 @@ async function main() {
                 : {}),
             sinaisDisparados,
             bloqueadosPorTendencia,
+            barradosPorTaxa,
             recusadosPorRisco,
             porAtivo: cfg.symbols.map((sym) => `${sym}: ${diagnostico.get(sym) ?? 'aguardando fechar a vela'}`).join(' | '),
         }),

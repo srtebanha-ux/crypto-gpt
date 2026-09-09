@@ -53,6 +53,10 @@ export const PRESETS = {
         // 3x a média é a fronteira entre "mexeu" e "alguém está comprando".
         minVolumeRatio: '3',
         atrStopMultiplier: '2',
+        // Desligada: quem tem capital para várias posições não sofre do
+        // custo de oportunidade que esta regra existe para atacar.
+        maxBarrasNaOperacao: '0',
+        minAtrEmTaxas: '0',
     },
     /**
      * Opera MUITO mais. Também perde mais, e não por acaso — por construção.
@@ -80,6 +84,8 @@ export const PRESETS = {
         riskFraction: '0.08',
         // "Subiu com volume acima da média", não "alguém está comprando".
         minVolumeRatio: '1.8',
+        maxBarrasNaOperacao: '0',
+        minAtrEmTaxas: '3',
         // Deliberadamente IGUAL ao padrão: apertar o stop não é coragem, é
         // menos tolerância a ruído, e alargar tem custo simétrico. Só o preset
         // `maximo` mexe nisso, e mexe para o lado de dar espaço.
@@ -116,6 +122,14 @@ export const PRESETS = {
         riskFraction: '0.15',
         minVolumeRatio: '1.2',
         atrStopMultiplier: '3',
+        // 24 velas de 15m = 6 horas. Operação que passou disso sem
+        // cobrir a própria taxa está ocupando a vaga de graça.
+        maxBarrasNaOperacao: '24',
+        // Exige que a vela típica valha 4x o pedágio. Contra-intuitivo num
+        // preset agressivo, e é o ponto: operar mesa morta não é coragem,
+        // é doar taxa. A medição de 15m mostrou a perda por operação
+        // batendo com o custo de uma ida e volta.
+        minAtrEmTaxas: '4',
     },
 } as const;
 
@@ -172,5 +186,11 @@ export function resolveStrategyParams(entryStrategy: EntryStrategy = 'breakout')
         // devolve tudo — em tendência longa, sair no alvo corta o ganho que
         // paga os prejuízos.
         takeProfitR: new Decimal(process.env.BT_TAKE_PROFIT_R ?? '0'),
+        // Saída por TEMPO: fecha o que não andou o bastante para pagar a
+        // própria taxa. Zero desliga. Ver timeStop.ts para o porquê.
+        maxBarrasNaOperacao: Number(process.env.BT_MAX_BARS ?? preset.maxBarrasNaOperacao),
+        // Quanto a amplitude típica precisa valer em múltiplos do custo de ida
+        // e volta para a operação ser aceita. Ver feeViability.ts.
+        minAtrEmTaxas: new Decimal(process.env.BT_MIN_ATR_EM_TAXAS ?? preset.minAtrEmTaxas),
     };
 }
