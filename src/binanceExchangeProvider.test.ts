@@ -584,3 +584,40 @@ test('fetchMarginAccount lê o nível de margem e recusa ser chamado em modo spo
 
     await assert.rejects(() => newProvider().fetchMarginAccount(), /só existe em mode/);
 });
+
+test('margem SEM empréstimo usa NO_SIDE_EFFECT — opera o saldo próprio da carteira de margem', async () => {
+    // Visto em produção: com a conta sem limite de empréstimo liberado, pedir
+    // MARGIN_BUY fez a Binance recusar TODAS as ordens (-3006), e dez sinais
+    // válidos viraram dez recusas. Sem alavancagem não há o que emprestar, e
+    // insistir no empréstimo trava a operação por um motivo que nada tem a ver
+    // com a estratégia.
+    const provider = new BinanceExchangeProvider({
+        apiKey: 'k',
+        apiSecret: 's',
+        live: true,
+        mode: 'margin',
+        marginAutoBorrow: false,
+    });
+    seedSymbolMapping(provider, 'BTC/USDT', 'BTCUSDT');
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.00001', minQty: '0.00001', minNotional: '5' });
+
+    let urlUsada = '';
+    await withFetchStub(
+        async (url) => {
+            urlUsada = url;
+            return jsonResponse(200, {
+                orderId: 1,
+                status: 'FILLED',
+                executedQty: '0.001',
+                cummulativeQuoteQty: '60.01',
+                transactTime: Date.now(),
+                fills: [],
+            });
+        },
+        () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'))
+    );
+
+    assert.ok(urlUsada.includes('/sapi/v1/margin/order'), 'continua na carteira de margem');
+    assert.ok(urlUsada.includes('sideEffectType=NO_SIDE_EFFECT'));
+    assert.ok(!urlUsada.includes('MARGIN_BUY'));
+});

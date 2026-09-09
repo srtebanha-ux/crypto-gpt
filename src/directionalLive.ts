@@ -306,6 +306,11 @@ async function main() {
               apiSecret: process.env.BINANCE_API_SECRET!,
               live: true,
               mode: cfg.margem ? 'margin' : 'spot',
+              // Sem alavancagem não há o que emprestar. Pedir empréstimo de
+              // qualquer forma faz a Binance recusar TODAS as ordens quando a
+              // conta não tem limite de empréstimo — e aí o motor fica sem
+              // operar por um motivo que nada tem a ver com a estratégia.
+              marginAutoBorrow: cfg.alavancagem.greaterThan(1),
           })
         : null;
     if (exchange) {

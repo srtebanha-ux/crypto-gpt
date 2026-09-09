@@ -113,6 +113,23 @@ export interface BinanceExchangeProviderOptions {
      * duas leituras da mesma coisa que se afastam sem nada quebrar.
      */
     mode?: 'spot' | 'margin';
+    /**
+     * Em `mode: 'margin'`, se a ordem deve TOMAR EMPRESTADO o que faltar
+     * (`MARGIN_BUY`/`AUTO_REPAY`) ou usar só o saldo próprio da carteira de
+     * margem (`NO_SIDE_EFFECT`). Padrão: emprestar.
+     *
+     * Desligar existe por dois motivos concretos:
+     *
+     *   1. Com alavancagem 1 não há nada a emprestar, e pedir empréstimo de
+     *      qualquer forma faz a Binance recusar a ordem inteira quando a conta
+     *      não pode tomar emprestado — visto em produção como
+     *      "Your borrow amount has exceed maximum borrow amount (-3006)",
+     *      com dez sinais válidos virando dez recusas.
+     *   2. Permite operar com o dinheiro que já está na carteira de MARGEM sem
+     *      depender de a conta ter empréstimo liberado — que é o que destrava
+     *      testar a estratégia enquanto o limite de empréstimo não resolve.
+     */
+    marginAutoBorrow?: boolean;
     recvWindowMs?: number;
     /** Taxa taker de fallback caso o endpoint de fee não esteja disponível (ex.: testnet). */
     fallbackFeeRate?: string;
@@ -190,6 +207,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     private readonly minBnbBalanceForDiscount: Decimal;
     private serverTimeOffsetMs = 0;
     private readonly mode: 'spot' | 'margin';
+    private readonly marginAutoBorrow: boolean;
     private symbolFilters = new Map<string, SymbolFilters>();
     /** Profundidade mais recente por par interno ("BTC/USDT"), atualizada pelo stream @depth5. */
     private depthState = new Map<string, OrderBookSnapshot>();
@@ -217,6 +235,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         this.minBnbBalanceForDiscount = new Decimal(options.minBnbBalanceForDiscount ?? '0.001');
         this.intermediateBases = options.intermediateBases ?? DEFAULT_INTERMEDIATE_BASES;
         this.mode = options.mode ?? 'spot';
+        this.marginAutoBorrow = options.marginAutoBorrow ?? true;
         if (this.mode === 'margin' && !options.live) {
             // O testnet spot não tem endpoints de margem. Deixar passar daria
             // 404 na primeira ordem, que é tarde demais para descobrir.
@@ -703,7 +722,15 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
             // rendeu. Sem estes dois a ordem só usaria o saldo próprio — seria
             // spot com outro endpoint, e a alavancagem configurada não
             // apareceria em lugar nenhum, sem erro nenhum.
-            params.sideEffectType = side === 'BUY' ? 'MARGIN_BUY' : 'AUTO_REPAY';
+            // NO_SIDE_EFFECT usa só o saldo próprio da carteira de margem — é
+            // spot com outro endereço, de propósito. Sem alavancagem não há o
+            // que emprestar, e pedir mesmo assim faz a corretora recusar a
+            // ordem inteira quando a conta não tem empréstimo liberado.
+            params.sideEffectType = this.marginAutoBorrow
+                ? side === 'BUY'
+                    ? 'MARGIN_BUY'
+                    : 'AUTO_REPAY'
+                : 'NO_SIDE_EFFECT';
         }
         if (type === 'LIMIT') {
             if (!price) throw new Error('Ordens LIMIT exigem price.');
