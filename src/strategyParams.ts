@@ -52,6 +52,7 @@ export const PRESETS = {
         riskFraction: '0.02',
         // 3x a média é a fronteira entre "mexeu" e "alguém está comprando".
         minVolumeRatio: '3',
+        atrStopMultiplier: '2',
     },
     /**
      * Opera MUITO mais. Também perde mais, e não por acaso — por construção.
@@ -79,6 +80,42 @@ export const PRESETS = {
         riskFraction: '0.08',
         // "Subiu com volume acima da média", não "alguém está comprando".
         minVolumeRatio: '1.8',
+        // Deliberadamente IGUAL ao padrão: apertar o stop não é coragem, é
+        // menos tolerância a ruído, e alargar tem custo simétrico. Só o preset
+        // `maximo` mexe nisso, e mexe para o lado de dar espaço.
+        atrStopMultiplier: '2',
+    },
+    /**
+     * O limite do que dá para pedir a esta estratégia. Opera quase tudo.
+     *
+     * Diferente do `agressivo`, que ainda mantinha alguma seletividade, aqui a
+     * ideia é não deixar passar oportunidade — e o preço disso é entrar em
+     * muita coisa que não era oportunidade nenhuma.
+     *
+     * Três mudanças, e vale saber o que cada uma custa:
+     *
+     * - RSI 55: acima de 50 o indicador deixa de significar "sobrevendido" e
+     *   passa a significar "não está caro". A estratégia deixa de comprar
+     *   pânico e passa a comprar qualquer recuo, inclusive os que são só o
+     *   começo de uma queda maior.
+     * - Máxima de 5 velas: rompimento de 5 velas em gráfico de 15 minutos é
+     *   pouco mais que ruído. Muitos disparos, muitos falsos.
+     * - Stop a 3x ATR em vez de 2x: dá espaço para a posição respirar em vez
+     *   de ser tirada por oscilação normal. É a mudança mais defensável das
+     *   três — e ainda assim ela AUMENTA a perda por operação errada, porque
+     *   o stop está mais longe.
+     *
+     * O que este preset NÃO muda, porque não adiantaria: `riskFraction`. Com
+     * teto por posição e alavancagem, o limite de tamanho vem do teto, não da
+     * fórmula de risco — subir o risco aqui seria cosmético.
+     */
+    maximo: {
+        rsiThreshold: '55',
+        breakoutLookback: '5',
+        trendPeriod: '0',
+        riskFraction: '0.15',
+        minVolumeRatio: '1.2',
+        atrStopMultiplier: '3',
     },
 } as const;
 
@@ -114,11 +151,7 @@ export function resolveStrategyParams(entryStrategy: EntryStrategy = 'breakout')
         rsiThreshold: new Decimal(process.env.BT_RSI_THRESHOLD ?? preset.rsiThreshold),
         breakoutLookback: Number(process.env.BT_BREAKOUT_LOOKBACK ?? preset.breakoutLookback),
         atrPeriod: Number(process.env.BT_ATR_PERIOD ?? '14'),
-        // NÃO faz parte do preset de propósito: apertar o stop não é coragem,
-        // é menos tolerância a ruído — e em ativo volátil vira uma sequência
-        // de stops por oscilação normal, que só paga taxa. Alargar tem o custo
-        // simétrico. Quem mexer aqui deve mexer sabendo qual dos dois quer.
-        atrStopMultiplier: new Decimal(process.env.BT_ATR_STOP_MULT ?? '2'),
+        atrStopMultiplier: new Decimal(process.env.BT_ATR_STOP_MULT ?? preset.atrStopMultiplier),
         trendPeriod: Number(process.env.BT_TREND_PERIOD ?? preset.trendPeriod),
         riskFraction: new Decimal(process.env.BT_RISK_FRACTION ?? preset.riskFraction),
         trailFraction: new Decimal(process.env.BT_TRAIL_FRACTION ?? '0'),

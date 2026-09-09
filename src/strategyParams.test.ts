@@ -186,3 +186,24 @@ test('preset inválido falha no boot em vez de cair no padrão em silêncio', ()
     const comRuido = withEnv({ DIRECTIONAL_PRESET: '  AGRESSIVO ' }, () => resolverPreset());
     assert.equal(comRuido.nome, 'agressivo');
 });
+
+test('o preset maximo é mais frouxo que o agressivo em tudo que decide frequência', () => {
+    const agressivo = withEnv({ DIRECTIONAL_PRESET: 'agressivo' }, () => resolveStrategyParams('reversion'));
+    const maximo = withEnv({ DIRECTIONAL_PRESET: 'maximo' }, () => resolveStrategyParams('reversion'));
+
+    assert.ok(maximo.rsiThreshold.greaterThan(agressivo.rsiThreshold));
+    assert.ok(maximo.breakoutLookback! < agressivo.breakoutLookback!);
+    assert.ok(maximo.minVolumeRatio!.lessThan(agressivo.minVolumeRatio!));
+    // Stop MAIS LARGO: dá espaço em vez de ser tirado por oscilação normal.
+    // É a única mudança que reduz a frequência de saída em vez de aumentar a
+    // de entrada — e aumenta a perda por operação errada.
+    assert.ok(maximo.atrStopMultiplier!.greaterThan(agressivo.atrStopMultiplier!));
+});
+
+test('só o preset maximo mexe no stop; padrão e agressivo usam o mesmo', () => {
+    // Apertar ou alargar o stop tem custo simétrico, então o `agressivo` não
+    // toca nisso de propósito. Se um dia tocar, este teste avisa.
+    const padrao = withEnv({ DIRECTIONAL_PRESET: 'padrao' }, () => resolveStrategyParams('reversion'));
+    const agressivo = withEnv({ DIRECTIONAL_PRESET: 'agressivo' }, () => resolveStrategyParams('reversion'));
+    assert.equal(agressivo.atrStopMultiplier!.toString(), padrao.atrStopMultiplier!.toString());
+});
