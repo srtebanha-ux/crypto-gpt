@@ -674,6 +674,24 @@ async function main() {
      */
     let capacidadeDeEmprestimo = new Decimal(0);
 
+    /**
+     * O USDT que a CORRETORA diz estar livre, na última consulta do ciclo.
+     *
+     * O motor mantém o próprio caixa (patrimônio menos margem comprometida), e
+     * esse número é uma MODELAGEM: ele assume que cada posição imobilizou
+     * exatamente `nocional / alavancagem`. Quando a alavancagem efetiva de uma
+     * entrada difere da que o modelo supõe — e ela difere, porque agora depende
+     * da capacidade de empréstimo do momento —, os dois divergem em silêncio.
+     *
+     * A divergência não gera erro nenhum até a ordem sair: aí a Binance recusa
+     * com `-2010 insufficient balance` enquanto o log anuncia caixa livre de
+     * sobra. O princípio já escrito neste projeto vale aqui também — a
+     * corretora é a fonte da verdade, não o arquivo de estado.
+     *
+     * `null` = ainda não consultado (ou consulta falhou): usa só o modelo.
+     */
+    let saldoRealLivre: Decimal | null = null;
+
     const criarLivro = (params: ResolvedStrategyParams, capitalInicial: Decimal) => {
     const salvo = estadoSalvo[params.entryStrategy];
     const positions = new Map<string, OpenPosition>();
@@ -1067,9 +1085,25 @@ async function main() {
         // O que pode ser arriscado, não o que existe: acima do teto o excedente
         // está congelado e não financia posição nova.
         const capitalOperacional = capitalDeTrabalho({ patrimonio: capital, teto: cfg.tetoDeCapital });
+        // O caixa que o motor ACHA que tem, e o que a corretora diz existir. O
+        // menor dos dois manda: dimensionar pelo modelo quando a carteira tem
+        // menos produz ordem recusada por saldo (-2010) com o log anunciando
+        // caixa de sobra — o motor pareceria vivo e não operaria.
+        const caixaModelado = capitalOperacional.minus(committed);
+        const caixaParaDimensionar =
+            saldoRealLivre !== null ? Decimal.min(caixaModelado, saldoRealLivre) : caixaModelado;
+        if (saldoRealLivre !== null && saldoRealLivre.lessThan(caixaModelado.minus('0.5'))) {
+            log.warn(`[${params.entryStrategy}] O caixa modelado passou do saldo real; vale o saldo real.`, {
+                caixaModelado: `$${caixaModelado.toFixed(2)}`,
+                saldoNaCorretora: `$${saldoRealLivre.toFixed(2)}`,
+                porque:
+                    'a margem imobilizada por posição é estimada como nocional/alavancagem, e a alavancagem ' +
+                    'efetiva de cada entrada depende da capacidade de empréstimo do momento.',
+            });
+        }
         const plan = planPosition({
             capital: capitalOperacional,
-            availableCapital: capitalOperacional.minus(committed),
+            availableCapital: caixaParaDimensionar,
             maxPositionFraction: cfg.maxPositionFraction,
             riskFraction: params.riskFraction,
             entryPrice,
@@ -1228,6 +1262,10 @@ async function main() {
             ...(cfg.margem && cfg.alavancagem.greaterThan(1)
                 ? { emprestimoDisponivel: `$${capacidadeDeEmprestimo.toFixed(2)}` }
                 : {}),
+            // O caixa que a CORRETORA diz existir, ao lado do que o motor
+            // modelou. Quando os dois divergem, é o modelo que está errado — e
+            // a divergência é invisível até uma ordem ser recusada por saldo.
+            ...(saldoRealLivre !== null ? { saldoNaCorretora: `$${saldoRealLivre.toFixed(2)}` } : {}),
             ...(cfg.tetoDeCapital.greaterThan(0)
                 ? {
                       capitalQueTrabalha: capitalDeTrabalho({ patrimonio: capital, teto: cfg.tetoDeCapital }).toFixed(2),
@@ -1290,11 +1328,32 @@ async function main() {
         }
     };
 
+    /**
+     * O saldo livre de verdade, uma vez por ciclo.
+     *
+     * Em papel não há carteira: devolver null mantém o modelo mandando, que é
+     * o comportamento correto para uma simulação. Falha na consulta também
+     * devolve null — degradar para o modelo é melhor que parar de operar, e a
+     * pior consequência é a recusa que já acontecia.
+     */
+    const medirSaldoRealLivre = async (): Promise<Decimal | null> => {
+        if (!exchange) return null;
+        try {
+            return await exchange.fetchAvailableBalance('USDT');
+        } catch (err) {
+            log.warn('Não foi possível ler o saldo livre; o ciclo usa o caixa modelado.', {
+                erro: err instanceof Error ? err.message : String(err),
+            });
+            return null;
+        }
+    };
+
     for (;;) {
         // Antes de qualquer decisão de tamanho: quanto a corretora empresta
         // AGORA. Consultar uma vez por ciclo, e não por ativo, evita gastar
         // peso de API repetindo a mesma pergunta vinte vezes.
         capacidadeDeEmprestimo = await medirCapacidadeDeEmprestimo();
+        saldoRealLivre = await medirSaldoRealLivre();
 
         for (const symbol of cfg.symbols) {
             try {
