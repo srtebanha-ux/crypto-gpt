@@ -789,6 +789,14 @@ async function main() {
             taxasPagas: feesPaid.toFixed(6),
             capital: capital.toFixed(6),
         });
+        // O diagnóstico do ativo tem que refletir a SAÍDA na hora. Sem isto ele
+        // continua dizendo "em posição" até o próximo sinal daquele símbolo —
+        // e o heartbeat mostra uma posição fechada como se estivesse aberta,
+        // contradizendo a própria lista de posicoesAbertas na mesma linha.
+        diagnostico.set(
+            pos.symbol,
+            `SAÍDA ${netProfit.greaterThanOrEqualTo(0) ? '+' : ''}$${netProfit.toFixed(4)} (${reason})`,
+        );
     };
 
     /** Símbolos já reconciliados contra o saldo real da corretora. */
@@ -1246,6 +1254,42 @@ async function main() {
                 openedAt: p.openedAt,
             })),
         }),
+        /**
+         * Uma linha que responde "ele está trabalhando?" sem ler o JSON.
+         *
+         * O heartbeat completo é diagnóstico; esta linha é sinal de vida. A
+         * diferença importa porque os dois estados perigosos deste motor são
+         * INVISÍVEIS num log que parece saudável: sem caixa nenhum ele fica
+         * eternamente "ativo" recusando todo sinal, e com falhas repetidas da
+         * corretora ele fica eternamente "ativo" tentando. Nos dois casos há
+         * heartbeat, timestamp novo, tudo verde — e nenhuma ordem sai.
+         *
+         * Por isso TRAVADO tem estado próprio em vez de virar mais um campo.
+         */
+        status: (): string => {
+            const fechadas = wins + losses;
+            const placar = `${fechadas} fechada${fechadas === 1 ? '' : 's'} (${wins}G/${losses}P), ${realizedPnl.greaterThanOrEqualTo(0) ? '+' : ''}$${realizedPnl.toFixed(4)}`;
+            const caixa =
+                saldoRealLivre !== null
+                    ? Decimal.min(capital.minus(committed), saldoRealLivre)
+                    : capital.minus(committed);
+            const falhas = Array.from(diagnostico.values()).filter((d) => d.startsWith('FALHA:')).length;
+
+            if (positions.size > 0) {
+                const nomes = Array.from(positions.keys()).join(', ');
+                return `${params.entryStrategy}: EM POSIÇÃO — ${nomes} | ${placar}`;
+            }
+            // Sem posição E sem dinheiro para abrir uma: o estado que parece
+            // saudável e não é. Nomeá-lo é a única forma de distinguir "está
+            // esperando o sinal certo" de "não pode agir nem que queira".
+            if (caixa.lessThan(minNotionalDe(cfg.symbols[0]))) {
+                return `${params.entryStrategy}: TRAVADO — sem posição e sem caixa ($${caixa.toFixed(2)}). Nenhuma ordem pode sair. | ${placar}`;
+            }
+            if (falhas > 0) {
+                return `${params.entryStrategy}: COM FALHAS — ${falhas} ativo(s) recusados pela corretora | ${placar}`;
+            }
+            return `${params.entryStrategy}: CAÇANDO — $${caixa.toFixed(2)} livres, ${cfg.symbols.length} ativos vigiados | ${placar}`;
+        },
         resumo: () => ({
             estrategia: params.entryStrategy,
             capital: capital.toFixed(6),
@@ -1412,6 +1456,7 @@ async function main() {
         }
 
         for (const livro of livros) {
+            log.info(`>>> ${livro.status()}`);
             log.info(`Heartbeat [${livro.params.entryStrategy}] — motor direcional ativo.`, {
                 modo: cfg.live ? 'LIVE' : 'PAPEL',
                 leituraDaVela: `uma avaliação por vela de ${cfg.interval} — o diagnóstico abaixo é da última fechada`,
