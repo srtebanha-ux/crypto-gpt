@@ -42,7 +42,8 @@ import {
     lucroCongelado,
     stopDisparaAntesDaLiquidacao,
 } from './leverage';
-import { barrasDesde, decidirSaidaPorTempo } from './timeStop';
+import { barrasDesde, decidirSaidaPorTempo, intervaloEmMs } from './timeStop';
+import { selecionarUniverso } from './universo';
 import { operacaoValeATaxa } from './feeViability';
 import { decidirEntradaPassiva, precoDaCompraPassiva } from './makerEntry';
 import { resolverPreset, resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
@@ -224,6 +225,13 @@ interface OpenPosition {
 
 interface Config {
     symbols: string[];
+    /**
+     * Quantas moedas escolher dinamicamente entre as que mais se moveram.
+     * Zero mantém a lista fixa de DIRECTIONAL_SYMBOLS.
+     */
+    topMovers: number;
+    /** Volume mínimo em 24h para uma moeda ser considerada líquida o bastante. */
+    volumeMinimo24h: Decimal;
     interval: string;
     capital: Decimal;
     pollSeconds: number;
@@ -345,6 +353,8 @@ function resolveConfig(): Config {
     // Todo o motor assume cotação em USDT: o saldo é lido de
     // `symbol.replace(USDT)` e o par é montado como `X/USDT`. Um símbolo com
     // outra cotação passaria por aqui em silêncio e só falharia na ordem.
+    const topMovers = Number(process.env.DIRECTIONAL_TOP_MOVERS ?? '0');
+    const volumeMinimo24h = new Decimal(process.env.DIRECTIONAL_MIN_VOLUME_24H ?? '20000000');
     const symbols = (process.env.DIRECTIONAL_SYMBOLS ?? 'BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT')
         .split(',')
         .map((s) => s.trim().toUpperCase())
@@ -357,6 +367,8 @@ function resolveConfig(): Config {
     }
     return {
         symbols,
+        topMovers,
+        volumeMinimo24h,
         interval: process.env.DIRECTIONAL_INTERVAL ?? '1h',
         capital: new Decimal(process.env.DIRECTIONAL_CAPITAL ?? '20'),
         pollSeconds: Number(process.env.DIRECTIONAL_POLL_SEC ?? '60'),
@@ -566,6 +578,11 @@ async function main() {
             cfg.capital.dividedBy(cfg.livros.length).dividedBy(minNotionalMaisAlto).floor(),
             cfg.maxPositionFraction.greaterThan(0) ? new Decimal(1).dividedBy(cfg.maxPositionFraction).floor() : new Decimal(1),
         ).toString(),
+        universo:
+            cfg.topMovers > 0
+                ? `DINÂMICO — as ${cfg.topMovers} moedas que mais se moveram em 24h, com volume acima de ` +
+                  `$${cfg.volumeMinimo24h.dividedBy(1_000_000).toFixed(0)}M (revisto a cada vela)`
+                : `FIXO — ${cfg.symbols.length} moedas de DIRECTIONAL_SYMBOLS`,
         saidaPorTempo:
             (cfg.strategy.maxBarrasNaOperacao ?? 0) > 0
                 ? `${cfg.strategy.maxBarrasNaOperacao} barras de ${cfg.interval} sem cobrir a própria taxa`
@@ -1515,10 +1532,73 @@ async function main() {
         }
     };
 
+    /** Quando o universo foi escolhido pela última vez. */
+    let universoEscolhidoEm = 0;
+
+    /**
+     * Reescolhe QUAIS moedas o motor vigia.
+     *
+     * A lista fixa era um limite invisível: o motor nunca reclama das moedas
+     * que não está olhando. Ele diz "sem sinal" para vinte ativos parados
+     * enquanto, fora da lista, outra moeda anda 40% no dia — e nenhum ajuste
+     * de RSI, stop ou alavancagem alcança isso.
+     *
+     * A cadência é uma vez por vela, não por ciclo: o endpoint devolve todos os
+     * pares da corretora de uma vez, e trocar o universo a cada minuto faria o
+     * motor perseguir ruído de ordenação em vez de movimento.
+     *
+     * Falha na consulta MANTÉM o universo anterior. Ficar sem ativos porque a
+     * rede piscou seria trocar um problema pequeno por um total.
+     */
+    const reescolherUniverso = async (): Promise<void> => {
+        if (!exchange || cfg.topMovers <= 0) return;
+        const agora = Date.now();
+        if (universoEscolhidoEm > 0 && agora - universoEscolhidoEm < intervaloEmMs(cfg.interval)) return;
+        try {
+            const candidatos = await exchange.fetchTopMovers();
+            const comPosicao = livros.flatMap((l) => l.snapshot().positions.map((pos) => pos.symbol));
+            const escolhidos = selecionarUniverso({
+                candidatos,
+                quantidade: cfg.topMovers,
+                volumeMinimo: cfg.volumeMinimo24h,
+                comPosicao,
+            });
+            // Registrar os filtros ANTES de trocar a lista: um símbolo sem
+            // filtro registrado derruba a ordem no momento da compra, não no
+            // boot — e aí já é dinheiro em jogo.
+            const usaveis = await exchange.ensureSymbolFilters(escolhidos.map(paraPar), {
+                ignorarDesconhecidos: true,
+            });
+            const validos = escolhidos.filter((sym) => usaveis.includes(paraPar(sym)));
+            if (validos.length === 0) {
+                log.warn('Nenhuma moeda utilizável na seleção dinâmica; universo anterior mantido.');
+                return;
+            }
+            const entraram = validos.filter((sym) => !cfg.symbols.includes(sym));
+            const sairam = cfg.symbols.filter((sym) => !validos.includes(sym));
+            cfg.symbols = validos;
+            universoEscolhidoEm = agora;
+            if (entraram.length > 0 || sairam.length > 0) {
+                log.info('Universo reescolhido pelas maiores variações de 24h.', {
+                    vigiando: validos.length,
+                    entraram: entraram.join(',') || 'nenhuma',
+                    sairam: sairam.join(',') || 'nenhuma',
+                    comPosicaoMantidas: comPosicao.join(',') || 'nenhuma',
+                });
+            }
+        } catch (err) {
+            log.warn('Não foi possível reescolher o universo; seguindo com a lista atual.', {
+                erro: err instanceof Error ? err.message : String(err),
+                vigiando: cfg.symbols.length,
+            });
+        }
+    };
+
     for (;;) {
         // Antes de qualquer decisão de tamanho: quanto a corretora empresta
         // AGORA. Consultar uma vez por ciclo, e não por ativo, evita gastar
         // peso de API repetindo a mesma pergunta vinte vezes.
+        await reescolherUniverso();
         capacidadeDeEmprestimo = await medirCapacidadeDeEmprestimo();
         saldoRealLivre = await medirSaldoRealLivre();
 

@@ -856,6 +856,41 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     }
 
     /**
+     * As moedas que MAIS se moveram nas últimas 24h, com volume.
+     *
+     * Existe porque a lista de ativos vigiados era fixa, e o custo disso não
+     * aparece em log nenhum: o motor nunca reclama das moedas que não está
+     * olhando. Ele diz "sem sinal" para vinte ativos parados enquanto, fora da
+     * lista, outra moeda anda 40% no dia.
+     *
+     * Endpoint público (sem assinatura) e pesado: devolve TODOS os pares da
+     * corretora de uma vez. Não deve ser chamado por ciclo — quem chama
+     * controla a cadência.
+     */
+    public async fetchTopMovers(): Promise<Array<{ symbol: string; variacao24h: Decimal; volumeQuote: Decimal }>> {
+        const res = await fetch(`${this.restBaseUrl}/api/v3/ticker/24hr`);
+        if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`Falha ao consultar as variações de 24h: HTTP ${res.status} — ${body}`);
+        }
+        const dados = (await res.json()) as Array<{
+            symbol?: string;
+            priceChangePercent?: string;
+            quoteVolume?: string;
+        }>;
+        if (!Array.isArray(dados)) throw new Error('Resposta inesperada do ticker de 24h.');
+        return dados
+            .filter((t): t is { symbol: string; priceChangePercent: string; quoteVolume: string } =>
+                typeof t.symbol === 'string' && t.priceChangePercent !== undefined && t.quoteVolume !== undefined,
+            )
+            .map((t) => ({
+                symbol: t.symbol,
+                variacao24h: new Decimal(t.priceChangePercent),
+                volumeQuote: new Decimal(t.quoteVolume),
+            }));
+    }
+
+    /**
      * Quanto a Binance DE FATO empresta deste ativo agora.
      *
      * Existe porque `DIRECTIONAL_LEVERAGE` é um pedido e este número é a
