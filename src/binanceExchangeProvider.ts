@@ -99,6 +99,20 @@ export interface BinanceExchangeProviderOptions {
     apiSecret: string;
     /** false (padrão) => Spot Testnet. true => produção, ordens reais com dinheiro real. */
     live?: boolean;
+    /**
+     * 'spot' (padrão) opera com o próprio dinheiro. 'margin' opera a Margem
+     * CRUZADA: a Binance empresta contra o saldo como colateral, e aparece a
+     * LIQUIDAÇÃO — a corretora fecha a posição sozinha quando a perda come a
+     * margem (ver leverage.ts).
+     *
+     * É um MODO do mesmo provedor, não uma classe nova, porque margem e spot
+     * compartilham quase tudo: os mesmos pares, os mesmos filtros de
+     * LOT_SIZE/NOTIONAL, o mesmo exchangeInfo e a mesma assinatura HMAC. Só
+     * mudam o endpoint da ordem e o de saldo. Duplicar em outra classe
+     * recriaria a divergência que o strategyParams.ts existe para impedir:
+     * duas leituras da mesma coisa que se afastam sem nada quebrar.
+     */
+    mode?: 'spot' | 'margin';
     recvWindowMs?: number;
     /** Taxa taker de fallback caso o endpoint de fee não esteja disponível (ex.: testnet). */
     fallbackFeeRate?: string;
@@ -175,6 +189,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     private readonly bnbFeeDiscount: boolean;
     private readonly minBnbBalanceForDiscount: Decimal;
     private serverTimeOffsetMs = 0;
+    private readonly mode: 'spot' | 'margin';
     private symbolFilters = new Map<string, SymbolFilters>();
     /** Profundidade mais recente por par interno ("BTC/USDT"), atualizada pelo stream @depth5. */
     private depthState = new Map<string, OrderBookSnapshot>();
@@ -201,6 +216,12 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         this.bnbFeeDiscount = options.bnbFeeDiscount ?? false;
         this.minBnbBalanceForDiscount = new Decimal(options.minBnbBalanceForDiscount ?? '0.001');
         this.intermediateBases = options.intermediateBases ?? DEFAULT_INTERMEDIATE_BASES;
+        this.mode = options.mode ?? 'spot';
+        if (this.mode === 'margin' && !options.live) {
+            // O testnet spot não tem endpoints de margem. Deixar passar daria
+            // 404 na primeira ordem, que é tarde demais para descobrir.
+            throw new Error('mode: "margin" exige live: true — o testnet da Binance não expõe endpoints de margem.');
+        }
 
         // A Binance separa REST e WebSocket em subdomínios diferentes em
         // produção (api.binance.com vs stream.binance.com) — o testnet
@@ -573,18 +594,57 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
     }
 
     /** Saldo disponível (livre, não travado em ordens) de um ativo na conta Spot. */
+    /**
+     * Saldo LIVRE de um ativo, na carteira que o modo determina.
+     *
+     * A distinção não é cosmética: Spot e Margem são carteiras SEPARADAS na
+     * Binance. Dinheiro transferido para a Margem some do Spot. Ler a carteira
+     * errada devolveria zero com a conta cheia — ou o contrário, que é pior:
+     * o motor acharia ter caixa e levaria recusa em toda ordem.
+     */
     public async fetchAvailableBalance(asset: string): Promise<Decimal> {
         const query = this.signParams({ timestamp: this.serverTimestamp() });
-        const res = await fetch(`${this.restBaseUrl}/api/v3/account?${query}`, {
+        const caminho = this.mode === 'margin' ? '/sapi/v1/margin/account' : '/api/v3/account';
+        const res = await fetch(`${this.restBaseUrl}${caminho}?${query}`, {
             headers: { 'X-MBX-APIKEY': this.apiKey },
         });
         if (!res.ok) {
             const body = await res.text();
-            throw new Error(`Falha ao consultar saldo da conta: HTTP ${res.status} — ${body}`);
+            throw new Error(`Falha ao consultar saldo da conta (${this.mode}): HTTP ${res.status} — ${body}`);
         }
-        const account = (await res.json()) as { balances: Array<{ asset: string; free: string }> };
-        const balance = account.balances.find((b) => b.asset === asset);
-        return new Decimal(balance?.free ?? '0');
+        // A conta de margem devolve `userAssets`, a spot devolve `balances`. Os
+        // dois trazem `free`, então só a chave da lista muda.
+        const account = (await res.json()) as {
+            balances?: Array<{ asset: string; free: string }>;
+            userAssets?: Array<{ asset: string; free: string }>;
+        };
+        const lista = account.userAssets ?? account.balances ?? [];
+        return new Decimal(lista.find((b) => b.asset === asset)?.free ?? '0');
+    }
+
+    /**
+     * Estado da conta de margem cruzada. Só faz sentido em `mode: 'margin'`.
+     *
+     * `marginLevel` é o número que importa para não ser liquidado: é o
+     * patrimônio dividido pela dívida. A Binance emite chamada de margem
+     * perto de 1,3 e liquida em 1,1 — quanto MENOR, pior. Sem dívida ele vem
+     * como 999.
+     */
+    public async fetchMarginAccount(): Promise<{ marginLevel: Decimal; totalNetAssetOfBtc: Decimal }> {
+        if (this.mode !== 'margin') throw new Error('fetchMarginAccount só existe em mode: "margin".');
+        const query = this.signParams({ timestamp: this.serverTimestamp() });
+        const res = await fetch(`${this.restBaseUrl}/sapi/v1/margin/account?${query}`, {
+            headers: { 'X-MBX-APIKEY': this.apiKey },
+        });
+        if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`Falha ao consultar a conta de margem: HTTP ${res.status} — ${body}`);
+        }
+        const conta = (await res.json()) as { marginLevel?: string; totalNetAssetOfBtc?: string };
+        return {
+            marginLevel: new Decimal(conta.marginLevel ?? '999'),
+            totalNetAssetOfBtc: new Decimal(conta.totalNetAssetOfBtc ?? '0'),
+        };
     }
 
     // ------------------------------------------------------------------
@@ -631,6 +691,20 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
             quantity: roundedQty.toFixed(),
             timestamp: this.serverTimestamp(),
         };
+        if (this.mode === 'margin') {
+            // FALSE = margem CRUZADA: o saldo inteiro serve de colateral para
+            // qualquer par. A isolada exige uma conta por par, cada uma com o
+            // próprio colateral — com capital pequeno e vários ativos isso
+            // fragmentaria o dinheiro em pedaços grandes demais para operar.
+            params.isIsolated = 'FALSE';
+            // O que torna isto alavancagem e não uma compra à vista cara:
+            // MARGIN_BUY manda a Binance EMPRESTAR o que faltar para completar
+            // a ordem; AUTO_REPAY devolve o emprestado com o que a venda
+            // rendeu. Sem estes dois a ordem só usaria o saldo próprio — seria
+            // spot com outro endpoint, e a alavancagem configurada não
+            // apareceria em lugar nenhum, sem erro nenhum.
+            params.sideEffectType = side === 'BUY' ? 'MARGIN_BUY' : 'AUTO_REPAY';
+        }
         if (type === 'LIMIT') {
             if (!price) throw new Error('Ordens LIMIT exigem price.');
             params.price = price.toFixed();
@@ -647,7 +721,8 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         }
 
         const query = this.signParams(params);
-        const res = await fetch(`${this.restBaseUrl}/api/v3/order?${query}`, {
+        const rota = this.mode === 'margin' ? '/sapi/v1/margin/order' : '/api/v3/order';
+        const res = await fetch(`${this.restBaseUrl}${rota}?${query}`, {
             method: 'POST',
             headers: { 'X-MBX-APIKEY': this.apiKey },
         });

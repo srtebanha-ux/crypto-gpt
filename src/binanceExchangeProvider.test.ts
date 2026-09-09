@@ -458,3 +458,129 @@ test('ensureSymbolFilters falha mesmo tolerante quando NENHUM par é utilizável
             )
     );
 });
+
+// ---------------------------------------------------------------------------
+// Modo margem
+//
+// Margem compartilha com o spot os pares, os filtros e a assinatura — só mudam
+// o endpoint e dois parâmetros. Mas são exatamente esses dois parâmetros que
+// separam "alavancado" de "à vista com outro endereço": sem sideEffectType a
+// ordem usaria só o saldo próprio, a alavancagem configurada não apareceria em
+// lugar nenhum, e NADA daria erro.
+// ---------------------------------------------------------------------------
+
+function newMarginProvider(): BinanceExchangeProvider {
+    const provider = new BinanceExchangeProvider({
+        apiKey: 'k',
+        apiSecret: 's',
+        live: true,
+        mode: 'margin',
+    });
+    seedSymbolMapping(provider, 'BTC/USDT', 'BTCUSDT');
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.00001', minQty: '0.00001', minNotional: '5' });
+    return provider;
+}
+
+test('em margem a COMPRA pede empréstimo e a VENDA devolve, pelo endpoint de margem', async () => {
+    const provider = newMarginProvider();
+    const urls: string[] = [];
+
+    await withFetchStub(
+        async (url) => {
+            urls.push(url);
+            return jsonResponse(200, {
+                orderId: 1,
+                status: 'FILLED',
+                executedQty: '0.001',
+                cummulativeQuoteQty: '60.01',
+                transactTime: Date.now(),
+                fills: [],
+            });
+        },
+        async () => {
+            await provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'));
+            await provider.executeOrder('BTC/USDT', 'SELL', 'MARKET', new Decimal('0.001'));
+        }
+    );
+
+    assert.equal(urls.length, 2);
+    for (const url of urls) {
+        assert.ok(url.includes('/sapi/v1/margin/order'), `ordem deve ir pelo endpoint de margem: ${url}`);
+        // Cruzada, não isolada: com capital pequeno e vários ativos, a isolada
+        // fragmentaria o colateral em pedaços grandes demais para operar.
+        assert.ok(url.includes('isIsolated=FALSE'));
+    }
+    assert.ok(urls[0].includes('sideEffectType=MARGIN_BUY'), 'a compra tem que EMPRESTAR');
+    assert.ok(urls[1].includes('sideEffectType=AUTO_REPAY'), 'a venda tem que DEVOLVER o emprestado');
+});
+
+test('em spot a ordem NÃO ganha parâmetros de margem', async () => {
+    // O modo padrão não pode virar alavancado por acidente.
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.00001', minQty: '0.00001', minNotional: '5' });
+    let urlUsada = '';
+
+    await withFetchStub(
+        async (url) => {
+            urlUsada = url;
+            return jsonResponse(200, {
+                orderId: 1,
+                status: 'FILLED',
+                executedQty: '0.001',
+                cummulativeQuoteQty: '60.01',
+                transactTime: Date.now(),
+                fills: [],
+            });
+        },
+        () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'))
+    );
+
+    assert.ok(urlUsada.includes('/api/v3/order'));
+    assert.ok(!urlUsada.includes('sideEffectType'), 'spot não empresta');
+    assert.ok(!urlUsada.includes('isIsolated'));
+});
+
+test('o saldo vem da carteira do MODO — Spot e Margem são carteiras separadas', async () => {
+    // Ler a carteira errada devolve zero com a conta cheia, ou pior: o motor
+    // acha ter caixa e leva recusa em toda ordem. Aconteceu de verdade neste
+    // projeto, com o dinheiro parado em Earn e o Spot zerado.
+    const margem = newMarginProvider();
+    const saldoMargem = await withFetchStub(
+        async (url) => {
+            assert.ok(url.includes('/sapi/v1/margin/account'), 'modo margem lê a conta de margem');
+            return jsonResponse(200, { userAssets: [{ asset: 'USDT', free: '20.39' }] });
+        },
+        () => margem.fetchAvailableBalance('USDT')
+    );
+    assert.equal(saldoMargem.toString(), '20.39');
+
+    const spot = newProvider();
+    const saldoSpot = await withFetchStub(
+        async (url) => {
+            assert.ok(url.includes('/api/v3/account'), 'modo spot lê a conta spot');
+            return jsonResponse(200, { balances: [{ asset: 'USDT', free: '0' }] });
+        },
+        () => spot.fetchAvailableBalance('USDT')
+    );
+    assert.equal(saldoSpot.toString(), '0');
+});
+
+test('margem no testnet falha na construção, não na primeira ordem', async () => {
+    // O testnet spot não tem endpoints de margem: deixar passar daria 404 já
+    // com sinal válido na mão, que é tarde demais para descobrir.
+    assert.throws(
+        () => new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', mode: 'margin' }),
+        /exige live: true/
+    );
+});
+
+test('fetchMarginAccount lê o nível de margem e recusa ser chamado em modo spot', async () => {
+    const margem = newMarginProvider();
+    const conta = await withFetchStub(
+        async () => jsonResponse(200, { marginLevel: '999', totalNetAssetOfBtc: '0.0002' }),
+        () => margem.fetchMarginAccount()
+    );
+    assert.equal(conta.marginLevel.toString(), '999');
+
+    await assert.rejects(() => newProvider().fetchMarginAccount(), /só existe em mode/);
+});
