@@ -34,7 +34,7 @@ import {
     type Candle,
 } from './signals';
 import { planPosition, tradeNetPnl, updateTrailingStopAtr } from './positionSizing';
-import { resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
+import { resolverPreset, resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
 import type { EntryStrategy } from './backtest';
 
 
@@ -301,6 +301,21 @@ async function main() {
         (acc, sym) => Decimal.max(acc, minNotionalDe(sym)),
         cfg.strategy.minNotional,
     );
+
+    // Os valores EFETIVOS, não o nome do preset: é a diferença entre saber o
+    // que o motor vai fazer e confiar que a variável certa foi digitada.
+    const { nome: presetEmUso } = resolverPreset();
+    log.info(`Configuração de entrada em uso (preset "${presetEmUso}", valores efetivos).`, {
+        rsiAbaixoDe: cfg.strategy.rsiThreshold.toString(),
+        filtroDeTendencia:
+            cfg.strategy.trendPeriod > 0
+                ? `média de ${cfg.strategy.trendPeriod} — só compra acima dela`
+                : 'DESLIGADO — compra também em mercado de queda, onde as três famílias mediram prejuízo',
+        rompimentoDeMaximaDe: `${cfg.strategy.breakoutLookback} velas`,
+        volumeMinimo: `${cfg.strategy.minVolumeRatio}x a média`,
+        riscoPorOperacao: `${cfg.strategy.riskFraction.mul(100).toFixed(2)}%`,
+        stop: `${cfg.strategy.atrStopMultiplier}x ATR`,
+    });
 
     log.info(`Motor direcional iniciado em modo ${cfg.live ? 'LIVE — DINHEIRO REAL' : 'PAPEL (nenhuma ordem enviada)'}.`, {
         ativos: cfg.symbols.join(','),

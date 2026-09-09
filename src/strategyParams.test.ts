@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
+import { PRESETS, resolverPreset, resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
 
 const BT_VARS = [
     'BT_RSI_PERIOD',
@@ -27,6 +27,10 @@ const BT_VARS = [
     'BT_TRAIL_ATR_MULT',
     'BT_FEE_RATE',
     'BT_MIN_NOTIONAL',
+    'BT_MIN_VOLUME_RATIO',
+    // Não é BT_*, mas muda os padrões que o resolvedor aplica — sem limpá-la
+    // aqui, um teste herdaria o preset de outro e passaria por acidente.
+    'DIRECTIONAL_PRESET',
 ];
 
 function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
@@ -113,4 +117,72 @@ test('campos opcionais vêm sempre preenchidos, para o chamador não repetir pad
     for (const campo of ['entryStrategy', 'rsiPeriod', 'rsiThreshold', 'trailAtrMultiplier', 'minNotional'] as const) {
         assert.notEqual(params[campo], undefined, `${campo} não pode vir indefinido`);
     }
+});
+
+// ---------------------------------------------------------------------------
+// Presets
+//
+// O preset troca os PADRÕES, nunca o que foi dito explicitamente. Se ele
+// sobrescrevesse um `BT_*` informado, o operador ajustaria um valor, veria o
+// log sem reclamação e rodaria com outro número — exatamente a falha que este
+// arquivo existe para impedir, só que por outro caminho.
+// ---------------------------------------------------------------------------
+
+test('o preset agressivo dispara MUITO mais que o padrão, nos parâmetros que decidem frequência', () => {
+    const padrao = withEnv({ DIRECTIONAL_PRESET: 'padrao' }, () => resolveStrategyParams('reversion'));
+    const agressivo = withEnv({ DIRECTIONAL_PRESET: 'agressivo' }, () => resolveStrategyParams('reversion'));
+
+    // RSI mais alto = compra correção comum em vez de esperar pânico.
+    assert.ok(
+        agressivo.rsiThreshold.greaterThan(padrao.rsiThreshold),
+        `agressivo (${agressivo.rsiThreshold}) deveria exigir menos queda que padrão (${padrao.rsiThreshold})`,
+    );
+    // Máxima mais curta é rompida com mais frequência.
+    assert.ok(agressivo.breakoutLookback! < padrao.breakoutLookback!);
+    // Volume menor deixa passar movimento sem grande participação.
+    assert.ok(agressivo.minVolumeRatio!.lessThan(padrao.minVolumeRatio!));
+    // Risco maior só morde em ativo volátil, mas é onde ele morde.
+    assert.ok(agressivo.riskFraction!.greaterThan(padrao.riskFraction!));
+});
+
+test('o preset agressivo DESLIGA o filtro de tendência — o destravador e o risco novo', () => {
+    const agressivo = withEnv({ DIRECTIONAL_PRESET: 'agressivo' }, () => resolveStrategyParams('reversion'));
+    // Zero é o que `backtest.ts` e `directionalLive.ts` interpretam como
+    // "sem filtro". Qualquer outro valor manteria o filtro ligado em silêncio,
+    // e o preset entregaria menos frequência do que promete.
+    assert.equal(agressivo.trendPeriod, 0);
+
+    const padrao = withEnv({ DIRECTIONAL_PRESET: 'padrao' }, () => resolveStrategyParams('reversion'));
+    assert.ok(padrao.trendPeriod! > 0, 'o padrão mantém o filtro que segura o motor fora de mercado em queda');
+});
+
+test('um BT_* explícito GANHA do preset', () => {
+    const params = withEnv(
+        { DIRECTIONAL_PRESET: 'agressivo', BT_RSI_THRESHOLD: '25', BT_TREND_PERIOD: '200' },
+        () => resolveStrategyParams('reversion'),
+    );
+    assert.equal(params.rsiThreshold.toString(), '25', 'o valor informado manda, não o do preset');
+    assert.equal(params.trendPeriod, 200, 'dá para ligar o filtro de volta mesmo no preset agressivo');
+    // O que NÃO foi informado continua vindo do preset.
+    assert.equal(params.breakoutLookback, Number(PRESETS.agressivo.breakoutLookback));
+});
+
+test('sem DIRECTIONAL_PRESET o comportamento é o MEDIDO, não o agressivo', () => {
+    // Padrão silencioso agressivo transformaria um deploy sem essa variável
+    // numa mudança de estratégia que ninguém pediu.
+    const semPreset = withEnv({}, () => resolveStrategyParams('reversion'));
+    const padrao = withEnv({ DIRECTIONAL_PRESET: 'padrao' }, () => resolveStrategyParams('reversion'));
+    assert.equal(semPreset.rsiThreshold.toString(), padrao.rsiThreshold.toString());
+    assert.equal(semPreset.trendPeriod, padrao.trendPeriod);
+});
+
+test('preset inválido falha no boot em vez de cair no padrão em silêncio', () => {
+    // Cair no padrão faria "agressivo" digitado errado rodar conservador, e o
+    // operador concluiria que o preset não funciona.
+    withEnv({ DIRECTIONAL_PRESET: 'agresssivo' }, () => {
+        assert.throws(() => resolverPreset(), /DIRECTIONAL_PRESET inválido/);
+    });
+    // Espaço sobrando e maiúsculas num painel web são invisíveis: devem passar.
+    const comRuido = withEnv({ DIRECTIONAL_PRESET: '  AGRESSIVO ' }, () => resolverPreset());
+    assert.equal(comRuido.nome, 'agressivo');
 });

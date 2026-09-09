@@ -28,27 +28,99 @@ export type ResolvedStrategyParams = StrategyParams &
     Required<Pick<StrategyParams, 'entryStrategy' | 'rsiPeriod' | 'rsiThreshold' | 'trailAtrMultiplier' | 'minNotional'>>;
 
 /**
+ * Conjuntos de padrões prontos, escolhidos por `DIRECTIONAL_PRESET`.
+ *
+ * Existe porque estes cinco valores são os que decidem se o motor opera muito
+ * ou quase nunca, e ajustá-los um a um num painel web é onde um erro de
+ * digitação fica invisível. Uma variável só troca os cinco de uma vez — e o
+ * motor imprime os valores efetivos no boot, porque preset que esconde o que
+ * fez é pior do que não ter preset.
+ *
+ * Qualquer `BT_*` explícito continua ganhando do preset: o preset é o padrão,
+ * não um teto.
+ */
+export const PRESETS = {
+    /** O que foi MEDIDO. `reversion` a 1h passou o critério com estes valores. */
+    padrao: {
+        // 30 é o valor de manual para mercado lateral. Para comprar correção
+        // DENTRO de uma tendência de alta ele quase nunca é atingido — as
+        // quedas param em 40-45 —, e o resultado é a estratégia não disparar
+        // nenhuma vez, que não é "perdeu": é "nunca foi testada".
+        rsiThreshold: '30',
+        breakoutLookback: '20',
+        trendPeriod: '50',
+        riskFraction: '0.02',
+        // 3x a média é a fronteira entre "mexeu" e "alguém está comprando".
+        minVolumeRatio: '3',
+    },
+    /**
+     * Opera MUITO mais. Também perde mais, e não por acaso — por construção.
+     *
+     * O que trava o motor não é o tamanho da posição, é a frequência do sinal:
+     * com RSI < 30 e filtro de tendência ligado, as duas condições quase se
+     * excluem (uma queda forte o bastante para o RSI cair abaixo de 30 joga o
+     * preço abaixo da própria média, e o filtro barra exatamente o que o sinal
+     * achou). Este preset ataca a frequência.
+     *
+     * O preço disso está medido e é real: `trendPeriod: 0` desliga o filtro
+     * que mantinha o motor fora de mercado em queda, e as TRÊS famílias
+     * mediram prejuízo em regime de baixa. Mais entradas em queda é
+     * exatamente o que este preset compra.
+     */
+    agressivo: {
+        // 45 pega correção comum em vez de pânico. É o valor que o próprio
+        // comentário do padrão descreve como o que de fato acontece.
+        rsiThreshold: '45',
+        // Máxima de 10 velas é rompida com muito mais frequência que a de 20.
+        breakoutLookback: '10',
+        // DESLIGADO. O maior destravador de frequência — e o maior risco novo.
+        trendPeriod: '0',
+        // Só morde nos ativos voláteis: em ATR baixo o capital já era o teto.
+        riskFraction: '0.08',
+        // "Subiu com volume acima da média", não "alguém está comprando".
+        minVolumeRatio: '1.8',
+    },
+} as const;
+
+export type NomeDePreset = keyof typeof PRESETS;
+
+/** O preset escolhido, com falha barulhenta em nome inválido. */
+export function resolverPreset(): { nome: NomeDePreset; valores: (typeof PRESETS)[NomeDePreset] } {
+    const escolha = (process.env.DIRECTIONAL_PRESET ?? 'padrao').trim().toLowerCase();
+    if (!(escolha in PRESETS)) {
+        throw new Error(
+            `DIRECTIONAL_PRESET inválido: "${escolha}". Use ${Object.keys(PRESETS).join(' ou ')}.`,
+        );
+    }
+    const nome = escolha as NomeDePreset;
+    return { nome, valores: PRESETS[nome] };
+}
+
+/**
  * Resolve os parâmetros de sinal e risco a partir das variáveis `BT_*`.
  *
  * O prefixo `BT_` ficou de quando só existia backtest. Mantê-lo é deliberado:
  * é o que garante que medir e operar leiam exatamente a mesma configuração,
  * sem ninguém precisar lembrar de espelhar valores entre dois conjuntos de
- * variáveis.
+ * variáveis. Vale para o preset também: `DIRECTIONAL_PRESET=agressivo` muda o
+ * backtest e o motor ao vivo da mesma forma, então dá para MEDIR o preset
+ * antes de operar com ele.
  */
 export function resolveStrategyParams(entryStrategy: EntryStrategy = 'breakout'): ResolvedStrategyParams {
+    const { valores: preset } = resolverPreset();
     return {
         entryStrategy,
         rsiPeriod: Number(process.env.BT_RSI_PERIOD ?? '14'),
-        // 30 é o valor de manual para mercado lateral. Para comprar correção
-        // DENTRO de uma tendência de alta ele quase nunca é atingido — as
-        // quedas param em 40-45 —, e o resultado é a estratégia não disparar
-        // nenhuma vez, que não é "perdeu": é "nunca foi testada".
-        rsiThreshold: new Decimal(process.env.BT_RSI_THRESHOLD ?? '30'),
-        breakoutLookback: Number(process.env.BT_BREAKOUT_LOOKBACK ?? '20'),
+        rsiThreshold: new Decimal(process.env.BT_RSI_THRESHOLD ?? preset.rsiThreshold),
+        breakoutLookback: Number(process.env.BT_BREAKOUT_LOOKBACK ?? preset.breakoutLookback),
         atrPeriod: Number(process.env.BT_ATR_PERIOD ?? '14'),
+        // NÃO faz parte do preset de propósito: apertar o stop não é coragem,
+        // é menos tolerância a ruído — e em ativo volátil vira uma sequência
+        // de stops por oscilação normal, que só paga taxa. Alargar tem o custo
+        // simétrico. Quem mexer aqui deve mexer sabendo qual dos dois quer.
         atrStopMultiplier: new Decimal(process.env.BT_ATR_STOP_MULT ?? '2'),
-        trendPeriod: Number(process.env.BT_TREND_PERIOD ?? '50'),
-        riskFraction: new Decimal(process.env.BT_RISK_FRACTION ?? '0.02'),
+        trendPeriod: Number(process.env.BT_TREND_PERIOD ?? preset.trendPeriod),
+        riskFraction: new Decimal(process.env.BT_RISK_FRACTION ?? preset.riskFraction),
         trailFraction: new Decimal(process.env.BT_TRAIL_FRACTION ?? '0'),
         // Padrão em ATR, não em percentual: 3x ATR deixa a posição respirar o
         // ruído normal enquanto sobe, e aperta sozinho conforme o preço avança.
@@ -62,8 +134,7 @@ export function resolveStrategyParams(entryStrategy: EntryStrategy = 'breakout')
         // classificação das operações do relatório.
         regimePeriod: Number(process.env.BT_REGIME_PERIOD ?? '200'),
         volumePeriod: Number(process.env.BT_VOLUME_PERIOD ?? '20'),
-        // 3x a média é a fronteira entre "mexeu" e "alguém está comprando".
-        minVolumeRatio: new Decimal(process.env.BT_MIN_VOLUME_RATIO ?? '3'),
+        minVolumeRatio: new Decimal(process.env.BT_MIN_VOLUME_RATIO ?? preset.minVolumeRatio),
         // Zero desliga. Ligado só faz sentido onde o movimento é rápido e
         // devolve tudo — em tendência longa, sair no alvo corta o ganho que
         // paga os prejuízos.
