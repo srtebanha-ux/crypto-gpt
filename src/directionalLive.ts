@@ -284,6 +284,47 @@ async function main() {
         const taxaReal = exchange.getFeeRate();
         cfg.strategy.feeRate = taxaReal;
         for (const livro of cfg.livros) livro.feeRate = taxaReal;
+
+        // O caixa CONFIGURADO contra o caixa que EXISTE.
+        //
+        // Sem isto o motor confia em DIRECTIONAL_CAPITAL e nunca confere se o
+        // dinheiro está lá. Aconteceu de verdade: a conta tinha 20 USDT, mas
+        // todos em Earn — a carteira Spot estava zerada. O motor subiu em modo
+        // LIVE, anunciou capital de $20 e ficou horas "operando" contra nada.
+        // Nenhuma ordem chegou a ser tentada, então nem o erro da corretora
+        // apareceu: o log parecia perfeitamente saudável.
+        //
+        // Grita e segue, em vez de recusar subir: VENDER não precisa de USDT, e
+        // um livro com posição aberta ainda precisa do motor para gerenciar o
+        // stop. Derrubar aqui deixaria posição real sem vigilância.
+        try {
+            const caixaReal = await exchange.fetchAvailableBalance('USDT');
+            if (caixaReal.lessThan(cfg.capital)) {
+                log.error('CAIXA REAL MENOR QUE O CONFIGURADO — as compras vão ser recusadas pela Binance.', {
+                    configurado: `$${cfg.capital.toFixed(2)} (DIRECTIONAL_CAPITAL)`,
+                    realNoSpot: `$${caixaReal.toFixed(2)} de USDT`,
+                    faltam: `$${cfg.capital.minus(caixaReal).toFixed(2)}`,
+                    causaMaisComum:
+                        'O dinheiro está em outra carteira. Earn, Fundos e Margem NÃO contam como saldo Spot — ' +
+                        'resgate para o Spot antes de operar.',
+                    oQueVaiAcontecer:
+                        caixaReal.lessThan(cfg.strategy.minNotional)
+                            ? 'Com esse saldo NENHUMA compra passa. Vender continua funcionando.'
+                            : 'Compras acima do saldo real vão ser recusadas uma a uma.',
+                });
+            } else {
+                log.info('Caixa real conferido contra o configurado.', {
+                    configurado: `$${cfg.capital.toFixed(2)}`,
+                    realNoSpot: `$${caixaReal.toFixed(2)}`,
+                });
+            }
+        } catch (err) {
+            // Não poder conferir não é o mesmo que estar tudo certo.
+            log.warn('Não foi possível conferir o caixa real em USDT; seguindo com o valor configurado.', {
+                configurado: cfg.capital.toFixed(2),
+                erro: err instanceof Error ? err.message : String(err),
+            });
+        }
     }
 
     /**
