@@ -27,8 +27,20 @@ import {
 
 const log = createLogger('sniffer');
 
-const BINANCE_REST_URL = 'https://api.binance.com/api/v3/exchangeInfo';
-const BINANCE_WS_URL = 'wss://stream.binance.com:9443/ws';
+/**
+ * Endpoints configuráveis.
+ *
+ * A Binance responde HTTP 451 ("Unavailable For Legal Reasons") quando o IP
+ * de origem está numa região bloqueada — e isso depende de onde o container
+ * roda, não do código. Dois serviços do mesmo projeto, em regiões diferentes,
+ * dão resultados diferentes contra a mesma URL.
+ *
+ * Deixar configurável evita ter que reescrever e reimplantar para testar um
+ * espelho: `data-api.binance.vision` serve os mesmos dados públicos de
+ * mercado por outro caminho.
+ */
+const BINANCE_REST_URL = `${process.env.SNIFFER_REST_BASE ?? 'https://api.binance.com'}/api/v3/exchangeInfo`;
+const BINANCE_WS_URL = process.env.SNIFFER_WS_BASE ?? 'wss://stream.binance.com:9443/ws';
 const SUBSCRIBE_BATCH_SIZE = 200; // limite de streams por conexão é 1024; batching evita payloads gigantes
 const SUBSCRIBE_BATCH_DELAY_MS = 250; // espaçamento entre lotes — a Binance limita ~5 msgs de controle/s por conexão
 const MAX_LEG_AGE_MS = 3000; // idade máxima aceita de CADA perna para uma avaliação contar como simultânea
@@ -154,7 +166,17 @@ class OpportunitySniffer {
 
     private async buildTopologyGraph(): Promise<void> {
         const res = await fetch(BINANCE_REST_URL);
-        if (!res.ok) throw new Error(`Falha ao buscar exchangeInfo: HTTP ${res.status}`);
+        if (!res.ok) {
+            // 451 não é erro de código nem de chave: é a Binance recusando o
+            // IP de origem. Dizer isso explicitamente evita horas procurando
+            // bug onde não tem, que é o custo real de uma mensagem genérica.
+            const explicacao =
+                res.status === 451
+                    ? ' — a Binance BLOQUEIA esta região. Mude a região do serviço no Railway para uma ' +
+                      'não bloqueada, ou aponte SNIFFER_REST_BASE/SNIFFER_WS_BASE para um espelho.'
+                    : '';
+            throw new Error(`Falha ao buscar exchangeInfo: HTTP ${res.status}${explicacao} (${BINANCE_REST_URL})`);
+        }
         const data = (await res.json()) as { symbols: Array<{ symbol: string; baseAsset: string; quoteAsset: string; status: string }> };
 
         const activeSymbols: SymbolInfo[] = data.symbols
