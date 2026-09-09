@@ -103,6 +103,12 @@ export interface BookState {
         notional: string;
         /** Ausente em estados gravados antes da margem existir: eram todos à vista. */
         margemUsada?: string;
+        /**
+         * Posição ADOTADA: o preço de entrada aqui é o do momento da adoção,
+         * não o que foi pago de verdade. Todo número derivado dela — variação,
+         * resultado, excursão em R — mede a partir da adoção.
+         */
+        adotada?: boolean;
         initialRisk: string;
         stopPrice: string;
         highestSinceEntry: string;
@@ -193,6 +199,8 @@ interface OpenPosition {
      * acusar.
      */
     margemUsada: Decimal;
+    /** Adotada: preço de entrada é o da adoção, não o realmente pago. */
+    adotada?: boolean;
     /** Distância entrada→stop inicial por unidade. É o "R" do alvo de lucro. */
     initialRisk: Decimal;
     stopPrice: Decimal;
@@ -737,6 +745,7 @@ async function main() {
                 // Estado antigo não tem o campo, e não ter significa spot: lá
                 // a margem É o nocional.
                 margemUsada: new Decimal(p.margemUsada ?? p.notional),
+                adotada: p.adotada,
                 // Estado antigo não tem o campo: reconstrói a partir do stop
                 // atual. Fica maior que o R original se o stop já subiu, e o
                 // efeito é um alvo mais distante — conservador, que é o lado
@@ -801,6 +810,13 @@ async function main() {
             resultadoLiquido: netProfit.toFixed(6),
             taxasPagas: feesPaid.toFixed(6),
             capital: capital.toFixed(6),
+            ...(pos.adotada
+                ? {
+                      atencao:
+                          'posição ADOTADA: o resultado acima é medido desde a adoção, não desde a compra real. ' +
+                          'O lucro ou prejuízo verdadeiro na corretora é outro.',
+                  }
+                : {}),
         });
         // O diagnóstico do ativo tem que refletir a SAÍDA na hora. Sem isto ele
         // continua dizendo "em posição" até o próximo sinal daquele símbolo —
@@ -810,7 +826,11 @@ async function main() {
         // O preço máximo já é acompanhado para o stop móvel; aqui ele vira
         // medição. Com stop móvel a saída quase nunca acontece no topo, então
         // este número diz o que um ALVO teria capturado e a saída real não.
-        if (pos.initialRisk.greaterThan(0)) {
+        // Posição ADOTADA fica FORA da medição. O preço de entrada dela é o do
+        // momento da adoção, não o que foi pago: a excursão em R sairia medida
+        // a partir do meio da operação, e o número que decide o preset seria
+        // contaminado justamente pelos casos em que o motor menos sabe.
+        if (pos.initialRisk.greaterThan(0) && !pos.adotada) {
             // Contado à parte do placar de ganhos e perdas de propósito. O
             // placar veio do disco e inclui operações fechadas ANTES desta
             // medição existir; usá-lo como denominador transformaria "ainda
@@ -949,6 +969,7 @@ async function main() {
                 stopPrice: stop,
                 highestSinceEntry: price,
                 openedAt: Date.now(),
+                adotada: true,
             });
             log.warn(`[${params.entryStrategy}] ${symbol}: posição órfã ADOTADA com stop novo.`, {
                 quantidade: saldo.toString(),
@@ -1257,8 +1278,9 @@ async function main() {
                     maxBarras > 0
                         ? ` | ${barras}/${maxBarras} barras até a saída por tempo`
                         : ` | aberta há ${barras} barras`;
+                const marca = p.adotada ? ' [ADOTADA: medida desde a adoção, não desde a compra]' : '';
                 return (
-                    `${p.symbol}: ${p.entryPrice.toFixed(6)} → ${agora.toFixed(6)} ` +
+                    `${p.symbol}${marca}: ${p.entryPrice.toFixed(6)} → ${agora.toFixed(6)} ` +
                     `(${variacao.toFixed(2)}%) | se fechasse agora: $${netProfit.toFixed(4)} | ` +
                     `stop ${p.stopPrice.toFixed(6)} (${ateOStop.toFixed(2)}% abaixo)${relogio}`
                 );
@@ -1279,6 +1301,7 @@ async function main() {
                 quantity: p.quantity.toString(),
                 notional: p.notional.toString(),
                 margemUsada: p.margemUsada.toString(),
+                ...(p.adotada ? { adotada: true } : {}),
                 initialRisk: p.initialRisk.toString(),
                 stopPrice: p.stopPrice.toString(),
                 highestSinceEntry: p.highestSinceEntry.toString(),
