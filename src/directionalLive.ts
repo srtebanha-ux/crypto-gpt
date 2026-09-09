@@ -496,15 +496,18 @@ async function main() {
         tetoPorPosicao:
             `${cfg.maxPositionFraction.mul(100).toFixed(0)}% do livro ` +
             `($${cfg.capital.dividedBy(cfg.livros.length).mul(cfg.maxPositionFraction).toFixed(2)} por posição)`,
-        // Quantas posições cabem no livro, e não quantos mínimos cabem em UMA
-        // posição — que era a conta antiga e dizia "1" para um livro de $20 com
-        // mínimo de $5, onde cabem quatro. O teto por posição limita o TAMANHO
-        // de cada uma, não a quantidade delas.
-        posicoesSimultaneasPossiveis: cfg.capital
-            .dividedBy(cfg.livros.length)
-            .dividedBy(minNotionalMaisAlto)
-            .floor()
-            .toString(),
+        // Dois limites independentes, e vale o MENOR:
+        //
+        //   - quantas posições de tamanho mínimo cabem no livro;
+        //   - quantas posições de tamanho CHEIO o teto permite (1/fração).
+        //
+        // Olhar só o primeiro dizia "4" com o teto em 100% — o modo de posição
+        // única, onde cabe exatamente uma. Olhar só o segundo dizia "1" com
+        // teto de 34% num livro que comporta duas.
+        posicoesSimultaneasPossiveis: Decimal.min(
+            cfg.capital.dividedBy(cfg.livros.length).dividedBy(minNotionalMaisAlto).floor(),
+            cfg.maxPositionFraction.greaterThan(0) ? new Decimal(1).dividedBy(cfg.maxPositionFraction).floor() : new Decimal(1),
+        ).toString(),
         saidaPorTempo:
             (cfg.strategy.maxBarrasNaOperacao ?? 0) > 0
                 ? `${cfg.strategy.maxBarrasNaOperacao} barras de ${cfg.interval} sem cobrir a própria taxa`
