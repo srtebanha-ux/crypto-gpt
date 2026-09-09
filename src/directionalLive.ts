@@ -1138,10 +1138,20 @@ async function main() {
                 const variacao = agora.minus(p.entryPrice).dividedBy(p.entryPrice).mul(100);
                 const { netProfit } = tradeNetPnl(p.entryPrice, agora, p.quantity, params.feeRate);
                 const ateOStop = agora.minus(p.stopPrice).dividedBy(agora).mul(100);
+                // O relógio da saída por tempo, visível. Sem ele não dá para
+                // saber se uma posição parada está prestes a liberar a vaga ou
+                // se vai ficar ali o dia inteiro — e é a vaga, não o prejuízo,
+                // que impede as outras entradas.
+                const barras = barrasDesde(p.openedAt, Date.now(), cfg.interval);
+                const maxBarras = params.maxBarrasNaOperacao ?? 0;
+                const relogio =
+                    maxBarras > 0
+                        ? ` | ${barras}/${maxBarras} barras até a saída por tempo`
+                        : ` | aberta há ${barras} barras`;
                 return (
                     `${p.symbol}: ${p.entryPrice.toFixed(6)} → ${agora.toFixed(6)} ` +
                     `(${variacao.toFixed(2)}%) | se fechasse agora: $${netProfit.toFixed(4)} | ` +
-                    `stop ${p.stopPrice.toFixed(6)} (${ateOStop.toFixed(2)}% abaixo)`
+                    `stop ${p.stopPrice.toFixed(6)} (${ateOStop.toFixed(2)}% abaixo)${relogio}`
                 );
             }),
         /** Snapshot serializável — o que precisa sobreviver a um reinício. */
