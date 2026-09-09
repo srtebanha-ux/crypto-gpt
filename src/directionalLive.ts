@@ -1148,7 +1148,18 @@ async function main() {
         // de $40 imobiliza $8 do próprio dinheiro a 5x. Somar o nocional
         // inteiro faria o motor achar que o caixa acabou e recusar as próximas
         // entradas — a alavancagem existiria na ordem e sumiria no controle.
-        const margemUsada = notional.dividedBy(alavancagem);
+        // Quanto do DINHEIRO PRÓPRIO esta posição consumiu.
+        //
+        // Não é nocional/alavancagem. MARGIN_BUY não empresta para atingir uma
+        // alavancagem alvo — ela empresta só o que FALTA para completar a
+        // ordem. Com $20 livres e uma ordem de $25, a Binance empresta $5 e
+        // consome $20 seus, não empresta $20 e consome $5. O motor não dita a
+        // alavancagem; ele dita o TAMANHO, e a alavancagem é consequência.
+        //
+        // Supor nocional/alavancagem fazia o motor achar que sobrava caixa que
+        // já tinha sido gasto — foi assim que ele anunciou $10,13 livres com
+        // $0,06 na carteira, e mandou ordens que voltaram com -2010.
+        const margemUsada = Decimal.min(notional, caixaParaDimensionar);
         committed = committed.plus(margemUsada);
         diagnostico.set(symbol, 'ENTRADA executada neste ciclo');
         positions.set(symbol, {
@@ -1235,7 +1246,13 @@ async function main() {
         resumo: () => ({
             estrategia: params.entryStrategy,
             capital: capital.toFixed(6),
-            caixaLivre: capital.minus(committed).toFixed(6),
+            // O caixa que vale para decidir é o menor entre o modelo e a
+            // carteira. Mostrar só o modelo já escondeu uma diferença de $10.
+            caixaLivre: (saldoRealLivre !== null
+                ? Decimal.min(capital.minus(committed), saldoRealLivre)
+                : capital.minus(committed)
+            ).toFixed(6),
+            caixaModelado: capital.minus(committed).toFixed(6),
             resultadoAcumulado: realizedPnl.toFixed(6),
             posicoesAbertas: positions.size,
             ativosComPosicao: Array.from(positions.keys()).join(',') || 'nenhum',
