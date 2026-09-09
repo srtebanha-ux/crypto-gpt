@@ -158,6 +158,27 @@ class OpportunitySniffer {
         startTime: Date.now(),
     };
 
+    /**
+     * Histograma do lucro líquido, em faixas de 0,01 ponto percentual.
+     *
+     * O "melhor visto" sozinho não distingue duas situações opostas: uma cauda
+     * que encosta na linha o tempo todo, e um pico único que nunca se repete.
+     * A primeira diz "espere e afine"; a segunda diz "desista". Sem a
+     * distribuição, as duas aparecem como o mesmo número.
+     *
+     * A chave é o líquido em CENTÉSIMOS de ponto percentual, truncado — um
+     * inteiro, para o Map não crescer com ruído de ponto flutuante.
+     */
+    private readonly histograma = new Map<number, number>();
+
+    private registrarNoHistograma(netPct: Decimal): void {
+        // Faixas fora de [-1%, +1%] são agrupadas nos extremos: o que interessa
+        // é a vizinhança da linha do custo, e um ciclo a -40% é dado de book
+        // quebrado, não informação sobre viabilidade.
+        const centesimos = Math.max(-100, Math.min(100, Math.trunc(netPct.toNumber() * 100)));
+        this.histograma.set(centesimos, (this.histograma.get(centesimos) ?? 0) + 1);
+    }
+
     constructor(feeRate: Decimal, targetNetProfit: Decimal, paresIsentos: string[] = []) {
         this.tabelaDeTaxas = montarTabelaDeTaxas({ padrao: feeRate, isentos: paresIsentos });
         this.lucroAlvo = targetNetProfit;
@@ -316,6 +337,7 @@ class OpportunitySniffer {
             if (evaluation.grossReturn.greaterThan(this.metrics.melhorBruto)) {
                 this.metrics.melhorBruto = evaluation.grossReturn;
             }
+            this.registrarNoHistograma(evaluation.netProfitPct);
 
             if (!evaluation.isOpportunity) continue;
             this.metrics.opportunitiesFound += 1;
@@ -350,6 +372,21 @@ class OpportunitySniffer {
                 faltam === null ? '—' : faltam.greaterThan(0) ? faltam.toFixed(4) : 'JÁ PASSOU DO CUSTO',
             melhorBrutoVisto: this.metrics.melhorBruto.greaterThan(0) ? this.metrics.melhorBruto.toFixed(6) : '—',
         });
+
+        // As faixas mais próximas da linha, do melhor para o pior. É aqui que
+        // se vê se existe cauda encostando ou se tudo está longe demais.
+        const faixas = Array.from(this.histograma.entries())
+            .sort((a, b) => b[0] - a[0])
+            .slice(0, 8);
+        if (faixas.length > 0) {
+            const total = this.metrics.avaliacoes || 1;
+            log.info('  Distribuição do lucro líquido (faixas mais próximas da linha).', {
+                faixas: faixas
+                    .map(([c, n]) => `${(c / 100).toFixed(2)}%: ${n} (${((n / total) * 100).toFixed(3)}%)`)
+                    .join(' | '),
+                acimaDeZero: (this.histograma.get(0) ?? 0) + faixas.filter(([c]) => c > 0).reduce((a, [, n]) => a + n, 0),
+            });
+        }
     }
 }
 
