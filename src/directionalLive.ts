@@ -415,16 +415,40 @@ async function main() {
         // Grita e segue, em vez de recusar subir: VENDER não precisa de USDT, e
         // um livro com posição aberta ainda precisa do motor para gerenciar o
         // stop. Derrubar aqui deixaria posição real sem vigilância.
+        //
+        // A conferência desconta o que JÁ ESTÁ EM POSIÇÃO. Dinheiro numa
+        // posição aberta não está sumido: está comprado. Sem esse desconto o
+        // motor grita "faltam $19,92" toda vez que reinicia com posição de pé —
+        // que é o estado normal — e o alarme que existe para o caso real vira
+        // ruído que se aprende a ignorar.
         try {
             const caixaReal = await exchange.fetchAvailableBalance('USDT');
-            if (caixaReal.lessThan(cfg.capital)) {
+            const emPosicao = Object.values(loadState(cfg.stateFile)).reduce(
+                (acc, livro) =>
+                    livro.positions.reduce((soma, pos) => soma.plus(new Decimal(pos.notional)), acc),
+                new Decimal(0),
+            );
+            const patrimonioVisivel = caixaReal.plus(emPosicao);
+            const ondeOMotorOpera = cfg.margem ? 'Margem Cruzada' : 'Spot';
+            if (emPosicao.greaterThan(0)) {
+                log.info('Caixa conferido com o que já está em posição.', {
+                    livre: `$${caixaReal.toFixed(2)}`,
+                    emPosicao: `$${emPosicao.toFixed(2)}`,
+                    somam: `$${patrimonioVisivel.toFixed(2)}`,
+                    configurado: `$${cfg.capital.toFixed(2)}`,
+                });
+            }
+            if (patrimonioVisivel.lessThan(cfg.capital)) {
                 log.error('CAIXA REAL MENOR QUE O CONFIGURADO — as compras vão ser recusadas pela Binance.', {
                     configurado: `$${cfg.capital.toFixed(2)} (DIRECTIONAL_CAPITAL)`,
-                    realNoSpot: `$${caixaReal.toFixed(2)} de USDT`,
-                    faltam: `$${cfg.capital.minus(caixaReal).toFixed(2)}`,
-                    causaMaisComum:
-                        'O dinheiro está em outra carteira. Earn, Fundos e Margem NÃO contam como saldo Spot — ' +
-                        'resgate para o Spot antes de operar.',
+                    livreNaCarteiraUsada: `$${caixaReal.toFixed(2)} de USDT em ${ondeOMotorOpera}`,
+                    jaEmPosicao: `$${emPosicao.toFixed(2)}`,
+                    faltam: `$${cfg.capital.minus(patrimonioVisivel).toFixed(2)}`,
+                    causaMaisComum: cfg.margem
+                        ? 'O dinheiro está em outra carteira. Spot, Earn e Fundos NÃO contam como colateral de ' +
+                          'Margem Cruzada — transfira para a carteira de Margem antes de operar.'
+                        : 'O dinheiro está em outra carteira. Earn, Fundos e Margem NÃO contam como saldo Spot — ' +
+                          'resgate para o Spot antes de operar.',
                     oQueVaiAcontecer:
                         caixaReal.lessThan(cfg.strategy.minNotional)
                             ? 'Com esse saldo NENHUMA compra passa. Vender continua funcionando.'
@@ -433,7 +457,7 @@ async function main() {
             } else {
                 log.info('Caixa real conferido contra o configurado.', {
                     configurado: `$${cfg.capital.toFixed(2)}`,
-                    realNoSpot: `$${caixaReal.toFixed(2)}`,
+                    livreNaCarteiraUsada: `$${caixaReal.toFixed(2)} em ${ondeOMotorOpera}`,
                 });
             }
         } catch (err) {
