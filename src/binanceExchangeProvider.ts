@@ -196,6 +196,36 @@ async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
     throw lastError;
 }
 
+/**
+ * O `sideEffectType` de uma ordem de margem.
+ *
+ * Existe como função separada porque a decisão é assimétrica e o erro é caro
+ * dos dois lados:
+ *
+ * - TOMAR emprestado é OPCIONAL. Quando a capacidade de empréstimo está
+ *   zerada, mandar `MARGIN_BUY` faz a Binance recusar a ordem INTEIRA com
+ *   `-3006` — mesmo que o saldo próprio bastasse para pagá-la. O rótulo, e
+ *   não o tamanho, é o que derruba a ordem: pedir empréstimo de zero não
+ *   devolve uma compra menor, devolve compra nenhuma.
+ * - DEVOLVER o emprestado NÃO é opcional. A venda precisa continuar com
+ *   `AUTO_REPAY` mesmo num ciclo sem alavancagem, senão a posição fecha e a
+ *   dívida fica — pagando juros por hora sobre um empréstimo que já não tem
+ *   posição nenhuma do outro lado.
+ *
+ * Por isso `comEmprestimo` governa só a COMPRA.
+ */
+export function efeitoColateralDaOrdem(params: {
+    /** A conta opera alavancada (DIRECTIONAL_LEVERAGE > 1). */
+    autoBorrow: boolean;
+    side: OrderSide;
+    /** Esta ordem específica precisa de empréstimo. */
+    comEmprestimo: boolean;
+}): 'MARGIN_BUY' | 'AUTO_REPAY' | 'NO_SIDE_EFFECT' {
+    if (!params.autoBorrow) return 'NO_SIDE_EFFECT';
+    if (params.side === 'SELL') return 'AUTO_REPAY';
+    return params.comEmprestimo ? 'MARGIN_BUY' : 'NO_SIDE_EFFECT';
+}
+
 export class BinanceExchangeProvider extends EventEmitter implements IExchangeProvider {
     private readonly apiKey: string;
     private readonly apiSecret: string;
@@ -691,6 +721,7 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         pairSymbol: string,
         qty: Decimal,
         price: Decimal,
+        opcoes?: { comEmprestimo?: boolean },
     ): Promise<{ orderId: number; status: StatusCru; executedQty: Decimal }> {
         const symbol = this.pairToBinanceSymbol.get(pairSymbol);
         if (!symbol) throw new Error(`Símbolo desconhecido para a Binance: ${pairSymbol}`);
@@ -710,7 +741,11 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         };
         if (this.mode === 'margin') {
             params.isIsolated = 'FALSE';
-            params.sideEffectType = this.marginAutoBorrow ? 'MARGIN_BUY' : 'NO_SIDE_EFFECT';
+            params.sideEffectType = efeitoColateralDaOrdem({
+                autoBorrow: this.marginAutoBorrow,
+                side: 'BUY',
+                comEmprestimo: opcoes?.comEmprestimo ?? true,
+            });
         }
 
         const query = this.signParams(params);
@@ -866,7 +901,14 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
         return qty.dividedToIntegerBy(filters.stepSize).mul(filters.stepSize);
     }
 
-    public async executeOrder(pairSymbol: string, side: OrderSide, type: OrderType, qty: Decimal, price?: Decimal): Promise<ExecutionResult> {
+    public async executeOrder(
+        pairSymbol: string,
+        side: OrderSide,
+        type: OrderType,
+        qty: Decimal,
+        price?: Decimal,
+        opcoes?: { comEmprestimo?: boolean },
+    ): Promise<ExecutionResult> {
         const symbol = this.pairToBinanceSymbol.get(pairSymbol);
         if (!symbol) throw new Error(`Símbolo desconhecido para a Binance: ${pairSymbol}`);
 
@@ -907,11 +949,14 @@ export class BinanceExchangeProvider extends EventEmitter implements IExchangePr
             // spot com outro endereço, de propósito. Sem alavancagem não há o
             // que emprestar, e pedir mesmo assim faz a corretora recusar a
             // ordem inteira quando a conta não tem empréstimo liberado.
-            params.sideEffectType = this.marginAutoBorrow
-                ? side === 'BUY'
-                    ? 'MARGIN_BUY'
-                    : 'AUTO_REPAY'
-                : 'NO_SIDE_EFFECT';
+            params.sideEffectType = efeitoColateralDaOrdem({
+                autoBorrow: this.marginAutoBorrow,
+                side,
+                // O padrão é pedir emprestado: quem sabe se esta ordem precisa
+                // de empréstimo é quem dimensionou, e omitir mantém o
+                // comportamento alavancado de antes.
+                comEmprestimo: opcoes?.comEmprestimo ?? true,
+            });
         }
         if (type === 'LIMIT') {
             if (!price) throw new Error('Ordens LIMIT exigem price.');

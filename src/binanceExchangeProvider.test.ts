@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { BinanceExchangeProvider, parseDepthLevels } from './binanceExchangeProvider';
+import { BinanceExchangeProvider, efeitoColateralDaOrdem, parseDepthLevels } from './binanceExchangeProvider';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
@@ -621,4 +621,41 @@ test('margem SEM empréstimo usa NO_SIDE_EFFECT — opera o saldo próprio da ca
     assert.ok(urlUsada.includes('/sapi/v1/margin/order'), 'continua na carteira de margem');
     assert.ok(urlUsada.includes('sideEffectType=NO_SIDE_EFFECT'));
     assert.ok(!urlUsada.includes('MARGIN_BUY'));
+});
+
+// ---------------------------------------------------------------------------
+// sideEffectType: o rótulo da ordem, que derruba a ordem sozinho
+// ---------------------------------------------------------------------------
+
+test('sem empréstimo nesta ordem, a COMPRA vai sem pedir emprestado', () => {
+    // O defeito que isto fecha: o motor dimensionou sem alavancagem (porque a
+    // capacidade estava zerada) e mesmo assim mandava MARGIN_BUY. A Binance
+    // não reduz a ordem — recusa inteira com -3006, ainda que o saldo próprio
+    // bastasse. Nove ativos com sinal válido morreram assim em produção.
+    assert.equal(
+        efeitoColateralDaOrdem({ autoBorrow: true, side: 'BUY', comEmprestimo: false }),
+        'NO_SIDE_EFFECT',
+    );
+});
+
+test('a VENDA devolve o emprestado mesmo num ciclo sem alavancagem', () => {
+    // A assimetria que importa: tomar emprestado é opcional, devolver não é.
+    // Fechar a posição sem AUTO_REPAY deixaria a dívida viva, pagando juros
+    // por hora sem nenhuma posição do outro lado.
+    assert.equal(
+        efeitoColateralDaOrdem({ autoBorrow: true, side: 'SELL', comEmprestimo: false }),
+        'AUTO_REPAY',
+    );
+});
+
+test('com empréstimo, a compra é alavancada de verdade', () => {
+    assert.equal(
+        efeitoColateralDaOrdem({ autoBorrow: true, side: 'BUY', comEmprestimo: true }),
+        'MARGIN_BUY',
+    );
+});
+
+test('conta sem alavancagem nunca toca no colateral, em nenhum dos lados', () => {
+    assert.equal(efeitoColateralDaOrdem({ autoBorrow: false, side: 'BUY', comEmprestimo: true }), 'NO_SIDE_EFFECT');
+    assert.equal(efeitoColateralDaOrdem({ autoBorrow: false, side: 'SELL', comEmprestimo: true }), 'NO_SIDE_EFFECT');
 });

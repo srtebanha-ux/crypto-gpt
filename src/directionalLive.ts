@@ -540,10 +540,11 @@ async function main() {
         familia: string,
         symbol: string,
         quantidade: Decimal,
+        comEmprestimo: boolean,
     ): Promise<{ executedPrice: Decimal; executedQty: Decimal }> => {
         const par = paraPar(symbol);
         const atravessar = async () => {
-            const fill = await exchange.executeOrder(par, 'BUY', 'MARKET', quantidade);
+            const fill = await exchange.executeOrder(par, 'BUY', 'MARKET', quantidade, undefined, { comEmprestimo });
             return { executedPrice: fill.executedPrice, executedQty: fill.executedQty };
         };
 
@@ -557,7 +558,7 @@ async function main() {
             return atravessar();
         }
 
-        const enviada = await exchange.placeMakerBuy(par, quantidade, preco);
+        const enviada = await exchange.placeMakerBuy(par, quantidade, preco, { comEmprestimo });
         const inicio = Date.now();
         let status = enviada.status;
         let preenchido = enviada.executedQty;
@@ -1063,9 +1064,14 @@ async function main() {
         let filledPrice = entryPrice;
         let filledQty = plan.quantity;
         if (exchange) {
+            // O rótulo da ordem tem que concordar com o tamanho dela. Sem
+            // alavancagem efetiva, mandar MARGIN_BUY faz a Binance recusar a
+            // ordem inteira com -3006 quando a capacidade de empréstimo está
+            // zerada — ainda que o saldo próprio bastasse para pagá-la.
+            const comEmprestimo = alavancagem.greaterThan(1);
             const fill = cfg.entradaPassiva
-                ? await entrarComoMaker(exchange, params.entryStrategy, symbol, plan.quantity)
-                : await exchange.executeOrder(paraPar(symbol), 'BUY', 'MARKET', plan.quantity);
+                ? await entrarComoMaker(exchange, params.entryStrategy, symbol, plan.quantity, comEmprestimo)
+                : await exchange.executeOrder(paraPar(symbol), 'BUY', 'MARKET', plan.quantity, undefined, { comEmprestimo });
             if (fill.executedQty.lessThanOrEqualTo(0)) {
                 // Nada preencheu e nada foi atravessado: não há posição. Sair
                 // aqui é obrigatório — seguir registraria uma posição fantasma,
