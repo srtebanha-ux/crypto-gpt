@@ -43,7 +43,20 @@ const BINANCE_REST_URL = `${process.env.SNIFFER_REST_BASE ?? 'https://api.binanc
 const BINANCE_WS_URL = process.env.SNIFFER_WS_BASE ?? 'wss://stream.binance.com:9443/ws';
 const SUBSCRIBE_BATCH_SIZE = 200; // limite de streams por conexão é 1024; batching evita payloads gigantes
 const SUBSCRIBE_BATCH_DELAY_MS = 250; // espaçamento entre lotes — a Binance limita ~5 msgs de controle/s por conexão
-const MAX_LEG_AGE_MS = 3000; // idade máxima aceita de CADA perna para uma avaliação contar como simultânea
+/**
+ * Idade máxima de CADA perna para a avaliação contar como simultânea.
+ *
+ * Três segundos é generoso demais para arbitragem, e o motivo de ser
+ * configurável é este: num par cruzado fino como DOTBTC o book pode ficar
+ * parado por segundos enquanto BTCUSDT e DOTUSDT se movem. A comparação entre
+ * uma cotação velha e duas frescas produz um desalinhamento que NUNCA existiu
+ * ao mesmo tempo no mercado — e ele aparece grande justamente porque o preço
+ * andou nesse intervalo.
+ *
+ * Quanto menor este número, mais honesta a medição e menos "oportunidades"
+ * sobram. Se todas somem a 500ms, todas eram fantasma.
+ */
+const MAX_LEG_AGE_MS = Number(process.env.SNIFFER_MAX_LEG_AGE_MS ?? '3000');
 
 const TAKER_FEE = new Decimal(process.env.SNIFFER_TAKER_FEE ?? '0.001');
 const TARGET_NET_PROFIT = new Decimal(process.env.SNIFFER_TARGET_NET_PROFIT ?? '0.0002'); // 0.02% líquido
@@ -155,6 +168,8 @@ class OpportunitySniffer {
         melhorLiquidoPct: new Decimal(Number.NEGATIVE_INFINITY),
         melhorLiquidoTriangulo: '',
         melhorBruto: new Decimal(0),
+        /** Idade da perna mais velha em cada oportunidade encontrada. */
+        oportunidadesPorIdade: [] as number[],
         startTime: Date.now(),
     };
 
@@ -342,7 +357,19 @@ class OpportunitySniffer {
             if (!evaluation.isOpportunity) continue;
             this.metrics.opportunitiesFound += 1;
 
+            // A idade de cada perna no instante da detecção. É o número que
+            // separa oportunidade real de comparação entre cotação velha e
+            // cotações frescas — e sem ele as duas aparecem idênticas.
+            const idades = [now - ob1.timestamp, now - ob2.timestamp, now - ob3.timestamp];
+            const idadeMaxima = Math.max(...idades);
+            this.metrics.oportunidadesPorIdade.push(idadeMaxima);
             log.info('Ineficiência líquida encontrada.', {
+                idadeDasPernasMs: idades.join('/'),
+                pernaMaisVelhaMs: idadeMaxima,
+                suspeita:
+                    idadeMaxima > 500
+                        ? 'PROVÁVEL FANTASMA: uma perna está velha, o desalinhamento pode nunca ter existido simultaneamente'
+                        : 'pernas frescas',
                 triangulo: evaluation.triangleId,
                 grossReturn: evaluation.grossReturn.toFixed(6),
                 lucroLiquidoPct: evaluation.netProfitPct.toFixed(4),
@@ -371,6 +398,16 @@ class OpportunitySniffer {
             faltaramPct:
                 faltam === null ? '—' : faltam.greaterThan(0) ? faltam.toFixed(4) : 'JÁ PASSOU DO CUSTO',
             melhorBrutoVisto: this.metrics.melhorBruto.greaterThan(0) ? this.metrics.melhorBruto.toFixed(6) : '—',
+            idadeMaximaAceita: `${MAX_LEG_AGE_MS}ms`,
+            // Quantas oportunidades sobrevivem a exigências de simultaneidade
+            // mais duras. Se todas somem a 500ms, todas eram fantasma.
+            sobrevivemA: (() => {
+                const idades = this.metrics.oportunidadesPorIdade;
+                if (idades.length === 0) return 'nenhuma oportunidade ainda';
+                return [200, 500, 1000]
+                    .map((lim) => `${lim}ms: ${idades.filter((i) => i <= lim).length}/${idades.length}`)
+                    .join(' | ');
+            })(),
         });
 
         // As faixas mais próximas da linha, do melhor para o pior. É aqui que
