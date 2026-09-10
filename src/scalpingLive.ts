@@ -140,6 +140,15 @@ class MotorDeScalping {
     private gravando: Array<{ caminho: CaminhoDeSinal; restantes: number }> = [];
     private sinaisVistos = 0;
     /**
+     * Último sinal por símbolo. Existe porque o mesmo pico é detectado a cada
+     * coleta enquanto a vela não fecha: aos 13s e aos 23s do mesmo minuto, o
+     * PUMPUSDT disparou duas vezes. Dois caminhos quase idênticos gravados
+     * como se fossem observações independentes inflam a amostra com CÓPIAS —
+     * e uma grade calculada sobre cópias parece sólida sem ser. É o pior tipo
+     * de erro de medição, porque aumenta a confiança em vez de derrubá-la.
+     */
+    private readonly ultimoSinalMs = new Map<string, number>();
+    /**
      * Telemetria crua do stream. Existe porque "comHistorico: 0" tem três
      * causas indistinguíveis sem ela: o WebSocket não está entregando nada,
      * está entregando mas nada fecha, ou fecha e o histórico ainda é novo.
@@ -467,6 +476,12 @@ class MotorDeScalping {
             variacaoMinima: this.cfg.variacaoMinima,
         });
         if (!sinal) return;
+
+        const agora = Date.now();
+        const anterior = this.ultimoSinalMs.get(symbol) ?? Number.NEGATIVE_INFINITY;
+        const carencia = Number(process.env.SCALPING_CARENCIA_MS ?? '300000'); // 5 min
+        if (agora - anterior < carencia) return;
+        this.ultimoSinalMs.set(symbol, agora);
 
         log.info('PICO DE VOLUME.', {
             symbol,
