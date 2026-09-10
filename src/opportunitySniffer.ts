@@ -85,6 +85,16 @@ const INTERMEDIATE_BASES = (process.env.SNIFFER_BASES ?? 'BTC,ETH,BNB,FDUSD').sp
 export interface BookTick {
     bid: Decimal;
     ask: Decimal;
+    /**
+     * Quantidade disponível NO TOPO do livro.
+     *
+     * Sem isto, um desalinhamento de 0,5% num par onde só existem 0,001 unidades
+     * na melhor oferta parece oportunidade e não é: a ordem varre níveis e o
+     * preço realizado é outro. O retorno calculado a partir do topo é o limite
+     * SUPERIOR do que se captura, nunca o valor.
+     */
+    bidQty: Decimal;
+    askQty: Decimal;
     timestamp: number;
 }
 
@@ -170,6 +180,10 @@ class OpportunitySniffer {
         melhorBruto: new Decimal(0),
         /** Idade da perna mais velha em cada oportunidade encontrada. */
         oportunidadesPorIdade: [] as number[],
+        /** Nocional máximo em USDT que o TOPO do livro comporta, por oportunidade. */
+        nocionalMaximo: [] as number[],
+        /** Sobreviveu à nossa latência? Reavaliação do MESMO ciclo depois de N ms. */
+        persistencia: { checadas: 0, sobreviveram150: 0, sobreviveram300: 0 },
         startTime: Date.now(),
     };
 
@@ -296,7 +310,7 @@ class OpportunitySniffer {
                 const msg = JSON.parse(raw.toString());
                 if (msg.u && msg.s && msg.b && msg.a) {
                     this.metrics.ticksProcessed += 1;
-                    this.updateStateAndEvaluate(msg.s, msg.b, msg.a);
+                    this.updateStateAndEvaluate(msg.s, msg.b, msg.a, msg.B ?? '0', msg.A ?? '0');
                 }
             } catch {
                 // mensagens de controle (resultado de SUBSCRIBE, ping/pong) não são bookTicker — ignoradas.
@@ -314,9 +328,21 @@ class OpportunitySniffer {
         });
     }
 
-    private updateStateAndEvaluate(symbol: string, bidRaw: string, askRaw: string): void {
+    private updateStateAndEvaluate(
+        symbol: string,
+        bidRaw: string,
+        askRaw: string,
+        bidQtyRaw: string,
+        askQtyRaw: string,
+    ): void {
         const now = Date.now();
-        this.orderBook.set(symbol, { bid: new Decimal(bidRaw), ask: new Decimal(askRaw), timestamp: now });
+        this.orderBook.set(symbol, {
+            bid: new Decimal(bidRaw),
+            ask: new Decimal(askRaw),
+            bidQty: new Decimal(bidQtyRaw),
+            askQty: new Decimal(askQtyRaw),
+            timestamp: now,
+        });
 
         const affected = this.trianglesBySymbol.get(symbol) ?? []; // O(k): só os triângulos que usam este símbolo
         for (const t of affected) {
@@ -363,9 +389,42 @@ class OpportunitySniffer {
             const idades = [now - ob1.timestamp, now - ob2.timestamp, now - ob3.timestamp];
             const idadeMaxima = Math.max(...idades);
             this.metrics.oportunidadesPorIdade.push(idadeMaxima);
+
+            // PROFUNDIDADE: quanto o topo do livro comporta, em USDT.
+            //
+            // O ciclo é USDT -> A -> B -> USDT, e cada perna tem um teto
+            // diferente. O menor deles é o tamanho máximo da operação — e se
+            // ele for menor que o mínimo da corretora, a "oportunidade" não é
+            // executável por nós, por mais real que o preço seja.
+            const limite1 = ob1.askQty.mul(ob1.ask);
+            const limite2 = ob2.askQty.mul(ob2.ask).mul(ob1.ask);
+            const limite3 = ob3.bidQty.mul(ob3.bid);
+            const nocionalMaximo = Decimal.min(limite1, limite2, limite3);
+            this.metrics.nocionalMaximo.push(nocionalMaximo.toNumber());
+
+            // PERSISTÊNCIA: o preço sobrevive à nossa latência?
+            //
+            // As pernas estavam frescas AGORA. A nossa ordem chega 50-160ms
+            // depois. Reavaliar o mesmo ciclo daqui a 150ms e 300ms responde a
+            // única pergunta que separa "existe" de "dá para pegar".
+            const reavaliar = (aposMs: number, contador: 'sobreviveram150' | 'sobreviveram300') => {
+                setTimeout(() => {
+                    const n1 = this.orderBook.get(t.leg1);
+                    const n2 = this.orderBook.get(t.leg2);
+                    const n3 = this.orderBook.get(t.leg3);
+                    if (!n1 || !n2 || !n3) return;
+                    const nova = evaluateTriangle(t, n1, n2, n3, custo.retencao, custo.brutoExigido);
+                    if (nova?.isOpportunity) this.metrics.persistencia[contador] += 1;
+                }, aposMs);
+            };
+            this.metrics.persistencia.checadas += 1;
+            reavaliar(150, 'sobreviveram150');
+            reavaliar(300, 'sobreviveram300');
             log.info('Ineficiência líquida encontrada.', {
                 idadeDasPernasMs: idades.join('/'),
                 pernaMaisVelhaMs: idadeMaxima,
+                nocionalMaximoUSDT: nocionalMaximo.toFixed(2),
+                cabeEm24: nocionalMaximo.greaterThanOrEqualTo(24) ? 'sim' : 'NÃO — topo do livro pequeno demais',
                 suspeita:
                     idadeMaxima > 500
                         ? 'PROVÁVEL FANTASMA: uma perna está velha, o desalinhamento pode nunca ter existido simultaneamente'
@@ -401,12 +460,27 @@ class OpportunitySniffer {
             idadeMaximaAceita: `${MAX_LEG_AGE_MS}ms`,
             // Quantas oportunidades sobrevivem a exigências de simultaneidade
             // mais duras. Se todas somem a 500ms, todas eram fantasma.
+            // Com o filtro em 200ms, isto é tautológico: tudo que é avaliado já
+            // tem menos de 200ms. Só volta a informar se o filtro for afrouxado.
             sobrevivemA: (() => {
                 const idades = this.metrics.oportunidadesPorIdade;
                 if (idades.length === 0) return 'nenhuma oportunidade ainda';
                 return [200, 500, 1000]
                     .map((lim) => `${lim}ms: ${idades.filter((i) => i <= lim).length}/${idades.length}`)
                     .join(' | ');
+            })(),
+            // As duas medições que decidem se a oportunidade é EXECUTÁVEL.
+            profundidadeUSDT: (() => {
+                const n = this.metrics.nocionalMaximo;
+                if (n.length === 0) return '—';
+                const ord = [...n].sort((a, b) => a - b);
+                const mediana = ord[Math.floor(ord.length / 2)];
+                return `mediana $${mediana.toFixed(2)} | cabem $24 em ${n.filter((v) => v >= 24).length}/${n.length}`;
+            })(),
+            sobreviveuALatencia: (() => {
+                const p = this.metrics.persistencia;
+                if (p.checadas === 0) return '—';
+                return `150ms: ${p.sobreviveram150}/${p.checadas} | 300ms: ${p.sobreviveram300}/${p.checadas}`;
             })(),
         });
 

@@ -15,8 +15,17 @@ const triangle = { id: 'USDT-BTC-ETH', leg1: 'BTCUSDT', leg2: 'ETHBTC', leg3: 'E
 const retentionCubed = new Decimal(1).minus('0.001').pow(3);
 const requiredGrossSpread = new Decimal(1).plus('0.0002').dividedBy(retentionCubed);
 
-function tick(bid: string, ask: string): { bid: Decimal; ask: Decimal; timestamp: number } {
-    return { bid: new Decimal(bid), ask: new Decimal(ask), timestamp: Date.now() };
+function tick(bid: string, ask: string, qtd = '1000000') {
+    return {
+        bid: new Decimal(bid),
+        ask: new Decimal(ask),
+        // Quantidade generosa por padrão: estes testes medem a ARITMÉTICA do
+        // ciclo, e um limite de profundidade apertado aqui mascararia o que
+        // eles existem para verificar.
+        bidQty: new Decimal(qtd),
+        askQty: new Decimal(qtd),
+        timestamp: Date.now(),
+    };
 }
 
 test('evaluateTriangle detecta a mesma ineficiência clássica usada nos testes do RiskManager', () => {
