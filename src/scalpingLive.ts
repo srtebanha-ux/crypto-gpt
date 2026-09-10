@@ -130,6 +130,7 @@ class MotorDeScalping {
     private readonly vazao = new ControleDeVazao({ capacidade: 2400, janelaMs: 60_000, nome: 'fapi' });
     private universo: string[] = [];
     private ws: WebSocket | null = null;
+    private vigia: ReturnType<typeof setTimeout> | null = null;
     private tentativasDeReconexao = 0;
     /** Trava de reentrância: mensagens de kline chegam várias por segundo. */
     private ocupado = false;
@@ -314,23 +315,33 @@ class MotorDeScalping {
         if (mudou) log.info('Universo atualizado.', { simbolos: novo.join(',') });
     }
 
+    /**
+     * Conecta e assina EXPLICITAMENTE.
+     *
+     * A forma anterior punha os streams na query (`/stream?streams=a/b/c`) e
+     * não tinha como saber se a Binance havia entendido: a conexão abria,
+     * respondia ping, e ficava muda. Vinte e oito minutos de silêncio sem um
+     * único erro — o pior modo de falhar, porque tudo parece certo.
+     *
+     * Com `/ws` + mensagem SUBSCRIBE, a corretora RESPONDE: `{"result":null,
+     * "id":1}` em caso de sucesso, ou um erro nomeando o stream inválido. A
+     * dúvida vira log.
+     */
     private conectar(): void {
         const base = process.env.FUTURES_WS_URL ?? 'wss://fstream.binance.com';
-        const streams = this.universo.map((s) => `${s.toLowerCase()}@kline_1m`).join('/');
-        const url = `${base}/stream?streams=${streams}`;
+        const url = `${base}/ws`;
+        const streams = this.universo.map((s) => `${s.toLowerCase()}@kline_1m`);
 
         this.ws = new WebSocket(url);
 
         this.ws.on('open', () => {
             this.tentativasDeReconexao = 0;
-            log.info('WebSocket de klines conectado.', { simbolos: this.universo.length });
+            this.ws?.send(JSON.stringify({ method: 'SUBSCRIBE', params: streams, id: 1 }));
+            log.info('WebSocket aberto; SUBSCRIBE enviado.', { streams: streams.length, url });
+            this.armarVigia();
         });
 
         this.ws.on('message', (bruto: WebSocket.RawData) => {
-            // Contado AQUI, antes do parsing. O contador que ficava lá dentro
-            // não distinguia "nada chegou" de "chegou em formato que eu não
-            // reconheço" — e são bugs opostos: um é rede, o outro é o meu
-            // próprio código descartando dado bom em silêncio.
             this.mensagensCruas += 1;
             if (this.amostrasLogadas < 2) {
                 this.amostrasLogadas += 1;
@@ -344,11 +355,35 @@ class MotorDeScalping {
         });
 
         this.ws.on('error', (err) => log.warn('Erro no WebSocket.', { erro: err.message }));
-        this.ws.on('close', () => {
+        this.ws.on('close', (codigo, motivo) => {
             const espera = Math.min(30_000, 1000 * 2 ** this.tentativasDeReconexao++);
-            log.warn('WebSocket caiu; reconectando.', { emMs: espera });
+            log.warn('WebSocket caiu; reconectando.', { emMs: espera, codigo, motivo: motivo.toString().slice(0, 200) });
             setTimeout(() => this.conectar(), espera);
         });
+    }
+
+    /**
+     * Vigia de silêncio.
+     *
+     * Uma conexão aberta e muda é indistinguível de uma saudável do lado de
+     * fora — responde ping, não fecha, não dá erro. Sem isto, o motor ficaria
+     * eternamente "CAÇANDO" sobre um stream morto. Sessenta segundos sem
+     * NENHUMA mensagem, com 15 pares de 1 minuto assinados, só pode ser
+     * defeito.
+     */
+    private armarVigia(): void {
+        if (this.vigia !== null) clearTimeout(this.vigia);
+        const antes = this.mensagensCruas;
+        this.vigia = setTimeout(() => {
+            if (this.mensagensCruas === antes) {
+                log.error('60s sem uma única mensagem no WebSocket. Derrubando para reconectar.', {
+                    assinados: this.universo.length,
+                });
+                this.ws?.terminate();
+            } else {
+                this.armarVigia();
+            }
+        }, 60_000);
     }
 
     private processarKline(msg: unknown): void {
@@ -360,7 +395,16 @@ class MotorDeScalping {
             data?: { E?: number; k?: Record<string, string | number | boolean> };
             E?: number;
             k?: Record<string, string | number | boolean>;
+            id?: number;
         };
+        // Resposta do SUBSCRIBE: {"result":null,"id":1} em caso de sucesso.
+        // Registrar é o que separa "assinou e o mercado está parado" de
+        // "a corretora recusou a assinatura e ninguém contou".
+        if (typeof (bruto as { id?: number }).id === 'number') {
+            log.info('Resposta do SUBSCRIBE.', { corpo: JSON.stringify(bruto).slice(0, 300) });
+            return;
+        }
+
         const dados = bruto.data ?? bruto;
         const k = dados?.k;
         if (!k) return;
