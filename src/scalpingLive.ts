@@ -329,17 +329,40 @@ class MotorDeScalping {
      */
     private conectar(): void {
         const base = process.env.FUTURES_WS_URL ?? 'wss://fstream.binance.com';
-        const url = `${base}/ws`;
         const streams = this.universo.map((s) => `${s.toLowerCase()}@kline_1m`);
+        // Abre JÁ ligado a um stream real em vez de num /ws vazio.
+        //
+        // A Binance responde {"result":null} a qualquer SUBSCRIBE, inclusive
+        // de stream inexistente — ela não valida o nome, só aceita e silencia.
+        // Por isso o ack de sucesso não provava nada. Nascendo em
+        // /ws/<stream>, se o primeiro par entregar dado, a conexão está boa e
+        // o problema seria só o SUBSCRIBE; se nem ele entregar, o problema é
+        // o transporte. Cada caso aponta para um lugar diferente.
+        const url = `${base}/ws/${streams[0] ?? 'btcusdt@kline_1m'}`;
+        const restantes = streams.slice(1);
 
-        this.ws = new WebSocket(url);
+        this.ws = new WebSocket(url, {
+            // Desliga a compressão de frames.
+            //
+            // A Binance negocia permessage-deflate, e existe um modo de falha
+            // em que o handshake fecha, o ping/pong continua, e os frames
+            // comprimidos nunca chegam a ser entregues à aplicação: conexão
+            // viva, dado nenhum, erro nenhum. É exatamente o quadro observado.
+            // Sem compressão o tráfego cresce, e cresce muito menos do que
+            // custa um stream mudo.
+            perMessageDeflate: false,
+        });
 
         this.ws.on('open', () => {
             this.tentativasDeReconexao = 0;
-            this.ws?.send(JSON.stringify({ method: 'SUBSCRIBE', params: streams, id: 1 }));
-            log.info('WebSocket aberto; SUBSCRIBE enviado.', { streams: streams.length, url });
+            if (restantes.length > 0) {
+                this.ws?.send(JSON.stringify({ method: 'SUBSCRIBE', params: restantes, id: 1 }));
+            }
+            log.info('WebSocket aberto.', { url, assinadosPorMensagem: restantes.length });
             this.armarVigia();
         });
+
+        this.ws.on('ping', () => log.debug('ping da Binance', {}));
 
         this.ws.on('message', (bruto: WebSocket.RawData) => {
             this.mensagensCruas += 1;
