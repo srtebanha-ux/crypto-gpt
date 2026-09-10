@@ -308,6 +308,51 @@ export class BinanceFuturesProvider {
         return { fechadas, emFormacao };
     }
 
+    /**
+     * Preço de TODOS os perpétuos numa chamada. Peso 2 — duas velas.
+     *
+     * É o que torna a varredura do mercado inteiro mais barata que vigiar
+     * quinze pares um a um, e é onde a frequência de eventos deixa de ser o
+     * gargalo da estratégia.
+     */
+    public async precosDeTodos(): Promise<Map<string, Decimal>> {
+        const cru = await this.publico<Array<{ symbol: string; price: string }>>('/fapi/v1/ticker/price');
+        const mapa = new Map<string, Decimal>();
+        for (const t of cru) {
+            if (!this.filtros.has(t.symbol)) continue;
+            const p = new Decimal(t.price);
+            if (p.greaterThan(0)) mapa.set(t.symbol, p);
+        }
+        return mapa;
+    }
+
+    /**
+     * Histórico curto de Open Interest — a impressão digital da liquidação.
+     *
+     * Vem por REST porque o stream !forceOrder@arr, que mostraria as
+     * liquidações uma a uma, é WebSocket — e o WebSocket deste ambiente não
+     * entrega dado (ver a nota em klines). O OI é a mesma informação com
+     * granularidade mais grossa: se posições SUMIRAM enquanto o preço caía,
+     * alguém foi fechado à força. Não diz quem nem quanto de cada vez; diz o
+     * que importa, que é se houve destruição de posição ou criação dela.
+     *
+     * period '5m' com limit 2 devolve o antes e o agora — o suficiente para
+     * classificar o regime sem carregar histórico de símbolo nenhum.
+     */
+    public async historicoDeOpenInterest(symbol: string, limite = 2): Promise<Array<{ emMs: number; oi: Decimal }>> {
+        const cru = await this.publico<Array<{ sumOpenInterest: string; timestamp: number }>>(
+            '/futures/data/openInterestHist',
+            { symbol, period: '5m', limit: String(limite) },
+        );
+        return cru.map((c) => ({ emMs: Number(c.timestamp), oi: new Decimal(c.sumOpenInterest) }));
+    }
+
+    /** Funding corrente do par — o combustível da cascata (ver tensao.ts). */
+    public async fundingAtual(symbol: string): Promise<Decimal> {
+        const cru = await this.publico<{ lastFundingRate: string }>('/fapi/v1/premiumIndex', { symbol });
+        return new Decimal(cru.lastFundingRate ?? '0');
+    }
+
     /** Estatísticas 24h de todos os perpétuos — a base para escolher o universo. */
     public async tickers24h(): Promise<Array<{ symbol: string; variacaoPct: Decimal; volumeUsdt: Decimal; ultimo: Decimal }>> {
         interface Cru {

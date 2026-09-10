@@ -41,6 +41,8 @@ import {
 import { veredictoDeScalping } from './scalping';
 import { avaliarGrade, CaminhoDeSinal, CelulaDaGrade, gradePadrao, melhorDaGrade } from './excursao';
 import { EstadoDeRicochete, parametrosPadrao, passoDoRicochete } from './ricochete';
+import { VarreduraDeMercado } from './varredura';
+import { classificarRegime, medirTensao, quedaOperavel } from './tensao';
 import { detectarPicoDeVolume, precosDeSaida, Vela1m } from './volumeSpike';
 import { selecionarUniverso } from './universo';
 import { ControleDeVazao } from './rateLimiter';
@@ -130,6 +132,24 @@ class MotorDeScalping {
     private readonly vazao = new ControleDeVazao({ capacidade: 2400, janelaMs: 60_000, nome: 'fapi' });
     private universo: string[] = [];
     private coletando = false;
+    private varrendo = false;
+    private readonly varredura = new VarreduraDeMercado({
+        janelaMs: 90_000,
+        quedaMinima: new Decimal(process.env.SCALPING_QUEDA_MINIMA_PCT ?? '8').dividedBy(100),
+    });
+    /** Estatística da auditoria de cascatas — a resposta da pergunta 3. */
+    private readonly auditoria = {
+        varreduras: 0,
+        quedasBrutas: 0,
+        semOi: 0,
+        distribuicao: 0,
+        cascataFraca: 0,
+        semTensao: 0,
+        ladoErrado: 0,
+        cascatasLimpas: 0,
+        desdeMs: Date.now(),
+    };
+    private readonly ultimaCascataMs = new Map<string, number>();
     private tentativasDeReconexao = 0;
     /** Trava de reentrância: mensagens de kline chegam várias por segundo. */
     private ocupado = false;
@@ -271,12 +291,20 @@ class MotorDeScalping {
         }
 
         await this.reescolherUniverso();
+        const varreduraMs = Number(process.env.SCALPING_VARREDURA_MS ?? '5000');
+        log.info('Varredura de mercado iniciada.', {
+            intervaloMs: varreduraMs,
+            simbolos: this.provider.simbolosDisponiveis().length,
+            quedaMinima: `${new Decimal(process.env.SCALPING_QUEDA_MINIMA_PCT ?? '8').toFixed(1)}%`,
+        });
+        setInterval(() => void this.varrer(), varreduraMs);
         const intervalo = Number(process.env.SCALPING_POLL_MS ?? '10000');
         log.info('Coleta por REST iniciada.', { intervaloMs: intervalo, simbolos: this.universo.length });
         void this.coletar();
         setInterval(() => void this.coletar(), intervalo);
         setInterval(() => void this.rotinaPeriodica(), 15_000);
         setInterval(() => this.relatarGrade(), 5 * 60_000);
+        setInterval(() => this.relatarAuditoria(), 10 * 60_000);
     }
 
     /**
@@ -476,6 +504,113 @@ class MotorDeScalping {
         if (total === 0) {
             log.info('GRADE: nenhum caminho completo ainda.', { gravando: this.gravando.length });
         }
+    }
+
+    /**
+     * Varredura do mercado inteiro: 528 pares por peso 2.
+     *
+     * Detecta a queda pelo preço e confirma pelo Open Interest. A confirmação
+     * é o que separa cascata de fluxo vendedor novo — e a proposta de baixar
+     * o gatilho para 4,5% morria exatamente por não ter como fazer essa
+     * separação. Cada recusa é contada por MOTIVO, porque "poucos eventos" e
+     * "muitos eventos que não passam no filtro" pedem correções opostas.
+     */
+    private async varrer(): Promise<void> {
+        if (this.varrendo) return;
+        this.varrendo = true;
+        try {
+            await this.vazao.aguardarVaga(2);
+            const precos = await this.provider.precosDeTodos();
+            const agora = { emMs: Date.now(), precos };
+            const quedas = this.varredura.quedas(agora);
+            this.varredura.registrar(agora);
+            this.auditoria.varreduras += 1;
+
+            for (const q of quedas) {
+                const anterior = this.ultimaCascataMs.get(q.symbol) ?? Number.NEGATIVE_INFINITY;
+                if (agora.emMs - anterior < 30 * 60_000) continue; // uma cascata por par por meia hora
+                this.auditoria.quedasBrutas += 1;
+
+                let oi: Array<{ emMs: number; oi: Decimal }>;
+                let funding: Decimal;
+                try {
+                    await this.vazao.aguardarVaga(2);
+                    [oi, funding] = await Promise.all([
+                        this.provider.historicoDeOpenInterest(q.symbol),
+                        this.provider.fundingAtual(q.symbol),
+                    ]);
+                } catch {
+                    this.auditoria.semOi += 1;
+                    continue;
+                }
+                if (oi.length < 2) {
+                    this.auditoria.semOi += 1;
+                    continue;
+                }
+
+                const classificacao = classificarRegime({
+                    antes: { emMs: oi[0].emMs, preco: q.de, openInterest: oi[0].oi, funding },
+                    agora: { emMs: oi[1].emMs, preco: q.para, openInterest: oi[1].oi, funding },
+                });
+                const tensao = medirTensao({ funding });
+                const veredicto = quedaOperavel({ classificacao, tensao });
+
+                if (!veredicto.operavel) {
+                    if (classificacao.regime !== 'cascata') this.auditoria.distribuicao += 1;
+                    else if (veredicto.motivo.includes('fraca')) this.auditoria.cascataFraca += 1;
+                    else if (veredicto.motivo.includes('não estava torto')) this.auditoria.semTensao += 1;
+                    else this.auditoria.ladoErrado += 1;
+                    log.info('Queda RECUSADA.', {
+                        symbol: q.symbol,
+                        queda: `${q.queda.mul(100).toFixed(2)}%`,
+                        emSegundos: (q.idadeMs / 1000).toFixed(0),
+                        regime: classificacao.regime,
+                        motivo: veredicto.motivo,
+                    });
+                    continue;
+                }
+
+                this.auditoria.cascatasLimpas += 1;
+                this.ultimaCascataMs.set(q.symbol, agora.emMs);
+                log.info('CASCATA LIMPA CONFIRMADA.', {
+                    symbol: q.symbol,
+                    queda: `${q.queda.mul(100).toFixed(2)}%`,
+                    emSegundos: (q.idadeMs / 1000).toFixed(0),
+                    oi: `${classificacao.variacaoDeOi.mul(100).toFixed(2)}%`,
+                    intensidade: classificacao.intensidade.toFixed(2),
+                    fundingAnual: `${tensao.fundingAnualizado.mul(100).toFixed(1)}%`,
+                });
+                // Arma o ricochete: daqui em diante o par é seguido até
+                // confirmar a volta ou a janela expirar.
+                this.ricochete.set(q.symbol, {
+                    fase: 'caindo',
+                    fundo: q.para,
+                    fundoEmMs: agora.emMs,
+                    referencia: q.de,
+                });
+                if (!this.janelas.has(q.symbol)) this.janelas.set(q.symbol, { fechadas: [], emFormacao: null, eventoMs: agora.emMs });
+            }
+        } catch (err) {
+            this.reportarErro('Falha na varredura', err);
+        } finally {
+            this.varrendo = false;
+        }
+    }
+
+    /** O relatório que responde: o mercado entrega cascatas limpas suficientes? */
+    private relatarAuditoria(): void {
+        const horas = (Date.now() - this.auditoria.desdeMs) / 3_600_000;
+        if (horas <= 0) return;
+        const a = this.auditoria;
+        log.info('AUDITORIA DE CASCATAS.', {
+            horas: horas.toFixed(1),
+            varreduras: a.varreduras,
+            quedasBrutas: a.quedasBrutas,
+            recusadas: `distribuicao:${a.distribuicao} fraca:${a.cascataFraca} semTensao:${a.semTensao} ladoErrado:${a.ladoErrado} semOi:${a.semOi}`,
+            CASCATAS_LIMPAS: a.cascatasLimpas,
+            porDia: (a.cascatasLimpas / horas * 24).toFixed(1),
+            precisaPorDia: '3.0',
+        });
     }
 
     /**
