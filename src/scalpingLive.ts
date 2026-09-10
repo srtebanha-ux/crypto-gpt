@@ -39,7 +39,8 @@ import {
     stopAntesDaLiquidacao,
 } from './futurosMath';
 import { veredictoDeScalping } from './scalping';
-import { avaliarGrade, CaminhoDeSinal, gradePadrao, melhorDaGrade } from './excursao';
+import { avaliarGrade, CaminhoDeSinal, CelulaDaGrade, gradePadrao, melhorDaGrade } from './excursao';
+import { EstadoDeRicochete, parametrosPadrao, passoDoRicochete } from './ricochete';
 import { detectarPicoDeVolume, precosDeSaida, Vela1m } from './volumeSpike';
 import { selecionarUniverso } from './universo';
 import { ControleDeVazao } from './rateLimiter';
@@ -134,10 +135,18 @@ class MotorDeScalping {
     private ocupado = false;
     private posicao: PosicaoViva | null = null;
     private placar = { entradas: 0, alvos: 0, stops: 0, emergencias: 0 };
-    /** Caminhos já completos: a matéria-prima da grade. */
-    private readonly caminhos: CaminhoDeSinal[] = [];
-    /** Caminhos ainda sendo seguidos, vela a vela. */
-    private gravando: Array<{ caminho: CaminhoDeSinal; restantes: number }> = [];
+    /**
+     * Caminhos completos, SEPARADOS POR GATILHO.
+     *
+     * Misturar as duas fontes numa amostra só destruiria a única coisa que
+     * interessa: saber qual gatilho presta. Um gatilho ruim com muitos eventos
+     * afogaria um bom com poucos, e a média não seria de nenhum dos dois.
+     */
+    private readonly caminhos = new Map<string, CaminhoDeSinal[]>();
+    private gravando: Array<{ gatilho: string; caminho: CaminhoDeSinal; restantes: number }> = [];
+    /** Estado da máquina de ricochete, por símbolo. */
+    private readonly ricochete = new Map<string, EstadoDeRicochete | null>();
+    private readonly ultimoRicocheteMs = new Map<string, number>();
     private sinaisVistos = 0;
     /**
      * Último sinal por símbolo. Existe porque o mesmo pico é detectado a cada
@@ -363,7 +372,10 @@ class MotorDeScalping {
 
                     const janela: JanelaDoSimbolo = { fechadas, emFormacao, eventoMs: Date.now() };
                     this.janelas.set(symbol, janela);
-                    if (emFormacao) await this.avaliar(symbol, janela);
+                    if (emFormacao) {
+                        this.avaliarRicochete(symbol, emFormacao);
+                        await this.avaliar(symbol, janela);
+                    }
                 } catch (err) {
                     this.reportarErro(`Falha ao coletar ${symbol}`, err);
                 }
@@ -390,8 +402,13 @@ class MotorDeScalping {
             }
             g.caminho.velas.push(vela);
             g.restantes -= 1;
-            if (g.restantes > 0) aindaGravando.push(g);
-            else this.caminhos.push(g.caminho);
+            if (g.restantes > 0) {
+                aindaGravando.push(g);
+            } else {
+                const lista = this.caminhos.get(g.gatilho) ?? [];
+                lista.push(g.caminho);
+                this.caminhos.set(g.gatilho, lista);
+            }
         }
         this.gravando = aindaGravando;
     }
@@ -404,100 +421,95 @@ class MotorDeScalping {
      * teve, diz isso — e essa é uma resposta tão útil quanto a outra: nenhum
      * ajuste de alvo salva um sinal que não antecipa nada.
      */
-    private relatarGrade(): void {
-        if (this.caminhos.length === 0) return;
+    /** Uma linha de relatório para um conjunto de caminhos. */
+    private relatarUm(gatilho: string, caminhos: CaminhoDeSinal[]): void {
+        if (caminhos.length === 0) return;
 
-        // O MESMO caminho avaliado nas duas direções.
-        //
-        // Um sinal que acerta menos que o acaso não é ruído: é informação
-        // invertida. Num passeio aleatório, tocar +0,3% antes de −0,4% tem
-        // 57,1% de chance (0,4 / 0,7); medir 24% significa que seguir o sinal
-        // é pior que jogar moeda — e que fazer o CONTRÁRIO pode ser melhor.
-        //
-        // Custa uma linha testar isso, e não custa nenhum dado novo: os
-        // caminhos já estão gravados, e inverter a direção é reinterpretar o
-        // mesmo preço. Deixar de medir seria descartar de graça a hipótese
-        // mais promissora que a própria medição levantou.
-        const invertidos = this.caminhos.map((c) => ({
+        const grade = gradePadrao();
+        const seguindo = avaliarGrade({ caminhos, ...grade, taxas: TAXAS_DA_OPERACAO });
+        // O MESMO caminho na direção oposta. Um sinal que acerta menos que o
+        // acaso não é ruído, é informação invertida — e testar isso não custa
+        // dado novo, só reinterpretar o preço já gravado.
+        const invertidos = caminhos.map((c) => ({
             ...c,
             direcao: (c.direcao === 'alta' ? 'baixa' : 'alta') as 'alta' | 'baixa',
         }));
-        const celulasInvertidas = avaliarGrade({ caminhos: invertidos, ...gradePadrao(), taxas: TAXAS_DA_OPERACAO });
-        const pedidaInvertida = celulasInvertidas.find(
-            (c) => c.alvo.equals(this.cfg.alvo) && c.stop.equals(this.cfg.stop),
-        );
-        const melhorInvertida = melhorDaGrade({ celulas: celulasInvertidas, minimoResolvidos: MINIMO_PARA_RECOMENDAR });
+        const contra = avaliarGrade({ caminhos: invertidos, ...grade, taxas: TAXAS_DA_OPERACAO });
 
-        if (pedidaInvertida) {
-            log.info('CONTRA O SINAL (mesma configuração, direção invertida).', {
-                acerto: `${pedidaInvertida.taxaDeAcerto.mul(100).toFixed(1)}%`,
-                amostra: `${pedidaInvertida.alvos}A/${pedidaInvertida.stops}S/${pedidaInvertida.abertos}abertos`,
-                ev: `${pedidaInvertida.evPorOperacao.mul(100).toFixed(4)}% do nocional`,
-                acasoSeria: '57.1%',
-            });
-        }
-        if (melhorInvertida) {
-            log.info('MELHOR CONTRA O SINAL.', {
-                alvo: `${melhorInvertida.alvo.mul(100).toFixed(1)}%`,
-                stop: `${melhorInvertida.stop.mul(100).toFixed(1)}%`,
-                acerto: `${melhorInvertida.taxaDeAcerto.mul(100).toFixed(1)}%`,
-                ev: `${melhorInvertida.evPorOperacao.mul(100).toFixed(4)}%`,
-                amostra: `${melhorInvertida.alvos}A/${melhorInvertida.stops}S`,
-            });
-        }
+        const naConfig = (cs: CelulaDaGrade[]) =>
+            cs.find((c) => c.alvo.equals(this.cfg.alvo) && c.stop.equals(this.cfg.stop));
+        const resumo = (c: CelulaDaGrade | undefined) =>
+            c
+                ? `acerto ${c.taxaDeAcerto.mul(100).toFixed(1)}% (${c.alvos}A/${c.stops}S/${c.abertos}ab), ` +
+                  `EV ${c.evPorOperacao.mul(100).toFixed(4)}%`
+                : 'fora da grade';
 
-        const celulas = avaliarGrade({ caminhos: this.caminhos, ...gradePadrao(), taxas: TAXAS_DA_OPERACAO });
-        const melhor = melhorDaGrade({ celulas, minimoResolvidos: MINIMO_PARA_RECOMENDAR });
-
-        const pedida = celulas.find(
-            (c) => c.alvo.equals(this.cfg.alvo) && c.stop.equals(this.cfg.stop),
-        );
-
-        log.info('GRADE MEDIDA.', {
-            caminhosCompletos: this.caminhos.length,
-            gravando: this.gravando.length,
-            sinaisVistos: this.sinaisVistos,
-            configuracaoPedida: pedida
-                ? `alvo ${pedida.alvo.mul(100).toFixed(1)}% / stop ${pedida.stop.mul(100).toFixed(1)}%: ` +
-                  `acerto ${pedida.taxaDeAcerto.mul(100).toFixed(1)}% (${pedida.alvos}A/${pedida.stops}S/${pedida.abertos}abertos), ` +
-                  `EV ${pedida.evPorOperacao.mul(100).toFixed(4)}% do nocional`
-                : 'fora da grade',
+        log.info(`GRADE [${gatilho}].`, {
+            completos: caminhos.length,
+            seguindo: resumo(naConfig(seguindo)),
+            contra: resumo(naConfig(contra)),
+            acasoSeria: '57.1%',
         });
 
-        if (!melhor) {
-            const resolvidos = Math.max(...celulas.map((c) => c.alvos + c.stops));
-            log.warn(
-                resolvidos < MINIMO_PARA_RECOMENDAR
-                    ? `Amostra ainda pequena: ${resolvidos} caminhos resolvidos, precisa de ${MINIMO_PARA_RECOMENDAR}.`
-                    : 'NENHUMA combinação de alvo e stop teve lucro esperado positivo. O sinal não antecipa movimento.',
-                {},
-            );
-            return;
+        for (const [nome, cs] of [
+            ['seguindo', seguindo],
+            ['contra', contra],
+        ] as const) {
+            const melhor = melhorDaGrade({ celulas: cs, minimoResolvidos: MINIMO_PARA_RECOMENDAR });
+            if (!melhor) continue;
+            log.info(`  MELHOR [${gatilho}/${nome}]`, {
+                alvo: `${melhor.alvo.mul(100).toFixed(1)}%`,
+                stop: `${melhor.stop.mul(100).toFixed(1)}%`,
+                acerto: `${melhor.taxaDeAcerto.mul(100).toFixed(1)}%`,
+                equilibrio: `${melhor.acertoDeEquilibrio.mul(100).toFixed(1)}%`,
+                ev: `${melhor.evPorOperacao.mul(100).toFixed(4)}%`,
+                amostra: `${melhor.alvos}A/${melhor.stops}S`,
+            });
         }
+    }
 
-        // As cinco melhores, para se ver se o topo é um pico isolado (ruído) ou
-        // um platô (efeito real que não depende de acertar o parâmetro exato).
-        const topo = celulas
-            .filter((c) => c.alvos + c.stops >= MINIMO_PARA_RECOMENDAR)
-            .sort((a, b) => b.evPorOperacao.comparedTo(a.evPorOperacao))
-            .slice(0, 5);
+    private relatarGrade(): void {
+        for (const [gatilho, caminhos] of this.caminhos) this.relatarUm(gatilho, caminhos);
+        const total = [...this.caminhos.values()].reduce((n, c) => n + c.length, 0);
+        if (total === 0) {
+            log.info('GRADE: nenhum caminho completo ainda.', { gravando: this.gravando.length });
+        }
+    }
 
-        log.info('MELHOR CONFIGURAÇÃO MEDIDA.', {
-            alvo: `${melhor.alvo.mul(100).toFixed(1)}%`,
-            stop: `${melhor.stop.mul(100).toFixed(1)}%`,
-            acerto: `${melhor.taxaDeAcerto.mul(100).toFixed(1)}%`,
-            acertoDeEquilibrio: `${melhor.acertoDeEquilibrio.mul(100).toFixed(1)}%`,
-            evPorOperacao: `${melhor.evPorOperacao.mul(100).toFixed(4)}% do nocional`,
-            amostra: `${melhor.alvos}A/${melhor.stops}S/${melhor.abertos}abertos`,
+    /**
+     * Gatilho de ricochete, medido em paralelo ao de volume.
+     *
+     * Os dois convivem porque respondem a perguntas diferentes e nenhum dos
+     * dois foi respondido ainda. O de volume dispara dezenas de vezes por hora
+     * sobre movimentos de 0,15%; este espera uma queda de 8% e a confirmação
+     * da volta. Um vai fechar amostra hoje; o outro pode levar dias — e é
+     * exatamente por isso que ele precisa começar a contar agora.
+     */
+    private avaliarRicochete(symbol: string, vela: Vela1m): void {
+        const cfg = parametrosPadrao({ alavancagem: this.cfg.alavancagem });
+        const agora = Date.now();
+        const r = passoDoRicochete({ estado: this.ricochete.get(symbol) ?? null, vela, agoraMs: agora, cfg });
+        this.ricochete.set(symbol, r.estado);
+        if (!r.sinal) return;
+
+        const anterior = this.ultimoRicocheteMs.get(symbol) ?? Number.NEGATIVE_INFINITY;
+        if (agora - anterior < 15 * 60_000) return;
+        this.ultimoRicocheteMs.set(symbol, agora);
+
+        log.info('RICOCHETE CONFIRMADO.', {
+            symbol,
+            queda: `${r.sinal.queda.mul(100).toFixed(2)}%`,
+            fundo: r.sinal.fundo.toString(),
+            entrada: r.sinal.entrada.toString(),
+            repique: `${r.sinal.repique.mul(100).toFixed(2)}%`,
+            liquidacaoVsFundo: `${r.sinal.liquidacaoVsFundo.mul(100).toFixed(2)}%`,
         });
-        topo.forEach((c, i) =>
-            log.info(`  #${i + 1}`, {
-                alvo: `${c.alvo.mul(100).toFixed(1)}%`,
-                stop: `${c.stop.mul(100).toFixed(1)}%`,
-                acerto: `${c.taxaDeAcerto.mul(100).toFixed(1)}%`,
-                ev: `${c.evPorOperacao.mul(100).toFixed(4)}%`,
-            }),
-        );
+
+        this.gravando.push({
+            gatilho: 'ricochete',
+            caminho: { symbol, direcao: 'alta', entrada: r.sinal.entrada, velas: [] },
+            restantes: JANELA_DE_MEDICAO,
+        });
     }
 
     // ------------------------------------------------------------------
@@ -536,6 +548,7 @@ class MotorDeScalping {
         // Todo sinal vira caminho medido, ao vivo ou não. Medir é o que
         // transforma a escolha de alvo e stop em resultado em vez de opinião.
         this.gravando.push({
+            gatilho: 'volume',
             caminho: { symbol, direcao: sinal.direcao, entrada: sinal.preco, velas: [] },
             restantes: JANELA_DE_MEDICAO,
         });
@@ -764,7 +777,7 @@ class MotorDeScalping {
                 comHistorico: profundidades.filter((n) => n >= 3).length,
                 sinaisVistos: this.sinaisVistos,
                 gravando: this.gravando.length,
-                caminhosCompletos: this.caminhos.length,
+                caminhosCompletos: [...this.caminhos.entries()].map(([g, c]) => `${g}:${c.length}`).join(' '),
                 placar: JSON.stringify(this.placar),
             });
         } catch (err) {
