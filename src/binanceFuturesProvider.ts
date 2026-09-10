@@ -360,6 +360,46 @@ export class BinanceFuturesProvider {
      * `workingType: MARK_PRICE` casa o gatilho com o da liquidação. Ver o
      * cabeçalho deste arquivo.
      */
+    /**
+     * Alvo como ordem LIMITADA parada no livro — ou seja, MAKER.
+     *
+     * Taker custa 0,05% (0,045% com BNB); maker custa 0,02% (0,018%). Numa
+     * perna, isso é 60% menos taxa; na ida e volta de um scalp, derruba o
+     * custo total de 0,090% para 0,063%. Como a taxa entra DUAS vezes na
+     * conta — encolhe o ganho e engorda a perda —, esses 0,027pp movem o
+     * acerto exigido em torno de 2 pontos percentuais. É a melhoria mais
+     * barata que existe: não depende de acertar mais nada.
+     *
+     * `reduceOnly` é o que torna isso seguro: uma ordem limitada pendurada
+     * jamais pode ABRIR posição contrária se a posição já tiver fechado pelo
+     * stop — ela só reduz, e vira no-op quando não há o que reduzir.
+     *
+     * O stop continua a mercado, e continua tendo de ser: uma ordem limitada
+     * de stop pode não preencher, e não sair de uma posição a 30x é pior do
+     * que sair caro.
+     */
+    public async colocarAlvoMaker(params: {
+        symbol: string;
+        direcao: 'alta' | 'baixa';
+        preco: Decimal;
+        quantidade: Decimal;
+    }): Promise<number> {
+        const r = await this.assinado<{ orderId: number }>('POST', '/fapi/v1/order', {
+            symbol: params.symbol,
+            side: params.direcao === 'alta' ? 'SELL' : 'BUY',
+            type: 'LIMIT',
+            price: params.preco.toString(),
+            quantity: params.quantidade.abs().toString(),
+            // GTX = post-only: a Binance RECUSA a ordem se ela fosse executar
+            // na hora. Sem isso, um preço já ultrapassado viraria taker e
+            // pagaria justamente a taxa que esta função existe para evitar.
+            timeInForce: 'GTX',
+            reduceOnly: 'true',
+            ...this.ladoDaPosicao(params.direcao),
+        });
+        return r.orderId;
+    }
+
     public async colocarSaida(params: {
         symbol: string;
         direcao: 'alta' | 'baixa';

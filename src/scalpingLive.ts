@@ -40,6 +40,7 @@ import {
     stopAntesDaLiquidacao,
 } from './futurosMath';
 import { veredictoDeScalping } from './scalping';
+import { avaliarGrade, CaminhoDeSinal, gradePadrao, melhorDaGrade } from './excursao';
 import { detectarPicoDeVolume, precosDeSaida, Vela1m } from './volumeSpike';
 import { selecionarUniverso } from './universo';
 import { ControleDeVazao } from './rateLimiter';
@@ -52,6 +53,23 @@ const FRASE_DE_CONFIRMACAO = 'I_UNDERSTAND_THE_RISK';
 const FRASE_DE_OVERRIDE = 'EU_ASSUMO_O_PREJUIZO';
 /** Quantas velas fechadas guardar por símbolo para calcular a média de volume. */
 const VELAS_DE_HISTORICO = 20;
+/**
+ * Por quantos minutos seguir o preço depois de um sinal.
+ *
+ * É o teto do que qualquer alvo pode capturar: um alvo de 1,5% que só é
+ * alcançado no minuto 40 não aparece numa janela de 30. Trinta minutos é a
+ * escala de um scalp — mais que isso já é outra estratégia.
+ */
+const JANELA_DE_MEDICAO = 30;
+/** Abaixo disto, a melhor célula da grade é ruído de amostra pequena. */
+const MINIMO_PARA_RECOMENDAR = 30;
+
+/** Taxas por perna: taker na entrada e no stop, maker no alvo, com desconto BNB. */
+const TAXAS_DA_OPERACAO = {
+    entrada: new Decimal('0.00045'),
+    alvo: new Decimal('0.00018'),
+    stop: new Decimal('0.00045'),
+};
 
 interface Configuracao {
     alavancagem: Decimal;
@@ -117,6 +135,11 @@ class MotorDeScalping {
     private ocupado = false;
     private posicao: PosicaoViva | null = null;
     private placar = { entradas: 0, alvos: 0, stops: 0, emergencias: 0 };
+    /** Caminhos já completos: a matéria-prima da grade. */
+    private readonly caminhos: CaminhoDeSinal[] = [];
+    /** Caminhos ainda sendo seguidos, vela a vela. */
+    private gravando: Array<{ caminho: CaminhoDeSinal; restantes: number }> = [];
+    private sinaisVistos = 0;
 
     constructor(cfg: Configuracao, provider: BinanceFuturesProvider) {
         this.cfg = cfg;
@@ -223,6 +246,7 @@ class MotorDeScalping {
         await this.reescolherUniverso();
         this.conectar();
         setInterval(() => void this.rotinaPeriodica(), 15_000);
+        setInterval(() => this.relatarGrade(), 5 * 60_000);
     }
 
     /**
@@ -329,12 +353,100 @@ class MotorDeScalping {
             janela.fechadas.push(vela);
             if (janela.fechadas.length > VELAS_DE_HISTORICO) janela.fechadas.shift();
             janela.emFormacao = null;
+            this.alimentarGravacoes(symbol, vela);
         } else {
             janela.emFormacao = vela;
         }
         this.janelas.set(symbol, janela);
 
         if (janela.emFormacao) void this.avaliar(symbol, janela);
+    }
+
+    /**
+     * Estende os caminhos em curso com a vela recém-fechada.
+     *
+     * Só velas FECHADAS entram: uma vela em formação tem máxima e mínima
+     * provisórias, e medir desfecho com extremos que ainda podem crescer
+     * anteciparia stops que talvez nunca acontecessem.
+     */
+    private alimentarGravacoes(symbol: string, vela: Vela1m): void {
+        if (this.gravando.length === 0) return;
+        const aindaGravando: typeof this.gravando = [];
+        for (const g of this.gravando) {
+            if (g.caminho.symbol !== symbol) {
+                aindaGravando.push(g);
+                continue;
+            }
+            g.caminho.velas.push(vela);
+            g.restantes -= 1;
+            if (g.restantes > 0) aindaGravando.push(g);
+            else this.caminhos.push(g.caminho);
+        }
+        this.gravando = aindaGravando;
+    }
+
+    /**
+     * O relatório que substitui a discussão sobre parâmetros.
+     *
+     * Percorre TODAS as combinações de alvo e stop contra os caminhos reais
+     * medidos e mostra as que tiveram lucro esperado positivo. Se nenhuma
+     * teve, diz isso — e essa é uma resposta tão útil quanto a outra: nenhum
+     * ajuste de alvo salva um sinal que não antecipa nada.
+     */
+    private relatarGrade(): void {
+        if (this.caminhos.length === 0) return;
+        const celulas = avaliarGrade({ caminhos: this.caminhos, ...gradePadrao(), taxas: TAXAS_DA_OPERACAO });
+        const melhor = melhorDaGrade({ celulas, minimoResolvidos: MINIMO_PARA_RECOMENDAR });
+
+        const pedida = celulas.find(
+            (c) => c.alvo.equals(this.cfg.alvo) && c.stop.equals(this.cfg.stop),
+        );
+
+        log.info('GRADE MEDIDA.', {
+            caminhosCompletos: this.caminhos.length,
+            gravando: this.gravando.length,
+            sinaisVistos: this.sinaisVistos,
+            configuracaoPedida: pedida
+                ? `alvo ${pedida.alvo.mul(100).toFixed(1)}% / stop ${pedida.stop.mul(100).toFixed(1)}%: ` +
+                  `acerto ${pedida.taxaDeAcerto.mul(100).toFixed(1)}% (${pedida.alvos}A/${pedida.stops}S/${pedida.abertos}abertos), ` +
+                  `EV ${pedida.evPorOperacao.mul(100).toFixed(4)}% do nocional`
+                : 'fora da grade',
+        });
+
+        if (!melhor) {
+            const resolvidos = Math.max(...celulas.map((c) => c.alvos + c.stops));
+            log.warn(
+                resolvidos < MINIMO_PARA_RECOMENDAR
+                    ? `Amostra ainda pequena: ${resolvidos} caminhos resolvidos, precisa de ${MINIMO_PARA_RECOMENDAR}.`
+                    : 'NENHUMA combinação de alvo e stop teve lucro esperado positivo. O sinal não antecipa movimento.',
+                {},
+            );
+            return;
+        }
+
+        // As cinco melhores, para se ver se o topo é um pico isolado (ruído) ou
+        // um platô (efeito real que não depende de acertar o parâmetro exato).
+        const topo = celulas
+            .filter((c) => c.alvos + c.stops >= MINIMO_PARA_RECOMENDAR)
+            .sort((a, b) => b.evPorOperacao.comparedTo(a.evPorOperacao))
+            .slice(0, 5);
+
+        log.info('MELHOR CONFIGURAÇÃO MEDIDA.', {
+            alvo: `${melhor.alvo.mul(100).toFixed(1)}%`,
+            stop: `${melhor.stop.mul(100).toFixed(1)}%`,
+            acerto: `${melhor.taxaDeAcerto.mul(100).toFixed(1)}%`,
+            acertoDeEquilibrio: `${melhor.acertoDeEquilibrio.mul(100).toFixed(1)}%`,
+            evPorOperacao: `${melhor.evPorOperacao.mul(100).toFixed(4)}% do nocional`,
+            amostra: `${melhor.alvos}A/${melhor.stops}S/${melhor.abertos}abertos`,
+        });
+        topo.forEach((c, i) =>
+            log.info(`  #${i + 1}`, {
+                alvo: `${c.alvo.mul(100).toFixed(1)}%`,
+                stop: `${c.stop.mul(100).toFixed(1)}%`,
+                acerto: `${c.taxaDeAcerto.mul(100).toFixed(1)}%`,
+                ev: `${c.evPorOperacao.mul(100).toFixed(4)}%`,
+            }),
+        );
     }
 
     // ------------------------------------------------------------------
@@ -361,6 +473,14 @@ class MotorDeScalping {
             variacao: `${sinal.variacao.mul(100).toFixed(3)}%`,
             preco: sinal.preco.toString(),
             segundosDaVela: decorridos.toFixed(0),
+        });
+
+        this.sinaisVistos += 1;
+        // Todo sinal vira caminho medido, ao vivo ou não. Medir é o que
+        // transforma a escolha de alvo e stop em resultado em vez de opinião.
+        this.gravando.push({
+            caminho: { symbol, direcao: sinal.direcao, entrada: sinal.preco, velas: [] },
+            restantes: JANELA_DE_MEDICAO,
         });
 
         if (!this.cfg.aoVivo) return; // modo observação: registra e não envia nada
@@ -494,10 +614,26 @@ class MotorDeScalping {
             return;
         }
 
+        // Primeiro como MAKER (0,018% em vez de 0,045%). Se a Binance recusar
+        // por não poder ser maker (-5022: o preço já passou), cai para
+        // mercado: taxa maior é melhor que alvo nenhum.
+        try {
+            const qtd = this.posicao?.quantidade ?? new Decimal(0);
+            await this.provider.colocarAlvoMaker({ symbol, direcao, preco: saidas.alvo, quantidade: qtd });
+            log.info('Alvo colocado (MAKER).', {
+                symbol,
+                alvo: saidas.alvo.toString(),
+                distancia: `${saidas.distanciaDoAlvo.mul(100).toFixed(3)}%`,
+            });
+            return;
+        } catch (err) {
+            this.reportarErro('Alvo maker recusado; caindo para mercado', err);
+        }
+
         for (let tentativa = 1; tentativa <= 2; tentativa += 1) {
             try {
                 await this.provider.colocarSaida({ symbol, direcao, tipo: 'TAKE_PROFIT_MARKET', precoGatilho: saidas.alvo });
-                log.info('Alvo colocado.', { symbol, alvo: saidas.alvo.toString(), distancia: `${saidas.distanciaDoAlvo.mul(100).toFixed(3)}%` });
+                log.info('Alvo colocado (mercado).', { symbol, alvo: saidas.alvo.toString(), distancia: `${saidas.distanciaDoAlvo.mul(100).toFixed(3)}%` });
                 return;
             } catch (err) {
                 this.reportarErro(`Alvo falhou (tentativa ${tentativa}/2)`, err);
