@@ -140,6 +140,14 @@ class MotorDeScalping {
     /** Caminhos ainda sendo seguidos, vela a vela. */
     private gravando: Array<{ caminho: CaminhoDeSinal; restantes: number }> = [];
     private sinaisVistos = 0;
+    /**
+     * Telemetria crua do stream. Existe porque "comHistorico: 0" tem três
+     * causas indistinguíveis sem ela: o WebSocket não está entregando nada,
+     * está entregando mas nada fecha, ou fecha e o histórico ainda é novo.
+     * Um contador separa as três em dez segundos.
+     */
+    private recebidas = 0;
+    private fechadasVistas = 0;
 
     constructor(cfg: Configuracao, provider: BinanceFuturesProvider) {
         this.cfg = cfg;
@@ -336,6 +344,7 @@ class MotorDeScalping {
         const k = envelope.data?.k;
         if (!k) return;
 
+        this.recebidas += 1;
         const symbol = String(k.s);
         const vela: Vela1m = {
             aberturaMs: Number(k.t),
@@ -353,6 +362,7 @@ class MotorDeScalping {
             janela.fechadas.push(vela);
             if (janela.fechadas.length > VELAS_DE_HISTORICO) janela.fechadas.shift();
             janela.emFormacao = null;
+            this.fechadasVistas += 1;
             this.alimentarGravacoes(symbol, vela);
         } else {
             janela.emFormacao = vela;
@@ -697,9 +707,17 @@ class MotorDeScalping {
                 return;
             }
 
+            const profundidades = [...this.janelas.values()].map((j) => j.fechadas.length);
             log.info('CAÇANDO.', {
                 universo: this.universo.length,
-                comHistorico: [...this.janelas.values()].filter((j) => j.fechadas.length >= 3).length,
+                simbolosVistos: this.janelas.size,
+                klinesRecebidas: this.recebidas,
+                velasFechadas: this.fechadasVistas,
+                historicoMax: profundidades.length > 0 ? Math.max(...profundidades) : 0,
+                comHistorico: profundidades.filter((n) => n >= 3).length,
+                sinaisVistos: this.sinaisVistos,
+                gravando: this.gravando.length,
+                caminhosCompletos: this.caminhos.length,
                 placar: JSON.stringify(this.placar),
             });
         } catch (err) {
