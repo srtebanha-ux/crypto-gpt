@@ -188,9 +188,14 @@ class MotorDeScalping {
         });
 
         if (!prontidao.pronto) {
-            log.error('Pré-requisitos de Futuros não atendidos. Nada será enviado.', {});
+            log.error('Pré-requisitos de Futuros não atendidos.', {});
             prontidao.pendencias.forEach((p, i) => log.error(`  ${i + 1}. ${p}`, {}));
-            process.exit(1);
+            // Mesma regra do veredicto: o que falta aqui impede ORDEM, não
+            // medição. Observar não gasta saldo — e é justamente enquanto o
+            // dinheiro não chegou que sai de graça o dado que decide se a
+            // configuração presta. Bloquear a partida desperdiçaria essas horas.
+            if (this.cfg.aoVivo) process.exit(1);
+            log.warn('Modo OBSERVAÇÃO: subindo mesmo assim para medir os sinais.', {});
         }
 
         await this.provider.carregarModoDePosicao();
