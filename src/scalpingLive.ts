@@ -158,6 +158,22 @@ class MotorDeScalping {
         desdeMs: Date.now(),
     };
     private readonly ultimaCascataMs = new Map<string, number>();
+    // ------------------------------------------------------------------
+    // Histograma de quedas
+    // ------------------------------------------------------------------
+    // Um gatilho que nunca dispara ensina uma coisa só: que ele é alto demais.
+    // O valor seguinte volta a ser chute, e cada chute custa uma noite. O
+    // histograma responde a pergunta certa — quantos eventos por dia existem
+    // em CADA profundidade — e o corte seguinte sai daí em vez de sair de mim.
+    private readonly FAIXAS = [1, 2, 3, 4, 5, 6, 8, 10, 15].map((n) => new Decimal(n).dividedBy(100));
+    private readonly histograma: number[] = new Array(9).fill(0);
+    /**
+     * Episódio em curso por símbolo, para não contar a mesma queda a cada
+     * varredura. Termina 30 min depois da última observação: como a janela é
+     * de 90s, um par que parou de cair some da lista sozinho, e o que sobra é
+     * um evento por queda de verdade.
+     */
+    private readonly episodio = new Map<string, { faixa: number; ateMs: number }>();
     /**
      * Saldo relido a cada ciclo.
      *
@@ -555,6 +571,7 @@ class MotorDeScalping {
             const precos = await this.provider.precosDeTodos();
             const agora = { emMs: Date.now(), precos };
             const quedas = this.varredura.quedas(agora);
+            this.contarNoHistograma(agora);
             this.varredura.registrar(agora);
             this.auditoria.varreduras += 1;
 
@@ -629,6 +646,34 @@ class MotorDeScalping {
         }
     }
 
+    /** Em que faixa cai esta queda. -1 se estiver abaixo do piso. */
+    private faixaDe(queda: Decimal): number {
+        let idx = -1;
+        for (let i = 0; i < this.FAIXAS.length; i++) if (queda.greaterThanOrEqualTo(this.FAIXAS[i])) idx = i;
+        return idx;
+    }
+
+    /** Conta cada queda uma vez, na maior profundidade que ela alcançar. */
+    private contarNoHistograma(agora: { emMs: number; precos: Map<string, Decimal> }): void {
+        const todas = this.varredura.quedasAcimaDe(agora, this.FAIXAS[0]);
+        for (const q of todas) {
+            const faixa = this.faixaDe(q.queda);
+            if (faixa < 0) continue;
+            const ep = this.episodio.get(q.symbol);
+
+            if (!ep || agora.emMs > ep.ateMs) {
+                this.histograma[faixa] += 1;
+            } else if (faixa > ep.faixa) {
+                // Mesmo episódio, ficou mais fundo: move a contagem de faixa
+                // em vez de somar outra. Uma queda que passa por 3% a caminho
+                // de 7% é um evento de 7%, não dois eventos.
+                this.histograma[ep.faixa] -= 1;
+                this.histograma[faixa] += 1;
+            }
+            this.episodio.set(q.symbol, { faixa: Math.max(faixa, ep && agora.emMs <= ep.ateMs ? ep.faixa : 0), ateMs: agora.emMs + 30 * 60_000 });
+        }
+    }
+
     /** O relatório que responde: o mercado entrega cascatas limpas suficientes? */
     private relatarAuditoria(): void {
         const horas = (Date.now() - this.auditoria.desdeMs) / 3_600_000;
@@ -642,6 +687,28 @@ class MotorDeScalping {
             CASCATAS_LIMPAS: a.cascatasLimpas,
             porDia: (a.cascatasLimpas / horas * 24).toFixed(1),
             precisaPorDia: '3.0',
+        });
+
+        // A pergunta prática não é "quantas passaram no gatilho de hoje", e sim
+        // "qual gatilho entrega os 3 por dia". A acumulada responde isso de uma
+        // vez, sem precisar de outra noite para testar o valor seguinte.
+        const porDia = (n: number) => (n / horas) * 24;
+        const faixas = this.FAIXAS.map((f, i) => `${f.mul(100).toFixed(0)}%:${this.histograma[i]}`);
+        const acumulada = this.FAIXAS.map((f, i) => {
+            const soma = this.histograma.slice(i).reduce((x, y) => x + y, 0);
+            return `${f.mul(100).toFixed(0)}%:${porDia(soma).toFixed(1)}`;
+        });
+        const suficiente = this.FAIXAS.map((f, i) => ({
+            f,
+            porDia: porDia(this.histograma.slice(i).reduce((x, y) => x + y, 0)),
+        }))
+            .filter((x) => x.porDia >= 3)
+            .pop();
+        log.info('HISTOGRAMA DE QUEDAS.', {
+            horas: horas.toFixed(1),
+            eventosPorFaixa: faixas.join(' '),
+            seOGatilhoFosse: acumulada.join(' '),
+            maiorGatilhoCom3PorDia: suficiente ? `${suficiente.f.mul(100).toFixed(0)}%` : 'nenhum ainda',
         });
     }
 

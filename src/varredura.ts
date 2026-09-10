@@ -75,6 +75,19 @@ export class VarreduraDeMercado {
      * que captura a queda de verdade em vez do saldo líquido dela.
      */
     public quedas(agora: Fita): QuedaDetectada[] {
+        return this.quedasAcimaDe(agora, this.params.quedaMinima);
+    }
+
+    /**
+     * O mesmo cálculo, com o corte escolhido por quem chama.
+     *
+     * Existe para separar duas perguntas que estavam coladas: "o que eu opero
+     * hoje" (corte configurado) e "o que o mercado ENTREGA" (corte baixo, para
+     * levantar a distribuição). Sem a segunda, um gatilho que nunca dispara
+     * ensina apenas que ele é alto demais — e o próximo valor volta a ser
+     * chute. Com ela, o corte seguinte sai de um histograma.
+     */
+    public quedasAcimaDe(agora: Fita, minima: Decimal): QuedaDetectada[] {
         if (this.fitas.length === 0) return [];
         const achados: QuedaDetectada[] = [];
 
@@ -96,7 +109,7 @@ export class VarreduraDeMercado {
             if (topo === null) continue;
 
             const queda = topo.minus(atual).dividedBy(topo);
-            if (queda.greaterThanOrEqualTo(this.params.quedaMinima)) {
+            if (queda.greaterThanOrEqualTo(minima)) {
                 achados.push({ symbol, queda, de: topo, para: atual, idadeMs: agora.emMs - topoEmMs });
             }
         }
