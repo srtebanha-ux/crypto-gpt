@@ -30,7 +30,19 @@ test('-2015 sem nenhuma mensagem cai em permissão, que é o caso comum no prime
 test('o 451 nem tem código — é reconhecido pelo status HTTP', () => {
     const d = diagnosticarFalhaDeFuturos({ httpStatus: 451 });
     assert.equal(d.bloqueio, 'geobloqueio');
-    assert.match(d.comoResolver, /FUTURES_REST_URL/);
+    assert.match(d.comoResolver, /Region/);
+});
+
+test('o bloqueio por região do /fapi NÃO vem como 451 — só a frase identifica', () => {
+    // Recusa real observada em produção: status diferente de 451, sem código,
+    // e a única pista é o texto. Ficar preso ao status deixaria isto cair em
+    // "desconhecido" — que é o diagnóstico que não ajuda ninguém.
+    const d = diagnosticarFalhaDeFuturos({
+        httpStatus: 403,
+        mensagem: "Service unavailable from a restricted location according to 'b. Eligibility' in https://www.binance.com/en/terms.",
+    });
+    assert.equal(d.bloqueio, 'geobloqueio');
+    assert.match(d.comoResolver, /mover o serviço de região/);
 });
 
 test('o questionário pendente é reconhecido pela palavra, não por código', () => {

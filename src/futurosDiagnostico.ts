@@ -47,12 +47,17 @@ export function diagnosticarFalhaDeFuturos(params: {
 }): DiagnosticoDeFuturos {
     const msg = (params.mensagem ?? '').toLowerCase();
 
-    if (params.httpStatus === 451) {
+    // O bloqueio por região nem sempre vem como 451: o /fapi devolve a mesma
+    // recusa com outros status, e o que identifica de verdade é a frase.
+    const geo = msg.includes('restricted location') || msg.includes('eligibility');
+    if (params.httpStatus === 451 || geo) {
         return {
             bloqueio: 'geobloqueio',
             comoResolver:
-                'A Binance recusou por região (HTTP 451). O servidor onde o bot roda está num país bloqueado. ' +
-                'Configure FUTURES_REST_URL/FUTURES_WS_URL para um endpoint alcançável ou mova o serviço de região.',
+                'A Binance recusou por REGIÃO. O servidor onde o bot roda está num país bloqueado para Futuros. ' +
+                'Não existe espelho público do /fapi que contorne isso — a correção é mover o serviço de região ' +
+                '(no Railway: Settings > Deploy > Region; Singapura ou Amsterdã funcionam e Singapura ainda ' +
+                'reduz a latência até o motor de casamento da Binance).',
         };
     }
 
