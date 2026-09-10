@@ -101,6 +101,37 @@ export interface CelulaDaGrade {
     evPorOperacao: Decimal;
     /** Acerto que esta célula EXIGIRIA para empatar. */
     acertoDeEquilibrio: Decimal;
+    /**
+     * Acerto que um passeio ALEATÓRIO daria neste par (alvo, stop).
+     *
+     * Sem esta linha de base, 62,9% parece ótimo. Com ela, sabe-se que para
+     * alvo 0,8% e stop 1,0% o acaso já entrega 55,6% — e que a "vantagem"
+     * eram 7 pontos, não 63.
+     */
+    acaso: Decimal;
+    /**
+     * Desvios-padrão acima do acaso.
+     *
+     * É o número que separa achado de sorte. Escolhendo o máximo entre 126
+     * combinações, encontrar uma a 1,1 desvio acima do acaso é o ESPERADO —
+     * acontece quase sempre, mesmo quando não existe vantagem nenhuma.
+     */
+    z: Decimal;
+}
+
+/**
+ * O acerto de um passeio aleatório sem deriva.
+ *
+ * Para um preço que sobe e desce sem tendência, a chance de tocar +alvo antes
+ * de −stop é stop/(alvo+stop): quanto mais longe o alvo em relação ao stop,
+ * menos vezes ele chega. É por isso que alvo curto com stop largo "acerta
+ * muito" sem valer nada — o acerto alto já vem embutido na geometria, e a
+ * taxa continua cobrando.
+ */
+export function acasoDaCelula(alvo: Decimal, stop: Decimal): Decimal {
+    const soma = alvo.plus(stop);
+    if (soma.lessThanOrEqualTo(0)) return new Decimal('0.5');
+    return stop.dividedBy(soma);
 }
 
 export interface TaxasDaOperacao {
@@ -154,6 +185,16 @@ export function avaliarGrade(params: {
             const ev = p.mul(ganho).minus(new Decimal(1).minus(p).mul(perda));
             const equilibrio = ganho.plus(perda).isZero() ? new Decimal(1) : perda.dividedBy(ganho.plus(perda));
 
+            const acaso = acasoDaCelula(alvo, stop);
+            // z = (p medido − p do acaso) / erro padrão. Com poucos caminhos o
+            // erro padrão é grande e quase nada passa — que é exatamente o
+            // comportamento certo.
+            const variancia = acaso.mul(new Decimal(1).minus(acaso));
+            const z =
+                resolvidos > 0 && variancia.greaterThan(0)
+                    ? p.minus(acaso).dividedBy(variancia.dividedBy(resolvidos).sqrt())
+                    : new Decimal(0);
+
             celulas.push({
                 alvo,
                 stop,
@@ -163,6 +204,8 @@ export function avaliarGrade(params: {
                 taxaDeAcerto: p,
                 evPorOperacao: ev,
                 acertoDeEquilibrio: equilibrio,
+                acaso,
+                z,
             });
         }
     }
@@ -179,9 +222,27 @@ export function avaliarGrade(params: {
 export function melhorDaGrade(params: {
     celulas: CelulaDaGrade[];
     minimoResolvidos: number;
+    /**
+     * Desvios acima do acaso exigidos.
+     *
+     * O padrão 3,0 é a correção para comparações múltiplas: testando 126
+     * combinações a 5%, cerca de SEIS pareceriam significativas por puro
+     * acaso. Bonferroni sobre 126 pede ~3,5; 3,0 é um meio-termo consciente
+     * entre não anunciar ruído e não descartar efeito verdadeiro.
+     *
+     * Sem isto, `melhorDaGrade` era um selecionador de máximo — e o máximo de
+     * 126 células correlacionadas está SEMPRE acima do acaso, exista ou não
+     * vantagem. O sintoma foi a melhor célula trocar de lugar entre dois
+     * relatórios com cinco minutos de diferença.
+     */
+    zMinimo?: number;
 }): CelulaDaGrade | null {
+    const zMin = new Decimal(params.zMinimo ?? 3);
     const elegiveis = params.celulas.filter(
-        (c) => c.alvos + c.stops >= params.minimoResolvidos && c.evPorOperacao.greaterThan(0),
+        (c) =>
+            c.alvos + c.stops >= params.minimoResolvidos &&
+            c.evPorOperacao.greaterThan(0) &&
+            c.z.greaterThanOrEqualTo(zMin),
     );
     if (elegiveis.length === 0) return null;
     return elegiveis.reduce((melhor, c) => {

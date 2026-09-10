@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { avaliarGrade, desfechoNoCaminho, excursoes, gradePadrao, melhorDaGrade } from './excursao';
+import { acasoDaCelula, avaliarGrade, desfechoNoCaminho, excursoes, gradePadrao, melhorDaGrade } from './excursao';
 import { Vela1m } from './volumeSpike';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
@@ -189,12 +189,54 @@ test('sem nenhuma célula de EV positivo, devolve null em vez da "menos pior"', 
 });
 
 test('empate de EV fica com o stop mais curto — menos capital em risco pela mesma expectativa', () => {
+    const base = { alvos: 30, stops: 20, abertos: 0, taxaDeAcerto: new Decimal('0.6'), evPorOperacao: new Decimal('0.001'), acertoDeEquilibrio: new Decimal('0.5'), acaso: new Decimal('0.5'), z: new Decimal('5') };
     const celulas = [
-        { alvo: new Decimal('0.005'), stop: new Decimal('0.005'), alvos: 30, stops: 20, abertos: 0, taxaDeAcerto: new Decimal('0.6'), evPorOperacao: new Decimal('0.001'), acertoDeEquilibrio: new Decimal('0.5') },
-        { alvo: new Decimal('0.005'), stop: new Decimal('0.003'), alvos: 30, stops: 20, abertos: 0, taxaDeAcerto: new Decimal('0.6'), evPorOperacao: new Decimal('0.001'), acertoDeEquilibrio: new Decimal('0.5') },
+        { ...base, alvo: new Decimal('0.005'), stop: new Decimal('0.005') },
+        { ...base, alvo: new Decimal('0.005'), stop: new Decimal('0.003') },
     ];
     const melhor = melhorDaGrade({ celulas, minimoResolvidos: 30 });
     assert.equal(melhor?.stop.toString(), '0.003');
+});
+
+test('o acaso de uma célula é stop/(alvo+stop) — o acerto que a geometria já dá', () => {
+    assert.equal(acasoDaCelula(new Decimal('0.003'), new Decimal('0.004')).mul(100).toFixed(1), '57.1');
+    assert.equal(acasoDaCelula(new Decimal('0.008'), new Decimal('0.010')).mul(100).toFixed(1), '55.5');
+    assert.equal(acasoDaCelula(new Decimal('0.010'), new Decimal('0.002')).mul(100).toFixed(1), '16.6');
+    // Alvo curto com stop largo "acerta muito" sem valer nada: o acerto alto
+    // já vem da geometria, e a taxa continua cobrando.
+});
+
+test('62,9% em alvo 0,8/stop 1,0 NÃO passa: é 1,1 desvio, e escolhemos entre 126', () => {
+    // Reproduz o número que apareceu em produção e que quase virou decisão.
+    const caminhos = Array.from({ length: 54 }, (_, i) => ({
+        symbol: `S${i}`,
+        direcao: 'alta' as const,
+        entrada: new Decimal(100),
+        // 34 batem o alvo de 0,8%; 20 batem o stop de 1,0%.
+        velas: i < 34 ? [vela('100', '100.9', '99.5', '100.8')] : [vela('100', '100.1', '98.9', '99')],
+    }));
+    const celulas = avaliarGrade({
+        caminhos,
+        alvos: [new Decimal('0.008')],
+        stops: [new Decimal('0.010')],
+        taxas: TAXAS,
+    });
+    assert.equal(celulas[0].taxaDeAcerto.mul(100).toFixed(1), '62.9');
+    assert.equal(celulas[0].acaso.mul(100).toFixed(1), '55.5');
+    assert.equal(celulas[0].z.lessThan(2), true);
+    assert.equal(melhorDaGrade({ celulas, minimoResolvidos: 30 }), null);
+});
+
+test('vantagem GRANDE com amostra suficiente passa — o filtro não recusa tudo', () => {
+    const caminhos = Array.from({ length: 100 }, (_, i) => ({
+        symbol: `S${i}`,
+        direcao: 'alta' as const,
+        entrada: new Decimal(100),
+        velas: i < 85 ? [vela('100', '100.9', '99.5', '100.8')] : [vela('100', '100.1', '98.9', '99')],
+    }));
+    const celulas = avaliarGrade({ caminhos, alvos: [new Decimal('0.008')], stops: [new Decimal('0.010')], taxas: TAXAS });
+    assert.equal(celulas[0].z.greaterThan(5), true);
+    assert.equal(melhorDaGrade({ celulas, minimoResolvidos: 30 }) !== null, true);
 });
 
 test('a grade padrão tem 126 combinações — 14 alvos x 9 stops', () => {

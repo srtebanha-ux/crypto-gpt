@@ -440,8 +440,8 @@ class MotorDeScalping {
             cs.find((c) => c.alvo.equals(this.cfg.alvo) && c.stop.equals(this.cfg.stop));
         const resumo = (c: CelulaDaGrade | undefined) =>
             c
-                ? `acerto ${c.taxaDeAcerto.mul(100).toFixed(1)}% (${c.alvos}A/${c.stops}S/${c.abertos}ab), ` +
-                  `EV ${c.evPorOperacao.mul(100).toFixed(4)}%`
+                ? `acerto ${c.taxaDeAcerto.mul(100).toFixed(1)}% (acaso ${c.acaso.mul(100).toFixed(1)}%, ` +
+                  `z=${c.z.toFixed(2)}) ${c.alvos}A/${c.stops}S/${c.abertos}ab, EV ${c.evPorOperacao.mul(100).toFixed(4)}%`
                 : 'fora da grade';
 
         log.info(`GRADE [${gatilho}].`, {
@@ -457,10 +457,12 @@ class MotorDeScalping {
         ] as const) {
             const melhor = melhorDaGrade({ celulas: cs, minimoResolvidos: MINIMO_PARA_RECOMENDAR });
             if (!melhor) continue;
-            log.info(`  MELHOR [${gatilho}/${nome}]`, {
+            log.info(`  VANTAGEM REAL [${gatilho}/${nome}]`, {
                 alvo: `${melhor.alvo.mul(100).toFixed(1)}%`,
                 stop: `${melhor.stop.mul(100).toFixed(1)}%`,
                 acerto: `${melhor.taxaDeAcerto.mul(100).toFixed(1)}%`,
+                acaso: `${melhor.acaso.mul(100).toFixed(1)}%`,
+                desviosAcimaDoAcaso: melhor.z.toFixed(2),
                 equilibrio: `${melhor.acertoDeEquilibrio.mul(100).toFixed(1)}%`,
                 ev: `${melhor.evPorOperacao.mul(100).toFixed(4)}%`,
                 amostra: `${melhor.alvos}A/${melhor.stops}S`,
