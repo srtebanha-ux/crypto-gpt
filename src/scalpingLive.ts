@@ -884,7 +884,14 @@ class MotorDeScalping {
         try {
             try {
                 const saldo = await this.provider.disponivelEmUsdt();
-                if (this.saldoAtual === null || !saldo.equals(this.saldoAtual)) {
+                // Compara na MESMA precisão em que se mostra. O availableBalance
+                // da Binance oscila em casas decimais invisíveis a cada leitura,
+                // e comparar na precisão cheia fazia o log anunciar "mudou" a
+                // cada quinze segundos com o mesmo número dos dois lados.
+                // Numa noite inteira isso são milhares de linhas que enterram os
+                // eventos que se quer encontrar de manhã.
+                const mudou = this.saldoAtual === null || saldo.minus(this.saldoAtual).abs().greaterThanOrEqualTo('0.01');
+                if (mudou) {
                     log.info('Saldo do Futures mudou.', {
                         de: this.saldoAtual ? `${this.saldoAtual.toFixed(2)} USDT` : 'desconhecido',
                         para: `${saldo.toFixed(2)} USDT`,
@@ -937,7 +944,8 @@ class MotorDeScalping {
                 comHistorico: profundidades.filter((n) => n >= 3).length,
                 sinaisVistos: this.sinaisVistos,
                 gravando: this.gravando.length,
-                caminhosCompletos: [...this.caminhos.entries()].map(([g, c]) => `${g}:${c.length}`).join(' '),
+                caminhosCompletos:
+                    [...this.caminhos.entries()].map(([g, c]) => `${g}:${c.length}`).join(' ') || 'nenhum',
                 placar: JSON.stringify(this.placar),
             });
         } catch (err) {
