@@ -46,6 +46,14 @@ import { classificarRegime, medirTensao, quedaOperavel } from './tensao';
 import { detectarPicoDeVolume, precosDeSaida, Vela1m } from './volumeSpike';
 import { selecionarUniverso } from './universo';
 import { ControleDeVazao } from './rateLimiter';
+import {
+    EstadoDoDisjuntor,
+    LIMITES_PADRAO,
+    estadoInicial,
+    podeOperar,
+    registrarResultado,
+    virarODia,
+} from './disjuntor';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
@@ -164,6 +172,21 @@ class MotorDeScalping {
     private ocupado = false;
     private posicao: PosicaoViva | null = null;
     private placar = { entradas: 0, alvos: 0, stops: 0, emergencias: 0 };
+    // ------------------------------------------------------------------
+    // Disjuntor
+    // ------------------------------------------------------------------
+    // Nasce nulo de propósito: sem saber a banca não existe referência de
+    // pico nem de perda diária, e um disjuntor sem referência é um enfeite.
+    // Ele é armado na primeira leitura de saldo que der certo.
+    private disjuntor: EstadoDoDisjuntor | null = null;
+    private readonly limites = LIMITES_PADRAO;
+    /** Banca no primeiro instante do dia corrente — referência da perda diária. */
+    private bancaNoInicioDoDia: Decimal | null = null;
+    /** Saldo lido no instante da entrada, para medir o resultado ao fechar. */
+    private saldoAoEntrar: Decimal | null = null;
+    /** Motivo do último bloqueio já anunciado, para não repetir a cada ciclo. */
+    private bloqueioAnunciado: string | null = null;
+    private paradoDeVez = false;
     /**
      * Caminhos completos, SEPARADOS POR GATILHO.
      *
@@ -704,9 +727,134 @@ class MotorDeScalping {
     }
 
     // ------------------------------------------------------------------
+    // Disjuntor
+    // ------------------------------------------------------------------
+    /** Arma o disjuntor na primeira banca conhecida. Idempotente. */
+    private armarDisjuntor(banca: Decimal): void {
+        if (this.disjuntor !== null) return;
+        const agora = Date.now();
+        this.disjuntor = estadoInicial(banca, agora);
+        this.bancaNoInicioDoDia = banca;
+        log.info('DISJUNTOR ARMADO.', {
+            banca: `${banca.toFixed(2)} USDT`,
+            perdasSeguidasMaximas: this.limites.perdasSeguidasMaximas,
+            pausa: `${(this.limites.pausaMs / 60_000).toFixed(0)} min`,
+            perdaDiariaMaxima: `${this.limites.perdaDiariaMaxima.mul(100).toFixed(0)}%`,
+            quedaDoPicoMaxima: `${this.limites.quedaDoPicoMaxima.mul(100).toFixed(0)}%`,
+        });
+    }
+
+    /**
+     * Vira o dia depois de 24h corridas desde a última virada.
+     *
+     * Vinte e quatro horas corridas, e não meia-noite de algum fuso: o limite
+     * diário existe para separar uma sequência ruim da seguinte, e uma
+     * fronteira que cai no meio da sessão asiática cortaria uma sequência ao
+     * meio sem motivo nenhum.
+     */
+    private virarODiaSePassou(banca: Decimal): void {
+        if (this.disjuntor === null) return;
+        const agora = Date.now();
+        if (agora - this.disjuntor.diaComecouEmMs < 24 * 60 * 60_000) return;
+        log.info('DIA VIRADO NO DISJUNTOR.', {
+            resultadoDoDiaAnterior: `${this.disjuntor.resultadoDoDia.toFixed(4)} USDT`,
+            bancaAgora: `${banca.toFixed(2)} USDT`,
+        });
+        this.disjuntor = virarODia(this.disjuntor, agora);
+        this.bancaNoInicioDoDia = banca;
+    }
+
+    /**
+     * Deixa entrar? Só responde sim com o disjuntor armado e dentro dos
+     * limites. Sem disjuntor a resposta é NÃO: preferir não operar a operar
+     * sem freio é a única ordem que faz sentido com dinheiro de verdade.
+     */
+    private freioLiberado(): boolean {
+        if (this.paradoDeVez) return false;
+        if (this.disjuntor === null || this.bancaNoInicioDoDia === null) {
+            if (this.bloqueioAnunciado !== 'sem-banca') {
+                this.bloqueioAnunciado = 'sem-banca';
+                log.warn('Entrada barrada: disjuntor ainda não armado (banca desconhecida).');
+            }
+            return false;
+        }
+
+        const v = podeOperar({
+            estado: this.disjuntor,
+            limites: this.limites,
+            agoraMs: Date.now(),
+            bancaNoInicioDoDia: this.bancaNoInicioDoDia,
+        });
+        if (v.podeOperar) {
+            if (this.bloqueioAnunciado !== null) {
+                log.info('DISJUNTOR RELIGADO. Voltando a caçar.');
+                this.bloqueioAnunciado = null;
+            }
+            return true;
+        }
+
+        if (v.permanente) this.paradoDeVez = true;
+        // Anuncia uma vez por motivo. O bloqueio dura uma hora e o ciclo roda
+        // a cada quinze segundos: sem isto seriam duzentas linhas iguais.
+        if (this.bloqueioAnunciado !== v.motivo) {
+            this.bloqueioAnunciado = v.motivo;
+            log.warn(v.permanente ? 'DISJUNTOR DESARMADO — PARADA DEFINITIVA.' : 'DISJUNTOR DESARMADO.', {
+                motivo: v.motivo,
+                religaEm: v.religaEmMs ? `${(v.religaEmMs / 60_000).toFixed(0)} min` : 'não religa sozinho',
+            });
+        }
+        return false;
+    }
+
+    /** Uma linha curta com o estado do freio, para o log de rotina. */
+    private resumoDoFreio(): string {
+        if (this.paradoDeVez) return 'PARADO DE VEZ';
+        if (this.disjuntor === null) return 'desarmado (sem banca)';
+        const d = this.disjuntor;
+        const falta = d.bloqueadoAteMs - Date.now();
+        if (falta > 0) return `pausado ${(falta / 60_000).toFixed(0)}min (${d.perdasSeguidas} perdas seguidas)`;
+        const queda = d.pico.greaterThan(0) ? d.pico.minus(d.banca).dividedBy(d.pico).mul(100) : new Decimal(0);
+        return `ok · seguidas ${d.perdasSeguidas}/${this.limites.perdasSeguidasMaximas} · dia ${d.resultadoDoDia.toFixed(2)} · doPico -${queda.toFixed(1)}%`;
+    }
+
+    /** Fecha a conta de uma operação: o que a banca fez do início ao fim. */
+    private async encerrarNoDisjuntor(symbol: string): Promise<void> {
+        if (this.disjuntor === null || this.saldoAoEntrar === null) return;
+        let saldo: Decimal;
+        try {
+            saldo = await this.provider.disponivelEmUsdt();
+        } catch {
+            // Sem leitura não há resultado confiável, e inventar zero
+            // esconderia uma perda do disjuntor — que é o oposto do trabalho
+            // dele. Mantém a sequência e tenta de novo no próximo ciclo.
+            return;
+        }
+        const resultado = saldo.minus(this.saldoAoEntrar);
+        this.saldoAoEntrar = null;
+        this.disjuntor = registrarResultado({
+            estado: this.disjuntor,
+            limites: this.limites,
+            resultadoUsdt: resultado,
+            agoraMs: Date.now(),
+        });
+        log.info('RESULTADO REGISTRADO.', {
+            symbol,
+            resultado: `${resultado.toFixed(4)} USDT`,
+            perdasSeguidas: this.disjuntor.perdasSeguidas,
+            dia: `${this.disjuntor.resultadoDoDia.toFixed(4)} USDT`,
+            banca: `${this.disjuntor.banca.toFixed(2)} USDT`,
+            pico: `${this.disjuntor.pico.toFixed(2)} USDT`,
+        });
+    }
+
+    // ------------------------------------------------------------------
     // Execução
     // ------------------------------------------------------------------
     private async entrar(symbol: string, direcao: 'alta' | 'baixa'): Promise<void> {
+        // O freio vem antes de tudo, inclusive de gastar peso de API. Este é o
+        // único caminho que abre posição, então é o único lugar que precisa
+        // perguntar.
+        if (!this.freioLiberado()) return;
         this.ocupado = true;
         try {
             // A verificação que vale é a da corretora, não a variável local.
@@ -724,6 +872,10 @@ class MotorDeScalping {
             }
 
             const disponivel = await this.provider.disponivelEmUsdt();
+            // Referência do resultado: o que a banca era antes desta operação.
+            // Medir pelo saldo, e não pelo preço de saída, é o que faz taxa e
+            // derrapagem entrarem na conta do disjuntor em vez de sumirem.
+            this.saldoAoEntrar = disponivel;
             const nocional = this.dimensionarNocional(disponivel);
 
             const faixas = await this.provider.faixasDeAlavancagem(symbol);
@@ -898,6 +1050,8 @@ class MotorDeScalping {
                     });
                 }
                 this.saldoAtual = saldo;
+                this.armarDisjuntor(saldo);
+                this.virarODiaSePassou(saldo);
             } catch {
                 // Falha de leitura não derruba o ciclo: o saldo antigo é
                 // melhor que interromper a medição por causa de um timeout.
@@ -912,6 +1066,7 @@ class MotorDeScalping {
                     // A saída que não disparou continua pendurada: cancelar é o
                     // que impede a ordem órfã de reabrir posição contrária.
                     await this.provider.cancelarTudo(p.symbol);
+                    await this.encerrarNoDisjuntor(p.symbol);
                     log.info('Posição encerrada.', { symbol: p.symbol, placar: JSON.stringify(this.placar) });
                     await this.reescolherUniverso();
                     return;
@@ -947,6 +1102,7 @@ class MotorDeScalping {
                 caminhosCompletos:
                     [...this.caminhos.entries()].map(([g, c]) => `${g}:${c.length}`).join(' ') || 'nenhum',
                 placar: JSON.stringify(this.placar),
+                freio: this.resumoDoFreio(),
             });
         } catch (err) {
             this.reportarErro('Falha na rotina periódica', err);
