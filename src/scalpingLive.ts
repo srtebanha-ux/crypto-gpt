@@ -148,6 +148,9 @@ class MotorDeScalping {
      */
     private recebidas = 0;
     private fechadasVistas = 0;
+    /** Mensagens CRUAS, contadas antes de qualquer parsing. Ver processarKline. */
+    private mensagensCruas = 0;
+    private amostrasLogadas = 0;
 
     constructor(cfg: Configuracao, provider: BinanceFuturesProvider) {
         this.cfg = cfg;
@@ -324,6 +327,15 @@ class MotorDeScalping {
         });
 
         this.ws.on('message', (bruto: WebSocket.RawData) => {
+            // Contado AQUI, antes do parsing. O contador que ficava lá dentro
+            // não distinguia "nada chegou" de "chegou em formato que eu não
+            // reconheço" — e são bugs opostos: um é rede, o outro é o meu
+            // próprio código descartando dado bom em silêncio.
+            this.mensagensCruas += 1;
+            if (this.amostrasLogadas < 2) {
+                this.amostrasLogadas += 1;
+                log.info('Amostra crua do WebSocket.', { corpo: bruto.toString().slice(0, 400) });
+            }
             try {
                 this.processarKline(JSON.parse(bruto.toString()));
             } catch (err) {
@@ -340,8 +352,17 @@ class MotorDeScalping {
     }
 
     private processarKline(msg: unknown): void {
-        const envelope = msg as { data?: { E?: number; k?: Record<string, string | number | boolean> } };
-        const k = envelope.data?.k;
+        // Dois formatos possíveis. No combined stream (/stream?streams=) vem
+        // envelopado em {stream, data}; num stream único (/ws/<nome>) o payload
+        // chega cru. Aceitar os dois custa uma linha e elimina a classe inteira
+        // de falha em que tudo conecta, nada quebra, e nada acontece.
+        const bruto = msg as {
+            data?: { E?: number; k?: Record<string, string | number | boolean> };
+            E?: number;
+            k?: Record<string, string | number | boolean>;
+        };
+        const dados = bruto.data ?? bruto;
+        const k = dados?.k;
         if (!k) return;
 
         this.recebidas += 1;
@@ -356,7 +377,7 @@ class MotorDeScalping {
         };
 
         const janela = this.janelas.get(symbol) ?? { fechadas: [], emFormacao: null, eventoMs: 0 };
-        janela.eventoMs = Number(envelope.data?.E ?? Date.now());
+        janela.eventoMs = Number(dados?.E ?? Date.now());
 
         if (k.x === true) {
             janela.fechadas.push(vela);
@@ -711,6 +732,7 @@ class MotorDeScalping {
             log.info('CAÇANDO.', {
                 universo: this.universo.length,
                 simbolosVistos: this.janelas.size,
+                mensagensCruas: this.mensagensCruas,
                 klinesRecebidas: this.recebidas,
                 velasFechadas: this.fechadasVistas,
                 historicoMax: profundidades.length > 0 ? Math.max(...profundidades) : 0,
