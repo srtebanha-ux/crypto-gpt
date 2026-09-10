@@ -406,6 +406,46 @@ class MotorDeScalping {
      */
     private relatarGrade(): void {
         if (this.caminhos.length === 0) return;
+
+        // O MESMO caminho avaliado nas duas direções.
+        //
+        // Um sinal que acerta menos que o acaso não é ruído: é informação
+        // invertida. Num passeio aleatório, tocar +0,3% antes de −0,4% tem
+        // 57,1% de chance (0,4 / 0,7); medir 24% significa que seguir o sinal
+        // é pior que jogar moeda — e que fazer o CONTRÁRIO pode ser melhor.
+        //
+        // Custa uma linha testar isso, e não custa nenhum dado novo: os
+        // caminhos já estão gravados, e inverter a direção é reinterpretar o
+        // mesmo preço. Deixar de medir seria descartar de graça a hipótese
+        // mais promissora que a própria medição levantou.
+        const invertidos = this.caminhos.map((c) => ({
+            ...c,
+            direcao: (c.direcao === 'alta' ? 'baixa' : 'alta') as 'alta' | 'baixa',
+        }));
+        const celulasInvertidas = avaliarGrade({ caminhos: invertidos, ...gradePadrao(), taxas: TAXAS_DA_OPERACAO });
+        const pedidaInvertida = celulasInvertidas.find(
+            (c) => c.alvo.equals(this.cfg.alvo) && c.stop.equals(this.cfg.stop),
+        );
+        const melhorInvertida = melhorDaGrade({ celulas: celulasInvertidas, minimoResolvidos: MINIMO_PARA_RECOMENDAR });
+
+        if (pedidaInvertida) {
+            log.info('CONTRA O SINAL (mesma configuração, direção invertida).', {
+                acerto: `${pedidaInvertida.taxaDeAcerto.mul(100).toFixed(1)}%`,
+                amostra: `${pedidaInvertida.alvos}A/${pedidaInvertida.stops}S/${pedidaInvertida.abertos}abertos`,
+                ev: `${pedidaInvertida.evPorOperacao.mul(100).toFixed(4)}% do nocional`,
+                acasoSeria: '57.1%',
+            });
+        }
+        if (melhorInvertida) {
+            log.info('MELHOR CONTRA O SINAL.', {
+                alvo: `${melhorInvertida.alvo.mul(100).toFixed(1)}%`,
+                stop: `${melhorInvertida.stop.mul(100).toFixed(1)}%`,
+                acerto: `${melhorInvertida.taxaDeAcerto.mul(100).toFixed(1)}%`,
+                ev: `${melhorInvertida.evPorOperacao.mul(100).toFixed(4)}%`,
+                amostra: `${melhorInvertida.alvos}A/${melhorInvertida.stops}S`,
+            });
+        }
+
         const celulas = avaliarGrade({ caminhos: this.caminhos, ...gradePadrao(), taxas: TAXAS_DA_OPERACAO });
         const melhor = melhorDaGrade({ celulas, minimoResolvidos: MINIMO_PARA_RECOMENDAR });
 
