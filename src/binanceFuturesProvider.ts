@@ -102,7 +102,12 @@ export class BinanceFuturesProvider {
     // Infraestrutura
     // ------------------------------------------------------------------
     private timestamp(): string {
-        return String(Date.now() + this.offsetDoRelogioMs);
+        // Defesa em profundidade: se o offset virar NaN, o relógio local
+        // sozinho ainda funciona. Um timestamp NaN faz a Binance responder
+        // "malformed" em TODA chamada assinada, e essa mensagem não aponta
+        // para o relógio — aponta para lugar nenhum.
+        const offset = Number.isFinite(this.offsetDoRelogioMs) ? this.offsetDoRelogioMs : 0;
+        return String(Date.now() + offset);
     }
 
     private assinar(params: Record<string, string>): string {
@@ -158,10 +163,35 @@ export class BinanceFuturesProvider {
     /** Sincroniza o relógio. Sem isto, -1021 aparece em máquinas com drift. */
     public async sincronizarRelogio(): Promise<void> {
         const antes = Date.now();
-        const { serverTime } = await this.publico<{ serverTime: number }>('/fapi/v1/time');
+        const resposta = await this.publico<{ serverTime?: number }>('/fapi/v1/time');
         const rtt = Date.now() - antes;
-        this.offsetDoRelogioMs = serverTime - (antes + rtt / 2);
-        log.info('Relógio sincronizado com a Binance Futures.', { offsetMs: Math.round(this.offsetDoRelogioMs), rttMs: rtt });
+
+        // Valida ANTES de usar. Sem isto, uma resposta fora do formato — um
+        // erro transitório, uma página de proxy, um campo renomeado — faz
+        // `undefined - número` virar NaN e envenenar o offset de forma
+        // permanente. O sintoma aparece longe daqui: toda chamada assinada
+        // passa a falhar com "timestamp malformed", que não menciona relógio.
+        const serverTime = Number(resposta?.serverTime);
+        if (!Number.isFinite(serverTime) || serverTime <= 0) {
+            log.warn('Resposta de /fapi/v1/time sem serverTime utilizável; mantendo relógio local.', {
+                recebido: JSON.stringify(resposta).slice(0, 200),
+            });
+            this.offsetDoRelogioMs = 0;
+            return;
+        }
+
+        const offset = serverTime - (antes + rtt / 2);
+        // Um offset absurdo é sinal de resposta errada, não de relógio errado:
+        // nenhuma máquina razoável está horas fora, e adotar o número faria
+        // todas as ordens caírem fora da recvWindow.
+        if (Math.abs(offset) > 60_000) {
+            log.warn('Offset de relógio implausível; ignorando.', { offsetMs: Math.round(offset), rttMs: rtt });
+            this.offsetDoRelogioMs = 0;
+            return;
+        }
+
+        this.offsetDoRelogioMs = offset;
+        log.info('Relógio sincronizado com a Binance Futures.', { offsetMs: Math.round(offset), rttMs: rtt });
     }
 
     /** Carrega os filtros de TODOS os símbolos USDT perpétuos negociáveis. */
