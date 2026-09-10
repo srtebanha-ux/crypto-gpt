@@ -31,6 +31,7 @@ import * as crypto from 'crypto';
 import { createLogger } from './logger';
 import { FaixaDeAlavancagem, FiltrosDeFuturos } from './futurosMath';
 import { diagnosticarFalhaDeFuturos } from './futurosDiagnostico';
+import { Vela1m } from './volumeSpike';
 
 const log = createLogger('futuros');
 
@@ -264,6 +265,47 @@ export class BinanceFuturesProvider {
                 precoDeLiquidacao: new Decimal(p.liquidationPrice),
                 alavancagem: new Decimal(p.leverage),
             }));
+    }
+
+    /**
+     * Velas de 1 minuto por REST.
+     *
+     * Existe porque o WebSocket deste ambiente entrega o handshake, responde
+     * ping, aceita SUBSCRIBE — e nunca entrega um frame de dado. Foram
+     * descartados, um a um: formato do nome do stream, endpoint combinado
+     * versus simples, mecanismo de assinatura e compressão de frames. O que
+     * resta é o transporte, e nenhuma linha de código nosso conserta isso.
+     *
+     * O REST custa latência (segundos em vez de milissegundos) e não custa
+     * nada em qualidade de MEDIÇÃO: a grade avalia caminhos a partir de velas
+     * FECHADAS, e uma vela fechada é idêntica venha de onde vier. Para operar
+     * de verdade a latência importa; para descobrir se existe vantagem, não.
+     *
+     * A última vela do retorno é a EM FORMAÇÃO quando o seu fechamento ainda
+     * está no futuro — a mesma distinção que o campo `x` faz no stream.
+     */
+    public async klines(symbol: string, limite = 21): Promise<{ fechadas: Vela1m[]; emFormacao: Vela1m | null }> {
+        const cru = await this.publico<Array<[number, string, string, string, string, string, number, ...unknown[]]>>(
+            '/fapi/v1/klines',
+            { symbol, interval: '1m', limit: String(limite) },
+        );
+        const agora = Date.now();
+        const fechadas: Vela1m[] = [];
+        let emFormacao: Vela1m | null = null;
+
+        for (const linha of cru) {
+            const vela: Vela1m = {
+                aberturaMs: Number(linha[0]),
+                abertura: new Decimal(linha[1]),
+                maxima: new Decimal(linha[2]),
+                minima: new Decimal(linha[3]),
+                fechamento: new Decimal(linha[4]),
+                volume: new Decimal(linha[5]),
+            };
+            if (Number(linha[6]) > agora) emFormacao = vela;
+            else fechadas.push(vela);
+        }
+        return { fechadas, emFormacao };
     }
 
     /** Estatísticas 24h de todos os perpétuos — a base para escolher o universo. */

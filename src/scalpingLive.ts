@@ -27,7 +27,6 @@
 // quando a configuração exige uma taxa de acerto que não existe no mundo real
 // (ver scalping.ts). A configuração +0,3% / −0,4% exige 70%.
 import { Decimal } from 'decimal.js';
-import WebSocket from 'ws';
 import { createLogger } from './logger';
 import { BinanceFuturesProvider, ErroDeFuturos } from './binanceFuturesProvider';
 import { avaliarProntidao } from './futurosDiagnostico';
@@ -129,8 +128,7 @@ class MotorDeScalping {
     private readonly janelas = new Map<string, JanelaDoSimbolo>();
     private readonly vazao = new ControleDeVazao({ capacidade: 2400, janelaMs: 60_000, nome: 'fapi' });
     private universo: string[] = [];
-    private ws: WebSocket | null = null;
-    private vigia: ReturnType<typeof setTimeout> | null = null;
+    private coletando = false;
     private tentativasDeReconexao = 0;
     /** Trava de reentrância: mensagens de kline chegam várias por segundo. */
     private ocupado = false;
@@ -150,8 +148,7 @@ class MotorDeScalping {
     private recebidas = 0;
     private fechadasVistas = 0;
     /** Mensagens CRUAS, contadas antes de qualquer parsing. Ver processarKline. */
-    private mensagensCruas = 0;
-    private amostrasLogadas = 0;
+
 
     constructor(cfg: Configuracao, provider: BinanceFuturesProvider) {
         this.cfg = cfg;
@@ -256,7 +253,10 @@ class MotorDeScalping {
         }
 
         await this.reescolherUniverso();
-        this.conectar();
+        const intervalo = Number(process.env.SCALPING_POLL_MS ?? '10000');
+        log.info('Coleta por REST iniciada.', { intervaloMs: intervalo, simbolos: this.universo.length });
+        void this.coletar();
+        setInterval(() => void this.coletar(), intervalo);
         setInterval(() => void this.rotinaPeriodica(), 15_000);
         setInterval(() => this.relatarGrade(), 5 * 60_000);
     }
@@ -316,148 +316,52 @@ class MotorDeScalping {
     }
 
     /**
-     * Conecta e assina EXPLICITAMENTE.
+     * Coleta por REST.
      *
-     * A forma anterior punha os streams na query (`/stream?streams=a/b/c`) e
-     * não tinha como saber se a Binance havia entendido: a conexão abria,
-     * respondia ping, e ficava muda. Vinte e oito minutos de silêncio sem um
-     * único erro — o pior modo de falhar, porque tudo parece certo.
+     * O WebSocket deste ambiente entrega handshake, responde ping, aceita
+     * SUBSCRIBE — e nunca entrega um frame de dado. Foram descartados um a um
+     * o formato do nome do stream, o endpoint combinado versus simples, o
+     * mecanismo de assinatura e a compressão. Insistir era gastar deploy em
+     * teoria.
      *
-     * Com `/ws` + mensagem SUBSCRIBE, a corretora RESPONDE: `{"result":null,
-     * "id":1}` em caso de sucesso, ou um erro nomeando o stream inválido. A
-     * dúvida vira log.
+     * O REST custa latência e não custa qualidade de MEDIÇÃO: a grade avalia
+     * caminhos a partir de velas FECHADAS, e uma vela fechada é idêntica
+     * venha de onde vier. Para operar de verdade a latência importa; para
+     * descobrir se existe vantagem, não.
      */
-    private conectar(): void {
-        const base = process.env.FUTURES_WS_URL ?? 'wss://fstream.binance.com';
-        const streams = this.universo.map((s) => `${s.toLowerCase()}@kline_1m`);
-        // Abre JÁ ligado a um stream real em vez de num /ws vazio.
-        //
-        // A Binance responde {"result":null} a qualquer SUBSCRIBE, inclusive
-        // de stream inexistente — ela não valida o nome, só aceita e silencia.
-        // Por isso o ack de sucesso não provava nada. Nascendo em
-        // /ws/<stream>, se o primeiro par entregar dado, a conexão está boa e
-        // o problema seria só o SUBSCRIBE; se nem ele entregar, o problema é
-        // o transporte. Cada caso aponta para um lugar diferente.
-        const url = `${base}/ws/${streams[0] ?? 'btcusdt@kline_1m'}`;
-        const restantes = streams.slice(1);
+    private async coletar(): Promise<void> {
+        if (this.coletando) return; // um ciclo por vez: 15 símbolos levam segundos
+        this.coletando = true;
+        try {
+            for (const symbol of this.universo) {
+                try {
+                    await this.vazao.aguardarVaga(1);
+                    const { fechadas, emFormacao } = await this.provider.klines(symbol, VELAS_DE_HISTORICO + 1);
+                    this.recebidas += 1;
 
-        this.ws = new WebSocket(url, {
-            // Desliga a compressão de frames.
-            //
-            // A Binance negocia permessage-deflate, e existe um modo de falha
-            // em que o handshake fecha, o ping/pong continua, e os frames
-            // comprimidos nunca chegam a ser entregues à aplicação: conexão
-            // viva, dado nenhum, erro nenhum. É exatamente o quadro observado.
-            // Sem compressão o tráfego cresce, e cresce muito menos do que
-            // custa um stream mudo.
-            perMessageDeflate: false,
-        });
+                    const anterior = this.janelas.get(symbol);
+                    const ultimaConhecida = anterior?.fechadas.at(-1)?.aberturaMs ?? 0;
+                    // Velas novas alimentam as gravações em curso. Comparar por
+                    // aberturaMs em vez de contar: o REST devolve a janela
+                    // inteira a cada chamada, e reprocessar as antigas
+                    // duplicaria o caminho medido.
+                    for (const v of fechadas) {
+                        if (v.aberturaMs > ultimaConhecida) {
+                            this.fechadasVistas += 1;
+                            this.alimentarGravacoes(symbol, v);
+                        }
+                    }
 
-        this.ws.on('open', () => {
-            this.tentativasDeReconexao = 0;
-            if (restantes.length > 0) {
-                this.ws?.send(JSON.stringify({ method: 'SUBSCRIBE', params: restantes, id: 1 }));
+                    const janela: JanelaDoSimbolo = { fechadas, emFormacao, eventoMs: Date.now() };
+                    this.janelas.set(symbol, janela);
+                    if (emFormacao) await this.avaliar(symbol, janela);
+                } catch (err) {
+                    this.reportarErro(`Falha ao coletar ${symbol}`, err);
+                }
             }
-            log.info('WebSocket aberto.', { url, assinadosPorMensagem: restantes.length });
-            this.armarVigia();
-        });
-
-        this.ws.on('ping', () => log.debug('ping da Binance', {}));
-
-        this.ws.on('message', (bruto: WebSocket.RawData) => {
-            this.mensagensCruas += 1;
-            if (this.amostrasLogadas < 2) {
-                this.amostrasLogadas += 1;
-                log.info('Amostra crua do WebSocket.', { corpo: bruto.toString().slice(0, 400) });
-            }
-            try {
-                this.processarKline(JSON.parse(bruto.toString()));
-            } catch (err) {
-                log.warn('Mensagem de kline malformada.', { erro: err instanceof Error ? err.message : String(err) });
-            }
-        });
-
-        this.ws.on('error', (err) => log.warn('Erro no WebSocket.', { erro: err.message }));
-        this.ws.on('close', (codigo, motivo) => {
-            const espera = Math.min(30_000, 1000 * 2 ** this.tentativasDeReconexao++);
-            log.warn('WebSocket caiu; reconectando.', { emMs: espera, codigo, motivo: motivo.toString().slice(0, 200) });
-            setTimeout(() => this.conectar(), espera);
-        });
-    }
-
-    /**
-     * Vigia de silêncio.
-     *
-     * Uma conexão aberta e muda é indistinguível de uma saudável do lado de
-     * fora — responde ping, não fecha, não dá erro. Sem isto, o motor ficaria
-     * eternamente "CAÇANDO" sobre um stream morto. Sessenta segundos sem
-     * NENHUMA mensagem, com 15 pares de 1 minuto assinados, só pode ser
-     * defeito.
-     */
-    private armarVigia(): void {
-        if (this.vigia !== null) clearTimeout(this.vigia);
-        const antes = this.mensagensCruas;
-        this.vigia = setTimeout(() => {
-            if (this.mensagensCruas === antes) {
-                log.error('60s sem uma única mensagem no WebSocket. Derrubando para reconectar.', {
-                    assinados: this.universo.length,
-                });
-                this.ws?.terminate();
-            } else {
-                this.armarVigia();
-            }
-        }, 60_000);
-    }
-
-    private processarKline(msg: unknown): void {
-        // Dois formatos possíveis. No combined stream (/stream?streams=) vem
-        // envelopado em {stream, data}; num stream único (/ws/<nome>) o payload
-        // chega cru. Aceitar os dois custa uma linha e elimina a classe inteira
-        // de falha em que tudo conecta, nada quebra, e nada acontece.
-        const bruto = msg as {
-            data?: { E?: number; k?: Record<string, string | number | boolean> };
-            E?: number;
-            k?: Record<string, string | number | boolean>;
-            id?: number;
-        };
-        // Resposta do SUBSCRIBE: {"result":null,"id":1} em caso de sucesso.
-        // Registrar é o que separa "assinou e o mercado está parado" de
-        // "a corretora recusou a assinatura e ninguém contou".
-        if (typeof (bruto as { id?: number }).id === 'number') {
-            log.info('Resposta do SUBSCRIBE.', { corpo: JSON.stringify(bruto).slice(0, 300) });
-            return;
+        } finally {
+            this.coletando = false;
         }
-
-        const dados = bruto.data ?? bruto;
-        const k = dados?.k;
-        if (!k) return;
-
-        this.recebidas += 1;
-        const symbol = String(k.s);
-        const vela: Vela1m = {
-            aberturaMs: Number(k.t),
-            abertura: new Decimal(String(k.o)),
-            maxima: new Decimal(String(k.h)),
-            minima: new Decimal(String(k.l)),
-            fechamento: new Decimal(String(k.c)),
-            volume: new Decimal(String(k.v)),
-        };
-
-        const janela = this.janelas.get(symbol) ?? { fechadas: [], emFormacao: null, eventoMs: 0 };
-        janela.eventoMs = Number(dados?.E ?? Date.now());
-
-        if (k.x === true) {
-            janela.fechadas.push(vela);
-            if (janela.fechadas.length > VELAS_DE_HISTORICO) janela.fechadas.shift();
-            janela.emFormacao = null;
-            this.fechadasVistas += 1;
-            this.alimentarGravacoes(symbol, vela);
-        } else {
-            janela.emFormacao = vela;
-        }
-        this.janelas.set(symbol, janela);
-
-        if (janela.emFormacao) void this.avaliar(symbol, janela);
     }
 
     /**
@@ -799,8 +703,7 @@ class MotorDeScalping {
             log.info('CAÇANDO.', {
                 universo: this.universo.length,
                 simbolosVistos: this.janelas.size,
-                mensagensCruas: this.mensagensCruas,
-                klinesRecebidas: this.recebidas,
+                coletasFeitas: this.recebidas,
                 velasFechadas: this.fechadasVistas,
                 historicoMax: profundidades.length > 0 ? Math.max(...profundidades) : 0,
                 comHistorico: profundidades.filter((n) => n >= 3).length,
