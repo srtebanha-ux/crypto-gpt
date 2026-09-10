@@ -266,6 +266,25 @@ export class BinanceFuturesProvider {
             }));
     }
 
+    /** Estatísticas 24h de todos os perpétuos — a base para escolher o universo. */
+    public async tickers24h(): Promise<Array<{ symbol: string; variacaoPct: Decimal; volumeUsdt: Decimal; ultimo: Decimal }>> {
+        interface Cru {
+            symbol: string;
+            priceChangePercent: string;
+            quoteVolume: string;
+            lastPrice: string;
+        }
+        const cru = await this.publico<Cru[]>('/fapi/v1/ticker/24hr');
+        return cru
+            .filter((t) => this.filtros.has(t.symbol))
+            .map((t) => ({
+                symbol: t.symbol,
+                variacaoPct: new Decimal(t.priceChangePercent),
+                volumeUsdt: new Decimal(t.quoteVolume),
+                ultimo: new Decimal(t.lastPrice),
+            }));
+    }
+
     public async faixasDeAlavancagem(symbol: string): Promise<FaixaDeAlavancagem[]> {
         interface Cru {
             symbol: string;

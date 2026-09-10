@@ -28,7 +28,9 @@
     "typecheck": "tsc -p . --noEmit",
     "test": "node --require ts-node/register --test src/*.test.ts",
     "leadlag": "ts-node src/leadLagSniffer.ts",
-    "leadlag:prod": "node dist/leadLagSniffer.js"
+    "leadlag:prod": "node dist/leadLagSniffer.js",
+    "scalping": "ts-node src/scalpingLive.ts",
+    "scalping:prod": "node dist/scalpingLive.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",
