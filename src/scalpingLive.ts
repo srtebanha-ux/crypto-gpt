@@ -150,6 +150,15 @@ class MotorDeScalping {
         desdeMs: Date.now(),
     };
     private readonly ultimaCascataMs = new Map<string, number>();
+    /**
+     * Saldo relido a cada ciclo.
+     *
+     * Antes era lido só no boot. Em observação o motor nunca chama entrar(),
+     * então nunca relia — e o log seguia dizendo "0.00 USDT" horas depois de
+     * o dinheiro ter chegado na carteira. O operador não tinha como saber, do
+     * log, se a transferência funcionou.
+     */
+    private saldoAtual: Decimal | null = null;
     private tentativasDeReconexao = 0;
     /** Trava de reentrância: mensagens de kline chegam várias por segundo. */
     private ocupado = false;
@@ -873,6 +882,19 @@ class MotorDeScalping {
     private async rotinaPeriodica(): Promise<void> {
         if (this.ocupado) return;
         try {
+            try {
+                const saldo = await this.provider.disponivelEmUsdt();
+                if (this.saldoAtual === null || !saldo.equals(this.saldoAtual)) {
+                    log.info('Saldo do Futures mudou.', {
+                        de: this.saldoAtual ? `${this.saldoAtual.toFixed(2)} USDT` : 'desconhecido',
+                        para: `${saldo.toFixed(2)} USDT`,
+                    });
+                }
+                this.saldoAtual = saldo;
+            } catch {
+                // Falha de leitura não derruba o ciclo: o saldo antigo é
+                // melhor que interromper a medição por causa de um timeout.
+            }
             if (this.posicao) {
                 const abertas = await this.provider.posicoesAbertas();
                 const ainda = abertas.find((a) => a.symbol === this.posicao?.symbol);
@@ -906,6 +928,7 @@ class MotorDeScalping {
 
             const profundidades = [...this.janelas.values()].map((j) => j.fechadas.length);
             log.info('CAÇANDO.', {
+                banca: this.saldoAtual ? `${this.saldoAtual.toFixed(2)} USDT` : 'lendo...',
                 universo: this.universo.length,
                 simbolosVistos: this.janelas.size,
                 coletasFeitas: this.recebidas,
