@@ -154,9 +154,18 @@ class MotorDeScalping {
             return;
         }
 
+        // O veredicto barra DINHEIRO, não observação. Em modo observação nada
+        // é enviado, e é justamente aí que se coleta o dado que responde se a
+        // taxa de acerto assumida existe neste mercado. Barrar isso seria
+        // impedir a única medição capaz de resolver a discussão.
+        if (!this.cfg.aoVivo) {
+            log.warn('Configuração reprovada, mas o modo é OBSERVAÇÃO: segue medindo sem enviar ordem.', {});
+            return;
+        }
+
         log.error(
-            'Motor NÃO vai ligar. Para operar assim mesmo, defina ' +
-                `SCALPING_IGNORAR_VEREDICTO=${FRASE_DE_OVERRIDE}.`,
+            'Motor NÃO vai operar com dinheiro nesta configuração. Ajuste o alvo, ou defina ' +
+                `SCALPING_IGNORAR_VEREDICTO=${FRASE_DE_OVERRIDE} para assumir o prejuízo esperado.`,
             {},
         );
         process.exit(1);
