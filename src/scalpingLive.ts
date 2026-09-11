@@ -631,6 +631,32 @@ class MotorDeScalping {
         return `${base} · EV depois do atraso ${sobra.toFixed(4)}%`;
     }
 
+    /**
+     * Quanto tempo cada operação ocupa a banca, e quantas cabem num dia.
+     *
+     * O motor opera UMA posição por vez. Então o que limita o ganho diário não
+     * é a oferta de sinais — aparecem mais de mil por dia — e sim quanto tempo
+     * cada operação segura a banca. Toda projeção de renda multiplica por
+     * "operações por dia", e até agora esse número era suposição minha (40).
+     * Se forem 20, todo o cronograma dobra.
+     *
+     * O teto é otimista de propósito: assume que existe sinal disponível no
+     * instante em que a posição anterior fecha. Na prática há espera, então o
+     * número real fica abaixo deste.
+     */
+    private resumoDoRitmo(c: CelulaDaGrade): string {
+        const tempos = c.minutosParaResolver;
+        if (tempos.length < 10) return `poucas amostras (${tempos.length})`;
+        const ord = [...tempos].sort((a, b) => a - b);
+        const mediana = ord[Math.floor(ord.length / 2)];
+        const media = ord.reduce((a, b) => a + b, 0) / ord.length;
+        // A MÉDIA é a que dita o ritmo: num dia inteiro o que importa é o tempo
+        // total gasto, e é a média que soma. A mediana só descreve a operação
+        // típica.
+        const porDia = media > 0 ? (24 * 60) / media : 0;
+        return `mediana ${mediana}min · media ${media.toFixed(1)}min · teto ${porDia.toFixed(0)} ops/dia`;
+    }
+
     /** Quanto desta célula foi decidido pela regra do empate, não pelo preço. */
     private pctAmbiguo(c: CelulaDaGrade): string {
         const resolvidos = c.alvos + c.stops;
@@ -669,6 +695,7 @@ class MotorDeScalping {
             amostra: `${c.alvos}A/${c.stops}S`,
             decididosPelaRegra: this.pctAmbiguo(c),
             custoDoAtraso: this.resumoDoAtraso(ev),
+            ritmo: this.resumoDoRitmo(c),
             // Sem correção de comparações múltiplas: a célula foi fixada antes
             // de a amostra existir, então 2,0 já é um resultado de verdade.
             veredicto:

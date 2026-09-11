@@ -189,7 +189,7 @@ test('sem nenhuma célula de EV positivo, devolve null em vez da "menos pior"', 
 });
 
 test('empate de EV fica com o stop mais curto — menos capital em risco pela mesma expectativa', () => {
-    const base = { alvos: 30, stops: 20, abertos: 0, ambiguos: 0, taxaDeAcerto: new Decimal('0.6'), evPorOperacao: new Decimal('0.001'), acertoDeEquilibrio: new Decimal('0.5'), acaso: new Decimal('0.5'), z: new Decimal('5') };
+    const base = { alvos: 30, stops: 20, abertos: 0, ambiguos: 0, minutosParaResolver: [], taxaDeAcerto: new Decimal('0.6'), evPorOperacao: new Decimal('0.001'), acertoDeEquilibrio: new Decimal('0.5'), acaso: new Decimal('0.5'), z: new Decimal('5') };
     const celulas = [
         { ...base, alvo: new Decimal('0.005'), stop: new Decimal('0.005') },
         { ...base, alvo: new Decimal('0.005'), stop: new Decimal('0.003') },
@@ -317,4 +317,49 @@ test('avaliarGrade conta os ambíguos por célula', () => {
     // Uma célula larga o bastante não é atravessada pela mesma vela.
     const largo = celulas.find((x) => x.alvo.equals('0.015') && x.stop.equals('0.010'));
     assert.equal(largo?.ambiguos, 0);
+});
+
+// ----------------------------------------------------------------------
+// Tempo até resolver — o que limita as operações por dia
+// ----------------------------------------------------------------------
+
+test('velasAteResolver conta a partir de 1: resolver na primeira vela custa um minuto', () => {
+    const d = desfechoDetalhado({
+        entrada: new Decimal('100'), direcao: 'alta',
+        alvo: new Decimal('0.003'), stop: new Decimal('0.004'),
+        velas: [vela('100', '100.5', '99.9', '100.4')],
+    });
+    assert.equal(d.desfecho, 'alvo');
+    assert.equal(d.velasAteResolver, 1, 'zero minutos seria uma operação instantânea, que não existe');
+});
+
+test('caminho que demora conta todas as velas percorridas', () => {
+    const paradas = Array.from({ length: 4 }, () => vela('100', '100.1', '99.95', '100'));
+    const d = desfechoDetalhado({
+        entrada: new Decimal('100'), direcao: 'alta',
+        alvo: new Decimal('0.003'), stop: new Decimal('0.004'),
+        velas: [...paradas, vela('100', '100.5', '99.9', '100.4')],
+    });
+    assert.equal(d.velasAteResolver, 5);
+});
+
+test('caminho ABERTO não tem tempo de resolução', () => {
+    const d = desfechoDetalhado({
+        entrada: new Decimal('100'), direcao: 'alta',
+        alvo: new Decimal('0.003'), stop: new Decimal('0.004'),
+        velas: [vela('100', '100.1', '99.95', '100')],
+    });
+    assert.equal(d.desfecho, 'aberto');
+    assert.equal(d.velasAteResolver, null, 'somar zero aqui puxaria a mediana para baixo e inflaria as ops/dia');
+});
+
+test('a célula acumula um tempo por caminho RESOLVIDO, não por caminho', () => {
+    const rapido = { symbol: 'A', direcao: 'alta' as const, entrada: new Decimal('100'),
+        velas: [vela('100', '100.5', '99.9', '100.4')] };
+    const aberto = { symbol: 'B', direcao: 'alta' as const, entrada: new Decimal('100'),
+        velas: [vela('100', '100.1', '99.95', '100')] };
+    const celulas = avaliarGrade({ caminhos: [rapido, rapido, aberto], ...gradePadrao(), taxas: TAXAS });
+    const c = celulas.find((x) => x.alvo.equals('0.003') && x.stop.equals('0.004'));
+    assert.deepEqual(c?.minutosParaResolver, [1, 1], 'o aberto não entra');
+    assert.equal(c?.abertos, 1);
 });

@@ -77,7 +77,7 @@ export function desfechoDetalhado(params: {
     alvo: Decimal;
     stop: Decimal;
     velas: Vela1m[];
-}): { desfecho: DesfechoDoCaminho; ambiguo: boolean } {
+}): { desfecho: DesfechoDoCaminho; ambiguo: boolean; velasAteResolver: number | null } {
     const alta = params.direcao === 'alta';
     const precoAlvo = alta
         ? params.entrada.mul(new Decimal(1).plus(params.alvo))
@@ -86,14 +86,17 @@ export function desfechoDetalhado(params: {
         ? params.entrada.mul(new Decimal(1).minus(params.stop))
         : params.entrada.mul(new Decimal(1).plus(params.stop));
 
-    for (const v of params.velas) {
+    for (let i = 0; i < params.velas.length; i += 1) {
+        const v = params.velas[i];
         const tocouStop = alta ? v.minima.lessThanOrEqualTo(precoStop) : v.maxima.greaterThanOrEqualTo(precoStop);
         const tocouAlvo = alta ? v.maxima.greaterThanOrEqualTo(precoAlvo) : v.minima.lessThanOrEqualTo(precoAlvo);
         // Ambos na mesma vela: sem dados intra-vela, conta como stop.
-        if (tocouStop) return { desfecho: 'stop', ambiguo: tocouAlvo };
-        if (tocouAlvo) return { desfecho: 'alvo', ambiguo: false };
+        // `velasAteResolver` conta a partir de 1: uma operação que resolve na
+        // primeira vela ocupou um minuto, não zero.
+        if (tocouStop) return { desfecho: 'stop', ambiguo: tocouAlvo, velasAteResolver: i + 1 };
+        if (tocouAlvo) return { desfecho: 'alvo', ambiguo: false, velasAteResolver: i + 1 };
     }
-    return { desfecho: 'aberto', ambiguo: false };
+    return { desfecho: 'aberto', ambiguo: false, velasAteResolver: null };
 }
 
 /** Extremos do caminho, em fração do preço de entrada. Útil para ver o teto do que é capturável. */
@@ -132,6 +135,16 @@ export interface CelulaDaGrade {
      * z, por maior que seja, conserta isso.
      */
     ambiguos: number;
+    /**
+     * Minutos até resolver, um por caminho resolvido.
+     *
+     * Existe porque o motor opera UMA posição por vez: o que limita o ganho
+     * diário não é quantos sinais aparecem — aparecem mais de mil — e sim
+     * quanto tempo cada operação ocupa a banca. Toda projeção de renda
+     * multiplica por "operações por dia", e esse número sai daqui, não de
+     * suposição.
+     */
+    minutosParaResolver: number[];
     /** Acerto entre os caminhos RESOLVIDOS (alvo + stop). Os abertos não votam. */
     taxaDeAcerto: Decimal;
     /** Lucro esperado por operação, em fração do NOCIONAL, já líquido de taxa. */
@@ -207,9 +220,10 @@ export function avaliarGrade(params: {
             let stops = 0;
             let abertos = 0;
             let ambiguos = 0;
+            const minutosParaResolver: number[] = [];
 
             for (const c of params.caminhos) {
-                const { desfecho: d, ambiguo } = desfechoDetalhado({
+                const { desfecho: d, ambiguo, velasAteResolver } = desfechoDetalhado({
                     entrada: c.entrada,
                     direcao: c.direcao,
                     alvo,
@@ -217,6 +231,7 @@ export function avaliarGrade(params: {
                     velas: c.velas,
                 });
                 if (ambiguo) ambiguos += 1;
+                if (velasAteResolver !== null) minutosParaResolver.push(velasAteResolver);
                 if (d === 'alvo') alvos += 1;
                 else if (d === 'stop') stops += 1;
                 else abertos += 1;
@@ -242,6 +257,7 @@ export function avaliarGrade(params: {
 
             celulas.push({
                 ambiguos,
+                minutosParaResolver,
                 alvo,
                 stop,
                 alvos,
