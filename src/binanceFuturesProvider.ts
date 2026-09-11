@@ -29,6 +29,7 @@
 import { Decimal } from 'decimal.js';
 import * as crypto from 'crypto';
 import { createLogger } from './logger';
+import { lerRetryAfter } from './rateLimiter';
 import { FaixaDeAlavancagem, FiltrosDeFuturos } from './futurosMath';
 import { diagnosticarFalhaDeFuturos } from './futurosDiagnostico';
 import { Vela1m } from './volumeSpike';
@@ -54,6 +55,16 @@ export interface OpcoesDoProviderDeFuturos {
     /** Padrão: https://fapi.binance.com. Configurável porque o 451 por região existe. */
     restBaseUrl?: string;
     recvWindowMs?: number;
+    /**
+     * Chamado quando a corretora RECUSA por excesso (429, 418 ou -1003).
+     *
+     * O provider não conhece o controle de vazão — e não deve conhecer, senão
+     * cada motor teria de trazer o seu. Mas ele é o ÚNICO lugar que enxerga o
+     * status HTTP e o cabeçalho Retry-After, que é a informação que o controle
+     * precisa para recuar. Este gancho é a ponte, e sem ele o recuo inteiro
+     * fica escrito, testado e desligado.
+     */
+    aoSerRecusado?: (params: { status: number; retryAfterSegundos?: number }) => void;
 }
 
 export interface SaldoDeFuturos {
@@ -91,11 +102,26 @@ export class BinanceFuturesProvider {
     /** null até o boot ler. Em hedge mode toda ordem precisa de positionSide. */
     private modoHedge: boolean | null = null;
 
+    private aoSerRecusado?: (params: { status: number; retryAfterSegundos?: number }) => void;
+
+    /**
+     * Liga o gancho de recusa depois da construção.
+     *
+     * Existe porque o controle de vazão pertence ao MOTOR, e o motor nasce
+     * depois do provider — ele recebe o provider pronto. Passar pela opção do
+     * construtor obrigaria quem monta tudo a criar o controle antes dos dois,
+     * só para que um deles conseguisse avisar o outro.
+     */
+    public avisarRecusasEm(ouvinte: (params: { status: number; retryAfterSegundos?: number }) => void): void {
+        this.aoSerRecusado = ouvinte;
+    }
+
     constructor(opcoes: OpcoesDoProviderDeFuturos) {
         this.apiKey = opcoes.apiKey;
         this.apiSecret = opcoes.apiSecret;
         this.restBaseUrl = opcoes.restBaseUrl ?? 'https://fapi.binance.com';
         this.recvWindowMs = opcoes.recvWindowMs ?? 5000;
+        this.aoSerRecusado = opcoes.aoSerRecusado;
     }
 
     // ------------------------------------------------------------------
@@ -131,6 +157,19 @@ export class BinanceFuturesProvider {
             mensagem = corpo.msg;
         } catch {
             mensagem = res.statusText;
+        }
+        // Avisa o controle de vazão ANTES de lançar.
+        //
+        // A escada da Binance é 429 (recue) e depois 418 (banido, de 2 minutos
+        // a 3 DIAS, e cada tentativa durante a pena a ESTENDE). Quem só lança o
+        // erro e segue tentando sobe a escada sozinho. E o dano não fica no
+        // motor que causou: um banimento por IP tira a capacidade de FECHAR uma
+        // posição aberta — vira uma posição sem saída.
+        //
+        // -1003 entra junto porque é o aviso que vem antes do 429: é a própria
+        // corretora dizendo "você está polindo demais" enquanto ainda dá tempo.
+        if (res.status === 429 || res.status === 418 || codigo === -1003) {
+            this.aoSerRecusado?.({ status: res.status, retryAfterSegundos: lerRetryAfter(res.headers) });
         }
         const d = diagnosticarFalhaDeFuturos({ httpStatus: res.status, codigo, mensagem });
         throw new ErroDeFuturos(`${contexto}: ${mensagem ?? res.statusText}`, codigo, res.status, d.comoResolver);

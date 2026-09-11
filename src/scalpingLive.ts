@@ -308,6 +308,11 @@ class MotorDeScalping {
     constructor(cfg: Configuracao, provider: BinanceFuturesProvider) {
         this.cfg = cfg;
         this.provider = provider;
+        // Sem esta linha o recuo contra banimento fica escrito, testado e
+        // DESLIGADO: registrarRecusa só era chamado pelos próprios testes. O
+        // motor subia hora após hora sem nunca conseguir saber que a corretora
+        // tinha mandado ele diminuir o ritmo.
+        provider.avisarRecusasEm((r) => this.vazao.registrarRecusa(r));
     }
 
     // ------------------------------------------------------------------
@@ -535,6 +540,9 @@ class MotorDeScalping {
     // Universo e WebSocket
     // ------------------------------------------------------------------
     private async reescolherUniverso(): Promise<void> {
+        // ticker/24hr SEM símbolo custa PESO 40 — a chamada mais cara
+        // do motor, e rodava sem ser contada nenhuma vez.
+        await this.vazao.aguardarVaga(40);
         const tickers = await this.provider.tickers24h();
         const novo = selecionarUniverso({
             candidatos: tickers.map((t) => ({ symbol: t.symbol, variacao24h: t.variacaoPct, volumeQuote: t.volumeUsdt })),
@@ -1340,6 +1348,9 @@ class MotorDeScalping {
             }
             const alavancagem = Decimal.min(this.cfg.alavancagem, faixa.alavancagemMaxima);
 
+            // ticker/24hr SEM símbolo custa PESO 40 — a chamada mais cara
+            // do motor, e rodava sem ser contada nenhuma vez.
+            await this.vazao.aguardarVaga(40);
             const tickers = await this.provider.tickers24h();
             const preco = tickers.find((t) => t.symbol === symbol)?.ultimo;
             if (!preco || preco.lessThanOrEqualTo(0)) {
@@ -1656,6 +1667,9 @@ class MotorDeScalping {
         if (this.ocupado) return;
         try {
             try {
+                // Peso 5, quatro vezes por minuto. Estava fora da contabilidade
+                // como quase tudo que não é klines — ver a auditoria no commit.
+                await this.vazao.aguardarVaga(5);
                 const saldo = await this.provider.disponivelEmUsdt();
                 // Compara na MESMA precisão em que se mostra. O availableBalance
                 // da Binance oscila em casas decimais invisíveis a cada leitura,
@@ -1691,6 +1705,7 @@ class MotorDeScalping {
                 // melhor que interromper a medição por causa de um timeout.
             }
             if (this.posicao) {
+                await this.vazao.aguardarVaga(5);
                 const abertas = await this.provider.posicoesAbertas();
                 const ainda = abertas.find((a) => a.symbol === this.posicao?.symbol);
 
