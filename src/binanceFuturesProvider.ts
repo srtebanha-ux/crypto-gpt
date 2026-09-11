@@ -357,6 +357,24 @@ export class BinanceFuturesProvider {
     }
 
     /**
+     * Preço de MARCAÇÃO de um símbolo só — para o vigia rápido do stop.
+     *
+     * É o mesmo preço com que a corretora dispararia o stop dela, e não o
+     * último negócio: um negócio solto fora do livro não deve fechar posição.
+     *
+     * Vem do endereço PÚBLICO (peso 1, sem assinatura) em vez de sair do
+     * positionRisk (peso 5, assinado) porque o vigia roda de dois em dois
+     * segundos enquanto houver posição sem stop na corretora. Peso 5 a cada
+     * 2s seriam 150 por minuto para ler um número que o público entrega por
+     * 30 — e, sem assinatura, ainda fica imune à falha intermitente de
+     * timestamp que aparece no boot.
+     */
+    public async marcacaoDe(symbol: string): Promise<Decimal> {
+        const r = await this.publico<{ markPrice: string }>('/fapi/v1/premiumIndex', { symbol });
+        return new Decimal(r.markPrice);
+    }
+
+    /**
      * Histórico curto de Open Interest — a impressão digital da liquidação.
      *
      * Vem por REST porque o stream !forceOrder@arr, que mostraria as

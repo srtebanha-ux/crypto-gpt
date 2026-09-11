@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { detectarPicoDeVolume, precosDeSaida, type Vela1m } from './volumeSpike';
+import { detectarPicoDeVolume, precosDeSaida, stopRompido, type Vela1m } from './volumeSpike';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
@@ -139,4 +139,69 @@ test('na VENDA os dois INVERTEM — o erro que transforma stop em alvo', () => {
     });
     assert.equal(s.alvo.toFixed(2), '99.20', 'vendido, o alvo é ABAIXO');
     assert.equal(s.stop.toFixed(2), '100.40', 'vendido, o stop é ACIMA');
+});
+
+// --------------------------------------------------------------------------
+// stopRompido — a mesma inversão, vista do lado do vigia
+// --------------------------------------------------------------------------
+
+test('COMPRADO, o stop rompe quando o preço CAI até ele', () => {
+    const stop = new Decimal('99.60');
+    assert.equal(
+        stopRompido({ direcao: 'alta', marcacao: new Decimal('99.59'), stop }),
+        true,
+        'abaixo do stop é rompimento',
+    );
+    assert.equal(
+        stopRompido({ direcao: 'alta', marcacao: new Decimal('99.61'), stop }),
+        false,
+        'ainda acima do stop: a posição segue viva',
+    );
+});
+
+test('VENDIDO, o stop rompe quando o preço SOBE até ele', () => {
+    // Este é o caso que inverte. Se alguém copiar a comparação da compra para
+    // a venda, o vigia fecha a posição no LUCRO e deixa a perda correr solta —
+    // o stop vira alvo e o alvo vira nada.
+    const stop = new Decimal('100.40');
+    assert.equal(
+        stopRompido({ direcao: 'baixa', marcacao: new Decimal('100.41'), stop }),
+        true,
+        'acima do stop é rompimento na venda',
+    );
+    assert.equal(
+        stopRompido({ direcao: 'baixa', marcacao: new Decimal('100.39'), stop }),
+        false,
+        'ainda abaixo do stop: a posição segue viva',
+    );
+});
+
+test('encostar no stop JÁ é romper, nos dois lados', () => {
+    // A corretora dispara o stop dela na igualdade. Se o motor exigisse passar
+    // do preço, ele ficaria com a perda e sem a proteção por causa de um fio
+    // de casa decimal.
+    const stop = new Decimal('100');
+    assert.equal(stopRompido({ direcao: 'alta', marcacao: stop, stop }), true);
+    assert.equal(stopRompido({ direcao: 'baixa', marcacao: stop, stop }), true);
+});
+
+test('o stop do vigia é o MESMO preço que precosDeSaida calculou', () => {
+    // O vigia rápido e o cálculo da entrada precisam concordar. Se um dia os
+    // dois se separarem, o motor vigia um preço que nunca foi colocado.
+    for (const direcao of ['alta', 'baixa'] as const) {
+        const saidas = precosDeSaida({
+            entrada: new Decimal(100),
+            direcao,
+            alvo: new Decimal('0.007'),
+            stop: new Decimal('0.010'),
+        });
+        const umFioAlem = direcao === 'alta'
+            ? saidas.stop.minus('0.01')
+            : saidas.stop.plus('0.01');
+        const umFioAquem = direcao === 'alta'
+            ? saidas.stop.plus('0.01')
+            : saidas.stop.minus('0.01');
+        assert.equal(stopRompido({ direcao, marcacao: umFioAlem, stop: saidas.stop }), true, direcao);
+        assert.equal(stopRompido({ direcao, marcacao: umFioAquem, stop: saidas.stop }), false, direcao);
+    }
 });

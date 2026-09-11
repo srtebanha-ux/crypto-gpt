@@ -43,7 +43,7 @@ import { avaliarGrade, CaminhoDeSinal, CelulaDaGrade, gradePadrao, melhorDaGrade
 import { EstadoDeRicochete, parametrosPadrao, passoDoRicochete } from './ricochete';
 import { VarreduraDeMercado } from './varredura';
 import { classificarRegime, medirTensao, quedaOperavel } from './tensao';
-import { detectarPicoDeVolume, precosDeSaida, Vela1m } from './volumeSpike';
+import { detectarPicoDeVolume, precosDeSaida, stopRompido, Vela1m } from './volumeSpike';
 import { selecionarUniverso } from './universo';
 import { ControleDeVazao } from './rateLimiter';
 import {
@@ -228,6 +228,12 @@ class MotorDeScalping {
     private ocupado = false;
     private posicao: PosicaoViva | null = null;
     private placar = { entradas: 0, alvos: 0, stops: 0, emergencias: 0 };
+    /** Um fechamento de emergência em curso. Ver fecharPorEmergencia. */
+    private fechando = false;
+    /** Uma leitura do vigia rápido em curso, para o laço não se atropelar. */
+    private vigiando = false;
+    /** Falhas seguidas do vigia rápido, para avisar sem enterrar o log. */
+    private falhasDoVigia = 0;
     // ------------------------------------------------------------------
     // Disjuntor
     // ------------------------------------------------------------------
@@ -424,6 +430,12 @@ class MotorDeScalping {
         void this.coletar();
         setInterval(() => void this.coletar(), intervalo);
         setInterval(() => void this.rotinaPeriodica(), 15_000);
+        const vigiaMs = Number(process.env.SCALPING_STOP_WATCH_MS ?? '2000');
+        log.info('Vigia do stop iniciado.', {
+            intervaloMs: vigiaMs,
+            porque: 'a corretora recusa stop condicional nesta conta; quem segura a perda é o motor',
+        });
+        setInterval(() => void this.vigiarStop(), vigiaMs);
         setInterval(() => this.relatarGrade(), 5 * 60_000);
         setInterval(() => this.relatarAuditoria(), 10 * 60_000);
     }
@@ -1251,8 +1263,16 @@ class MotorDeScalping {
     }
 
     /** Fecha a conta de uma operação: o que a banca fez do início ao fim. */
-    private async encerrarNoDisjuntor(symbol: string): Promise<void> {
-        if (this.disjuntor === null || this.saldoAoEntrar === null) return;
+    /**
+     * Registra o desfecho no disjuntor e DEVOLVE o resultado em caixa.
+     *
+     * Devolver importa porque quem fecha pela corretora (alvo ou stop
+     * preenchendo sozinho) não tem outro jeito de saber qual dos dois foi:
+     * o motor só vê a posição ter sumido. O sinal do resultado é o que
+     * sobra. Devolve null quando não deu para apurar — e aí ninguém conta.
+     */
+    private async encerrarNoDisjuntor(symbol: string): Promise<Decimal | null> {
+        if (this.disjuntor === null || this.saldoAoEntrar === null) return null;
         let saldo: Decimal;
         try {
             saldo = await this.provider.disponivelEmUsdt();
@@ -1260,7 +1280,7 @@ class MotorDeScalping {
             // Sem leitura não há resultado confiável, e inventar zero
             // esconderia uma perda do disjuntor — que é o oposto do trabalho
             // dele. Mantém a sequência e tenta de novo no próximo ciclo.
-            return;
+            return null;
         }
         const resultado = saldo.minus(this.saldoAoEntrar);
         this.saldoAoEntrar = null;
@@ -1278,6 +1298,7 @@ class MotorDeScalping {
             banca: `${this.disjuntor.banca.toFixed(2)} USDT`,
             pico: `${this.disjuntor.pico.toFixed(2)} USDT`,
         });
+        return resultado;
     }
 
     // ------------------------------------------------------------------
@@ -1521,7 +1542,15 @@ class MotorDeScalping {
 
     private async fecharPorEmergencia(motivo: string): Promise<void> {
         const p = this.posicao;
-        if (!p) return;
+        // Dois vigias agora podem pedir o mesmo fechamento: o rápido, de dois
+        // em dois segundos, e a rotina de quinze. A ordem a mercado já sai com
+        // reduceOnly, então duplicar não abriria posição contrária — mas
+        // duplicaria a contagem de emergência E o registro no disjuntor, que
+        // contaria a mesma perda duas vezes e mexeria no freio com dado falso.
+        // A trava mora aqui, no único método que zera a posição, e não em cada
+        // chamador: assim qualquer caminho novo já nasce protegido.
+        if (!p || this.fechando) return;
+        this.fechando = true;
         this.placar.emergencias += 1;
         log.error('FECHAMENTO DE EMERGÊNCIA.', { symbol: p.symbol, motivo });
         try {
@@ -1545,6 +1574,78 @@ class MotorDeScalping {
             // enxerga lucro não é um disjuntor.
             await this.encerrarNoDisjuntor(p.symbol);
             this.posicao = null;
+            this.fechando = false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Vigia rápido do stop
+    // ------------------------------------------------------------------
+
+    /**
+     * Confere o stop de dois em dois segundos, e só isso.
+     *
+     * Existe porque a corretora recusa stop condicional nesta conta (-4120,
+     * Multi-Assets Mode) e quem segura a perda passou a ser o motor. Vigiar
+     * dentro da rotina de quinze segundos custava caro: a MEDIDA em produção
+     * deu atraso de mediana 0,0121pp mas MÉDIA 0,1187pp — quase zero quase
+     * sempre, e carésimo de vez em quando, que é a assinatura de um preço
+     * que disparou dentro da janela. Num alvo de 0,7% o atraso médio comia
+     * treze vezes a vantagem bruta medida (+0,0089%). Não é ajuste fino: era
+     * a maior perda conhecida do motor.
+     *
+     * Fica separado da rotina periódica de propósito. A rotina lê saldo e
+     * posições por chamada ASSINADA (peso 5); repetir isso a cada 2s seria
+     * gastar peso de API para reler coisas que não mudam nesse ritmo. Aqui
+     * lê-se um número público (peso 1) e mais nada.
+     *
+     * Não substitui o stop da rotina de quinze segundos — fica ao lado dele.
+     * Se o endereço público falhar, o caminho assinado ainda protege.
+     */
+    private async vigiarStop(): Promise<void> {
+        const p = this.posicao;
+        // Sem posição, com stop na corretora, ou no meio de uma entrada: nada
+        // a fazer — e nem uma chamada de rede a gastar.
+        if (!p || p.stopNaCorretora || !p.stop.greaterThan(0)) return;
+        if (this.vigiando || this.ocupado || this.fechando) return;
+        this.vigiando = true;
+        try {
+            // Peso 1, mas pedido pela mesma porta que o resto: um controle de
+            // vazão que não enxerga 30 chamadas por minuto é um controle que
+            // mente na hora que mais importa.
+            await this.vazao.aguardarVaga(1);
+            const marcacao = await this.provider.marcacaoDe(p.symbol);
+            this.falhasDoVigia = 0;
+            // A posição pode ter fechado enquanto a leitura estava no ar. Sem
+            // esta conferência o motor fecharia a posição SEGUINTE com o stop
+            // da anterior.
+            if (this.posicao !== p || this.fechando) return;
+            if (!stopRompido({ direcao: p.direcao, marcacao, stop: p.stop })) return;
+            log.warn('STOP DO MOTOR disparado (vigia rápido).', {
+                symbol: p.symbol,
+                marcacao: marcacao.toString(),
+                stop: p.stop.toString(),
+            });
+            await this.fecharPorEmergencia('stop vigiado pelo motor');
+        } catch (err) {
+            // Uma leitura falha não derruba o vigia: ele tenta de novo em dois
+            // segundos e a rotina de quinze é a rede por baixo.
+            //
+            // Mas engolir em silêncio, não. Este é um mecanismo de PROTEÇÃO: se
+            // o endereço público quebrar, o stop rápido simplesmente deixa de
+            // existir e o log não diria uma palavra — a pior forma de falhar,
+            // porque parece estar funcionando. Avisa na primeira falha e depois
+            // de minuto em minuto, que é barulho de menos para esconder e de
+            // sobra para aparecer no resumo da manhã.
+            this.falhasDoVigia += 1;
+            if (this.falhasDoVigia === 1 || this.falhasDoVigia % 30 === 0) {
+                this.reportarErro(
+                    `VIGIA DO STOP FALHOU ${this.falhasDoVigia}x seguidas — a rede de 15s ainda protege`,
+                    err,
+                );
+            }
+        } finally {
+            this.vigiando = false;
         }
     }
 
@@ -1562,7 +1663,19 @@ class MotorDeScalping {
                 // cada quinze segundos com o mesmo número dos dois lados.
                 // Numa noite inteira isso são milhares de linhas que enterram os
                 // eventos que se quer encontrar de manhã.
-                const mudou = this.saldoAtual === null || saldo.minus(this.saldoAtual).abs().greaterThanOrEqualTo('0.01');
+                //
+                // E com posição aberta ele balança sozinho a cada leitura: é o
+                // lucro não realizado entrando e saindo da margem, não dinheiro
+                // mudando de mão. Anunciar isso de quinze em quinze segundos
+                // enterra os eventos de verdade — e a linha EM POSIÇÃO, logo
+                // abaixo, já mostra o mesmo movimento com o nome certo. O saldo
+                // continua sendo GUARDADO; só deixa de ser anunciado.
+                // Com posição aberta o piso sobe: centavos de lucro não
+                // realizado entrando e saindo da margem não são notícia, mas o
+                // SALTO de volta (a margem inteira sendo devolvida no
+                // fechamento) é — e esse é grande.
+                const piso = this.posicao === null ? '0.01' : '1';
+                const mudou = this.saldoAtual === null || saldo.minus(this.saldoAtual).abs().greaterThanOrEqualTo(piso);
                 if (mudou) {
                     log.info('Saldo do Futures mudou.', {
                         de: this.saldoAtual ? `${this.saldoAtual.toFixed(2)} USDT` : 'desconhecido',
@@ -1587,21 +1700,41 @@ class MotorDeScalping {
                     // A saída que não disparou continua pendurada: cancelar é o
                     // que impede a ordem órfã de reabrir posição contrária.
                     await this.provider.cancelarTudo(p.symbol);
-                    await this.encerrarNoDisjuntor(p.symbol);
+                    const resultado = await this.encerrarNoDisjuntor(p.symbol);
+                    // A ordem preencheu NA CORRETORA e o motor só viu a posição
+                    // sumir — não sabe se foi o alvo ou o stop. O sinal honesto
+                    // que resta é o resultado em caixa.
+                    //
+                    // Sem isto os dois contadores nunca saíam de zero: estavam
+                    // declarados e nunca incrementados. Em 25 entradas o placar
+                    // anunciava "alvos: 0" no exato minuto em que dois alvos
+                    // seguidos tinham preenchido. Um placar que só conta o que
+                    // dá errado faz quem lê achar que nada dá certo.
+                    if (resultado !== null) {
+                        if (resultado.greaterThan(0)) this.placar.alvos += 1;
+                        else this.placar.stops += 1;
+                    }
                     log.info('Posição encerrada.', { symbol: p.symbol, placar: JSON.stringify(this.placar) });
                     await this.reescolherUniverso();
                     return;
                 }
 
-                // O vigia do stop vem ANTES do time stop: limitar a perda é
-                // mais urgente que liberar a banca.
+                // Rede por baixo do vigia rápido (ver vigiarStop): quem deve
+                // disparar o stop é o laço de 2s, mas se o endereço público
+                // estiver fora do ar este caminho assinado ainda protege. A
+                // trava em fecharPorEmergencia impede a contagem dobrada.
+                //
+                // Vem ANTES do time stop: limitar a perda é mais urgente que
+                // liberar a banca.
                 if (!this.posicao.stopNaCorretora && this.posicao.stop.greaterThan(0)) {
                     // Preço de MARCAÇÃO, não o último negócio: é o mesmo que a
                     // corretora usaria para disparar o stop dela, e é imune a
                     // um negócio solto fora do livro.
-                    const rompeu = this.posicao.direcao === 'alta'
-                        ? ainda.marcacao.lessThanOrEqualTo(this.posicao.stop)
-                        : ainda.marcacao.greaterThanOrEqualTo(this.posicao.stop);
+                    const rompeu = stopRompido({
+                        direcao: this.posicao.direcao,
+                        marcacao: ainda.marcacao,
+                        stop: this.posicao.stop,
+                    });
                     if (rompeu) {
                         log.warn('STOP DO MOTOR disparado.', {
                             symbol: ainda.symbol,

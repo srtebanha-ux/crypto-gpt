@@ -111,6 +111,30 @@ export function detectarPicoDeVolume(params: {
  * limite de perda, e num scalp alavancado essa é a única falha que não tem
  * conserto. Quem chama recebe os dois ou nenhum.
  */
+/**
+ * O preço de marcação já rompeu o stop?
+ *
+ * Mora ao lado de precosDeSaida de propósito: é a MESMA inversão de sinal,
+ * vista do outro lado. Lá o stop de uma venda fica ACIMA da entrada; aqui,
+ * por consequência, uma venda rompe quando o preço SOBE até ele. Escrever a
+ * comparação à mão em cada vigia é convidar exatamente o erro que troca stop
+ * por alvo — e agora há dois vigias conferindo o mesmo stop, o rápido de 2s e
+ * a rede de 15s.
+ *
+ * Compara com <= e >= porque encostar no stop é romper: a corretora dispara o
+ * dela na igualdade, e sair depois do preço por um fio de casa decimal seria
+ * ficar com a perda sem ficar com a proteção.
+ */
+export function stopRompido(params: {
+    direcao: 'alta' | 'baixa';
+    marcacao: Decimal;
+    stop: Decimal;
+}): boolean {
+    return params.direcao === 'alta'
+        ? params.marcacao.lessThanOrEqualTo(params.stop)
+        : params.marcacao.greaterThanOrEqualTo(params.stop);
+}
+
 export function precosDeSaida(params: {
     entrada: Decimal;
     direcao: 'alta' | 'baixa';
