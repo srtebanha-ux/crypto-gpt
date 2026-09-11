@@ -1338,8 +1338,39 @@ class MotorDeScalping {
                 return;
             }
 
-            // O preço que dimensiona as saídas é o EXECUTADO, nunca o do sinal.
-            const entrada = ordem.precoMedio.greaterThan(0) ? ordem.precoMedio : preco;
+            // O preço que dimensiona as saídas vem da POSIÇÃO na corretora, não
+            // da resposta da ordem.
+            //
+            // Visto ao vivo em LABUSDT: a ordem respondeu avgPrice 0,05648 e a
+            // posição tinha entrada 0,05708 — 1,06% de diferença, confirmada
+            // pela conta do PnL. Com alvo de 0,7% e stop de 1,0%, um erro de 1%
+            // não desloca as saídas, ele INVERTE o risco/retorno: o stop fica
+            // colado na entrada e o alvo longe demais. A configuração vira
+            // perdedora por construção, e o pior é que ela continua parecendo
+            // certa no log.
+            //
+            // A posição é a fonte da verdade: é contra ela que a corretora
+            // calcula PnL e liquidação. A resposta da ordem fica de reserva.
+            let entrada = ordem.precoMedio.greaterThan(0) ? ordem.precoMedio : preco;
+            try {
+                const abertasAgora = await this.provider.posicoesAbertas();
+                const minha = abertasAgora.find((x) => x.symbol === symbol);
+                if (minha && minha.entrada.greaterThan(0)) {
+                    if (!minha.entrada.equals(entrada)) {
+                        log.warn('Entrada da ordem diverge da posição; usando a da posição.', {
+                            symbol,
+                            daOrdem: entrada.toString(),
+                            daPosicao: minha.entrada.toString(),
+                            diferenca: `${minha.entrada.minus(entrada).dividedBy(entrada).mul(100).toFixed(3)}%`,
+                        });
+                    }
+                    entrada = minha.entrada;
+                }
+            } catch (err) {
+                // Sem leitura, segue com o preço da ordem: pior referência, mas
+                // ficar sem stop por causa de um timeout seria muito pior.
+                this.reportarErro('Não foi possível confirmar a entrada pela posição', err);
+            }
 
             if (preco.greaterThan(0) && ordem.precoMedio.greaterThan(0)) {
                 // Positivo = preenchemos PIOR que o sinal. Comprar mais caro e
