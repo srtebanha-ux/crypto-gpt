@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { estadoInicial, LIMITES_PADRAO, podeOperar, registrarResultado, virarODia } from './disjuntor';
+import { estadoInicial, LIMITES_PADRAO, podeOperar, registrarResultado, virarODia, ajustarPorTransferencia } from './disjuntor';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
@@ -111,4 +111,57 @@ test('banca zerada não divide por zero', () => {
     const e = { ...estadoInicial(new Decimal(0), AGORA), banca: new Decimal(0) };
     const v = podeOperar({ estado: e, limites: LIMITES_PADRAO, agoraMs: AGORA, bancaNoInicioDoDia: new Decimal(0) });
     assert.equal(v.podeOperar, true); // sem pico não há queda a medir
+});
+
+// ----------------------------------------------------------------------
+// Saque e depósito — o bug que barrava o saque planejado
+// ----------------------------------------------------------------------
+
+test('sacar NÃO dispara o freio: o pico acompanha a banca', () => {
+    // Banca no topo, saca R$1.000 de R$2.800. Sem o ajuste, a queda apareceria
+    // como 35,7% e pararia tudo permanentemente.
+    let e = estadoInicial(new Decimal('2800'), 0);
+    e = ajustarPorTransferencia({ estado: e, bancaReal: new Decimal('1800') });
+
+    assert.equal(e.banca.toString(), '1800');
+    assert.equal(e.pico.toString(), '1800', 'o pico desce junto');
+
+    const v = podeOperar({ estado: e, limites: LIMITES_PADRAO, agoraMs: 1, bancaNoInicioDoDia: new Decimal('1800') });
+    assert.equal(v.podeOperar, true, 'sacar o próprio lucro não pode parar o robô');
+});
+
+test('a queda em PORCENTAGEM é preservada ao sacar durante uma baixa', () => {
+    // Pico 1000, banca 900 (10% abaixo). Saca 300 -> banca 600.
+    // Escalando: pico = 1000 * (600/900) = 666,66 -> 600 continua 10% abaixo.
+    let e = estadoInicial(new Decimal('1000'), 0);
+    e = registrarResultado({ estado: e, limites: LIMITES_PADRAO, resultadoUsdt: new Decimal('-100'), agoraMs: 1 });
+    assert.equal(e.banca.toString(), '900');
+
+    e = ajustarPorTransferencia({ estado: e, bancaReal: new Decimal('600') });
+    const queda = e.pico.minus(e.banca).dividedBy(e.pico);
+    // Compara contra uma tolerância em vez de casas decimais: o Decimal está
+    // em ROUND_DOWN, então a divisão exata 1/10 vira 0,0999…9 e um toFixed(1)
+    // mostraria "9.9". O que o teste precisa afirmar é a propriedade — a queda
+    // continua sendo 10% e não 40% — não o arredondamento da exibição.
+    assert.ok(queda.minus('0.10').abs().lessThan('0.0001'), `esperava ~10%, veio ${queda.mul(100).toFixed(4)}%`);
+});
+
+test('depósito acima do pico antigo não nasce "abaixo do pico"', () => {
+    let e = estadoInicial(new Decimal('600'), 0);
+    e = ajustarPorTransferencia({ estado: e, bancaReal: new Decimal('874') }); // aporte
+    assert.equal(e.pico.toString(), '874');
+    const v = podeOperar({ estado: e, limites: LIMITES_PADRAO, agoraMs: 1, bancaNoInicioDoDia: new Decimal('874') });
+    assert.equal(v.podeOperar, true);
+});
+
+test('o ajuste NÃO apaga uma parada permanente já merecida', () => {
+    // Caiu 40% de verdade e só depois sacou: continua parado, porque a queda
+    // em porcentagem é preservada pelo reescalonamento.
+    let e = estadoInicial(new Decimal('1000'), 0);
+    e = registrarResultado({ estado: e, limites: LIMITES_PADRAO, resultadoUsdt: new Decimal('-400'), agoraMs: 1 });
+    e = ajustarPorTransferencia({ estado: e, bancaReal: new Decimal('300') });
+
+    const v = podeOperar({ estado: e, limites: LIMITES_PADRAO, agoraMs: 2, bancaNoInicioDoDia: new Decimal('300') });
+    assert.equal(v.podeOperar, false);
+    assert.equal(v.podeOperar === false && v.permanente, true, 'a queda real de 40% sobrevive ao saque');
 });

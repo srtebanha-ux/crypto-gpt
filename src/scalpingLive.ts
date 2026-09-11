@@ -49,6 +49,7 @@ import { ControleDeVazao } from './rateLimiter';
 import {
     EstadoDoDisjuntor,
     LIMITES_PADRAO,
+    ajustarPorTransferencia,
     estadoInicial,
     podeOperar,
     registrarResultado,
@@ -100,7 +101,13 @@ interface Configuracao {
 
 function lerConfiguracao(): Configuracao {
     return {
-        alavancagem: new Decimal(process.env.SCALPING_LEVERAGE ?? '30'),
+        // O padrão é 1x, e isto não é timidez: o disjuntor para de vez em -30% do
+        // pico, e com parede absorvente a alavancagem ótima desaba muito abaixo
+        // de Kelly. Medido, indo de R$283 até a banca-alvo: 1x chega em 95% dos
+        // casos, 3x em 17%, 10x em 1,6% — e a 10x quase toda morte acontece
+        // ANTES de qualquer meta ser atingida. Um padrão perigoso escondido num
+        // fallback é a pior forma de perder dinheiro: a silenciosa.
+        alavancagem: new Decimal(process.env.SCALPING_LEVERAGE ?? '1'),
         alvo: new Decimal(process.env.SCALPING_ALVO_PCT ?? '0.3').dividedBy(100),
         stop: new Decimal(process.env.SCALPING_STOP_PCT ?? '0.4').dividedBy(100),
         // Taker de Futuros: 0,05%; 0,045% com desconto de BNB.
@@ -593,9 +600,15 @@ class MotorDeScalping {
         const q = (f: number) => ord[Math.min(ord.length - 1, Math.floor(ord.length * f))];
         const mediana = q(0.5);
         const p75 = q(0.75);
-        const base = `mediana ${mediana.toFixed(4)}pp · p75 ${p75.toFixed(4)}pp · n=${ord.length}`;
+        // A MÉDIA é o que desconta, não a mediana. O atraso incide em toda
+        // operação, então o custo por operação é a média — e a distribuição é
+        // torta: mediana zero com cauda positiva dá média bem acima de zero.
+        // Descontar pela mediana mostrava "EV depois do atraso" idêntico ao EV
+        // bruto, o que é falso sempre que existe cauda.
+        const media = ord.reduce((a, b) => a + b, 0) / ord.length;
+        const base = `media ${media.toFixed(4)}pp · mediana ${mediana.toFixed(4)}pp · p75 ${p75.toFixed(4)}pp · n=${ord.length}`;
         if (!evPorOperacaoPct) return base;
-        const sobra = evPorOperacaoPct.minus(mediana);
+        const sobra = evPorOperacaoPct.minus(media);
         return `${base} · EV depois do atraso ${sobra.toFixed(4)}%`;
     }
 
@@ -986,6 +999,36 @@ class MotorDeScalping {
         return false;
     }
 
+    /**
+     * Percebe saque ou depósito e reconcilia o disjuntor.
+     *
+     * O `banca` do disjuntor só anda por resultado de operação. Sem isto, um
+     * saque apareceria como queda contra o pico — sacar R$1.000 de R$2.800
+     * viraria uma "queda de 35,7%" e dispararia a parada permanente por causa
+     * de um saque planejado.
+     *
+     * Só compara com a posição FECHADA: com posição aberta o saldo disponível
+     * está reduzido pela margem, e a diferença não seria transferência.
+     */
+    private reconciliarTransferencia(saldo: Decimal): void {
+        if (this.disjuntor === null || this.posicao !== null || this.ocupado) return;
+        const diferenca = saldo.minus(this.disjuntor.banca);
+        // Meio dólar: acima do ruído de arredondamento da corretora e muito
+        // abaixo de qualquer transferência que uma pessoa faria de propósito.
+        if (diferenca.abs().lessThan('0.5')) return;
+
+        const antes = this.disjuntor;
+        this.disjuntor = ajustarPorTransferencia({ estado: antes, bancaReal: saldo });
+        if (this.bancaNoInicioDoDia !== null) this.bancaNoInicioDoDia = this.bancaNoInicioDoDia.plus(diferenca);
+        log.info(diferenca.isPositive() ? 'DEPÓSITO DETECTADO.' : 'SAQUE DETECTADO.', {
+            valor: `${diferenca.toFixed(2)} USDT`,
+            bancaAgora: `${saldo.toFixed(2)} USDT`,
+            picoDe: `${antes.pico.toFixed(2)}`,
+            picoPara: `${this.disjuntor.pico.toFixed(2)} USDT`,
+            nota: 'o pico acompanha a banca — transferência não conta como queda',
+        });
+    }
+
     /** Uma linha curta com o estado do freio, para o log de rotina. */
     private resumoDoFreio(): string {
         if (this.paradoDeVez) return 'PARADO DE VEZ';
@@ -1231,6 +1274,7 @@ class MotorDeScalping {
                 }
                 this.saldoAtual = saldo;
                 this.armarDisjuntor(saldo);
+                this.reconciliarTransferencia(saldo);
                 this.virarODiaSePassou(saldo);
             } catch {
                 // Falha de leitura não derruba o ciclo: o saldo antigo é

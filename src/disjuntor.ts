@@ -148,6 +148,45 @@ export function virarODia(estado: EstadoDoDisjuntor, agoraMs: number): EstadoDoD
     return { ...estado, resultadoDoDia: new Decimal(0), diaComecouEmMs: agoraMs };
 }
 
+/**
+ * Reconcilia o disjuntor com a banca real depois de um saque ou depósito.
+ *
+ * O `banca` interno só cresce e diminui por resultado de operação. Um saque
+ * não passa por ali, então sem esta função ele fica mentindo — e a mentira é
+ * cara: a queda é medida contra o PICO, e sacar derruba a banca abaixo do
+ * próprio pico. Sacar R$1.000 de uma banca de R$2.800 apareceria como queda
+ * de 35,7% e dispararia a parada PERMANENTE, por causa de um saque
+ * planejado, sem nada de ruim ter acontecido.
+ *
+ * O pico é reescalado na MESMA proporção da banca, e não deslocado pelo valor
+ * transferido. Escalar preserva a queda em PORCENTAGEM, que é a unidade em
+ * que o limite é escrito: quem estava 10% abaixo do pico continua 10% abaixo
+ * depois de sacar. Deslocar pioraria a situação de quem saca durante uma
+ * queda, punindo justamente quem tirou dinheiro da mesa na hora certa.
+ */
+export function ajustarPorTransferencia(params: {
+    estado: EstadoDoDisjuntor;
+    bancaReal: Decimal;
+}): EstadoDoDisjuntor {
+    const { estado, bancaReal } = params;
+    if (bancaReal.isNegative()) return estado;
+
+    // Sem banca anterior não há proporção a preservar: o pico passa a ser o
+    // que existe agora, que é o único ponto de referência honesto.
+    if (estado.banca.lessThanOrEqualTo(0)) {
+        return { ...estado, banca: bancaReal, pico: bancaReal };
+    }
+
+    const proporcao = bancaReal.dividedBy(estado.banca);
+    return {
+        ...estado,
+        banca: bancaReal,
+        // Decimal.max com a banca nova cobre o depósito que ultrapassa o pico
+        // antigo: dinheiro novo não deve nascer já "abaixo do pico".
+        pico: Decimal.max(estado.pico.mul(proporcao), bancaReal),
+    };
+}
+
 export function estadoInicial(banca: Decimal, agoraMs: number): EstadoDoDisjuntor {
     return {
         perdasSeguidas: 0,
