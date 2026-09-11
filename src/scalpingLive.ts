@@ -544,6 +544,8 @@ class MotorDeScalping {
             acasoSeria: '57.1%',
         });
 
+        this.relatarHipotese(gatilho, contra);
+
         for (const [nome, cs] of [
             ['seguindo', seguindo],
             ['contra', contra],
@@ -602,6 +604,48 @@ class MotorDeScalping {
         const resolvidos = c.alvos + c.stops;
         if (resolvidos === 0) return '—';
         return `${((c.ambiguos / resolvidos) * 100).toFixed(0)}%`;
+    }
+
+    /**
+     * A célula da HIPÓTESE, reportada sempre, passe ou não passe.
+     *
+     * A vantagem de ontem (contra o sinal, alvo 0,7%, stop 1,0%, z=3,55) saiu
+     * do MÁXIMO de 252 células. O máximo de 252 testes correlacionados fica
+     * acima do acaso quase sempre, exista vantagem ou não — por isso aquele z
+     * precisava de Bonferroni e passou por 0,008.
+     *
+     * Reencontrar o máximo numa amostra nova não responde nada: seria minerar
+     * de novo. O que responde é fixar a célula ANTES de olhar e testar só ela.
+     * Aí não há 252 testes, há um — e o z vale de cara, sem correção nenhuma.
+     *
+     * Por isso esta linha é separada de VANTAGEM REAL e sai mesmo quando o
+     * resultado é ruim. Uma hipótese que só aparece no log quando confirma não
+     * está sendo testada, está sendo torcida.
+     */
+    private relatarHipotese(gatilho: string, contra: CelulaDaGrade[]): void {
+        const alvo = new Decimal(process.env.SCALPING_HIPOTESE_ALVO_PCT ?? '0.7').dividedBy(100);
+        const stop = new Decimal(process.env.SCALPING_HIPOTESE_STOP_PCT ?? '1.0').dividedBy(100);
+        const c = contra.find((x) => x.alvo.equals(alvo) && x.stop.equals(stop));
+        if (!c) return;
+        const resolvidos = c.alvos + c.stops;
+        const ev = c.evPorOperacao.mul(100);
+        log.info(`  HIPOTESE [${gatilho}/contra ${alvo.mul(100).toFixed(1)}%/${stop.mul(100).toFixed(1)}%]`, {
+            acerto: `${c.taxaDeAcerto.mul(100).toFixed(1)}%`,
+            acaso: `${c.acaso.mul(100).toFixed(1)}%`,
+            z: c.z.toFixed(2),
+            ev: `${ev.toFixed(4)}%`,
+            amostra: `${c.alvos}A/${c.stops}S`,
+            decididosPelaRegra: this.pctAmbiguo(c),
+            custoDoAtraso: this.resumoDoAtraso(ev),
+            // Sem correção de comparações múltiplas: a célula foi fixada antes
+            // de a amostra existir, então 2,0 já é um resultado de verdade.
+            veredicto:
+                resolvidos < 100
+                    ? `aguardando (${resolvidos}/100 resolvidos)`
+                    : c.z.greaterThanOrEqualTo(2) && ev.greaterThan(0)
+                      ? 'CONFIRMA'
+                      : 'NAO CONFIRMA',
+        });
     }
 
     private relatarGrade(): void {
