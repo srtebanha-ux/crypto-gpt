@@ -86,6 +86,8 @@ interface Configuracao {
     alavancagem: Decimal;
     alvo: Decimal;
     stop: Decimal;
+    /** Operar CONTRA a direção do sinal. É onde a vantagem foi medida. */
+    inverterSinal: boolean;
     taxaPorPerna: Decimal;
     acertoRealista: Decimal;
     nocionalFixo: Decimal;
@@ -108,8 +110,23 @@ function lerConfiguracao(): Configuracao {
         // ANTES de qualquer meta ser atingida. Um padrão perigoso escondido num
         // fallback é a pior forma de perder dinheiro: a silenciosa.
         alavancagem: new Decimal(process.env.SCALPING_LEVERAGE ?? '1'),
-        alvo: new Decimal(process.env.SCALPING_ALVO_PCT ?? '0.3').dividedBy(100),
-        stop: new Decimal(process.env.SCALPING_STOP_PCT ?? '0.4').dividedBy(100),
+        // 0,7% e 1,0% são a célula da HIPÓTESE, não um chute. A antiga 0,3%/0,4%
+        // era estreita demais: 40% dos desfechos dela eram decididos pela regra
+        // do empate — a vela de 1 minuto atravessa os dois lados — então ela
+        // media a régua em vez do mercado. Na célula larga a ambiguidade cai
+        // para 8%.
+        alvo: new Decimal(process.env.SCALPING_ALVO_PCT ?? '0.7').dividedBy(100),
+        stop: new Decimal(process.env.SCALPING_STOP_PCT ?? '1.0').dividedBy(100),
+        // O padrão é operar CONTRA o sinal, e isto é o achado central da
+        // medição. Seguir o pico de volume acerta 23,2% onde o acaso dá 57,1%;
+        // inverter na célula larga acerta 75,6% onde o acaso dá 58,8%. O pico
+        // marca DISPUTA, não direção — e o preço tende a voltar.
+        //
+        // O padrão fica em inverter porque é o único lado com vantagem medida.
+        // Deixar o padrão no lado perdedor, esperando alguém lembrar de virar
+        // uma variável no dia de ligar, é como o padrão de 30x de alavancagem:
+        // uma armadilha silenciosa.
+        inverterSinal: (process.env.SCALPING_INVERTER_SINAL ?? '1') === '1',
         // Taker de Futuros: 0,05%; 0,045% com desconto de BNB.
         taxaPorPerna: new Decimal(process.env.SCALPING_TAXA_PERNA ?? '0.0005'),
         acertoRealista: new Decimal(process.env.SCALPING_ACERTO_REALISTA ?? '0.55'),
@@ -343,6 +360,8 @@ class MotorDeScalping {
         const fracao = fracaoDaBancaEmMargem({ nocional, alavancagem: this.cfg.alavancagem, banca: disponivel });
         log.info('Motor de scalping pronto.', {
             modo: this.cfg.aoVivo ? 'AO VIVO (ordens reais)' : 'OBSERVAÇÃO (nenhuma ordem)',
+            lado: this.cfg.inverterSinal ? 'CONTRA o sinal (onde a vantagem foi medida)' : 'SEGUINDO o sinal',
+            alvoStop: `${this.cfg.alvo.mul(100).toFixed(1)}% / ${this.cfg.stop.mul(100).toFixed(1)}%`,
             saldoDisponivel: `${disponivel.toFixed(2)} USDT`,
             nocional: `${nocional.toFixed(2)} USDT`,
             alavancagem: `${this.cfg.alavancagem.toFixed(0)}x`,
@@ -916,7 +935,13 @@ class MotorDeScalping {
         });
 
         if (!this.cfg.aoVivo) return; // modo observação: registra e não envia nada
-        await this.entrar(symbol, sinal.direcao);
+        // A vantagem medida está no lado OPOSTO ao do sinal. Inverter aqui, e
+        // não na detecção, mantém o caminho GRAVADO na direção do sinal — a
+        // grade continua comparando "seguindo" e "contra" com a mesma base.
+        const direcao = this.cfg.inverterSinal
+            ? ((sinal.direcao === 'alta' ? 'baixa' : 'alta') as 'alta' | 'baixa')
+            : sinal.direcao;
+        await this.entrar(symbol, direcao);
     }
 
     // ------------------------------------------------------------------
@@ -1369,9 +1394,41 @@ async function main(): Promise<void> {
     await motor.iniciar();
 }
 
+/**
+ * Sobe o motor, insistindo diante de falha TRANSITÓRIA de partida.
+ *
+ * Antes, qualquer erro no boot chamava process.exit(1) — e no Railway isso
+ * virou um ciclo de cinco quedas seguidas ("timestamp malformed" numa chamada
+ * assinada) até a sexta tentativa pegar. Só o reinício automático da
+ * plataforma salvou.
+ *
+ * Isso é inaceitável quando houver posição aberta: o processo morre segurando
+ * risco, e o stop fica sozinho na corretora sem ninguém para reagir se ele
+ * falhar. Insistir aqui não conserta a causa — mas transforma uma queda
+ * definitiva numa pausa de segundos.
+ *
+ * Desiste depois de seis tentativas: se nem assim subiu, o problema é de
+ * configuração e reiniciar para sempre só esconderia isso do log.
+ */
+async function subirComInsistencia(): Promise<void> {
+    const MAXIMO = 6;
+    for (let tentativa = 1; tentativa <= MAXIMO; tentativa += 1) {
+        try {
+            await main();
+            return;
+        } catch (err) {
+            const erro = err instanceof Error ? err.message : String(err);
+            if (tentativa === MAXIMO) {
+                log.error('Motor de scalping abortou depois de insistir.', { tentativas: MAXIMO, erro });
+                process.exit(1);
+            }
+            const esperaMs = Math.min(30_000, 2 ** tentativa * 1000);
+            log.warn('Falha ao subir; tentando de novo.', { tentativa, de: MAXIMO, esperaMs, erro });
+            await new Promise((r) => setTimeout(r, esperaMs));
+        }
+    }
+}
+
 if (require.main === module) {
-    main().catch((err) => {
-        log.error('Motor de scalping abortou.', { erro: err instanceof Error ? err.message : String(err) });
-        process.exit(1);
-    });
+    void subirComInsistencia();
 }
