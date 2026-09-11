@@ -636,6 +636,14 @@ class MotorDeScalping {
             for (const q of quedas) {
                 const anterior = this.ultimaCascataMs.get(q.symbol) ?? Number.NEGATIVE_INFINITY;
                 if (agora.emMs - anterior < 30 * 60_000) continue; // uma cascata por par por meia hora
+                // A carência passa a valer JÁ, antes do veredicto. Antes ela só
+                // era marcada quando a cascata era confirmada, então uma queda
+                // recusada voltava a contar a cada varredura enquanto durasse:
+                // o mesmo evento virava dezenas de "quedasBrutas" e gastava
+                // duas chamadas de API por repetição. Cinco minutos, e não
+                // trinta, porque uma queda que se APROFUNDA é evento novo e
+                // precisa poder ser reexaminada.
+                this.ultimaCascataMs.set(q.symbol, agora.emMs - 25 * 60_000);
                 this.auditoria.quedasBrutas += 1;
 
                 let oi: Array<{ emMs: number; oi: Decimal }>;
