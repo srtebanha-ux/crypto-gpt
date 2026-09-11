@@ -1521,6 +1521,19 @@ class MotorDeScalping {
         } catch (err) {
             this.reportarErro('FECHAMENTO DE EMERGÊNCIA FALHOU — POSIÇÃO PODE ESTAR NUA', err);
         } finally {
+            // O disjuntor PRECISA saber deste resultado, e antes não sabia.
+            //
+            // Só o caminho "a posição sumiu da corretora" registrava, e ele
+            // depende de this.posicao ainda existir no ciclo seguinte — o que
+            // nunca acontece aqui, porque este método zera a posição. Com a
+            // corretora recusando stop condicional, TODA perda sai por aqui:
+            // o freio via só os ganhos e nunca contaria uma perda seguida.
+            //
+            // Pior, a diferença de saldo era recolhida depois pelo detector de
+            // transferência, que ABAIXA o pico em vez de registrar queda. Assim
+            // o limite de -30% também nunca dispararia. Um disjuntor que só
+            // enxerga lucro não é um disjuntor.
+            await this.encerrarNoDisjuntor(p.symbol);
             this.posicao = null;
         }
     }
