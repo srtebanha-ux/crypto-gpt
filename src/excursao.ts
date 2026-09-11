@@ -57,14 +57,43 @@ export function desfechoNoCaminho(params: {
         ? params.entrada.mul(new Decimal(1).minus(params.stop))
         : params.entrada.mul(new Decimal(1).plus(params.stop));
 
+    return desfechoDetalhado(params).desfecho;
+}
+
+/**
+ * O mesmo desfecho, dizendo se a vela que resolveu tocou os DOIS lados.
+ *
+ * A regra de contar empate como stop é conservadora e continua valendo — mas
+ * ela é uma CONVENÇÃO, não uma medida. Num par volátil, uma vela de 1 minuto
+ * atravessa alvo e stop com folga, e aí o desfecho não vem do mercado, vem da
+ * regra. Sem separar os dois casos não dá para saber se uma taxa de acerto
+ * mede o preço ou mede a convenção — e o erro aparece dos dois lados ao mesmo
+ * tempo: a mesma vela ambígua vira stop seguindo E stop invertendo, o que faz
+ * o resultado invertido parecer pior do que o direto sugeria.
+ */
+export function desfechoDetalhado(params: {
+    entrada: Decimal;
+    direcao: 'alta' | 'baixa';
+    alvo: Decimal;
+    stop: Decimal;
+    velas: Vela1m[];
+}): { desfecho: DesfechoDoCaminho; ambiguo: boolean } {
+    const alta = params.direcao === 'alta';
+    const precoAlvo = alta
+        ? params.entrada.mul(new Decimal(1).plus(params.alvo))
+        : params.entrada.mul(new Decimal(1).minus(params.alvo));
+    const precoStop = alta
+        ? params.entrada.mul(new Decimal(1).minus(params.stop))
+        : params.entrada.mul(new Decimal(1).plus(params.stop));
+
     for (const v of params.velas) {
         const tocouStop = alta ? v.minima.lessThanOrEqualTo(precoStop) : v.maxima.greaterThanOrEqualTo(precoStop);
         const tocouAlvo = alta ? v.maxima.greaterThanOrEqualTo(precoAlvo) : v.minima.lessThanOrEqualTo(precoAlvo);
         // Ambos na mesma vela: sem dados intra-vela, conta como stop.
-        if (tocouStop) return 'stop';
-        if (tocouAlvo) return 'alvo';
+        if (tocouStop) return { desfecho: 'stop', ambiguo: tocouAlvo };
+        if (tocouAlvo) return { desfecho: 'alvo', ambiguo: false };
     }
-    return 'aberto';
+    return { desfecho: 'aberto', ambiguo: false };
 }
 
 /** Extremos do caminho, em fração do preço de entrada. Útil para ver o teto do que é capturável. */
@@ -95,6 +124,14 @@ export interface CelulaDaGrade {
     alvos: number;
     stops: number;
     abertos: number;
+    /**
+     * Resolvidos por uma vela que tocou os DOIS lados.
+     *
+     * Estes não foram decididos pelo mercado, e sim pela regra do empate. Se
+     * forem a maioria, a célula mede a convenção e não o preço — e nenhum
+     * z, por maior que seja, conserta isso.
+     */
+    ambiguos: number;
     /** Acerto entre os caminhos RESOLVIDOS (alvo + stop). Os abertos não votam. */
     taxaDeAcerto: Decimal;
     /** Lucro esperado por operação, em fração do NOCIONAL, já líquido de taxa. */
@@ -169,9 +206,17 @@ export function avaliarGrade(params: {
             let alvos = 0;
             let stops = 0;
             let abertos = 0;
+            let ambiguos = 0;
 
             for (const c of params.caminhos) {
-                const d = desfechoNoCaminho({ entrada: c.entrada, direcao: c.direcao, alvo, stop, velas: c.velas });
+                const { desfecho: d, ambiguo } = desfechoDetalhado({
+                    entrada: c.entrada,
+                    direcao: c.direcao,
+                    alvo,
+                    stop,
+                    velas: c.velas,
+                });
+                if (ambiguo) ambiguos += 1;
                 if (d === 'alvo') alvos += 1;
                 else if (d === 'stop') stops += 1;
                 else abertos += 1;
@@ -196,6 +241,7 @@ export function avaliarGrade(params: {
                     : new Decimal(0);
 
             celulas.push({
+                ambiguos,
                 alvo,
                 stop,
                 alvos,

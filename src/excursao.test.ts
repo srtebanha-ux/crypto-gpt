@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { acasoDaCelula, avaliarGrade, desfechoNoCaminho, excursoes, gradePadrao, melhorDaGrade } from './excursao';
+import { acasoDaCelula, avaliarGrade, desfechoNoCaminho, excursoes, gradePadrao, melhorDaGrade, desfechoDetalhado } from './excursao';
 import { Vela1m } from './volumeSpike';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
@@ -189,7 +189,7 @@ test('sem nenhuma célula de EV positivo, devolve null em vez da "menos pior"', 
 });
 
 test('empate de EV fica com o stop mais curto — menos capital em risco pela mesma expectativa', () => {
-    const base = { alvos: 30, stops: 20, abertos: 0, taxaDeAcerto: new Decimal('0.6'), evPorOperacao: new Decimal('0.001'), acertoDeEquilibrio: new Decimal('0.5'), acaso: new Decimal('0.5'), z: new Decimal('5') };
+    const base = { alvos: 30, stops: 20, abertos: 0, ambiguos: 0, taxaDeAcerto: new Decimal('0.6'), evPorOperacao: new Decimal('0.001'), acertoDeEquilibrio: new Decimal('0.5'), acaso: new Decimal('0.5'), z: new Decimal('5') };
     const celulas = [
         { ...base, alvo: new Decimal('0.005'), stop: new Decimal('0.005') },
         { ...base, alvo: new Decimal('0.005'), stop: new Decimal('0.003') },
@@ -245,4 +245,76 @@ test('a grade padrão tem 126 combinações — 14 alvos x 9 stops', () => {
     assert.equal(g.stops.length, 9);
     assert.equal(g.alvos[0].toString(), '0.002');
     assert.equal(g.alvos[13].toString(), '0.015');
+});
+
+// ----------------------------------------------------------------------
+// Ambiguidade: quando o desfecho vem da regra, não do mercado
+// ----------------------------------------------------------------------
+
+test('vela que toca os dois lados é stop E é marcada como ambígua', () => {
+    const d = desfechoDetalhado({
+        entrada: new Decimal('100'),
+        direcao: 'alta',
+        alvo: new Decimal('0.003'),
+        stop: new Decimal('0.004'),
+        velas: [vela('100', '100.5', '99.5', '100')], // atravessa +0,3% e -0,4%
+    });
+    assert.equal(d.desfecho, 'stop');
+    assert.equal(d.ambiguo, true, 'o desfecho veio da convenção, não do preço');
+});
+
+test('stop limpo — só o stop foi tocado — NÃO é ambíguo', () => {
+    const d = desfechoDetalhado({
+        entrada: new Decimal('100'),
+        direcao: 'alta',
+        alvo: new Decimal('0.003'),
+        stop: new Decimal('0.004'),
+        velas: [vela('100', '100.1', '99.5', '99.6')], // máxima não alcança +0,3%
+    });
+    assert.equal(d.desfecho, 'stop');
+    assert.equal(d.ambiguo, false);
+});
+
+test('alvo nunca é ambíguo: se o stop tivesse sido tocado, teria vencido', () => {
+    const d = desfechoDetalhado({
+        entrada: new Decimal('100'),
+        direcao: 'alta',
+        alvo: new Decimal('0.003'),
+        stop: new Decimal('0.004'),
+        velas: [vela('100', '100.5', '99.9', '100.4')],
+    });
+    assert.equal(d.desfecho, 'alvo');
+    assert.equal(d.ambiguo, false);
+});
+
+test('a MESMA vela ambígua vira stop nas DUAS direções — a assimetria que engana', () => {
+    // Este é o teste que explica por que inverter um sinal ruim não devolve
+    // automaticamente um sinal bom: o caminho ambíguo é penalizado duas vezes.
+    const velas = [vela('100', '100.5', '99.5', '100')];
+    const seguindo = desfechoDetalhado({
+        entrada: new Decimal('100'), direcao: 'alta',
+        alvo: new Decimal('0.003'), stop: new Decimal('0.004'), velas,
+    });
+    const invertido = desfechoDetalhado({
+        entrada: new Decimal('100'), direcao: 'baixa',
+        alvo: new Decimal('0.004'), stop: new Decimal('0.003'), velas,
+    });
+    assert.equal(seguindo.desfecho, 'stop');
+    assert.equal(invertido.desfecho, 'stop', 'inverter NÃO transforma este stop em alvo');
+    assert.equal(seguindo.ambiguo && invertido.ambiguo, true);
+});
+
+test('avaliarGrade conta os ambíguos por célula', () => {
+    const caminhos = Array.from({ length: 40 }, () => ({
+        symbol: 'AUSDT', direcao: 'alta' as const, entrada: new Decimal('100'),
+        velas: [vela('100', '100.5', '99.5', '100')],
+    }));
+    const celulas = avaliarGrade({ caminhos, ...gradePadrao(), taxas: TAXAS });
+    const c = celulas.find((x) => x.alvo.equals('0.003') && x.stop.equals('0.004'));
+    assert.equal(c?.stops, 40);
+    assert.equal(c?.ambiguos, 40, 'todos resolvidos pela regra do empate');
+
+    // Uma célula larga o bastante não é atravessada pela mesma vela.
+    const largo = celulas.find((x) => x.alvo.equals('0.015') && x.stop.equals('0.010'));
+    assert.equal(largo?.ambiguos, 0);
 });

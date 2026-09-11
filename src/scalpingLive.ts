@@ -225,6 +225,20 @@ class MotorDeScalping {
      * de erro de medição, porque aumenta a confiança em vez de derrubá-la.
      */
     private readonly ultimoSinalMs = new Map<string, number>();
+    // ------------------------------------------------------------------
+    // Custo do atraso
+    // ------------------------------------------------------------------
+    // A grade mede o caminho a partir do preço do SINAL. Uma ordem de verdade
+    // sai depois: o motor lê por REST, e entre ver o pico e conseguir entrar
+    // passam segundos. Num pico de volume o preço anda justamente nesses
+    // segundos, e ele anda contra quem entra depois.
+    //
+    // Uma vantagem de +0,08% por operação não sobrevive a 0,10% de atraso.
+    // Então este número não é um detalhe de execução: é o que decide se o
+    // achado da grade existe fora da planilha.
+    private readonly aguardandoAtraso = new Map<string, { preco: Decimal; direcao: 'alta' | 'baixa' }>();
+    /** Deslocamento no sentido do sinal, em pontos percentuais, por amostra. */
+    private readonly atrasos: number[] = [];
     /**
      * Telemetria crua do stream. Existe porque "comHistorico: 0" tem três
      * causas indistinguíveis sem ela: o WebSocket não está entregando nada,
@@ -446,6 +460,8 @@ class MotorDeScalping {
                         }
                     }
 
+                    if (emFormacao) this.medirAtraso(symbol, emFormacao.fechamento);
+
                     const janela: JanelaDoSimbolo = { fechadas, emFormacao, eventoMs: Date.now() };
                     this.janelas.set(symbol, janela);
                     if (emFormacao) {
@@ -517,7 +533,8 @@ class MotorDeScalping {
         const resumo = (c: CelulaDaGrade | undefined) =>
             c
                 ? `acerto ${c.taxaDeAcerto.mul(100).toFixed(1)}% (acaso ${c.acaso.mul(100).toFixed(1)}%, ` +
-                  `z=${c.z.toFixed(2)}) ${c.alvos}A/${c.stops}S/${c.abertos}ab, EV ${c.evPorOperacao.mul(100).toFixed(4)}%`
+                  `z=${c.z.toFixed(2)}) ${c.alvos}A/${c.stops}S/${c.abertos}ab, EV ${c.evPorOperacao.mul(100).toFixed(4)}%` +
+                  `, ambiguos ${this.pctAmbiguo(c)}`
                 : 'fora da grade';
 
         log.info(`GRADE [${gatilho}].`, {
@@ -542,8 +559,49 @@ class MotorDeScalping {
                 equilibrio: `${melhor.acertoDeEquilibrio.mul(100).toFixed(1)}%`,
                 ev: `${melhor.evPorOperacao.mul(100).toFixed(4)}%`,
                 amostra: `${melhor.alvos}A/${melhor.stops}S`,
+                decididosPelaRegra: this.pctAmbiguo(melhor),
+                custoDoAtraso: this.resumoDoAtraso(melhor.evPorOperacao.mul(100)),
             });
         }
+    }
+
+    /**
+     * Fecha uma amostra de atraso: quanto o preço andou NO SENTIDO do sinal
+     * entre o pico e a leitura seguinte.
+     *
+     * Positivo é continuação. Como a vantagem medida está em operar CONTRA o
+     * sinal, continuação é exatamente o movimento adverso — o preço fugindo
+     * antes de a ordem existir.
+     */
+    private medirAtraso(symbol: string, precoAgora: Decimal): void {
+        const pendente = this.aguardandoAtraso.get(symbol);
+        if (!pendente) return;
+        this.aguardandoAtraso.delete(symbol);
+        if (pendente.preco.lessThanOrEqualTo(0)) return;
+        const variacao = precoAgora.minus(pendente.preco).dividedBy(pendente.preco);
+        const noSentidoDoSinal = pendente.direcao === 'alta' ? variacao : variacao.negated();
+        this.atrasos.push(noSentidoDoSinal.mul(100).toNumber());
+        if (this.atrasos.length > 5000) this.atrasos.shift();
+    }
+
+    /** Mediana e cauda do custo de atraso, com o veredicto contra a vantagem. */
+    private resumoDoAtraso(evPorOperacaoPct?: Decimal): string {
+        if (this.atrasos.length < 20) return `poucas amostras (${this.atrasos.length})`;
+        const ord = [...this.atrasos].sort((a, b) => a - b);
+        const q = (f: number) => ord[Math.min(ord.length - 1, Math.floor(ord.length * f))];
+        const mediana = q(0.5);
+        const p75 = q(0.75);
+        const base = `mediana ${mediana.toFixed(4)}pp · p75 ${p75.toFixed(4)}pp · n=${ord.length}`;
+        if (!evPorOperacaoPct) return base;
+        const sobra = evPorOperacaoPct.minus(mediana);
+        return `${base} · EV depois do atraso ${sobra.toFixed(4)}%`;
+    }
+
+    /** Quanto desta célula foi decidido pela regra do empate, não pelo preço. */
+    private pctAmbiguo(c: CelulaDaGrade): string {
+        const resolvidos = c.alvos + c.stops;
+        if (resolvidos === 0) return '—';
+        return `${((c.ambiguos / resolvidos) * 100).toFixed(0)}%`;
     }
 
     private relatarGrade(): void {
@@ -781,6 +839,9 @@ class MotorDeScalping {
         });
 
         this.sinaisVistos += 1;
+        // Fica pendente até a leitura seguinte deste símbolo. Não se mede aqui:
+        // aqui o atraso é zero por construção.
+        this.aguardandoAtraso.set(symbol, { preco: sinal.preco, direcao: sinal.direcao });
         // Todo sinal vira caminho medido, ao vivo ou não. Medir é o que
         // transforma a escolha de alvo e stop em resultado em vez de opinião.
         this.gravando.push({
