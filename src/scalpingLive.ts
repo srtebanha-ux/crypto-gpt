@@ -347,6 +347,14 @@ class MotorDeScalping {
         await this.provider.sincronizarRelogio();
         await this.provider.carregarFiltros();
 
+        // Diz o modo em vez de adivinhar: -4168 e -4120 mudam de causa conforme
+        // ele, e caçar isso num painel é lento e falível.
+        const multi = await this.provider.modoMultiAtivos();
+        log.info('Modo da conta de Futuros.', {
+            multiAtivos: multi === null ? 'não foi possível ler' : multi ? 'LIGADO' : 'desligado',
+            margemConfigurada: this.cfg.tipoDeMargem,
+        });
+
         const temPermissao = await this.provider.temPermissaoDeFuturos();
         const disponivel = temPermissao ? await this.provider.disponivelEmUsdt() : new Decimal(0);
         const nocional = this.dimensionarNocional(disponivel);
@@ -1377,7 +1385,10 @@ class MotorDeScalping {
         }
 
         try {
-            await this.provider.colocarSaida({ symbol, direcao, tipo: 'STOP_MARKET', precoGatilho: saidas.stop });
+            await this.provider.colocarSaida({
+                symbol, direcao, tipo: 'STOP_MARKET', precoGatilho: saidas.stop,
+                quantidade: this.posicao?.quantidade,
+            });
             log.info('Stop colocado.', { symbol, stop: saidas.stop.toString(), distancia: `${saidas.distanciaDoStop.mul(100).toFixed(3)}%` });
         } catch (err) {
             this.reportarErro('STOP FALHOU — fechando a posição agora', err);
@@ -1403,7 +1414,10 @@ class MotorDeScalping {
 
         for (let tentativa = 1; tentativa <= 2; tentativa += 1) {
             try {
-                await this.provider.colocarSaida({ symbol, direcao, tipo: 'TAKE_PROFIT_MARKET', precoGatilho: saidas.alvo });
+                await this.provider.colocarSaida({
+                    symbol, direcao, tipo: 'TAKE_PROFIT_MARKET', precoGatilho: saidas.alvo,
+                    quantidade: this.posicao?.quantidade,
+                });
                 log.info('Alvo colocado (mercado).', { symbol, alvo: saidas.alvo.toString(), distancia: `${saidas.distanciaDoAlvo.mul(100).toFixed(3)}%` });
                 return;
             } catch (err) {

@@ -522,18 +522,72 @@ export class BinanceFuturesProvider {
         direcao: 'alta' | 'baixa';
         tipo: 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
         precoGatilho: Decimal;
+        /** Necessária para o plano B, quando closePosition é recusado. */
+        quantidade?: Decimal;
     }): Promise<number> {
-        const r = await this.assinado<{ orderId: number }>('POST', '/fapi/v1/order', {
+        const comuns = {
             symbol: params.symbol,
             // A saída é sempre o lado oposto ao da posição.
-            side: params.direcao === 'alta' ? 'SELL' : 'BUY',
+            side: (params.direcao === 'alta' ? 'SELL' : 'BUY') as 'SELL' | 'BUY',
             type: params.tipo,
             stopPrice: params.precoGatilho.toString(),
-            closePosition: 'true',
             workingType: 'MARK_PRICE',
             ...this.ladoDaPosicao(params.direcao),
-        });
-        return r.orderId;
+        };
+
+        try {
+            // Preferido: closePosition fecha o que houver e se cancela sozinho
+            // quando a posição zera, então nunca vira ordem órfã.
+            const r = await this.assinado<{ orderId: number }>('POST', '/fapi/v1/order', {
+                ...comuns,
+                closePosition: 'true',
+            });
+            return r.orderId;
+        } catch (err) {
+            // Plano B para contas que recusam closePosition.
+            //
+            // Alguns modos de conta respondem -4120 ("use the Algo Order API
+            // endpoints") a uma ordem condicional com closePosition — e o
+            // resultado prático é catastrófico: a entrada preenche, o stop não
+            // entra, e o motor precisa fechar de emergência a cada sinal,
+            // pagando taxa sem nunca poder ganhar.
+            //
+            // reduceOnly com quantidade explícita faz o mesmo trabalho e passa
+            // onde closePosition não passa. É pior num aspecto: não se cancela
+            // sozinha, então depende do cancelarTudo que já roda antes de cada
+            // entrada e no fechamento. Pior que o ideal, muito melhor que não
+            // ter stop.
+            const codigo = err instanceof ErroDeFuturos ? err.codigo : undefined;
+            if (codigo !== -4120 || !params.quantidade || params.quantidade.lessThanOrEqualTo(0)) throw err;
+
+            log.warn('closePosition recusado; recolocando a saída com reduceOnly.', {
+                symbol: params.symbol,
+                tipo: params.tipo,
+                codigo,
+            });
+            const r = await this.assinado<{ orderId: number }>('POST', '/fapi/v1/order', {
+                ...comuns,
+                quantity: params.quantidade.abs().toString(),
+                reduceOnly: 'true',
+            });
+            return r.orderId;
+        }
+    }
+
+    /**
+     * O modo de margem da conta, dito pela própria Binance.
+     *
+     * Sai no boot para não ter de adivinhar: erros como -4168 e -4120 mudam de
+     * causa conforme o modo, e olhar um painel de configuração é lento e
+     * falível. Uma linha no log resolve.
+     */
+    public async modoMultiAtivos(): Promise<boolean | null> {
+        try {
+            const r = await this.assinado<{ multiAssetsMargin: boolean }>('GET', '/fapi/v1/multiAssetsMargin');
+            return Boolean(r.multiAssetsMargin);
+        } catch {
+            return null;
+        }
     }
 
     /**
