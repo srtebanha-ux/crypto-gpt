@@ -1125,6 +1125,16 @@ class MotorDeScalping {
     /** Arma o disjuntor na primeira banca conhecida. Idempotente. */
     private armarDisjuntor(banca: Decimal): void {
         if (this.disjuntor !== null) return;
+        // Nunca armar com posição aberta: o saldo DISPONÍVEL está reduzido pela
+        // margem, e a 1x a margem é o valor inteiro da posição. Visto ao vivo:
+        // um reinício com posição aberta armou o pico em 5,60 USDT quando a
+        // banca era 55 — dez vezes menor. Um pico falso baixo transforma a
+        // primeira variação normal numa "queda de 30%" e para o robô de vez.
+        //
+        // Esperar custa um ciclo de quinze segundos; e como entrar exige
+        // disjuntor armado, esperar também significa não operar até saber a
+        // banca de verdade. Os dois lados disso são o comportamento certo.
+        if (this.posicao !== null) return;
         const agora = Date.now();
         this.disjuntor = estadoInicial(banca, agora);
         this.bancaNoInicioDoDia = banca;
