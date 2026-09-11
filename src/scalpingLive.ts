@@ -160,6 +160,17 @@ interface PosicaoViva {
     quantidade: Decimal;
     entrada: Decimal;
     abertaEmMs: number;
+    /** Preço em que a posição tem de ser encerrada. */
+    stop: Decimal;
+    /**
+     * O stop está na CORRETORA ou é o motor que vigia?
+     *
+     * Na corretora é sempre melhor: funciona com o processo morto. Algumas
+     * contas recusam ordem condicional no endpoint que este código usa
+     * (-4120), e aí a alternativa honesta é vigiar daqui — pior, e muito
+     * melhor que não operar.
+     */
+    stopNaCorretora: boolean;
 }
 
 class MotorDeScalping {
@@ -427,12 +438,23 @@ class MotorDeScalping {
         if (abertas.length === 0) return;
 
         const p = abertas[0];
+        const direcaoAdotada = p.quantidade.isPositive() ? 'alta' : ('baixa' as const);
         this.posicao = {
             symbol: p.symbol,
-            direcao: p.quantidade.isPositive() ? 'alta' : 'baixa',
+            direcao: direcaoAdotada,
             quantidade: p.quantidade.abs(),
             entrada: p.entrada,
             abertaEmMs: Date.now(),
+            // Recalculado da entrada real: uma posição adotada não traz consigo
+            // onde o stop deveria estar, e deixar isso em zero desligaria o
+            // vigia justamente na posição que já perdeu supervisão uma vez.
+            stop: precosDeSaida({
+                entrada: p.entrada,
+                direcao: direcaoAdotada,
+                alvo: this.cfg.alvo,
+                stop: this.cfg.stop,
+            }).stop,
+            stopNaCorretora: false,
         };
         log.warn('Posição JÁ ABERTA adotada da corretora.', {
             symbol: p.symbol,
@@ -1334,6 +1356,10 @@ class MotorDeScalping {
                 quantidade: ordem.quantidadeExecutada,
                 entrada,
                 abertaEmMs: Date.now(),
+                // Provisórios: protegerPosicao ajusta os dois para a grade de
+                // preço real do par e para onde o stop acabou ficando.
+                stop: precosDeSaida({ entrada, direcao, alvo: this.cfg.alvo, stop: this.cfg.stop }).stop,
+                stopNaCorretora: false,
             };
             this.placar.entradas += 1;
             log.info('ENTRADA PREENCHIDA.', {
@@ -1384,16 +1410,39 @@ class MotorDeScalping {
             return;
         }
 
+        if (this.posicao) this.posicao.stop = saidas.stop;
+
         try {
             await this.provider.colocarSaida({
                 symbol, direcao, tipo: 'STOP_MARKET', precoGatilho: saidas.stop,
                 quantidade: this.posicao?.quantidade,
             });
+            if (this.posicao) this.posicao.stopNaCorretora = true;
             log.info('Stop colocado.', { symbol, stop: saidas.stop.toString(), distancia: `${saidas.distanciaDoStop.mul(100).toFixed(3)}%` });
         } catch (err) {
-            this.reportarErro('STOP FALHOU — fechando a posição agora', err);
-            await this.fecharPorEmergencia('stop não pôde ser colocado');
-            return;
+            // -4120 é a conta recusando ordem condicional NESTE endpoint — não
+            // é falha de rede nem preço inválido, e nenhuma retentativa muda
+            // isso. Fechar de emergência a cada sinal, como antes, paga taxa
+            // sem chance de ganhar: em duas horas foram US$0,28 e nenhuma
+            // operação completa.
+            //
+            // A alternativa é o motor vigiar o preço e fechar a mercado. É pior
+            // de um jeito específico e importante: o stop na corretora funciona
+            // com o processo morto, este não. A 1x isso é aceitável — não existe
+            // liquidação, e o pior caso é a moeda andar sozinha enquanto o
+            // processo está fora. Com alavancagem alta NÃO seria.
+            const codigo = err instanceof ErroDeFuturos ? err.codigo : undefined;
+            if (codigo !== -4120 || this.cfg.alavancagem.greaterThan(2)) {
+                this.reportarErro('STOP FALHOU — fechando a posição agora', err);
+                await this.fecharPorEmergencia('stop não pôde ser colocado');
+                return;
+            }
+            log.warn('A corretora recusa stop condicional; o MOTOR passa a vigiar o preço.', {
+                symbol,
+                stop: saidas.stop.toString(),
+                alavancagem: `${alavancagem.toFixed(0)}x`,
+                aviso: 'sem proteção enquanto o processo estiver fora do ar',
+            });
         }
 
         // Primeiro como MAKER (0,018% em vez de 0,045%). Se a Binance recusar
@@ -1488,6 +1537,26 @@ class MotorDeScalping {
                     log.info('Posição encerrada.', { symbol: p.symbol, placar: JSON.stringify(this.placar) });
                     await this.reescolherUniverso();
                     return;
+                }
+
+                // O vigia do stop vem ANTES do time stop: limitar a perda é
+                // mais urgente que liberar a banca.
+                if (!this.posicao.stopNaCorretora && this.posicao.stop.greaterThan(0)) {
+                    // Preço de MARCAÇÃO, não o último negócio: é o mesmo que a
+                    // corretora usaria para disparar o stop dela, e é imune a
+                    // um negócio solto fora do livro.
+                    const rompeu = this.posicao.direcao === 'alta'
+                        ? ainda.marcacao.lessThanOrEqualTo(this.posicao.stop)
+                        : ainda.marcacao.greaterThanOrEqualTo(this.posicao.stop);
+                    if (rompeu) {
+                        log.warn('STOP DO MOTOR disparado.', {
+                            symbol: ainda.symbol,
+                            marcacao: ainda.marcacao.toString(),
+                            stop: this.posicao.stop.toString(),
+                        });
+                        await this.fecharPorEmergencia('stop vigiado pelo motor');
+                        return;
+                    }
                 }
 
                 if (this.cfg.timeStopMs > 0 && Date.now() - this.posicao.abertaEmMs > this.cfg.timeStopMs) {
