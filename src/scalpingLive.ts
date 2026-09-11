@@ -137,7 +137,12 @@ function lerConfiguracao(): Configuracao {
         tamanhoDoUniverso: Number(process.env.SCALPING_UNIVERSO ?? '15'),
         volumeMinimo24h: new Decimal(process.env.SCALPING_VOLUME_MINIMO_24H ?? '50000000'),
         tipoDeMargem: (process.env.SCALPING_MARGIN_TYPE as 'ISOLATED' | 'CROSSED') ?? 'ISOLATED',
-        timeStopMs: Number(process.env.SCALPING_TIME_STOP_MIN ?? '0') * 60_000,
+        // 45 minutos, e NAO zero. O modo sniper opera uma posição por vez, então
+        // uma posição que não resolve trava o robô inteiro: sem isto, um par que
+        // ficou de lado numa sexta deixaria o bot parado até quarta. A resolução
+        // medida tem média de 6 minutos, então 45 é folga larga — quem passa
+        // disso não vai resolver mesmo.
+        timeStopMs: Number(process.env.SCALPING_TIME_STOP_MIN ?? '45') * 60_000,
         aoVivo: process.env.SCALPING_LIVE_CONFIRM === FRASE_DE_CONFIRMACAO,
     };
 }
@@ -263,6 +268,15 @@ class MotorDeScalping {
     private readonly aguardandoAtraso = new Map<string, { preco: Decimal; direcao: 'alta' | 'baixa' }>();
     /** Deslocamento no sentido do sinal, em pontos percentuais, por amostra. */
     private readonly atrasos: number[] = [];
+    /**
+     * Derrapagem REALIZADA: quanto o preço preenchido ficou pior que o do sinal.
+     *
+     * É o número que a observação nunca consegue dar. A grade mede o caminho a
+     * partir do preço do SINAL; uma ordem a mercado paga o outro lado do livro,
+     * e esse pedaço — spread mais impacto — nunca entrou em conta nenhuma minha.
+     * Com margem de 2 pontos percentuais, ele sozinho decide se sobra lucro.
+     */
+    private readonly derrapagens: number[] = [];
     /**
      * Telemetria crua do stream. Existe porque "comHistorico: 0" tem três
      * causas indistinguíveis sem ela: o WebSocket não está entregando nada,
@@ -424,6 +438,48 @@ class MotorDeScalping {
                 simbolos: abertas.map((x) => x.symbol).join(','),
             });
         }
+
+        // Reconfere a proteção em vez de supor que ela sobreviveu.
+        //
+        // Uma posição só é adotada quando o motor perdeu o fio dela — reinício
+        // do processo, queda do contêiner. Nesses casos não há como saber se o
+        // stop ainda está na corretora: pode ter sido cancelado, pode ter sido
+        // preenchido parcialmente, pode nunca ter chegado a existir se o
+        // processo morreu entre a entrada e a proteção. Rodando cinco dias sem
+        // ninguém olhando, "provavelmente ainda está lá" não é bom o bastante.
+        //
+        // Cancelar e recolocar é determinístico e barato. Se o stop já estava
+        // certo, o resultado é idêntico.
+        if (!this.cfg.aoVivo) return;
+        try {
+            const filtros = this.provider.filtrosDe(p.symbol);
+            const faixas = await this.provider.faixasDeAlavancagem(p.symbol);
+            const nocional = p.entrada.mul(p.quantidade.abs());
+            const faixa = alavancagemPermitida({ faixas, nocional });
+            if (!filtros || !faixa) {
+                log.error('Sem filtros ou faixa para reproteger a posição adotada; fechando por segurança.', {
+                    symbol: p.symbol,
+                });
+                await this.fecharPorEmergencia('posição adotada sem como reproteger');
+                return;
+            }
+            await this.provider.cancelarTudo(p.symbol);
+            await this.protegerPosicao(
+                p.symbol,
+                this.posicao.direcao,
+                p.entrada,
+                filtros.tickSize,
+                faixa.manutencao,
+                Decimal.min(this.cfg.alavancagem, faixa.alavancagemMaxima),
+            );
+            log.info('Proteção da posição adotada recolocada.', { symbol: p.symbol });
+        } catch (err) {
+            // Não conseguir reproteger é motivo para SAIR, não para seguir
+            // torcendo: posição sem stop é o único jeito de perder mais que os
+            // 30% que o disjuntor promete.
+            this.reportarErro('Falha ao reproteger posição adotada; fechando', err);
+            await this.fecharPorEmergencia('não foi possível reproteger a posição adotada');
+        }
     }
 
     private dimensionarNocional(disponivel: Decimal): Decimal {
@@ -571,6 +627,10 @@ class MotorDeScalping {
         });
 
         this.relatarHipotese(gatilho, contra);
+        const alvoH = new Decimal(process.env.SCALPING_HIPOTESE_ALVO_PCT ?? '0.7').dividedBy(100);
+        const stopH = new Decimal(process.env.SCALPING_HIPOTESE_STOP_PCT ?? '1.0').dividedBy(100);
+        const celulaH = contra.find((x) => x.alvo.equals(alvoH) && x.stop.equals(stopH));
+        if (celulaH) this.relatarResumo(celulaH);
 
         for (const [nome, cs] of [
             ['seguindo', seguindo],
@@ -704,6 +764,64 @@ class MotorDeScalping {
                     : c.z.greaterThanOrEqualTo(2) && ev.greaterThan(0)
                       ? 'CONFIRMA'
                       : 'NAO CONFIRMA',
+        });
+    }
+
+    /**
+     * O relatório que uma pessoa lê sem mim.
+     *
+     * A linha HIPOTESE tem z, acaso, EV — e nada disso responde "e aí, tá indo
+     * bem?" para quem não passou o dia nisso. Rodando cinco dias sozinho, o
+     * estado precisa caber numa linha em português, com o que fazer junto.
+     *
+     * O equilíbrio inclui a DERRAPAGEM medida, e é por isso que ele se move: a
+     * conta que ignora o spread é a conta que engana.
+     */
+    private relatarResumo(c: CelulaDaGrade): void {
+        const resolvidos = c.alvos + c.stops;
+        const acerto = c.taxaDeAcerto.mul(100);
+
+        const d = this.derrapagens.length > 0
+            ? new Decimal(this.derrapagens.reduce((a, b) => a + b, 0) / this.derrapagens.length).dividedBy(100)
+            : new Decimal(0);
+        const ganho = this.cfg.alvo.minus(TAXAS_DA_OPERACAO.entrada).minus(TAXAS_DA_OPERACAO.alvo).minus(d);
+        const perda = this.cfg.stop.plus(TAXAS_DA_OPERACAO.entrada).plus(TAXAS_DA_OPERACAO.stop).plus(d);
+        const equilibrio = ganho.plus(perda).isZero()
+            ? new Decimal(100)
+            : perda.dividedBy(ganho.plus(perda)).mul(100);
+        const margem = acerto.minus(equilibrio);
+
+        const MINIMO = 400;
+        let situacao: string;
+        let oQueFazer: string;
+        if (resolvidos < MINIMO) {
+            situacao = 'MEDINDO AINDA — nenhuma conclusão vale';
+            oQueFazer = `deixar rodando (faltam ${MINIMO - resolvidos} operações)`;
+        } else if (margem.lessThan(0)) {
+            situacao = 'PERDENDO DINHEIRO — a taxa come mais do que a vantagem';
+            oQueFazer = 'DESLIGAR O SERVIÇO no Railway';
+        } else if (margem.lessThan(3)) {
+            situacao = 'VANTAGEM PEQUENA DEMAIS — não dá para confiar';
+            oQueFazer = 'deixar rodando, mas não aportar dinheiro';
+        } else if (margem.lessThan(6)) {
+            situacao = 'VANTAGEM REAL, porém modesta';
+            oQueFazer = 'seguir; chamar o Claude antes de aportar';
+        } else {
+            situacao = 'VANTAGEM BOA';
+            oQueFazer = 'chamar o Claude — vale aportar';
+        }
+
+        log.info('RESUMO.', {
+            'operacoes medidas': resolvidos,
+            acerto: `${acerto.toFixed(1)}%`,
+            'precisa acertar': `${equilibrio.toFixed(1)}% para empatar`,
+            margem: `${margem.toFixed(1)} pontos`,
+            derrapagem: this.derrapagens.length > 0
+                ? `${d.mul(100).toFixed(4)}% (${this.derrapagens.length} entradas reais)`
+                : 'sem entradas reais ainda',
+            banca: this.saldoAtual ? `${this.saldoAtual.toFixed(2)} USDT` : '—',
+            situacao,
+            'o que fazer': oQueFazer,
         });
     }
 
@@ -1192,6 +1310,16 @@ class MotorDeScalping {
 
             // O preço que dimensiona as saídas é o EXECUTADO, nunca o do sinal.
             const entrada = ordem.precoMedio.greaterThan(0) ? ordem.precoMedio : preco;
+
+            if (preco.greaterThan(0) && ordem.precoMedio.greaterThan(0)) {
+                // Positivo = preenchemos PIOR que o sinal. Comprar mais caro e
+                // vender mais barato são o mesmo prejuízo, por isso o sinal
+                // inverte conforme o lado.
+                const bruta = entrada.minus(preco).dividedBy(preco);
+                const contra = direcao === 'alta' ? bruta : bruta.negated();
+                this.derrapagens.push(contra.mul(100).toNumber());
+                if (this.derrapagens.length > 5000) this.derrapagens.shift();
+            }
             this.posicao = {
                 symbol,
                 direcao,
