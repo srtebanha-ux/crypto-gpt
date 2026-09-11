@@ -47,6 +47,7 @@ import { createLogger } from './logger';
 import { RiskManager } from './riskManager';
 import { EngineConfig, TriangularArbitrageEngine } from './engine';
 import { BinanceExchangeProvider } from './binanceExchangeProvider';
+import { exigirAtivacao } from './ativacao';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
@@ -280,7 +281,9 @@ async function bootstrap() {
     });
 }
 
-if (require.main === module) {
+// Só roda com ATIVAR_LIVE=1. Sem isso o processo anuncia que está
+// desligado e fica ocioso — ver src/ativacao.ts.
+if (require.main === module && exigirAtivacao('live')) {
     bootstrap().catch((err) => {
         log.error('Falha ao inicializar o engine contra a Binance.', { error: err instanceof Error ? err.message : String(err) });
         process.exit(1);

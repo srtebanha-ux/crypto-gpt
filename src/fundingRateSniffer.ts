@@ -25,6 +25,7 @@
 // Só endpoints públicos: não precisa de API key nem de conta de futuros.
 import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
+import { exigirAtivacao } from './ativacao';
 import {
     annualizeFundingRate,
     projectCarry,
@@ -179,7 +180,9 @@ async function main() {
 // Guardado como os demais executáveis do projeto: sem isto, qualquer
 // `import` deste módulo (inclusive de um teste) dispararia a medição de
 // verdade, indo à rede no meio da suíte.
-if (require.main === module) {
+// Só roda com ATIVAR_FUNDINGRATESNIFFER=1. Sem isso o processo anuncia que está
+// desligado e fica ocioso — ver src/ativacao.ts.
+if (require.main === module && exigirAtivacao('fundingRateSniffer')) {
     main().catch((err) => {
         log.error('Falha ao medir funding rates.', { error: err instanceof Error ? err.message : String(err) });
         process.exit(1);

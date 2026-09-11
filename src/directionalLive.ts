@@ -48,6 +48,7 @@ import { operacaoValeATaxa } from './feeViability';
 import { decidirEntradaPassiva, precoDaCompraPassiva } from './makerEntry';
 import { resolverPreset, resolveStrategyParams, type ResolvedStrategyParams } from './strategyParams';
 import type { EntryStrategy } from './backtest';
+import { exigirAtivacao } from './ativacao';
 
 
 Decimal.set({ precision: 30, rounding: Decimal.ROUND_DOWN });
@@ -1655,7 +1656,9 @@ async function main() {
     }
 }
 
-if (require.main === module) {
+// Só roda com ATIVAR_DIRECTIONALLIVE=1. Sem isso o processo anuncia que está
+// desligado e fica ocioso — ver src/ativacao.ts.
+if (require.main === module && exigirAtivacao('directionalLive')) {
     main().catch((err) => {
         log.error('Falha no motor direcional.', { error: err instanceof Error ? err.message : String(err) });
         process.exit(1);

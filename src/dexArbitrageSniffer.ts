@@ -36,6 +36,7 @@ import {
 } from './flashArbExecutor';
 import { encodeAddress, SELECTORS, decodeAddressWord, decodeDecimals, decodeReserves, decodeUintWord, encodeUint256, fromRawUnits } from './evmAbi';
 import { assertPlausiblePoolCount, parseScanMode, selectPoolIndices } from './poolDiscovery';
+import { exigirAtivacao } from './ativacao';
 
 Decimal.set({ precision: 40, rounding: Decimal.ROUND_DOWN });
 
@@ -1077,7 +1078,9 @@ async function main() {
     }
 }
 
-if (require.main === module) {
+// Só roda com ATIVAR_DEXARBITRAGESNIFFER=1. Sem isso o processo anuncia que está
+// desligado e fica ocioso — ver src/ativacao.ts.
+if (require.main === module && exigirAtivacao('dexArbitrageSniffer')) {
     main().catch((err) => {
         log.error('Falha ao medir arbitragem on-chain.', { error: err instanceof Error ? err.message : String(err) });
         process.exit(1);

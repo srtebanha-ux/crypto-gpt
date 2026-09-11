@@ -16,6 +16,7 @@
 import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
 import { BinanceExchangeProvider } from './binanceExchangeProvider';
+import { exigirAtivacao } from './ativacao';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
 
@@ -77,7 +78,9 @@ async function main() {
 // Guardado como os demais executáveis do projeto: sem isto, qualquer
 // `import` deste módulo (inclusive de um teste) dispararia a medição de
 // verdade, indo à rede no meio da suíte.
-if (require.main === module) {
+// Só roda com ATIVAR_SMOKETESTORDER=1. Sem isso o processo anuncia que está
+// desligado e fica ocioso — ver src/ativacao.ts.
+if (require.main === module && exigirAtivacao('smokeTestOrder')) {
     main().catch((err) => {
         log.error('Falha no teste de fumaça de execução.', { error: err instanceof Error ? err.message : String(err) });
         process.exit(1);

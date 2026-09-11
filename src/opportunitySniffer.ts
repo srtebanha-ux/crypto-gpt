@@ -16,6 +16,7 @@ import { Decimal } from 'decimal.js';
 import WebSocket from 'ws';
 import { createLogger } from './logger';
 import { buildTriangles, RawTriangle as Triangle, SymbolInfo } from './triangleTopology';
+import { exigirAtivacao } from './ativacao';
 import {
     brutoNecessario,
     custoDoTriangulo,
@@ -514,7 +515,9 @@ async function main() {
     process.on('SIGTERM', shutdown);
 }
 
-if (require.main === module) {
+// Só roda com ATIVAR_OPPORTUNITYSNIFFER=1. Sem isso o processo anuncia que está
+// desligado e fica ocioso — ver src/ativacao.ts.
+if (require.main === module && exigirAtivacao('opportunitySniffer')) {
     main().catch((err) => {
         log.error('Falha fatal no sniffer.', { error: err instanceof Error ? err.message : String(err) });
         process.exit(1);

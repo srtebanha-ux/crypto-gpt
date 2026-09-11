@@ -23,6 +23,7 @@
 //      elemento quase sempre — varrer é mais barato que indexar.
 import WebSocket from 'ws';
 import { createLogger } from './logger';
+import { exigirAtivacao } from './ativacao';
 import {
     DetectorDeRajada,
     EstatisticaDeAtraso,
@@ -344,7 +345,9 @@ async function main(): Promise<void> {
     setInterval(relatar, RELATORIO_MS);
 }
 
-if (require.main === module) {
+// Só roda com ATIVAR_LEADLAGSNIFFER=1. Sem isso o processo anuncia que está
+// desligado e fica ocioso — ver src/ativacao.ts.
+if (require.main === module && exigirAtivacao('leadLagSniffer')) {
     main().catch((err) => {
         log.error('Falha fatal na escuta cruzada.', { error: err instanceof Error ? err.message : String(err) });
         process.exit(1);
