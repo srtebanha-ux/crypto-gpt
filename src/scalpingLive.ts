@@ -263,6 +263,8 @@ class MotorDeScalping {
     private fechando = false;
     /** Uma leitura do vigia rápido em curso, para o laço não se atropelar. */
     private vigiando = false;
+    /** Uma reescolha de universo em curso. Ver reescolherUniverso. */
+    private reescolhendo = false;
     /** Falhas seguidas do vigia rápido, para avisar sem enterrar o log. */
     private falhasDoVigia = 0;
     // ------------------------------------------------------------------
@@ -482,6 +484,22 @@ class MotorDeScalping {
         setInterval(() => void this.vigiarStop(), vigiaMs);
         setInterval(() => this.relatarGrade(), 5 * 60_000);
         setInterval(() => this.relatarAuditoria(), 10 * 60_000);
+        // O universo era reescolhido só no boot e quando uma posição FECHAVA.
+        // Em modo observação nenhuma posição fecha — então ele ficava
+        // congelado nas moedas escolhidas no minuto do boot, por horas a fio.
+        //
+        // Isso não quebrava nada, mas media outra coisa: "o sinal funciona
+        // nestas 15 moedas de hoje às 11h" em vez de "o sinal funciona onde o
+        // volume está". E o motor AO VIVO rotaciona — então a medição estaria
+        // testando uma estratégia diferente da que seria operada, que é
+        // exatamente a fresta que já custou caro para a gente aprender a
+        // enxergar.
+        const universoMs = Number(process.env.SCALPING_UNIVERSO_MIN ?? '15') * 60_000;
+        log.info('Universo será reescolhido periodicamente.', {
+            intervaloMin: universoMs / 60_000,
+            porque: 'sem isto ele congela em observação, e a amostra vira um conjunto fixo',
+        });
+        setInterval(() => void this.reescolherUniverso(), universoMs);
     }
 
     /**
@@ -579,6 +597,19 @@ class MotorDeScalping {
     // Universo e WebSocket
     // ------------------------------------------------------------------
     private async reescolherUniverso(): Promise<void> {
+        // Dois chamadores agora: o relógio e o fechamento de posição. Cada
+        // chamada custa PESO 40 — a mais cara do motor — então sobrepor duas é
+        // gastar 80 para escrever o mesmo resultado duas vezes.
+        if (this.reescolhendo) return;
+        this.reescolhendo = true;
+        try {
+            await this.reescolherUniversoAgora();
+        } finally {
+            this.reescolhendo = false;
+        }
+    }
+
+    private async reescolherUniversoAgora(): Promise<void> {
         // ticker/24hr SEM símbolo custa PESO 40 — a chamada mais cara
         // do motor, e rodava sem ser contada nenhuma vez.
         await this.vazao.aguardarVaga(40);
