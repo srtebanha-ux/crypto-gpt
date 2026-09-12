@@ -178,6 +178,46 @@ export interface CelulaDaGrade {
  * muito" sem valer nada — o acerto alto já vem embutido na geometria, e a
  * taxa continua cobrando.
  */
+/**
+ * Quantos PONTOS de vantagem sobre o acaso uma célula exige para empatar.
+ *
+ * É o número que decide onde vale a pena procurar, e ele não é óbvio: a
+ * exigência cai quando o movimento perseguido cresce, porque a taxa é fixa e
+ * passa a ser uma fatia menor do movimento.
+ *
+ *     alvo 0,7% + stop 1,0%  ->  4,3 pontos exigidos
+ *     alvo 3%   + stop 4%    ->  1,1 ponto
+ *     alvo 5%   + stop 5%    ->  0,8 ponto
+ *
+ * A grade nasceu olhando só até 1,5% de alvo — ou seja, passou a semana
+ * inteira procurando vantagem exatamente onde ela precisava ser quatro vezes
+ * maior. Foram 170 operações medidas para dizer "não existe vantagem de 4,3
+ * pontos aqui", o que é uma pergunta bem mais difícil do que a que dava para
+ * ter feito.
+ *
+ * Aproxima-se de `taxa ÷ (alvo + stop)`, mas não é isso: a taxa do lado que
+ * ganha (maker no alvo) é menor que a do lado que perde (taker no stop), e a
+ * derrapagem só entra do lado da perda. Por isso a conta é feita inteira aqui
+ * em vez de na cabeça de alguém.
+ */
+export function vantagemExigida(params: {
+    alvo: Decimal;
+    stop: Decimal;
+    taxas: TaxasDaOperacao;
+    /** Derrapagem medida, em fração. Entra como custo dos dois lados. */
+    derrapagem?: Decimal;
+}): Decimal {
+    const d = params.derrapagem ?? new Decimal(0);
+    const ganho = params.alvo.minus(params.taxas.entrada).minus(params.taxas.alvo).minus(d);
+    const perda = params.stop.plus(params.taxas.entrada).plus(params.taxas.stop).plus(d);
+    const soma = ganho.plus(perda);
+    // Alvo menor que a própria taxa: não existe taxa de acerto que salve.
+    if (soma.lessThanOrEqualTo(0)) return new Decimal(100);
+    const equilibrio = perda.dividedBy(soma);
+    const acaso = acasoDaCelula(params.alvo, params.stop);
+    return equilibrio.minus(acaso).mul(100);
+}
+
 export function acasoDaCelula(alvo: Decimal, stop: Decimal): Decimal {
     const soma = alvo.plus(stop);
     if (soma.lessThanOrEqualTo(0)) return new Decimal('0.5');
@@ -318,10 +358,33 @@ export function melhorDaGrade(params: {
 }
 
 /** Grade padrão: alvos de 0,2% a 1,5%, stops de 0,2% a 1,0%, passo de 0,1pp. */
+/**
+ * Passos largos acima de 1,5%, em cima dos finos.
+ *
+ * A grade nasceu olhando só de 0,2% a 1,5% — a escala de um scalp. Isso a
+ * cegou justamente para a região onde a taxa para de mandar, porque a
+ * vantagem que uma configuração PRECISA ter para empatar é
+ *
+ *     taxa ÷ (alvo + stop)
+ *
+ * Com 0,7%+1,0% e taxa de 0,0727%, são 4,3 pontos de vantagem exigida. Com
+ * 3%+4%, um ponto. Com 5%+5%, sete décimos. A taxa não muda; o que muda é
+ * quanto do movimento ela come. A grade antiga procurava vantagem só onde
+ * ela precisava ser quatro vezes maior para valer a pena.
+ *
+ * Passo grosso de propósito daqui para cima: cada célula nova é mais uma
+ * chance de encontrar ruído bonito, e o remédio para isso é procurar em
+ * menos lugares, não em mais.
+ */
+const ALVOS_LARGOS = [0.02, 0.025, 0.03, 0.04, 0.05, 0.07, 0.1];
+const STOPS_LARGOS = [0.015, 0.02, 0.03, 0.04, 0.05, 0.07, 0.1];
+
 export function gradePadrao(): { alvos: Decimal[]; stops: Decimal[] } {
     const alvos: Decimal[] = [];
     const stops: Decimal[] = [];
     for (let i = 2; i <= 15; i += 1) alvos.push(new Decimal(i).dividedBy(1000));
+    for (const a of ALVOS_LARGOS) alvos.push(new Decimal(a));
     for (let i = 2; i <= 10; i += 1) stops.push(new Decimal(i).dividedBy(1000));
+    for (const st of STOPS_LARGOS) stops.push(new Decimal(st));
     return { alvos, stops };
 }

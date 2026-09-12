@@ -7,7 +7,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { acasoDaCelula, avaliarGrade, desfechoNoCaminho, excursoes, gradePadrao, melhorDaGrade, desfechoDetalhado } from './excursao';
+import {
+    acasoDaCelula,
+    avaliarGrade,
+    desfechoDetalhado,
+    desfechoNoCaminho,
+    excursoes,
+    gradePadrao,
+    melhorDaGrade,
+    TaxasDaOperacao,
+    vantagemExigida,
+} from './excursao';
 import { Vela1m } from './volumeSpike';
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
@@ -239,10 +249,18 @@ test('vantagem GRANDE com amostra suficiente passa — o filtro não recusa tudo
     assert.equal(melhorDaGrade({ celulas, minimoResolvidos: 30 }) !== null, true);
 });
 
-test('a grade padrão tem 126 combinações — 14 alvos x 9 stops', () => {
+test('a grade cobre a faixa larga, onde a taxa para de mandar', () => {
+    // Era 14x9=126, tudo abaixo de 1,5% de alvo — a escala de um scalp. A
+    // medição de 11-12/09 reprovou o scalp com 170 operações, e a razão
+    // estrutural é que ali a exigência de vantagem é 4,3 pontos. A grade
+    // precisava enxergar a faixa onde ela cai para ~1 ponto, senão a busca
+    // continuava acontecendo só no lugar mais difícil que existe.
     const g = gradePadrao();
-    assert.equal(g.alvos.length, 14);
-    assert.equal(g.stops.length, 9);
+    assert.equal(g.alvos.length, 21);
+    assert.equal(g.stops.length, 16);
+    assert.ok(g.alvos.some((a) => a.equals('0.03')), 'a hipótese nova precisa existir na grade');
+    assert.ok(g.stops.some((st) => st.equals('0.04')), 'idem o stop dela');
+    assert.ok(g.alvos[0].equals('0.002'), 'e a faixa fina continua inteira');
     assert.equal(g.alvos[0].toString(), '0.002');
     assert.equal(g.alvos[13].toString(), '0.015');
 });
@@ -362,4 +380,87 @@ test('a célula acumula um tempo por caminho RESOLVIDO, não por caminho', () =>
     const c = celulas.find((x) => x.alvo.equals('0.003') && x.stop.equals('0.004'));
     assert.deepEqual(c?.minutosParaResolver, [1, 1], 'o aberto não entra');
     assert.equal(c?.abertos, 1);
+});
+
+// --------------------------------------------------------------------------
+// vantagemExigida — o número que decide ONDE procurar
+// --------------------------------------------------------------------------
+
+const TAXAS_REAIS: TaxasDaOperacao = {
+    entrada: new Decimal('0.00045'), // taker
+    alvo: new Decimal('0.00018'), // maker
+    stop: new Decimal('0.00045'), // taker
+};
+
+test('reproduz o 63,1% de empate que o motor mediu em produção', () => {
+    // Âncora contra a realidade: em 11/09 o log imprimiu "precisa acertar
+    // 63.1%" com alvo 0,7% e stop 1,0%. Se esta conta divergir daquela, uma
+    // das duas está errada e a decisão de onde procurar sai envenenada.
+    const exigida = vantagemExigida({
+        alvo: new Decimal('0.007'),
+        stop: new Decimal('0.010'),
+        taxas: TAXAS_REAIS,
+    });
+    const acaso = acasoDaCelula(new Decimal('0.007'), new Decimal('0.010')).mul(100);
+    assert.equal(acaso.toFixed(1), '58.8', 'o acaso medido no log');
+    assert.equal(acaso.plus(exigida).toFixed(1), '63.1', 'o equilíbrio medido no log');
+    assert.equal(exigida.toFixed(2), '4.29');
+});
+
+test('perseguir movimento maior derruba a exigência — o motivo de alargar a grade', () => {
+    const exigir = (a: string, st: string) =>
+        vantagemExigida({ alvo: new Decimal(a), stop: new Decimal(st), taxas: TAXAS_REAIS });
+
+    const scalp = exigir('0.007', '0.010'); // a configuração reprovada
+    const dia = exigir('0.03', '0.04'); // a hipótese nova
+    const largo = exigir('0.05', '0.05');
+
+    assert.ok(dia.lessThan(scalp), 'alvo maior exige menos vantagem');
+    assert.ok(largo.lessThan(dia), 'e continua caindo');
+    // Quatro vezes menos exigente, que é a razão inteira da mudança.
+    assert.ok(scalp.dividedBy(dia).greaterThan(3.5), `esperava >3,5x, deu ${scalp.dividedBy(dia)}`);
+});
+
+test('quem manda é a SOMA; trocar alvo por stop quase não muda', () => {
+    // Eu tinha afirmado que SÓ a soma importa. Este teste me desmentiu: 3+4
+    // exige 1,06 e 4+3 exige 1,12. Não é idêntico, porque o lado que ganha
+    // paga taxa de maker (0,018%) e o lado que perde paga taker (0,045%) —
+    // então inverter alvo e stop move um pouco a conta.
+    //
+    // O que É verdade: a soma manda MUITO mais que a divisão. Trocar os dois
+    // de lugar mexe 0,06 ponto; mudar a soma de 1,7% para 7% mexe 3,2 pontos.
+    // Cinquenta vezes mais. A decisão de onde procurar continua de pé — só
+    // não com a frase absoluta que eu tinha usado.
+    const trocaDeLado = vantagemExigida({ alvo: new Decimal('0.03'), stop: new Decimal('0.04'), taxas: TAXAS_REAIS })
+        .minus(vantagemExigida({ alvo: new Decimal('0.04'), stop: new Decimal('0.03'), taxas: TAXAS_REAIS }))
+        .abs();
+    const mudaASoma = vantagemExigida({ alvo: new Decimal('0.007'), stop: new Decimal('0.010'), taxas: TAXAS_REAIS })
+        .minus(vantagemExigida({ alvo: new Decimal('0.03'), stop: new Decimal('0.04'), taxas: TAXAS_REAIS }));
+
+    assert.ok(trocaDeLado.lessThan('0.1'), `troca de lado mexeu ${trocaDeLado}`);
+    assert.ok(mudaASoma.greaterThan('3'), `mudar a soma mexeu ${mudaASoma}`);
+    assert.ok(
+        mudaASoma.dividedBy(trocaDeLado).greaterThan(20),
+        `a soma tem de pesar >20x mais que a divisão, deu ${mudaASoma.dividedBy(trocaDeLado)}`,
+    );
+});
+
+test('a derrapagem encarece a exigência, e é por isso que ela precisa ser medida', () => {
+    const sem = vantagemExigida({ alvo: new Decimal('0.03'), stop: new Decimal('0.04'), taxas: TAXAS_REAIS });
+    const com = vantagemExigida({
+        alvo: new Decimal('0.03'),
+        stop: new Decimal('0.04'),
+        taxas: TAXAS_REAIS,
+        derrapagem: new Decimal('0.001'), // 0,1% de escorregão
+    });
+    assert.ok(com.greaterThan(sem));
+});
+
+test('alvo menor que a taxa é impossível, não apenas ruim', () => {
+    const exigida = vantagemExigida({
+        alvo: new Decimal('0.0002'), // 0,02% — menor que a taxa de entrada
+        stop: new Decimal('0.0002'),
+        taxas: TAXAS_REAIS,
+    });
+    assert.ok(exigida.greaterThan(30), `exigência tem de ser enorme, deu ${exigida}`);
 });

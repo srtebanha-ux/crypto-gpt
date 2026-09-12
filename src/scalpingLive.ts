@@ -68,12 +68,38 @@ const VELAS_DE_HISTORICO = 20;
  * Por quantos minutos seguir o preço depois de um sinal.
  *
  * É o teto do que qualquer alvo pode capturar: um alvo de 1,5% que só é
- * alcançado no minuto 40 não aparece numa janela de 30. Trinta minutos é a
- * escala de um scalp — mais que isso já é outra estratégia.
+ * alcançado no minuto 40 não aparece numa janela de 30. Trinta minutos era a
+ * escala de um scalp — e o scalp acabou de ser medido e reprovado.
+ *
+ * A razão de alargar não é teimosia, é aritmética. A vantagem que a
+ * estratégia PRECISA ter para empatar é exatamente
+ *
+ *     taxa ÷ (alvo + stop)
+ *
+ * Com alvo 0,7% e stop 1,0% e taxa de 0,0727%, isso dá 4,3 pontos de
+ * vantagem exigida — e 170 operações disseram que ela não existe. Com alvo
+ * 3% e stop 4% a exigência cai para 1,0 ponto. A taxa é fixa; o que muda é
+ * a fração do movimento que ela leva. Perseguir movimento maior é a única
+ * alavanca que reduz a exigência sem precisar de um sinal melhor.
+ *
+ * O preço disso é tempo: alvo de 3% não resolve em três minutos.
  */
-const JANELA_DE_MEDICAO = 30;
+const JANELA_DE_MEDICAO = Number(process.env.SCALPING_JANELA_MIN ?? '360');
 /** Abaixo disto, a melhor célula da grade é ruído de amostra pequena. */
 const MINIMO_PARA_RECOMENDAR = 30;
+/**
+ * Teto de símbolos buscados por ciclo de coleta.
+ *
+ * A coleta é sequencial e roda a cada dez segundos; cada símbolo custa uma
+ * ida à corretora. Sem teto, uma janela de medição longa faz a lista crescer
+ * junto com as gravações em aberto, o ciclo passa a demorar mais que o
+ * intervalo, e a coleta começa a PERDER velas — que é justamente o que se
+ * estava tentando evitar ao alargar a janela.
+ *
+ * Sessenta símbolos são ~360 de peso por minuto contra um teto de 2400, e uns
+ * seis segundos de ciclo dentro dos dez disponíveis.
+ */
+const TETO_DE_SIMBOLOS_COLETADOS = 60;
 
 /** Taxas por perna: taker na entrada e no stop, maker no alvo, com desconto BNB. */
 const TAXAS_DA_OPERACAO = {
@@ -142,7 +168,12 @@ function lerConfiguracao(): Configuracao {
         // ficou de lado numa sexta deixaria o bot parado até quarta. A resolução
         // medida tem média de 6 minutos, então 45 é folga larga — quem passa
         // disso não vai resolver mesmo.
-        timeStopMs: Number(process.env.SCALPING_TIME_STOP_MIN ?? '45') * 60_000,
+        // Nunca segurar posição por mais tempo do que a janela que a MEDIÇÃO
+        // enxerga: o que acontece depois do minuto N não foi medido por
+        // ninguém, então segurar até lá é operar fora do que se sabe. Os 45
+        // minutos antigos eram coerentes com a janela de 30; com 360 eles
+        // cortariam toda operação antes de ela ter chance de chegar ao alvo.
+        timeStopMs: Number(process.env.SCALPING_TIME_STOP_MIN ?? String(JANELA_DE_MEDICAO)) * 60_000,
         aoVivo: process.env.SCALPING_LIVE_CONFIRM === FRASE_DE_CONFIRMACAO,
     };
 }
@@ -257,7 +288,15 @@ class MotorDeScalping {
      * afogaria um bom com poucos, e a média não seria de nenhum dos dois.
      */
     private readonly caminhos = new Map<string, CaminhoDeSinal[]>();
-    private gravando: Array<{ gatilho: string; caminho: CaminhoDeSinal; restantes: number }> = [];
+    private gravando: Array<{
+        gatilho: string;
+        caminho: CaminhoDeSinal;
+        restantes: number;
+        /** Quando esta gravação recebeu vela pela última vez. Ver limparGravacoesParadas. */
+        ultimoAvancoMs: number;
+    }> = [];
+    /** Gravações que morreram sem completar — cada uma é uma amostra perdida. */
+    private gravacoesPerdidas = 0;
     /** Estado da máquina de ricochete, por símbolo. */
     private readonly ricochete = new Map<string, EstadoDeRicochete | null>();
     private readonly ultimoRicocheteMs = new Map<string, number>();
@@ -569,11 +608,65 @@ class MotorDeScalping {
      * venha de onde vier. Para operar de verdade a latência importa; para
      * descobrir se existe vantagem, não.
      */
+    /**
+     * De quais símbolos buscar velas: o universo MAIS o que está sendo gravado.
+     *
+     * Sem isto a medição de janela longa não existe, e falha calada. O
+     * universo é trocado a cada fechamento de posição, e só o símbolo com
+     * posição aberta é preservado. Uma gravação cujo símbolo saiu do universo
+     * para de receber velas: ela nunca completa, fica presa em `gravando` para
+     * sempre, e a grade simplesmente não ganha aquela amostra.
+     *
+     * Com janela de 30 minutos isso mordia pouco. Com 360 minutos morderia
+     * quase tudo — o universo gira várias vezes em seis horas — e o log diria
+     * "poucas amostras" indefinidamente, sem nenhum erro aparecer. É o pior
+     * tipo de defeito: o que faz o número certo nunca chegar.
+     *
+     * Custo: peso 1 por símbolo a cada dez segundos. Trinta símbolos extras
+     * são 180 de peso por minuto, contra um teto de 2400.
+     */
+    private simbolosParaColetar(): string[] {
+        const todos = new Set(this.universo);
+        for (const g of this.gravando) {
+            // O universo vem primeiro e NUNCA é cortado: é dele que saem os
+            // sinais novos. O teto cai sobre as gravações, e quando cai a
+            // amostra some — mas some contada, pela varredura de gravações
+            // paradas, em vez de sumir calada.
+            if (todos.size >= TETO_DE_SIMBOLOS_COLETADOS) break;
+            todos.add(g.caminho.symbol);
+        }
+        return [...todos];
+    }
+
+    /**
+     * Descarta gravações que pararam de receber vela.
+     *
+     * Válvula de segurança para o caso de `simbolosParaColetar` falhar por
+     * algum caminho que eu não previ: sem isto uma gravação órfã fica em
+     * memória para sempre e ainda puxa uma chamada de API a cada ciclo. Conta
+     * quantas morreram assim, porque gravação perdida é AMOSTRA perdida — e
+     * amostra perdida em silêncio é como se enviesa uma medição sem perceber.
+     */
+    private limparGravacoesParadas(agoraMs: number): void {
+        const limiteMs = 15 * 60_000;
+        const vivas = this.gravando.filter((g) => agoraMs - g.ultimoAvancoMs < limiteMs);
+        const mortas = this.gravando.length - vivas.length;
+        if (mortas > 0) {
+            this.gravacoesPerdidas += mortas;
+            log.warn('Gravações descartadas por falta de velas.', {
+                agora: mortas,
+                totalPerdido: this.gravacoesPerdidas,
+                porque: 'o símbolo parou de ser coletado; a amostra dessas gravações se perde',
+            });
+            this.gravando = vivas;
+        }
+    }
+
     private async coletar(): Promise<void> {
         if (this.coletando) return; // um ciclo por vez: 15 símbolos levam segundos
         this.coletando = true;
         try {
-            for (const symbol of this.universo) {
+            for (const symbol of this.simbolosParaColetar()) {
                 try {
                     await this.vazao.aguardarVaga(1);
                     const { fechadas, emFormacao } = await this.provider.klines(symbol, VELAS_DE_HISTORICO + 1);
@@ -626,6 +719,7 @@ class MotorDeScalping {
             }
             g.caminho.velas.push(vela);
             g.restantes -= 1;
+            g.ultimoAvancoMs = Date.now();
             if (g.restantes > 0) {
                 aindaGravando.push(g);
             } else {
@@ -677,8 +771,8 @@ class MotorDeScalping {
         });
 
         this.relatarHipotese(gatilho, contra);
-        const alvoH = new Decimal(process.env.SCALPING_HIPOTESE_ALVO_PCT ?? '0.7').dividedBy(100);
-        const stopH = new Decimal(process.env.SCALPING_HIPOTESE_STOP_PCT ?? '1.0').dividedBy(100);
+        const alvoH = new Decimal(process.env.SCALPING_HIPOTESE_ALVO_PCT ?? '3.0').dividedBy(100);
+        const stopH = new Decimal(process.env.SCALPING_HIPOTESE_STOP_PCT ?? '4.0').dividedBy(100);
         const celulaH = contra.find((x) => x.alvo.equals(alvoH) && x.stop.equals(stopH));
         if (celulaH) this.relatarResumo(celulaH);
 
@@ -791,8 +885,8 @@ class MotorDeScalping {
      * está sendo testada, está sendo torcida.
      */
     private relatarHipotese(gatilho: string, contra: CelulaDaGrade[]): void {
-        const alvo = new Decimal(process.env.SCALPING_HIPOTESE_ALVO_PCT ?? '0.7').dividedBy(100);
-        const stop = new Decimal(process.env.SCALPING_HIPOTESE_STOP_PCT ?? '1.0').dividedBy(100);
+        const alvo = new Decimal(process.env.SCALPING_HIPOTESE_ALVO_PCT ?? '3.0').dividedBy(100);
+        const stop = new Decimal(process.env.SCALPING_HIPOTESE_STOP_PCT ?? '4.0').dividedBy(100);
         const c = contra.find((x) => x.alvo.equals(alvo) && x.stop.equals(stop));
         if (!c) return;
         const resolvidos = c.alvos + c.stops;
@@ -1082,6 +1176,7 @@ class MotorDeScalping {
             gatilho: 'ricochete',
             caminho: { symbol, direcao: 'alta', entrada: r.sinal.entrada, velas: [] },
             restantes: JANELA_DE_MEDICAO,
+            ultimoAvancoMs: Date.now(),
         });
     }
 
@@ -1127,6 +1222,7 @@ class MotorDeScalping {
             gatilho: 'volume',
             caminho: { symbol, direcao: sinal.direcao, entrada: sinal.preco, velas: [] },
             restantes: JANELA_DE_MEDICAO,
+            ultimoAvancoMs: Date.now(),
         });
 
         if (!this.cfg.aoVivo) return; // modo observação: registra e não envia nada
@@ -1704,6 +1800,8 @@ class MotorDeScalping {
                 // Falha de leitura não derruba o ciclo: o saldo antigo é
                 // melhor que interromper a medição por causa de um timeout.
             }
+            this.limparGravacoesParadas(Date.now());
+
             if (this.posicao) {
                 await this.vazao.aguardarVaga(5);
                 const abertas = await this.provider.posicoesAbertas();
@@ -1788,6 +1886,8 @@ class MotorDeScalping {
                 comHistorico: profundidades.filter((n) => n >= 3).length,
                 sinaisVistos: this.sinaisVistos,
                 gravando: this.gravando.length,
+                coletandoSimbolos: this.simbolosParaColetar().length,
+                gravacoesPerdidas: this.gravacoesPerdidas,
                 caminhosCompletos:
                     [...this.caminhos.entries()].map(([g, c]) => `${g}:${c.length}`).join(' ') || 'nenhum',
                 placar: JSON.stringify(this.placar),
