@@ -39,7 +39,15 @@ import {
     stopAntesDaLiquidacao,
 } from './futurosMath';
 import { veredictoDeScalping } from './scalping';
-import { avaliarGrade, CaminhoDeSinal, CelulaDaGrade, gradePadrao, melhorDaGrade } from './excursao';
+import {
+    acasoDaCelula,
+    avaliarGrade,
+    CaminhoDeSinal,
+    CelulaDaGrade,
+    gradePadrao,
+    melhorDaGrade,
+    vantagemExigida,
+} from './excursao';
 import { EstadoDeRicochete, parametrosPadrao, passoDoRicochete } from './ricochete';
 import { VarreduraDeMercado } from './varredura';
 import { classificarRegime, medirTensao, quedaOperavel } from './tensao';
@@ -141,8 +149,8 @@ function lerConfiguracao(): Configuracao {
         // do empate — a vela de 1 minuto atravessa os dois lados — então ela
         // media a régua em vez do mercado. Na célula larga a ambiguidade cai
         // para 8%.
-        alvo: new Decimal(process.env.SCALPING_ALVO_PCT ?? '0.7').dividedBy(100),
-        stop: new Decimal(process.env.SCALPING_STOP_PCT ?? '1.0').dividedBy(100),
+        alvo: new Decimal(process.env.SCALPING_ALVO_PCT ?? '3.0').dividedBy(100),
+        stop: new Decimal(process.env.SCALPING_STOP_PCT ?? '4.0').dividedBy(100),
         // O padrão é operar CONTRA o sinal, e isto é o achado central da
         // medição. Seguir o pico de volume acerta 23,2% onde o acaso dá 57,1%;
         // inverter na célula larga acerta 75,6% onde o acaso dá 58,8%. O pico
@@ -959,11 +967,19 @@ class MotorDeScalping {
         const d = this.derrapagens.length > 0
             ? new Decimal(this.derrapagens.reduce((a, b) => a + b, 0) / this.derrapagens.length).dividedBy(100)
             : new Decimal(0);
-        const ganho = this.cfg.alvo.minus(TAXAS_DA_OPERACAO.entrada).minus(TAXAS_DA_OPERACAO.alvo).minus(d);
-        const perda = this.cfg.stop.plus(TAXAS_DA_OPERACAO.entrada).plus(TAXAS_DA_OPERACAO.stop).plus(d);
-        const equilibrio = ganho.plus(perda).isZero()
-            ? new Decimal(100)
-            : perda.dividedBy(ganho.plus(perda)).mul(100);
+        // O equilíbrio sai da geometria DA CÉLULA, não da configuração do
+        // motor. Eram a mesma coisa enquanto o motor operava exatamente o que
+        // a hipótese media; deixaram de ser no momento em que a hipótese
+        // passou a ser 3%/4% e o motor continuou em 0,7%/1,0%.
+        //
+        // A linha resultante seria o pior tipo de relatório: cada número certo
+        // sozinho e a conclusão errada. Acerto de uma geometria, empate de
+        // outra, e uma "margem" que é a diferença entre dois números que não
+        // se falam. Amarrar ao `c` recebido torna isso impossível por
+        // construção — a célula carrega o próprio alvo e o próprio stop.
+        const equilibrio = acasoDaCelula(c.alvo, c.stop)
+            .mul(100)
+            .plus(vantagemExigida({ alvo: c.alvo, stop: c.stop, taxas: TAXAS_DA_OPERACAO, derrapagem: d }));
         const margem = acerto.minus(equilibrio);
 
         const MINIMO = 400;
