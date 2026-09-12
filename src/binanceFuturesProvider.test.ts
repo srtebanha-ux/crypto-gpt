@@ -105,3 +105,53 @@ test('marcacaoDe devolve o markPrice, que é o preço que o vigia do stop usa', 
         await srv.fechar();
     }
 });
+
+test('uma conexão que emudece vira ERRO, e não um travamento eterno', async () => {
+    // Este é o teste que protege a medição de rodar seis horas sem coletar
+    // nada. O servidor aceita a conexão e nunca responde — exatamente o que
+    // uma rede ruim faz. Sem prazo, este await nunca voltaria, a trava
+    // `coletando` do motor ficaria presa em true, e a coleta pararia de vez
+    // SEM UM ERRO NO LOG. Com prazo, vira uma falha comum: o ciclo seguinte
+    // tenta de novo.
+    const mudo = createServer(() => {
+        /* aceita e nunca responde, de propósito */
+    });
+    await new Promise<void>((ok) => mudo.listen(0, '127.0.0.1', ok));
+    const { port } = mudo.address() as AddressInfo;
+    try {
+        const p = new BinanceFuturesProvider({
+            apiKey: 'k',
+            apiSecret: 's',
+            restBaseUrl: `http://127.0.0.1:${port}`,
+            timeoutMs: 300,
+        });
+        const comecou = Date.now();
+        await assert.rejects(() => p.marcacaoDe('BTCUSDT'));
+        const levou = Date.now() - comecou;
+        assert.ok(levou < 5000, `devia desistir rápido, levou ${levou}ms`);
+    } finally {
+        mudo.closeAllConnections?.();
+        await new Promise<void>((ok) => mudo.close(() => ok()));
+    }
+});
+
+test('a chamada assinada também tem prazo — ela é a que fecha posição', async () => {
+    // A assinada é a que manda ordem. Uma ordem de FECHAMENTO pendurada é
+    // pior que uma coleta pendurada: a posição fica aberta achando que está
+    // sendo fechada.
+    const mudo = createServer(() => {});
+    await new Promise<void>((ok) => mudo.listen(0, '127.0.0.1', ok));
+    const { port } = mudo.address() as AddressInfo;
+    try {
+        const p = new BinanceFuturesProvider({
+            apiKey: 'k',
+            apiSecret: 's',
+            restBaseUrl: `http://127.0.0.1:${port}`,
+            timeoutMs: 300,
+        });
+        await assert.rejects(() => p.disponivelEmUsdt());
+    } finally {
+        mudo.closeAllConnections?.();
+        await new Promise<void>((ok) => mudo.close(() => ok()));
+    }
+});

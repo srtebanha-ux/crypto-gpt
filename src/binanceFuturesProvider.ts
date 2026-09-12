@@ -56,6 +56,17 @@ export interface OpcoesDoProviderDeFuturos {
     restBaseUrl?: string;
     recvWindowMs?: number;
     /**
+     * Prazo de cada chamada HTTP, em ms. Padrão 10s.
+     *
+     * O fetch do Node NÃO tem prazo por padrão: uma conexão que abre e emudece
+     * fica pendurada para sempre. Isso não é teoria — é o jeito mais silencioso
+     * de este motor morrer. Quem chama usa travas de reentrância (`coletando`,
+     * `vigiando`) liberadas num `finally`, e um `await` que nunca volta nunca
+     * chega no `finally`: a trava fica presa, o laço para de rodar, e NENHUM
+     * erro aparece. O log continua bonito enquanto a medição não acontece mais.
+     */
+    timeoutMs?: number;
+    /**
      * Chamado quando a corretora RECUSA por excesso (429, 418 ou -1003).
      *
      * O provider não conhece o controle de vazão — e não deve conhecer, senão
@@ -102,6 +113,7 @@ export class BinanceFuturesProvider {
     /** null até o boot ler. Em hedge mode toda ordem precisa de positionSide. */
     private modoHedge: boolean | null = null;
 
+    private readonly timeoutMs: number;
     private aoSerRecusado?: (params: { status: number; retryAfterSegundos?: number }) => void;
 
     /**
@@ -121,6 +133,7 @@ export class BinanceFuturesProvider {
         this.apiSecret = opcoes.apiSecret;
         this.restBaseUrl = opcoes.restBaseUrl ?? 'https://fapi.binance.com';
         this.recvWindowMs = opcoes.recvWindowMs ?? 5000;
+        this.timeoutMs = opcoes.timeoutMs ?? 10_000;
         this.aoSerRecusado = opcoes.aoSerRecusado;
     }
 
@@ -177,7 +190,9 @@ export class BinanceFuturesProvider {
 
     private async publico<T>(rota: string, params?: Record<string, string>): Promise<T> {
         const query = params ? `?${new URLSearchParams(params).toString()}` : '';
-        const res = await fetch(`${this.restBaseUrl}${rota}${query}`);
+        const res = await fetch(`${this.restBaseUrl}${rota}${query}`, {
+            signal: AbortSignal.timeout(this.timeoutMs),
+        });
         if (!res.ok) await this.lancarTraduzido(res, `GET ${rota}`);
         return (await res.json()) as T;
     }
@@ -191,6 +206,7 @@ export class BinanceFuturesProvider {
         const res = await fetch(`${this.restBaseUrl}${rota}?${query}`, {
             method: metodo,
             headers: { 'X-MBX-APIKEY': this.apiKey },
+            signal: AbortSignal.timeout(this.timeoutMs),
         });
         if (!res.ok) await this.lancarTraduzido(res, `${metodo} ${rota}`);
         return (await res.json()) as T;

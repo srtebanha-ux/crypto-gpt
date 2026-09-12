@@ -960,10 +960,17 @@ class MotorDeScalping {
             acerto: `${acerto.toFixed(1)}%`,
             'precisa acertar': `${equilibrio.toFixed(1)}% para empatar`,
             margem: `${margem.toFixed(1)} pontos`,
+            disponivel: this.saldoAtual ? `${this.saldoAtual.toFixed(2)} USDT` : '—',
             derrapagem: this.derrapagens.length > 0
                 ? `${d.mul(100).toFixed(4)}% (${this.derrapagens.length} entradas reais)`
                 : 'sem entradas reais ainda',
-            banca: this.saldoAtual ? `${this.saldoAtual.toFixed(2)} USDT` : '—',
+            // A BANCA é o total da conta; o DISPONÍVEL é o que sobra livre.
+            // Com posição aberta a 1x a margem tranca quase tudo, e o
+            // disponível cai para uns 5 USDT numa conta de 53. Chamar isso de
+            // "banca" fez a usuária achar, com razão, que tinha perdido 90% do
+            // dinheiro. Os dois números são informação real — o que não podia
+            // era um usar o nome do outro.
+            banca: this.disjuntor ? `${this.disjuntor.banca.toFixed(2)} USDT` : '—',
             situacao,
             'o que fazer': oQueFazer,
         });
@@ -1877,7 +1884,8 @@ class MotorDeScalping {
 
             const profundidades = [...this.janelas.values()].map((j) => j.fechadas.length);
             log.info('CAÇANDO.', {
-                banca: this.saldoAtual ? `${this.saldoAtual.toFixed(2)} USDT` : 'lendo...',
+                banca: this.disjuntor ? `${this.disjuntor.banca.toFixed(2)} USDT` : 'lendo...',
+                disponivel: this.saldoAtual ? `${this.saldoAtual.toFixed(2)} USDT` : 'lendo...',
                 universo: this.universo.length,
                 simbolosVistos: this.janelas.size,
                 coletasFeitas: this.recebidas,
