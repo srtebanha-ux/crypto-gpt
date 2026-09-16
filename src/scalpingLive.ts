@@ -53,6 +53,7 @@ import { EstadoDeRicochete, parametrosPadrao, passoDoRicochete } from './ricoche
 import { VarreduraDeMercado } from './varredura';
 import { classificarRegime, medirTensao, quedaOperavel } from './tensao';
 import { detectarPicoDeVolume, precosDeSaida, stopRompido, Vela1m } from './volumeSpike';
+import { extremosTransversais, retornoDaJanela, RetornoDoSimbolo } from './transversal';
 import { selecionarUniverso } from './universo';
 import { ControleDeVazao } from './rateLimiter';
 import {
@@ -94,6 +95,21 @@ const VELAS_DE_HISTORICO = 20;
  * O preço disso é tempo: alvo de 3% não resolve em três minutos.
  */
 const JANELA_DE_MEDICAO = Number(process.env.SCALPING_JANELA_MIN ?? '360');
+/**
+ * Sinal TRANSVERSAL: parâmetros fixados ANTES de existir amostra.
+ *
+ * Uma hora de retrospectiva, os 2 melhores e os 2 piores de um universo de
+ * pelo menos 10, e só quando a distância entre o pior do topo e o melhor do
+ * fundo passar de 2 pontos percentuais — sem isso, "extremo" vira a
+ * ordenação de um empate.
+ */
+const LOOKBACK_TRANSVERSAL_MIN = Number(process.env.SCALPING_TRANSVERSAL_LOOKBACK_MIN ?? '60');
+const EXTREMOS_POR_LADO = Number(process.env.SCALPING_TRANSVERSAL_EXTREMOS ?? '2');
+const MINIMO_SIMBOLOS_TRANSVERSAL = 10;
+const SEPARACAO_MINIMA_TRANSVERSAL = new Decimal('0.02');
+/** Quantas velas buscar por símbolo: o maior consumidor manda. */
+const VELAS_A_BUSCAR = Math.max(VELAS_DE_HISTORICO, LOOKBACK_TRANSVERSAL_MIN) + 1;
+
 /** Abaixo disto, a melhor célula da grade é ruído de amostra pequena. */
 const MINIMO_PARA_RECOMENDAR = 30;
 /**
@@ -513,6 +529,14 @@ class MotorDeScalping {
             porque: 'sem isto ele congela em observação, e a amostra vira um conjunto fixo',
         });
         setInterval(() => void this.reescolherUniverso(), universoMs);
+        const transversalMs = Number(process.env.SCALPING_TRANSVERSAL_MIN ?? '15') * 60_000;
+        log.info('Sinal transversal iniciado.', {
+            intervaloMin: transversalMs / 60_000,
+            retrospectivaMin: LOOKBACK_TRANSVERSAL_MIN,
+            extremosPorLado: EXTREMOS_POR_LADO,
+            hipotese: 'CONTRA o momento (reversão), alvo 3,0% / stop 4,0% — registrada antes da amostra',
+        });
+        setInterval(() => this.varrerTransversal(), transversalMs);
     }
 
     /**
@@ -733,6 +757,57 @@ class MotorDeScalping {
         this.coletando = false;
     }
 
+    /**
+     * Ordena o universo pelo retorno da última hora e marca os extremos.
+     *
+     * Não abre posição: só grava o caminho para a grade medir. Ligar dinheiro
+     * nisso antes de a hipótese pré-registrada passar seria repetir, com um
+     * sinal novo, exatamente o erro que custou R$52 no sinal anterior.
+     */
+    private varrerTransversal(): void {
+        const retornos: RetornoDoSimbolo[] = [];
+        for (const symbol of this.universo) {
+            const j = this.janelas.get(symbol);
+            if (!j) continue;
+            const ret = retornoDaJanela(j.fechadas, LOOKBACK_TRANSVERSAL_MIN);
+            if (ret === null) continue; // ainda não tem uma hora de história
+            const preco = j.emFormacao?.fechamento ?? j.fechadas.at(-1)?.fechamento;
+            if (!preco || preco.lessThanOrEqualTo(0)) continue;
+            retornos.push({ symbol, retorno: ret, preco });
+        }
+
+        const sinais = extremosTransversais({
+            retornos,
+            quantos: EXTREMOS_POR_LADO,
+            minimoDeSimbolos: MINIMO_SIMBOLOS_TRANSVERSAL,
+            separacaoMinima: SEPARACAO_MINIMA_TRANSVERSAL,
+        });
+        if (sinais.length === 0) {
+            log.info('TRANSVERSAL: sem extremo nesta rodada.', {
+                simbolosComUmaHora: retornos.length,
+                porque: 'universo curto, ou todas as moedas andaram quase igual',
+            });
+            return;
+        }
+
+        for (const s of sinais) {
+            this.sinaisVistos += 1;
+            this.gravando.push({
+                gatilho: 'transversal',
+                caminho: { symbol: s.symbol, direcao: s.direcao, entrada: s.preco, velas: [] },
+                restantes: JANELA_DE_MEDICAO,
+                ultimoAvancoMs: Date.now(),
+            });
+        }
+        log.info('SINAL TRANSVERSAL.', {
+            extremos: sinais
+                .map((s) => `${s.symbol} ${s.direcao} ${s.retorno.mul(100).toFixed(2)}%`)
+                .join(' · '),
+            simbolosComUmaHora: retornos.length,
+            lembrete: 'direção = MOMENTO; a hipótese registrada é a coluna CONTRA (reversão)',
+        });
+    }
+
     private async coletar(): Promise<void> {
         if (this.coletando) return; // um ciclo por vez: 15 símbolos levam segundos
         this.coletando = true;
@@ -741,7 +816,7 @@ class MotorDeScalping {
             for (const symbol of this.simbolosParaColetar()) {
                 try {
                     await this.vazao.aguardarVaga(1);
-                    const { fechadas, emFormacao } = await this.provider.klines(symbol, VELAS_DE_HISTORICO + 1);
+                    const { fechadas, emFormacao } = await this.provider.klines(symbol, VELAS_A_BUSCAR);
                     this.recebidas += 1;
 
                     const anterior = this.janelas.get(symbol);
@@ -1283,7 +1358,7 @@ class MotorDeScalping {
 
         const decorridos = Math.min(60, Math.max(0, (janela.eventoMs - janela.emFormacao.aberturaMs) / 1000));
         const sinal = detectarPicoDeVolume({
-            velasFechadas: janela.fechadas,
+            velasFechadas: janela.fechadas.slice(-VELAS_DE_HISTORICO), // a janela do volume não muda por causa do transversal
             emFormacao: janela.emFormacao,
             segundosDecorridos: decorridos,
             multiplicador: this.cfg.multiplicadorDeVolume,
