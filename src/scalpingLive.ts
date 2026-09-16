@@ -107,8 +107,19 @@ const LOOKBACK_TRANSVERSAL_MIN = Number(process.env.SCALPING_TRANSVERSAL_LOOKBAC
 const EXTREMOS_POR_LADO = Number(process.env.SCALPING_TRANSVERSAL_EXTREMOS ?? '2');
 const MINIMO_SIMBOLOS_TRANSVERSAL = 10;
 const SEPARACAO_MINIMA_TRANSVERSAL = new Decimal('0.02');
-/** Quantas velas buscar por símbolo: o maior consumidor manda. */
-const VELAS_A_BUSCAR = Math.max(VELAS_DE_HISTORICO, LOOKBACK_TRANSVERSAL_MIN) + 1;
+/**
+ * Quantas velas buscar por símbolo: o maior consumidor manda, MAIS DUAS.
+ *
+ * Duas, e não uma. A Binance devolve `limite` velas e a última ainda está em
+ * formação, então `fechadas` recebe `limite - 1`. Um retorno de 60 minutos
+ * precisa de 61 velas FECHADAS (ele compara a primeira com a última), logo o
+ * pedido tem de ser 62.
+ *
+ * Com 61 o retorno devolveria null em todo símbolo, para sempre, e o sinal
+ * transversal simplesmente nunca dispararia — sem erro, sem aviso, só um log
+ * dizendo "sem extremo nesta rodada" a noite inteira.
+ */
+const VELAS_A_BUSCAR = Math.max(VELAS_DE_HISTORICO, LOOKBACK_TRANSVERSAL_MIN) + 2;
 
 /** Abaixo disto, a melhor célula da grade é ruído de amostra pequena. */
 const MINIMO_PARA_RECOMENDAR = 30;

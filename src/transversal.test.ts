@@ -100,3 +100,16 @@ test('aceita quando a separação é real', () => {
     assert.equal(sinais[0].symbol, 'S14');
     assert.equal(sinais[3].symbol, 'S0');
 });
+
+test('a fronteira exata: N minutos exigem N+1 velas fechadas', () => {
+    // Este é o erro de um que quase custou uma noite de medição. A Binance
+    // devolve `limite` velas com a última em formação, então `fechadas` fica
+    // com `limite - 1`. Pedir 61 dá 60 fechadas, e um retorno de 60 minutos
+    // precisa de 61 — devolveria null em todo símbolo, para sempre, sem
+    // erro nenhum no log.
+    const sessenta = Array.from({ length: 60 }, (_, i) => vela(String(100 + i)));
+    assert.equal(retornoDaJanela(sessenta, 60), null, '60 velas NÃO bastam para 60 minutos');
+
+    const sessentaEUma = Array.from({ length: 61 }, (_, i) => vela(String(100 + i)));
+    assert.ok(retornoDaJanela(sessentaEUma, 60) !== null, '61 velas bastam');
+});
