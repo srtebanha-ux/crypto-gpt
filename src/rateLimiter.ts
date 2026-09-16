@@ -129,12 +129,28 @@ export class ControleDeVazao {
     }
 
     /** Espera até haver vaga e consome. Uso normal: `await c.aguardarVaga()`. */
-    public async aguardarVaga(custo = 1): Promise<void> {
+    public async aguardarVaga(custo = 1, tetoMs = 60_000): Promise<void> {
+        // Espera LIMITADA, e que avisa. O laço infinito daqui era um jeito de
+        // um banimento de 418 (que pode durar horas) congelar quem chamasse:
+        // a trava de reentrância do chamador só é solta num `finally`, e o
+        // `finally` nunca chega. O motor fica vivo, calado, e sem coletar.
+        //
+        // Estourar o teto é melhor que esperar para sempre: o chamador trata
+        // como falha comum, libera a trava e tenta no ciclo seguinte.
+        const limite = this.agora() + tetoMs;
         for (;;) {
             const espera = this.esperaNecessariaMs(custo);
             if (espera <= 0) {
                 this.consumir(custo);
                 return;
+            }
+            if (this.agora() >= limite) {
+                log.error(`[${this.params.nome}] Espera por vaga excedeu o teto.`, {
+                    tetoMs,
+                    aindaFaltavamMs: espera,
+                    porque: 'provável bloqueio longo (429/418); desistir é melhor que travar o chamador',
+                });
+                throw new Error(`controle de vazão ${this.params.nome}: sem vaga em ${tetoMs}ms`);
             }
             await new Promise((r) => setTimeout(r, Math.min(espera, 5000)));
         }

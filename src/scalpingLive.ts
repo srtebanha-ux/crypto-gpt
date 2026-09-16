@@ -42,6 +42,7 @@ import { veredictoDeScalping } from './scalping';
 import {
     acasoDaCelula,
     avaliarGrade,
+    fracaoAberta,
     CaminhoDeSinal,
     CelulaDaGrade,
     gradePadrao,
@@ -219,6 +220,10 @@ class MotorDeScalping {
     private readonly vazao = new ControleDeVazao({ capacidade: 2400, janelaMs: 60_000, nome: 'fapi' });
     private universo: string[] = [];
     private coletando = false;
+    /** Quando o ciclo de coleta em curso começou. Ver vigiarColeta. */
+    private coletaComecouMs = 0;
+    /** Quantas vezes a coleta precisou ser destravada à força. */
+    private coletasTravadas = 0;
     private varrendo = false;
     private readonly varredura = new VarreduraDeMercado({
         janelaMs: 90_000,
@@ -701,9 +706,37 @@ class MotorDeScalping {
         }
     }
 
+    /**
+     * A coleta avançou? Se não, solta a trava e GRITA.
+     *
+     * Em 16/09 `coletasFeitas` ficou congelado por mais de nove minutos
+     * enquanto o resto do processo seguia imprimindo normalmente. A trava
+     * `coletando` é liberada num `finally`; alguma coisa dentro do ciclo não
+     * retornou, e como não há erro, não há log — o motor parecia vivo e não
+     * coletava mais nada. Ao morrer assim ele levou junto ~500 gravações
+     * pendentes, que expiraram por falta de vela: 57% da amostra.
+     *
+     * Soltar a trava não conserta a causa. Faz duas coisas que importam mais:
+     * o ciclo seguinte volta a rodar, e o log passa a dizer que aconteceu.
+     */
+    private vigiarColeta(agoraMs: number): void {
+        const LIMITE_MS = 120_000;
+        if (!this.coletando) return;
+        if (agoraMs - this.coletaComecouMs < LIMITE_MS) return;
+        this.coletasTravadas += 1;
+        log.error('COLETA TRAVADA — soltando a trava e seguindo.', {
+            paradaHaMs: agoraMs - this.coletaComecouMs,
+            vezes: this.coletasTravadas,
+            gravandoEmRisco: this.gravando.length,
+            efeito: 'sem isto o motor para de coletar em silêncio e a amostra pendente se perde',
+        });
+        this.coletando = false;
+    }
+
     private async coletar(): Promise<void> {
         if (this.coletando) return; // um ciclo por vez: 15 símbolos levam segundos
         this.coletando = true;
+        this.coletaComecouMs = Date.now();
         try {
             for (const symbol of this.simbolosParaColetar()) {
                 try {
@@ -821,7 +854,10 @@ class MotorDeScalping {
         ] as const) {
             const melhor = melhorDaGrade({ celulas: cs, minimoResolvidos: MINIMO_PARA_RECOMENDAR });
             if (!melhor) continue;
-            log.info(`  VANTAGEM REAL [${gatilho}/${nome}]`, {
+            // NAO se chama mais "VANTAGEM REAL". É o máximo de centenas de
+            // células correlacionadas, e o máximo sempre parece bom. O nome
+            // antigo convidava a acreditar; este convida a conferir.
+            log.info(`  MELHOR CELULA (candidata, NAO confirmada) [${gatilho}/${nome}]`, {
                 alvo: `${melhor.alvo.mul(100).toFixed(1)}%`,
                 stop: `${melhor.stop.mul(100).toFixed(1)}%`,
                 acerto: `${melhor.taxaDeAcerto.mul(100).toFixed(1)}%`,
@@ -830,8 +866,11 @@ class MotorDeScalping {
                 equilibrio: `${melhor.acertoDeEquilibrio.mul(100).toFixed(1)}%`,
                 ev: `${melhor.evPorOperacao.mul(100).toFixed(4)}%`,
                 amostra: `${melhor.alvos}A/${melhor.stops}S`,
+                // Abertos alto = a janela pode estar escondendo as perdas.
+                abertosNaJanela: `${fracaoAberta(melhor).mul(100).toFixed(0)}%`,
                 decididosPelaRegra: this.pctAmbiguo(melhor),
                 custoDoAtraso: this.resumoDoAtraso(melhor.evPorOperacao.mul(100)),
+                aviso: 'candidata minerada: só vale se for pré-registrada e testada em amostra NOVA',
             });
         }
     }
@@ -931,6 +970,7 @@ class MotorDeScalping {
         const resolvidos = c.alvos + c.stops;
         const ev = c.evPorOperacao.mul(100);
         log.info(`  HIPOTESE [${gatilho}/contra ${alvo.mul(100).toFixed(1)}%/${stop.mul(100).toFixed(1)}%]`, {
+            abertosNaJanela: `${fracaoAberta(c).mul(100).toFixed(0)}%`,
             acerto: `${c.taxaDeAcerto.mul(100).toFixed(1)}%`,
             acaso: `${c.acaso.mul(100).toFixed(1)}%`,
             z: c.z.toFixed(2),
@@ -1854,6 +1894,7 @@ class MotorDeScalping {
                 // Falha de leitura não derruba o ciclo: o saldo antigo é
                 // melhor que interromper a medição por causa de um timeout.
             }
+            this.vigiarColeta(Date.now());
             this.limparGravacoesParadas(Date.now());
 
             if (this.posicao) {
@@ -1943,6 +1984,7 @@ class MotorDeScalping {
                 gravando: this.gravando.length,
                 coletandoSimbolos: this.simbolosParaColetar().length,
                 gravacoesPerdidas: this.gravacoesPerdidas,
+                coletasTravadas: this.coletasTravadas,
                 caminhosCompletos:
                     [...this.caminhos.entries()].map(([g, c]) => `${g}:${c.length}`).join(' ') || 'nenhum',
                 placar: JSON.stringify(this.placar),

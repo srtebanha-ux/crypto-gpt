@@ -10,9 +10,11 @@ import { Decimal } from 'decimal.js';
 import {
     acasoDaCelula,
     avaliarGrade,
+    CelulaDaGrade,
     desfechoDetalhado,
     desfechoNoCaminho,
     excursoes,
+    fracaoAberta,
     gradePadrao,
     melhorDaGrade,
     TaxasDaOperacao,
@@ -463,4 +465,40 @@ test('alvo menor que a taxa é impossível, não apenas ruim', () => {
         taxas: TAXAS_REAIS,
     });
     assert.ok(exigida.greaterThan(30), `exigência tem de ser enorme, deu ${exigida}`);
+});
+
+test('celula truncada NAO pode ser eleita a melhor — o viés de 12/09', () => {
+    // Passeio aleatório PURO truncado em 6h mostrou alvo 5%/stop 10% com
+    // 83,6% de acerto contra 66,7% de acaso: 17 pontos de vantagem
+    // INVENTADA, e 56% dos caminhos abertos. O motor anunciou exatamente
+    // essa célula como "VANTAGEM REAL", z 4,60, EV +2% por operação.
+    //
+    // O stop distante não tem tempo de ser alcançado dentro da janela, então
+    // as perdas saem da conta como "aberto". Na operação real não existe
+    // janela: quem segura até o stop de 10% perde os 10%.
+    const truncada: CelulaDaGrade = {
+        alvo: new Decimal('0.05'),
+        stop: new Decimal('0.10'),
+        alvos: 201,
+        stops: 49,
+        abertos: 166, // 40% da amostra que a janela não resolveu
+        ambiguos: 0,
+        minutosParaResolver: [],
+        taxaDeAcerto: new Decimal(201).dividedBy(250),
+        acaso: new Decimal('0.6667'),
+        z: new Decimal('4.6'),
+        acertoDeEquilibrio: new Decimal('0.671'),
+        evPorOperacao: new Decimal('0.0199'),
+    };
+    // Tolerância, não dígito: o Decimal do projeto arredonda para BAIXO, e
+    // afirmar '40' para 39,9 testa a formatação em vez da conta.
+    const abertaPct = fracaoAberta(truncada).mul(100);
+    assert.ok(abertaPct.greaterThan(39) && abertaPct.lessThan(41), `${abertaPct}`);
+    assert.equal(
+        melhorDaGrade({ celulas: [truncada], minimoResolvidos: 30 }),
+        null,
+        'z alto e EV alto NAO bastam quando a janela escondeu as perdas',
+    );
+    // E continua elegível se alguém assumir o risco conscientemente.
+    assert.ok(melhorDaGrade({ celulas: [truncada], minimoResolvidos: 30, maxAbertos: 0.5 }));
 });

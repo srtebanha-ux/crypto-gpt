@@ -321,6 +321,12 @@ export function avaliarGrade(params: {
  * quase sempre ruído: entre centenas de combinações, alguma sempre parece
  * excelente por acaso. Exigir amostra é o que separa medir de garimpar.
  */
+/** Fração dos caminhos da célula que a janela não resolveu. */
+export function fracaoAberta(c: CelulaDaGrade): Decimal {
+    const total = c.alvos + c.stops + c.abertos;
+    return total === 0 ? new Decimal(0) : new Decimal(c.abertos).dividedBy(total);
+}
+
 export function melhorDaGrade(params: {
     celulas: CelulaDaGrade[];
     minimoResolvidos: number;
@@ -338,11 +344,32 @@ export function melhorDaGrade(params: {
      * relatórios com cinco minutos de diferença.
      */
     zMinimo?: number;
+    /**
+     * Fração máxima de caminhos que podem ficar ABERTOS na célula.
+     *
+     * Esta é a defesa contra o viés de truncamento, e ele já enganou este
+     * projeto uma vez. A janela de medição é finita; um stop DISTANTE muitas
+     * vezes não tem tempo de ser alcançado, e o caminho sai como "aberto" em
+     * vez de sair como perda. A célula então exibe acerto muito acima do
+     * acaso teórico sem que exista vantagem nenhuma.
+     *
+     * Medido com passeio aleatório PURO truncado em 360 minutos: alvo 5% com
+     * stop 10% mostrou 83,6% de acerto contra 66,7% de acaso — quase 17
+     * pontos de vantagem inventada, com 56% dos caminhos abertos. Em 12/09 o
+     * motor anunciou essa mesma célula como VANTAGEM REAL, z 4,60, EV +2%.
+     * Era ruído.
+     *
+     * E na operação real não existe janela: ninguém fecha a posição porque
+     * "acabaram as seis horas". Quem segura até o stop de 10% perde os 10%.
+     */
+    maxAbertos?: number;
 }): CelulaDaGrade | null {
     const zMin = new Decimal(params.zMinimo ?? 3);
+    const maxAb = new Decimal(params.maxAbertos ?? 0.15);
     const elegiveis = params.celulas.filter(
         (c) =>
             c.alvos + c.stops >= params.minimoResolvidos &&
+            fracaoAberta(c).lessThanOrEqualTo(maxAb) &&
             c.evPorOperacao.greaterThan(0) &&
             c.z.greaterThanOrEqualTo(zMin),
     );
