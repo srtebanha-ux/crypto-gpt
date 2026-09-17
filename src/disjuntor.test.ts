@@ -219,3 +219,109 @@ test('sem o teto definido, nada muda', () => {
     });
     assert.equal(v.podeOperar, true);
 });
+
+// ----------------------------------------------------------------------
+// Piso de banca — o teto que sobrevive ao deploy
+// ----------------------------------------------------------------------
+// O teto do dia mora num contador (`resultadoDoDia`) que nasce zerado a cada
+// processo. Um deploy no meio de um teste de um dólar cobra outro dólar, e o
+// log do processo novo não tem como saber disso. O piso não conta nada: compara
+// a banca real com um número fixo que veio de fora.
+
+test('o piso para de vez mesmo com o contador do dia zerado', () => {
+    // Exatamente o processo recém-nascido: resultadoDoDia = 0, pico = banca
+    // (estadoInicial), nenhum sinal interno de que já se perdeu alguma coisa.
+    // A única memória do prejuízo é o piso.
+    const v = podeOperar({
+        estado: {
+            banca: new Decimal('43.9'),
+            pico: new Decimal('43.9'),
+            perdasSeguidas: 0,
+            bloqueadoAteMs: 0,
+            resultadoDoDia: new Decimal('0'),
+            diaComecouEmMs: 0,
+        },
+        limites: { ...LIMITES_PADRAO, pisoDeBanca: new Decimal('44') },
+        agoraMs: 1,
+        bancaNoInicioDoDia: new Decimal('43.9'),
+    });
+    assert.equal(v.podeOperar, false);
+    assert.equal(
+        v.podeOperar === false && v.permanente,
+        true,
+        'o piso existe para o custo do teste ser o combinado; religar sozinho o quebraria',
+    );
+});
+
+test('o piso não dispara um centavo acima dele', () => {
+    const v = podeOperar({
+        estado: {
+            banca: new Decimal('44.01'),
+            pico: new Decimal('44.01'),
+            perdasSeguidas: 0,
+            bloqueadoAteMs: 0,
+            resultadoDoDia: new Decimal('0'),
+            diaComecouEmMs: 0,
+        },
+        limites: { ...LIMITES_PADRAO, pisoDeBanca: new Decimal('44') },
+        agoraMs: 1,
+        bancaNoInicioDoDia: new Decimal('44.01'),
+    });
+    assert.equal(v.podeOperar, true);
+});
+
+test('o piso dispara na igualdade', () => {
+    // "Pode perder um dólar" inclui o dólar. Parar em 43,999 e continuar em
+    // 44,000 seria uma diferença sem significado nenhum para quem autorizou.
+    const v = podeOperar({
+        estado: {
+            banca: new Decimal('44'),
+            pico: new Decimal('44'),
+            perdasSeguidas: 0,
+            bloqueadoAteMs: 0,
+            resultadoDoDia: new Decimal('0'),
+            diaComecouEmMs: 0,
+        },
+        limites: { ...LIMITES_PADRAO, pisoDeBanca: new Decimal('44') },
+        agoraMs: 1,
+        bancaNoInicioDoDia: new Decimal('44'),
+    });
+    assert.equal(v.podeOperar, false);
+});
+
+test('sem piso definido, nada muda', () => {
+    const v = podeOperar({
+        estado: {
+            banca: new Decimal('40'),
+            pico: new Decimal('45'),
+            perdasSeguidas: 0,
+            bloqueadoAteMs: 0,
+            resultadoDoDia: new Decimal('0'),
+            diaComecouEmMs: 0,
+        },
+        limites: LIMITES_PADRAO,
+        agoraMs: 1,
+        bancaNoInicioDoDia: new Decimal('45'),
+    });
+    assert.equal(v.podeOperar, true);
+});
+
+test('a queda do pico continua falando antes do piso', () => {
+    // Ordem importa: a queda de 30% é a mais grave das três e não pode ser
+    // mascarada por uma mensagem que fale de um teste de um dólar.
+    const v = podeOperar({
+        estado: {
+            banca: new Decimal('30'),
+            pico: new Decimal('45'),
+            perdasSeguidas: 0,
+            bloqueadoAteMs: 0,
+            resultadoDoDia: new Decimal('0'),
+            diaComecouEmMs: 0,
+        },
+        limites: { ...LIMITES_PADRAO, pisoDeBanca: new Decimal('44') },
+        agoraMs: 1,
+        bancaNoInicioDoDia: new Decimal('45'),
+    });
+    assert.equal(v.podeOperar, false);
+    assert.match(v.podeOperar === false ? v.motivo : '', /pico/);
+});

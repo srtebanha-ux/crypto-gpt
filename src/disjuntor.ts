@@ -61,6 +61,26 @@ export interface LimitesDoDisjuntor {
      * religar sozinho quebraria essa garantia.
      */
     perdaAbsolutaMaxima?: Decimal;
+    /**
+     * Piso ABSOLUTO de banca, em USDT. Abaixo dele o robô para de vez.
+     *
+     * Existe porque `perdaAbsolutaMaxima` mede um contador que vive na
+     * memória do processo, e memória de processo não sobrevive a um deploy.
+     * Quem combinou "pode perder um dólar" e teve dois deploys no meio do
+     * teste pagou três dólares: cada reinício zerou `resultadoDoDia` e o teto
+     * recomeçou do zero, sem que nada no log parecesse errado.
+     *
+     * O piso não tem esse problema porque não é um contador. É uma
+     * comparação contra um número fixo, dado de fora, que o reinício não
+     * apaga: banca de referência menos o prejuízo autorizado. Um processo
+     * recém-nascido lê o saldo real, compara com o piso e para na primeira
+     * avaliação — exatamente como o que morreu teria feito.
+     *
+     * Depósito ou saque mudam o saldo sem serem resultado de operação, e o
+     * piso não sabe disso. Quem move dinheiro na conta reescreve a
+     * referência; é a mesma conversa de quem autorizou o valor.
+     */
+    pisoDeBanca?: Decimal;
 }
 
 export const LIMITES_PADRAO: LimitesDoDisjuntor = {
@@ -100,6 +120,20 @@ export function podeOperar(params: {
                     `pôs o dinheiro, não de uma regra.`,
             };
         }
+    }
+
+    // O piso vem antes do teto do dia porque os dois dizem a mesma coisa e só
+    // um deles sobrevive a um reinício. Quando ambos valem, quem fala é o que
+    // não depende de memória.
+    if (limites.pisoDeBanca !== undefined && estado.banca.lessThanOrEqualTo(limites.pisoDeBanca)) {
+        return {
+            podeOperar: false,
+            permanente: true,
+            motivo:
+                `Banca (${estado.banca.toFixed(4)} USDT) chegou ao piso combinado de ` +
+                `${limites.pisoDeBanca.toFixed(4)} USDT. O teste custou o que foi autorizado e para aqui — ` +
+                `e para aqui mesmo depois de um reinício, porque o piso é um número fixo, não um contador.`,
+        };
     }
 
     // Logo depois da queda do pico, e antes de qualquer limite que religue:

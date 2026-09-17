@@ -163,6 +163,27 @@ interface Configuracao {
     aoVivo: boolean;
 }
 
+/**
+ * Lê um número de variável de ambiente, ou null quando ela não existe.
+ *
+ * `new Decimal(lixo)` levanta exceção. Dentro do construtor, isso derruba o
+ * processo ANTES de qualquer log dizer por quê, e no Railway vira um ciclo de
+ * reinício que parece rede ruim. Um valor que não é número é o mesmo que
+ * ausência, e o log diz qual foi.
+ */
+function numeroDoAmbiente(nome: string): Decimal | null {
+    const bruto = process.env[nome];
+    if (bruto === undefined || bruto.trim() === '') return null;
+    try {
+        const n = new Decimal(bruto.trim());
+        if (!n.isFinite()) throw new Error('não finito');
+        return n;
+    } catch {
+        log.error(`Variável ${nome} não é um número — ignorada.`, { valor: bruto });
+        return null;
+    }
+}
+
 function lerConfiguracao(): Configuracao {
     return {
         // O padrão é 1x, e isto não é timidez: o disjuntor para de vez em -30% do
@@ -401,9 +422,18 @@ class MotorDeScalping {
     constructor(cfg: Configuracao, provider: BinanceFuturesProvider) {
         this.cfg = cfg;
         this.provider = provider;
-        const teto = process.env.SCALPING_PERDA_MAXIMA_USDT;
-        if (teto !== undefined && teto !== '') {
-            this.limites = { ...this.limites, perdaAbsolutaMaxima: new Decimal(teto) };
+        const teto = numeroDoAmbiente('SCALPING_PERDA_MAXIMA_USDT');
+        if (teto !== null) {
+            this.limites = { ...this.limites, perdaAbsolutaMaxima: teto };
+        }
+        // O teto do dia é um contador na memória do processo: um deploy no meio
+        // do teste o zera, e o "pode perder um dólar" vira um dólar POR
+        // REINÍCIO sem que nada no log pareça errado. A referência de banca
+        // fecha esse buraco porque vem de fora do processo (variável de
+        // ambiente sobrevive a deploy) e vira uma comparação, não um contador.
+        const referencia = numeroDoAmbiente('SCALPING_BANCA_REFERENCIA');
+        if (referencia !== null && teto !== null) {
+            this.limites = { ...this.limites, pisoDeBanca: referencia.minus(teto) };
         }
         // Sem esta linha o recuo contra banimento fica escrito, testado e
         // DESLIGADO: registrarRecusa só era chamado pelos próprios testes. O
@@ -1468,6 +1498,8 @@ class MotorDeScalping {
             pausa: `${(this.limites.pausaMs / 60_000).toFixed(0)} min`,
             perdaDiariaMaxima: `${this.limites.perdaDiariaMaxima.mul(100).toFixed(0)}%`,
             quedaDoPicoMaxima: `${this.limites.quedaDoPicoMaxima.mul(100).toFixed(0)}%`,
+            tetoDoDia: this.limites.perdaAbsolutaMaxima ? `${this.limites.perdaAbsolutaMaxima.toFixed(2)} USDT` : '—',
+            pisoDeBanca: this.limites.pisoDeBanca ? `${this.limites.pisoDeBanca.toFixed(2)} USDT` : '— (sem SCALPING_BANCA_REFERENCIA: um deploy zera o teto do dia)',
         });
     }
 
