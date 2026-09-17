@@ -135,7 +135,7 @@ const MINIMO_PARA_RECOMENDAR = 30;
  * Sessenta símbolos são ~360 de peso por minuto contra um teto de 2400, e uns
  * seis segundos de ciclo dentro dos dez disponíveis.
  */
-const TETO_DE_SIMBOLOS_COLETADOS = 60;
+const TETO_DE_SIMBOLOS_COLETADOS = Number(process.env.SCALPING_TETO_SIMBOLOS ?? '90');
 
 /** Taxas por perna: taker na entrada e no stop, maker no alvo, com desconto BNB. */
 const TAXAS_DA_OPERACAO = {
@@ -196,7 +196,19 @@ function lerConfiguracao(): Configuracao {
         fracaoDaBanca: new Decimal(process.env.SCALPING_FRACAO_DA_BANCA ?? '0.9'),
         multiplicadorDeVolume: new Decimal(process.env.SCALPING_MULTIPLICADOR_VOLUME ?? '3'),
         variacaoMinima: new Decimal(process.env.SCALPING_VARIACAO_MINIMA_PCT ?? '0.1').dividedBy(100),
-        tamanhoDoUniverso: Number(process.env.SCALPING_UNIVERSO ?? '15'),
+        // 30, e não 15, por causa da VELOCIDADE DA MEDIÇÃO.
+        //
+        // O sinal transversal ordena o universo e marca os extremos; dobrar o
+        // universo dobra os sinais por rodada sem enfraquecer nenhum deles —
+        // continuam sendo os 2 melhores e os 2 piores, só que de um grupo
+        // maior, o que torna "extremo" mais exigente, não menos.
+        //
+        // Com z em 0,35 e 114 amostras, confirmar exigiria ~3.800 operações:
+        // 18 dias a 15 moedas, ~9 a 30. As alternativas para acelerar eram
+        // pegar 3 extremos em vez de 2 (o terceiro não é extremo: dilui) ou
+        // rodar de 10 em 10 minutos (amostras coladas: inflam o z de mentira).
+        // Ambas dariam número mais rápido e número errado.
+        tamanhoDoUniverso: Number(process.env.SCALPING_UNIVERSO ?? '30'),
         volumeMinimo24h: new Decimal(process.env.SCALPING_VOLUME_MINIMO_24H ?? '50000000'),
         tipoDeMargem: (process.env.SCALPING_MARGIN_TYPE as 'ISOLATED' | 'CROSSED') ?? 'ISOLATED',
         // 45 minutos, e NAO zero. O modo sniper opera uma posição por vez, então
