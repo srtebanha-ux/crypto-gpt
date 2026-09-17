@@ -321,6 +321,29 @@ export class BinanceFuturesProvider {
     }
 
     /**
+     * Dinheiro de verdade em USDT: o `balance` da carteira.
+     *
+     * Diferente do disponível em três coisas que importam para medir o
+     * resultado de uma operação: não desconta margem travada, não soma lucro
+     * flutuante, e por isso só se move quando alguma coisa de fato aconteceu
+     * — preenchimento, taxa, transferência.
+     *
+     * Medir resultado pelo DISPONÍVEL só funciona se as duas leituras — antes
+     * e depois — forem feitas com a conta zerada. Vale para quem entrou pelo
+     * motor; não vale para uma posição adotada num reinício, porque aí a
+     * primeira leitura já está reduzida pela margem e o resultado sai inflado
+     * pelo valor dela.
+     *
+     * Visto na conta em 17/09: disponível 39,14 com posição aberta, carteira
+     * 45,086. A diferença é margem e lucro flutuante, nenhum dos dois é
+     * resultado.
+     */
+    public async carteiraEmUsdt(): Promise<Decimal> {
+        const s = (await this.saldos()).find((x) => x.asset === 'USDT');
+        return s ? s.saldo : new Decimal(0);
+    }
+
+    /**
      * Posições ABERTAS de verdade, lidas da corretora.
      *
      * "Uma posição por vez" tem de ser verificado aqui, não no estado local:

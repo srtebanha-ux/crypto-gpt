@@ -625,6 +625,27 @@ class MotorDeScalping {
             }).stop,
             stopNaCorretora: false,
         };
+        // A referência de resultado da posição adotada.
+        //
+        // Sem esta linha `encerrarNoDisjuntor` devolvia null para TODA posição
+        // adotada — a checagem no topo dele é `saldoAoEntrar === null`. O
+        // efeito: o desfecho não entrava no disjuntor, o teto do dia não
+        // contava aquele resultado, e o placar continuava zerado.
+        //
+        // Visto ao vivo em 17/09: a PONSUSDT bateu no alvo e rendeu +0,176
+        // USDT; a linha de fechamento saiu com `entradas:0, alvos:0, stops:0`.
+        // O dinheiro estava na conta e nenhum contador sabia.
+        //
+        // Uma posição adotada é adotada por inteiro: a proteção, o stop e
+        // também a contabilidade. Deixar a última de fora é o que fazia um
+        // reinício apagar uma operação da conta do freio.
+        try {
+            this.saldoAoEntrar = await this.provider.carteiraEmUsdt();
+        } catch {
+            // Sem leitura fica null e o desfecho não conta — o mesmo que antes
+            // desta correção, mas agora por falha de rede e não por desenho.
+            this.saldoAoEntrar = null;
+        }
         log.warn('Posição JÁ ABERTA adotada da corretora.', {
             symbol: p.symbol,
             lado: this.posicao.direcao,
@@ -1620,7 +1641,7 @@ class MotorDeScalping {
         if (this.disjuntor === null || this.saldoAoEntrar === null) return null;
         let saldo: Decimal;
         try {
-            saldo = await this.provider.disponivelEmUsdt();
+            saldo = await this.provider.carteiraEmUsdt();
         } catch {
             // Sem leitura não há resultado confiável, e inventar zero
             // esconderia uma perda do disjuntor — que é o oposto do trabalho
@@ -1674,7 +1695,13 @@ class MotorDeScalping {
             // Referência do resultado: o que a banca era antes desta operação.
             // Medir pelo saldo, e não pelo preço de saída, é o que faz taxa e
             // derrapagem entrarem na conta do disjuntor em vez de sumirem.
-            this.saldoAoEntrar = disponivel;
+            //
+            // CARTEIRA, não disponível: com a conta zerada os dois são iguais,
+            // mas só a carteira dá o mesmo número para uma posição adotada,
+            // cuja primeira leitura acontece com a margem já travada. Uma única
+            // referência para os dois caminhos é o que impede o de baixo de ter
+            // regra própria.
+            this.saldoAoEntrar = await this.provider.carteiraEmUsdt();
             const nocional = this.dimensionarNocional(disponivel);
 
             const faixas = await this.provider.faixasDeAlavancagem(symbol);
