@@ -401,6 +401,10 @@ class MotorDeScalping {
     constructor(cfg: Configuracao, provider: BinanceFuturesProvider) {
         this.cfg = cfg;
         this.provider = provider;
+        const teto = process.env.SCALPING_PERDA_MAXIMA_USDT;
+        if (teto !== undefined && teto !== '') {
+            this.limites = { ...this.limites, perdaAbsolutaMaxima: new Decimal(teto) };
+        }
         // Sem esta linha o recuo contra banimento fica escrito, testado e
         // DESLIGADO: registrarRecusa só era chamado pelos próprios testes. O
         // motor subia hora após hora sem nunca conseguir saber que a corretora
@@ -650,6 +654,18 @@ class MotorDeScalping {
         if (this.cfg.nocionalFixo.greaterThan(0)) return this.cfg.nocionalFixo;
         // Sem nocional fixo, o tamanho sai do que a conta REALMENTE tem — é o
         // que impede a ordem de US$ 750 numa carteira de US$ 8.
+        // Nocional FIXO manda sobre a fração, quando definido.
+        //
+        // Existe para teste pago com teto: fração da banca responde "quanto
+        // do meu dinheiro", e um teste responde "quanto eu topo perder". Com
+        // stop de 4%, um nocional de 6 USDT perde 0,24 por operação — quatro
+        // stops cabem no dólar autorizado. Expressar isso como fração exigiria
+        // recalcular toda vez que a banca mudasse.
+        const fixo = process.env.SCALPING_NOCIONAL_USDT;
+        if (fixo !== undefined && fixo !== '') {
+            const n = new Decimal(fixo);
+            if (n.greaterThan(0)) return n;
+        }
         return disponivel.mul(this.cfg.fracaoDaBanca).mul(this.cfg.alavancagem);
     }
 

@@ -165,3 +165,57 @@ test('o ajuste NÃO apaga uma parada permanente já merecida', () => {
     assert.equal(v.podeOperar, false);
     assert.equal(v.podeOperar === false && v.permanente, true, 'a queda real de 40% sobrevive ao saque');
 });
+
+test('teto ABSOLUTO em dólar para tudo, e não religa sozinho', () => {
+    // Quem autoriza um teste autoriza um VALOR, não uma fração. "Pode perder
+    // um dólar" não quer dizer 15% de 45 USDT, que são 6,75. Os limites
+    // percentuais existentes não sabem dizer isso.
+    const limites = { ...LIMITES_PADRAO, perdaAbsolutaMaxima: new Decimal('1') };
+    const base = {
+        banca: new Decimal('44.3'),
+        pico: new Decimal('45.28'),
+        perdasSeguidas: 1,
+        bloqueadoAteMs: 0,
+        resultadoDoDia: new Decimal('-0.98'),
+        diaComecouEmMs: 0,
+    };
+
+    const quaseLa = podeOperar({
+        estado: base,
+        limites,
+        agoraMs: 1,
+        bancaNoInicioDoDia: new Decimal('45.28'),
+    });
+    assert.equal(quaseLa.podeOperar, true, '0,98 ainda cabe no dólar');
+
+    const estourou = podeOperar({
+        estado: { ...base, resultadoDoDia: new Decimal('-1.0001') },
+        limites,
+        agoraMs: 1,
+        bancaNoInicioDoDia: new Decimal('45.28'),
+    });
+    assert.equal(estourou.podeOperar, false);
+    assert.equal(
+        estourou.podeOperar === false && estourou.permanente,
+        true,
+        'religar sozinho quebraria a garantia de custo do teste',
+    );
+});
+
+test('sem o teto definido, nada muda', () => {
+    // O campo é opcional: quem não pediu teto não ganha um por acidente.
+    const v = podeOperar({
+        estado: {
+            banca: new Decimal('40'),
+            pico: new Decimal('45'),
+            perdasSeguidas: 0,
+            bloqueadoAteMs: 0,
+            resultadoDoDia: new Decimal('-5'),
+            diaComecouEmMs: 0,
+        },
+        limites: LIMITES_PADRAO,
+        agoraMs: 1,
+        bancaNoInicioDoDia: new Decimal('45'),
+    });
+    assert.equal(v.podeOperar, true);
+});

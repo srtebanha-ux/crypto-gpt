@@ -47,6 +47,20 @@ export interface LimitesDoDisjuntor {
     perdaDiariaMaxima: Decimal;
     /** Queda do pico que para tudo permanentemente (0.30 = 30%). */
     quedaDoPicoMaxima: Decimal;
+    /**
+     * Teto ABSOLUTO de prejuízo acumulado no dia, em USDT.
+     *
+     * Os outros limites são percentuais, e percentual é a linguagem errada
+     * para um teste pago: quem autoriza um teste autoriza um VALOR — "pode
+     * perder um dólar" —, não uma fração de uma banca que ele vai ter de
+     * calcular de cabeça. 15% de 45 USDT são 6,75, e ninguém que disse "um
+     * dólar" quis dizer isso.
+     *
+     * Permanente de propósito. O objetivo de um teto assim não é pausar até
+     * melhorar: é garantir que o experimento custe exatamente o combinado, e
+     * religar sozinho quebraria essa garantia.
+     */
+    perdaAbsolutaMaxima?: Decimal;
 }
 
 export const LIMITES_PADRAO: LimitesDoDisjuntor = {
@@ -86,6 +100,19 @@ export function podeOperar(params: {
                     `pôs o dinheiro, não de uma regra.`,
             };
         }
+    }
+
+    // Logo depois da queda do pico, e antes de qualquer limite que religue:
+    // um teto combinado em dinheiro não pode ser contornado por uma pausa que
+    // termina sozinha.
+    if (limites.perdaAbsolutaMaxima !== undefined && estado.resultadoDoDia.lessThanOrEqualTo(limites.perdaAbsolutaMaxima.negated())) {
+        return {
+            podeOperar: false,
+            permanente: true,
+            motivo:
+                `Prejuízo do dia (${estado.resultadoDoDia.toFixed(4)} USDT) atingiu o teto combinado de ` +
+                `${limites.perdaAbsolutaMaxima.toFixed(2)} USDT. O teste custou o que foi autorizado e para aqui.`,
+        };
     }
 
     if (params.agoraMs < estado.bloqueadoAteMs) {
