@@ -27,6 +27,7 @@
 // quando a configuração exige uma taxa de acerto que não existe no mundo real
 // (ver scalping.ts). A configuração +0,3% / −0,4% exige 70%.
 import { Decimal } from 'decimal.js';
+import { derrapagemDaEntrada } from './derrapagem';
 import { createLogger } from './logger';
 import { BinanceFuturesProvider, ErroDeFuturos } from './binanceFuturesProvider';
 import { avaliarProntidao } from './futurosDiagnostico';
@@ -1750,15 +1751,9 @@ class MotorDeScalping {
                 this.reportarErro('Não foi possível confirmar a entrada pela posição', err);
             }
 
-            let derrapagemDaEntrada: Decimal | null = null;
-            if (preco.greaterThan(0) && ordem.precoMedio.greaterThan(0)) {
-                // Positivo = preenchemos PIOR que o sinal. Comprar mais caro e
-                // vender mais barato são o mesmo prejuízo, por isso o sinal
-                // inverte conforme o lado.
-                const bruta = entrada.minus(preco).dividedBy(preco);
-                const contra = direcao === 'alta' ? bruta : bruta.negated();
-                derrapagemDaEntrada = contra.mul(100);
-                this.derrapagens.push(derrapagemDaEntrada.toNumber());
+            const derrapagem = derrapagemDaEntrada({ precoDoSinal: preco, entrada, direcao });
+            if (derrapagem !== null) {
+                this.derrapagens.push(derrapagem.toNumber());
                 if (this.derrapagens.length > 5000) this.derrapagens.shift();
             }
             this.posicao = {
@@ -1791,7 +1786,7 @@ class MotorDeScalping {
                 // a média é recuperável de qualquer pedaço de log, por
                 // qualquer processo, depois de qualquer reinício.
                 precoDoSinal: preco.toString(),
-                derrapagem: derrapagemDaEntrada !== null ? `${derrapagemDaEntrada.toFixed(4)}%` : '—',
+                derrapagem: derrapagem !== null ? `${derrapagem.toFixed(4)}%` : '—',
             });
 
             await this.protegerPosicao(symbol, direcao, entrada, filtros.tickSize, faixa.manutencao, alavancagem);
