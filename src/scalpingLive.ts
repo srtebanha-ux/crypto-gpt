@@ -1750,13 +1750,15 @@ class MotorDeScalping {
                 this.reportarErro('Não foi possível confirmar a entrada pela posição', err);
             }
 
+            let derrapagemDaEntrada: Decimal | null = null;
             if (preco.greaterThan(0) && ordem.precoMedio.greaterThan(0)) {
                 // Positivo = preenchemos PIOR que o sinal. Comprar mais caro e
                 // vender mais barato são o mesmo prejuízo, por isso o sinal
                 // inverte conforme o lado.
                 const bruta = entrada.minus(preco).dividedBy(preco);
                 const contra = direcao === 'alta' ? bruta : bruta.negated();
-                this.derrapagens.push(contra.mul(100).toNumber());
+                derrapagemDaEntrada = contra.mul(100);
+                this.derrapagens.push(derrapagemDaEntrada.toNumber());
                 if (this.derrapagens.length > 5000) this.derrapagens.shift();
             }
             this.posicao = {
@@ -1777,6 +1779,19 @@ class MotorDeScalping {
                 quantidade: ordem.quantidadeExecutada.toString(),
                 entrada: entrada.toString(),
                 alavancagem: `${alavancagem.toFixed(0)}x`,
+                // O preço do sinal e a derrapagem desta entrada, por extenso.
+                //
+                // A derrapagem é o número que um teste pago existe para
+                // comprar, e ela morava só na memória do processo: um array
+                // que o RESUMO mostrava como média e que um deploy apagava
+                // sem deixar rastro. O log guardava `entrada` mas não `preco`,
+                // então nem reconstruir dava — a amostra sumia de vez.
+                //
+                // Uma linha por entrada resolve: cada amostra fica gravada, e
+                // a média é recuperável de qualquer pedaço de log, por
+                // qualquer processo, depois de qualquer reinício.
+                precoDoSinal: preco.toString(),
+                derrapagem: derrapagemDaEntrada !== null ? `${derrapagemDaEntrada.toFixed(4)}%` : '—',
             });
 
             await this.protegerPosicao(symbol, direcao, entrada, filtros.tickSize, faixa.manutencao, alavancagem);
