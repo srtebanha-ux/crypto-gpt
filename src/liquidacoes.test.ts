@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import {
     aglomeracao,
+    bonusDeLiquidacao,
+    chamadaDeConfiguracao,
+    lucroBruto,
     contarPorTopico,
     decodificarLiquidacao,
     ehLimiteDeFaixa,
@@ -480,4 +483,53 @@ test('a janela é em blocos e conta dos dois lados', () => {
     );
     const a = aglomeracao(todas, [{ usd: new Decimal(1), bloco: 1000 }], 30);
     assert.match(a.detalhe[0], /2 outras/, '970 e 1030 entram; 1031 fica de fora');
+});
+
+// ---------------------------------------------------------------------------
+// O bônus: lido do contrato, não chutado.
+// ---------------------------------------------------------------------------
+
+/** Monta um bitmap de configuração da Aave com o bônus no lugar certo. */
+function configComBonus(centesimos: bigint): string {
+    const bitmap = (centesimos << 32n) | 8000n | (8500n << 16n);
+    return `0x${bitmap.toString(16).padStart(64, '0')}`;
+}
+
+test('10500 nos bits 32-47 quer dizer bônus de 5%, não de 105%', () => {
+    // O valor traz os 100% embutidos. Ler 10500 como "105% de lucro" infla o
+    // resultado em vinte vezes — a mesma ordem de grandeza que eu já errei.
+    assert.equal(bonusDeLiquidacao(configComBonus(10_500n))?.mul(100).toFixed(2), '5.00');
+    assert.equal(bonusDeLiquidacao(configComBonus(11_000n))?.mul(100).toFixed(2), '10.00');
+    assert.equal(bonusDeLiquidacao(configComBonus(10_750n))?.mul(100).toFixed(2), '7.50');
+});
+
+test('os outros campos da configuração não vazam para o bônus', () => {
+    // LTV e limiar ficam nos bits 0-31 e são diferentes em cada linha; o bônus
+    // tem de sair igual nas duas.
+    const a = (10_500n << 32n) | 8000n | (8500n << 16n);
+    const b = (10_500n << 32n) | 4500n | (5000n << 16n);
+    assert.equal(
+        bonusDeLiquidacao(`0x${a.toString(16).padStart(64, '0')}`)?.toString(),
+        bonusDeLiquidacao(`0x${b.toString(16).padStart(64, '0')}`)?.toString(),
+    );
+});
+
+test('bônus zero é "não sei", não é bônus de zero por cento', () => {
+    // Ativo que não serve de garantia. Tratar como 0% faria o relatório dizer
+    // que aquela liquidação não pagou nada, que é uma afirmação diferente.
+    assert.equal(bonusDeLiquidacao(configComBonus(0n)), null);
+    assert.equal(bonusDeLiquidacao('0x'), null);
+    assert.equal(bonusDeLiquidacao('0xabcd'), null);
+});
+
+test('o lucro é o ágio, não a dívida', () => {
+    const lucro = lucroBruto(new Decimal(255_485), new Decimal('0.05'));
+    assert.equal(lucro.toFixed(0), '12774');
+});
+
+test('a chamada carrega o ativo em palavra de 32 bytes', () => {
+    const c = chamadaDeConfiguracao('0x4200000000000000000000000000000000000006');
+    assert.ok(c.startsWith('0xc44b11f7'));
+    assert.equal(c.length, 10 + 64);
+    assert.ok(c.endsWith('4200000000000000000000000000000000000006'));
 });

@@ -202,6 +202,8 @@ export interface ResumoDoHistorico {
         liquidante: string;
         bloco: number;
         transacao: string;
+        /** O bônus é configurado na GARANTIA, então ela precisa viajar junto. */
+        garantia: string;
     }>;
 }
 
@@ -263,6 +265,7 @@ export function resumirHistorico(
             liquidante: x.l.liquidante,
             bloco: x.l.bloco,
             transacao: x.l.transacao,
+            garantia: x.l.ativoDaGarantia,
         }));
 
     // `comValor` ficou ordenado do MAIOR para o menor pelo sort acima, e o
@@ -620,4 +623,56 @@ export function aglomeracao(
             : `DESPERCEBIDAS: ${sozinhas} de ${n} das grandes caíram sozinhas, sem outras por perto. Ninguém estava olhando aquela posição. Ganha quem tiver a lista de posições mais completa — e isso se faz com calma, antes.`;
 
     return { sozinhas, emMonte, leitura, detalhe };
+}
+
+// ---------------------------------------------------------------------------
+// O BÔNUS — o número que eu vinha chutando e que decide quanto uma vitória paga.
+// ---------------------------------------------------------------------------
+
+/**
+ * `getConfiguration(address)` no contrato da Aave. Conferido com ethers:
+ * os quatro primeiros bytes de keccak("getConfiguration(address)").
+ */
+export const SELETOR_GET_CONFIGURATION = '0xc44b11f7';
+
+/** A chamada pronta para `eth_call`: seletor + o ativo em palavra de 32 bytes. */
+export function chamadaDeConfiguracao(ativo: string): string {
+    return SELETOR_GET_CONFIGURATION + ativo.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+}
+
+/**
+ * O bônus de liquidação daquele ativo, como fração — 0.05 para 5%.
+ *
+ * Eu vinha escrevendo "uns 5% a 10%, depende da moeda" e isso era chute. A
+ * diferença entre 5% e 10% dobra o que ela ganha, então o chute não era um
+ * detalhe: era metade da resposta.
+ *
+ * A Aave guarda a configuração de cada ativo empacotada num único número de
+ * 256 bits, cada pedaço num intervalo de bits. O bônus está nos bits 32 a 47 e
+ * vem em centésimos de por cento, com 100% embutido: 10500 quer dizer que o
+ * liquidante recebe 105% do valor da dívida em garantia. O lucro é o que passa
+ * de 100% — 5%.
+ *
+ * Importante: o bônus é configurado na GARANTIA, não na dívida. Quem decide
+ * quanto se ganha é a moeda que se leva, não a que se paga.
+ */
+export function bonusDeLiquidacao(dataHex: string): Decimal | null {
+    const limpo = dataHex.replace(/^0x/, '');
+    if (limpo.length < 64) return null;
+    const bruto = (BigInt(`0x${limpo.slice(0, 64)}`) >> 32n) & 0xffffn;
+    // Zero = ativo sem configuração de garantia. Não existe bônus de 0%: o que
+    // existe é ativo que não serve de garantia, e aí a resposta é "não sei".
+    if (bruto === 0n) return null;
+    return new Decimal(bruto.toString()).dividedBy(10_000).minus(1);
+}
+
+/**
+ * O que sobra para ela, antes do gás.
+ *
+ * Não é a dívida. A dívida é de quem quebrou; ela só a paga e leva a garantia
+ * com o ágio. Confundir as duas infla o resultado por vinte vezes — e foi
+ * exatamente o erro de ordem de grandeza que eu já cometi uma vez hoje.
+ */
+export function lucroBruto(dividaUsd: Decimal, bonus: Decimal): Decimal {
+    return dividaUsd.mul(bonus);
 }

@@ -32,6 +32,9 @@ import {
     REDES,
     gorjetaWei,
     aglomeracao,
+    bonusDeLiquidacao,
+    chamadaDeConfiguracao,
+    lucroBruto,
     lerDisputaPorPiso,
     repartirOBolo,
     lerPosicao,
@@ -397,6 +400,46 @@ async function principal(): Promise<void> {
         liquidacaoTipica: r.medianaCotada ? `$${r.medianaCotada.toFixed(0)} (mediana)` : '—',
         acimaDe50k: `$${(r.somaAcimaDe[50_000] ?? new Decimal(0)).toFixed(0)}`,
         leitura: bolo.leitura,
+    });
+
+    // QUANTO SOBRA — o bônus lido do contrato, não chutado por mim.
+    //
+    // Uma chamada por moeda de garantia distinta, num punhado delas. A dívida
+    // NÃO é o lucro: o lucro é o ágio por cima dela.
+    const bonusPorAtivo = new Map<string, Decimal | null>();
+    const lucros: string[] = [];
+    let somaLucro = new Decimal(0);
+    for (const m of r.maioresLiquidacoes) {
+        const chave = m.garantia.toLowerCase();
+        if (!bonusPorAtivo.has(chave)) {
+            try {
+                const bruto = await chamar<string>('eth_call', [
+                    { to: POOL, data: chamadaDeConfiguracao(chave) },
+                    'latest',
+                ]);
+                bonusPorAtivo.set(chave, bonusDeLiquidacao(bruto));
+            } catch (err) {
+                bonusPorAtivo.set(chave, null);
+                log.warn('Não deu para ler a configuração desta garantia.', {
+                    ativo: chave,
+                    erro: err instanceof Error ? err.message : String(err),
+                });
+            }
+            await dormir(PAUSA_MS);
+        }
+        const bonus = bonusPorAtivo.get(chave) ?? null;
+        if (bonus === null) {
+            lucros.push(`$${m.usd.toFixed(0)}: bônus desconhecido`);
+            continue;
+        }
+        const lucro = lucroBruto(m.usd, bonus);
+        somaLucro = somaLucro.plus(lucro);
+        lucros.push(`$${m.usd.toFixed(0)} de dívida -> $${lucro.toFixed(0)} de lucro (bônus ${bonus.mul(100).toFixed(2)}%)`);
+    }
+    log.info('QUANTO SOBRA — o bônus lido do contrato, não chutado.', {
+        // O câmbio vem de fora porque inventar cotação foi erro meu antes.
+        somaDasDez: `$${somaLucro.toFixed(0)}`,
+        detalhe: lucros.join(' | '),
     });
 
     log.info('VEREDICTO PRELIMINAR.', {
