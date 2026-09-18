@@ -32,6 +32,11 @@ import {
     REDES,
     gorjetaWei,
     FAIXAS_USD,
+    RPCS_PARA_TENTAR,
+    TAMANHOS_PARA_SONDAR,
+    escolherMelhorRpc,
+    minutosEstimados,
+    type Sonda,
     aglomeracao,
     bonusDeLiquidacao,
     chamadaDeConfiguracao,
@@ -61,7 +66,8 @@ const log = createLogger('liquidacoes');
  * As variáveis individuais continuam valendo e têm prioridade, para ajustar
  * um campo sem abandonar o resto do preset.
  */
-const REDE = REDES[(process.env.LIQUIDACOES_REDE ?? 'base').toLowerCase()] ?? REDES.base;
+const REDE_ESCOLHIDA = (process.env.LIQUIDACOES_REDE ?? 'base').toLowerCase();
+const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const RPC = process.env.LIQUIDACOES_RPC_URL ?? REDE.rpc;
 /** Aave V3 Pool na Base. Variável porque eu não pude conferir o endereço. */
 const POOL = (process.env.LIQUIDACOES_POOL ?? REDE.pool).toLowerCase();
@@ -97,9 +103,13 @@ const PRECO_ETH = process.env.LIQUIDACOES_PRECO_ETH
     : null;
 
 let rpcId = 0;
+/** Trocado pela sondagem quando o RPC escolhido à mão não serve. */
+let rpcEmUso = RPC;
+/** Idem para o tamanho do pedaço: quem manda é o que a sondagem aguentou. */
+let pedacoEmUso = PEDACO;
 
-async function chamar<T>(metodo: string, params: unknown[]): Promise<T> {
-    const res = await fetch(RPC, {
+async function chamarEm<T>(rpc: string, metodo: string, params: unknown[]): Promise<T> {
+    const res = await fetch(rpc, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: metodo, params }),
@@ -114,19 +124,101 @@ async function chamar<T>(metodo: string, params: unknown[]): Promise<T> {
     return body.result;
 }
 
+const chamar = <T>(metodo: string, params: unknown[]): Promise<T> =>
+    chamarEm<T>(rpcEmUso, metodo, params);
+
 const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Descobre qual RPC serve, e com que tamanho de pedaço, ANTES de varrer.
+ *
+ * A rodada da Ethereum morreu com 648 falhas de 649 e um erro que falava de
+ * limite de faixa em pedaços que estavam dentro do limite. Eu não consigo
+ * testar RPC daqui — a caixa onde eu rodo não alcança blockchain — então
+ * escolher um na mão era chutar, e o chute custou uma rodada inteira.
+ *
+ * A sondagem testa LONGE do topo de propósito. Perto do topo quase todo
+ * provedor responde, inclusive os que não guardam histórico, e foi exatamente
+ * isso que fez um pedaço passar e 648 falharem: o primeiro estava recente.
+ */
+async function sondar(topo: number): Promise<void> {
+    const candidatos = [RPC, ...(RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [])].filter(
+        (v, i, a) => a.indexOf(v) === i,
+    );
+    // Fundo da janela: é lá que o histórico precisa existir.
+    const fundo = Math.max(1, topo - BLOCOS + 1000);
+    const sondas: Sonda[] = [];
+
+    for (const rpc of candidatos) {
+        let maior = 0;
+        let erro: string | undefined;
+        for (const tam of TAMANHOS_PARA_SONDAR) {
+            try {
+                await chamarEm<unknown[]>(rpc, 'eth_getLogs', [
+                    {
+                        address: POOL,
+                        fromBlock: `0x${fundo.toString(16)}`,
+                        toBlock: `0x${(fundo + tam - 1).toString(16)}`,
+                        ...(TOPIC0 === '' ? {} : { topics: [TOPIC0] }),
+                    },
+                ]);
+                maior = tam;
+            } catch (err) {
+                erro = err instanceof Error ? err.message : String(err);
+                break;
+            }
+            await dormir(PAUSA_MS);
+        }
+        sondas.push({ rpc, maiorFaixa: maior, erro });
+    }
+
+    log.info('SONDAGEM DE RPC — qual serve e com que pedaço.', {
+        testadoEm: `bloco ${fundo} (o fundo da janela, onde o histórico precisa existir)`,
+        resultado: sondas
+            .map(
+                (s) =>
+                    `${s.rpc.replace(/\/v2\/.*$/, '/v2/***')}: ${
+                        s.maiorFaixa > 0 ? `até ${s.maiorFaixa} blocos` : `NÃO SERVE (${(s.erro ?? '').slice(0, 60)})`
+                    }`,
+            )
+            .join(' | '),
+    });
+
+    const melhor = escolherMelhorRpc(sondas);
+    if (melhor === null) {
+        log.error('NENHUM RPC SERVE para esta rede. A varredura não vai medir nada.', {
+            oQueFazer:
+                'defina LIQUIDACOES_RPC_URL com um provedor que tenha histórico ' +
+                '(plano grátis costuma só enxergar bloco recente)',
+        });
+        return;
+    }
+
+    rpcEmUso = melhor.rpc;
+    pedacoEmUso = Math.min(PEDACO, melhor.maiorFaixa);
+    const minutos = minutosEstimados(BLOCOS, pedacoEmUso, PAUSA_MS / 1000 + 0.3);
+    log.info('RPC escolhido pela sondagem.', {
+        rpc: melhor.rpc.replace(/\/v2\/.*$/, '/v2/***'),
+        pedaco: pedacoEmUso,
+        estimativa:
+            minutos > 90
+                ? `~${(minutos / 60).toFixed(1)} HORAS — longo demais; considere reduzir LIQUIDACOES_BLOCOS`
+                : `~${minutos.toFixed(0)} minutos`,
+    });
+}
 
 async function principal(): Promise<void> {
     log.info('*** MODO LEITURA — nenhuma transação é enviada por este processo. ***');
 
     const topoHex = await chamar<string>('eth_blockNumber', []);
     const topo = Number.parseInt(topoHex, 16);
+    await sondar(topo);
     const inicio = Math.max(0, topo - BLOCOS);
-    const faixas = faixasDeBlocos(inicio, topo, PEDACO);
+    const faixas = faixasDeBlocos(inicio, topo, pedacoEmUso);
 
     log.info('Varredura de liquidações iniciada.', {
         rede: REDE.nome,
-        rpc: RPC.replace(/\/v2\/.*$/, '/v2/***'),
+        rpc: rpcEmUso.replace(/\/v2\/.*$/, '/v2/***'),
         contrato: POOL,
         blocos: `${inicio} → ${topo} (${BLOCOS})`,
         pedacos: faixas.length,
@@ -187,6 +279,16 @@ async function principal(): Promise<void> {
                 continue;
             }
             pedacosComErro += 1;
+            // Trinta falhas seguidas sem UMA leitura boa não é azar, é o
+            // provedor não servindo. Insistir mais 600 vezes só enche o log de
+            // linhas iguais na hora em que ela está tentando ler o resultado.
+            if (lidos === 0 && pedacosComErro >= 30) {
+                log.error('DESISTINDO: 30 pedaços seguidos falharam e nenhum funcionou.', {
+                    erro: msg.slice(0, 160),
+                    oQueFazer: 'veja a linha SONDAGEM DE RPC acima — nenhum provedor serviu para esta rede',
+                });
+                break;
+            }
             log.warn('Pedaço falhou; seguindo.', { faixa: `${de}-${ate}`, erro: msg.slice(0, 160) });
         }
 

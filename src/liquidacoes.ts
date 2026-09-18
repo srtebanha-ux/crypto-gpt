@@ -390,8 +390,79 @@ export function ehLimiteDeFaixa(mensagem: string): boolean {
         m.includes('returned more than') ||
         m.includes('query timeout') ||
         m.includes('too many results') ||
-        m.includes('limit exceeded')
+        m.includes('limit exceeded') ||
+        // drpc: "ranges over 10000 blocks are not supported on free plan".
+        // Não bate com nenhuma das outras e a diferença é só de redação.
+        m.includes('are not supported on free plan') ||
+        m.includes('ranges over')
     );
+}
+
+/**
+ * RPCs para EXPERIMENTAR, não para confiar.
+ *
+ * O da Ethereum devolveu 648 falhas de 649 com "ranges over 10000 blocks are
+ * not supported on free plan" — em pedaços de 2.000 blocos. A mensagem fala de
+ * tamanho e o tamanho estava dentro; um pedaço passou e o resto não. Isso não
+ * é teto de faixa, é plano grátis que só enxerga bloco recente, descrito com a
+ * mensagem errada pelo provedor.
+ *
+ * Eu não tenho como testar isto daqui: a caixa onde eu rodo não alcança RPC de
+ * blockchain. Então em vez de eu escolher um e ela descobrir em vinte minutos
+ * que não presta, o programa experimenta todos e RELATA qual serve e com que
+ * tamanho de pedaço. É o mesmo caminho que resolveu o palpite do tópico.
+ */
+export const RPCS_PARA_TENTAR: Record<string, string[]> = {
+    base: ['https://mainnet.base.org', 'https://base-rpc.publicnode.com', 'https://base.llamarpc.com'],
+    ethereum: [
+        'https://ethereum-rpc.publicnode.com',
+        'https://eth.llamarpc.com',
+        'https://rpc.ankr.com/eth',
+        'https://cloudflare-eth.com',
+        'https://eth.drpc.org',
+    ],
+    arbitrum: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum-one-rpc.publicnode.com'],
+    optimism: ['https://mainnet.optimism.io', 'https://optimism-rpc.publicnode.com'],
+    polygon: ['https://polygon-rpc.com', 'https://polygon-bor-rpc.publicnode.com'],
+    avalanche: ['https://api.avax.network/ext/bc/C/rpc', 'https://avalanche-c-chain-rpc.publicnode.com'],
+};
+
+/** Tamanhos de pedaço a experimentar, do menor para o maior. */
+export const TAMANHOS_PARA_SONDAR = [10, 100, 1_000, 2_000, 10_000];
+
+export interface Sonda {
+    rpc: string;
+    /** Maior pedaço que funcionou LONGE do topo. 0 = não serve. */
+    maiorFaixa: number;
+    erro?: string;
+}
+
+/**
+ * Qual RPC usar, dado o que a sondagem encontrou.
+ *
+ * Ganha o que aguenta o maior pedaço, porque é ele que decide se a varredura
+ * leva vinte minutos ou cinco horas: 1.296.000 blocos de dez em dez são cento
+ * e trinta mil pedidos.
+ *
+ * Empate fica com o primeiro da lista, que é a ordem de preferência escrita à
+ * mão em `RPCS_PARA_TENTAR`.
+ */
+export function escolherMelhorRpc(sondas: Sonda[]): Sonda | null {
+    const servem = sondas.filter((s) => s.maiorFaixa > 0);
+    if (servem.length === 0) return null;
+    return servem.reduce((melhor, s) => (s.maiorFaixa > melhor.maiorFaixa ? s : melhor));
+}
+
+/**
+ * Quanto tempo a varredura vai levar, em minutos, com um dado pedaço.
+ *
+ * Existe para a decisão sair ANTES da espera, e não depois. Cinco horas de
+ * varredura não é "um pouco mais lento": é uma tarde perdida por um número que
+ * dava para calcular em uma linha.
+ */
+export function minutosEstimados(blocos: number, pedaco: number, segPorPedido = 0.3): number {
+    if (pedaco <= 0) return Infinity;
+    return (Math.ceil(blocos / pedaco) * segPorPedido) / 60;
 }
 
 export interface Rede {

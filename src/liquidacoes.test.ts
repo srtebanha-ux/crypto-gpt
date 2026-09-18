@@ -7,6 +7,10 @@ import {
     chamadaDeConfiguracao,
     janelaDeOportunidade,
     REDES,
+    RPCS_PARA_TENTAR,
+    TAMANHOS_PARA_SONDAR,
+    escolherMelhorRpc,
+    minutosEstimados,
     lucroBruto,
     contarPorTopico,
     decodificarLiquidacao,
@@ -660,4 +664,63 @@ test('a tabela errada faz a dívida virar null, não um número torto', () => {
     );
     assert.equal(valorEmDolares(l, REDES.base.tokens), null);
     assert.equal(valorEmDolares(l, REDES.ethereum.tokens)?.toString(), '250000');
+});
+
+// ---------------------------------------------------------------------------
+// Sondagem de RPC: descobrir em vez de chutar.
+// ---------------------------------------------------------------------------
+
+test('a mensagem do drpc é reconhecida como teto de faixa', () => {
+    // 648 de 649 pedaços morreram com esta, e ehLimiteDeFaixa não a conhecia.
+    assert.ok(ehLimiteDeFaixa('ranges over 10000 blocks are not supported on free plan'));
+});
+
+test('as mensagens que já eram reconhecidas continuam sendo', () => {
+    assert.ok(ehLimiteDeFaixa('block range is too wide'));
+    assert.ok(ehLimiteDeFaixa('query returned more than 10000 results'));
+    assert.ok(ehLimiteDeFaixa('limit exceeded'));
+    assert.equal(ehLimiteDeFaixa('execution reverted'), false);
+    assert.equal(ehLimiteDeFaixa('connection reset'), false);
+});
+
+test('ganha o RPC que aguenta o maior pedaço', () => {
+    const melhor = escolherMelhorRpc([
+        { rpc: 'a', maiorFaixa: 10 },
+        { rpc: 'b', maiorFaixa: 2000 },
+        { rpc: 'c', maiorFaixa: 100 },
+    ]);
+    assert.equal(melhor?.rpc, 'b');
+});
+
+test('nenhum servindo devolve null, e não o "menos ruim"', () => {
+    assert.equal(
+        escolherMelhorRpc([
+            { rpc: 'a', maiorFaixa: 0, erro: 'sem histórico' },
+            { rpc: 'b', maiorFaixa: 0, erro: 'sem histórico' },
+        ]),
+        null,
+    );
+    assert.equal(escolherMelhorRpc([]), null);
+});
+
+test('a estimativa de tempo separa vinte minutos de cinco horas', () => {
+    // O ponto: 1.296.000 blocos de dez em dez são 129.600 pedidos. Esse número
+    // precisa aparecer ANTES da espera, não depois.
+    const dezEmDez = minutosEstimados(1_296_000, 10, 0.3);
+    const doisMil = minutosEstimados(1_296_000, 2000, 0.3);
+    assert.ok(dezEmDez > 600, `${dezEmDez} minutos`);
+    assert.ok(doisMil < 5, `${doisMil} minutos`);
+    assert.equal(minutosEstimados(1000, 0), Infinity);
+});
+
+test('toda rede tem RPC alternativo para sondar', () => {
+    for (const nome of Object.keys(REDES)) {
+        assert.ok((RPCS_PARA_TENTAR[nome] ?? []).length > 0, `${nome} sem alternativa`);
+    }
+});
+
+test('os tamanhos de sondagem vão do menor ao maior', () => {
+    // A sondagem para no primeiro que falha, então a ordem é o algoritmo.
+    const ordenado = [...TAMANHOS_PARA_SONDAR].sort((a, b) => a - b);
+    assert.deepEqual(TAMANHOS_PARA_SONDAR, ordenado);
 });
