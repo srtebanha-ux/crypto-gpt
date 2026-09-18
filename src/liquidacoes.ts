@@ -233,3 +233,29 @@ export function contarPorTopico(logs: LogCru[]): Array<{ topico: string; quantos
         .map(([topico, quantos]) => ({ topico, quantos }))
         .sort((a, b) => b.quantos - a.quantos);
 }
+
+/**
+ * O erro é do tipo "sua faixa de blocos é grande demais"?
+ *
+ * Cada provedor recusa com uma frase diferente, e o número muda por plano: a
+ * Alchemy no plano grátis responde "up to a 10 block range", outros falam em
+ * "query returned more than N results" ou "range is too large". Tentar
+ * adivinhar o teto certo de cada um pela documentação é trabalho que envelhece;
+ * reconhecer a recusa e partir a faixa ao meio resolve para todos, inclusive
+ * os que ainda não existem.
+ *
+ * Visto em 18/09: os 101 pedaços de 2.000 blocos falharam, e o relatório final
+ * anunciou "o endereço do contrato provavelmente está errado" — o endereço
+ * estava certo, nenhuma leitura tinha acontecido.
+ */
+export function ehLimiteDeFaixa(mensagem: string): boolean {
+    const m = mensagem.toLowerCase();
+    return (
+        m.includes('block range') ||
+        m.includes('range is too large') ||
+        m.includes('returned more than') ||
+        m.includes('query timeout') ||
+        m.includes('too many results') ||
+        m.includes('limit exceeded')
+    );
+}

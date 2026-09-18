@@ -28,6 +28,7 @@ import { exigirAtivacao } from './ativacao';
 import {
     TOPIC_LIQUIDATION_CALL,
     contarPorTopico,
+    ehLimiteDeFaixa,
     decodificarLiquidacao,
     faixasDeBlocos,
     resumirHistorico,
@@ -89,8 +90,18 @@ async function principal(): Promise<void> {
     let indecifraveis = 0;
     let pedacosComErro = 0;
 
-    for (let i = 0; i < faixas.length; i++) {
-        const [de, ate] = faixas[i];
+    // Fila em vez de laço fixo: quando o provedor recusa a faixa por tamanho, o
+    // pedaço é PARTIDO AO MEIO e os dois metades voltam para a fila. Isso
+    // encontra sozinho o teto de qualquer provedor — o da Alchemy grátis é de
+    // 10 blocos, outros aceitam milhares — em vez de exigir que alguém acerte
+    // LIQUIDACOES_PEDACO na mão antes de saber qual é.
+    const fila: Array<[number, number]> = [...faixas];
+    let menorQueCoube = PEDACO;
+    let partidas = 0;
+    let lidos = 0;
+
+    while (fila.length > 0) {
+        const [de, ate] = fila.shift() as [number, number];
         const filtro: Record<string, unknown> = {
             address: POOL,
             fromBlock: `0x${de.toString(16)}`,
@@ -101,35 +112,54 @@ async function principal(): Promise<void> {
         try {
             const logs = await chamar<LogCru[]>('eth_getLogs', [filtro]);
             todos.push(...logs);
+            lidos += 1;
+            menorQueCoube = Math.min(menorQueCoube, ate - de + 1);
             if (TOPIC0 !== '') {
                 for (const l of logs) {
                     try {
                         liquidacoes.push(decodificarLiquidacao(l));
                     } catch {
-                        // Um log com formato inesperado não derruba a varredura
-                        // inteira; ele é contado e o relatório diz quantos.
                         indecifraveis += 1;
                     }
                 }
             }
         } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (ehLimiteDeFaixa(msg) && ate > de) {
+                const meio = Math.floor((de + ate) / 2);
+                fila.unshift([meio + 1, ate]);
+                fila.unshift([de, meio]);
+                partidas += 1;
+                if (partidas === 1) {
+                    log.info('Faixa grande demais para este provedor; partindo ao meio.', {
+                        primeiraRecusa: msg.slice(0, 160),
+                    });
+                }
+                continue;
+            }
             pedacosComErro += 1;
-            log.warn('Pedaço falhou; seguindo.', {
-                faixa: `${de}-${ate}`,
-                erro: err instanceof Error ? err.message : String(err),
-                dica: 'se falhar muito, diminua LIQUIDACOES_PEDACO',
-            });
+            log.warn('Pedaço falhou; seguindo.', { faixa: `${de}-${ate}`, erro: msg.slice(0, 160) });
         }
 
-        if (i > 0 && i % 25 === 0) {
+        if (lidos > 0 && lidos % 200 === 0) {
             log.info('Progresso.', {
-                pedacos: `${i}/${faixas.length}`,
+                lidos,
+                naFila: fila.length,
                 eventos: todos.length,
                 falhas: pedacosComErro,
+                menorQueCoube,
             });
         }
         await dormir(PAUSA_MS);
     }
+
+    log.info('Varredura terminada.', {
+        pedacosLidos: lidos,
+        partidasPorLimite: partidas,
+        maiorFaixaAceita: menorQueCoube,
+        falhas: pedacosComErro,
+        eventos: todos.length,
+    });
 
     if (TOPIC0 === '') {
         const porTopico = contarPorTopico(todos);
@@ -139,10 +169,15 @@ async function principal(): Promise<void> {
             tiposEncontrados: porTopico.length,
             // Se um destes for o palpite lá de cima, o palpite estava certo.
             ranking: porTopico.slice(0, 12).map((t) => `${t.topico} x${t.quantos}`).join(' | '),
+            // Duas causas diferentes para o mesmo zero, e confundi-las já
+            // mandou procurar defeito no lugar errado: se NENHUMA leitura deu
+            // certo, o endereço não foi testado — só o provedor respondeu.
             oQueFazer:
-                todos.length === 0
-                    ? 'ZERO eventos: o endereço do contrato provavelmente está errado. Confira LIQUIDACOES_POOL.'
-                    : 'defina LIQUIDACOES_TOPIC0 com o tópico das liquidações e rode de novo',
+                todos.length > 0
+                    ? 'defina LIQUIDACOES_TOPIC0 com o tópico das liquidações e rode de novo'
+                    : pedacosComErro > 0
+                      ? 'NENHUMA leitura teve sucesso. O endereço NÃO foi testado — o problema está no provedor de RPC. Veja o erro acima.'
+                      : 'Leituras funcionaram e o contrato não emitiu nada no período: endereço provavelmente errado. Confira LIQUIDACOES_POOL.',
             confereComOPalpite: TOPIC_LIQUIDATION_CALL,
         });
         return;

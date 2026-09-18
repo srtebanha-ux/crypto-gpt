@@ -4,6 +4,7 @@ import { Decimal } from 'decimal.js';
 import {
     contarPorTopico,
     decodificarLiquidacao,
+    ehLimiteDeFaixa,
     enderecoDoTopico,
     faixasDeBlocos,
     resumirHistorico,
@@ -159,4 +160,39 @@ test('o modo descoberta ordena os eventos do mais frequente para o menos', () =>
     assert.equal(c[0].topico, '0xaaa');
     assert.equal(c[0].quantos, 2);
     assert.equal(c[1].quantos, 1);
+});
+
+// ----------------------------------------------------------------------
+// Reconhecer a recusa por faixa grande demais
+// ----------------------------------------------------------------------
+test('reconhece a recusa da Alchemy no plano grátis', () => {
+    // A frase EXATA que voltou em 18/09, nos 101 pedaços que falharam.
+    assert.equal(
+        ehLimiteDeFaixa(
+            'RPC HTTP 400: Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range.',
+        ),
+        true,
+    );
+});
+
+test('reconhece as outras formas de dizer a mesma coisa', () => {
+    // Cada provedor recusa com a própria frase. Reconhecer a recusa e partir a
+    // faixa ao meio serve para todos, inclusive os que ainda não existem.
+    for (const m of [
+        'query returned more than 10000 results',
+        'eth_getLogs block range is too large',
+        'too many results, please narrow the range',
+        'limit exceeded',
+        'query timeout exceeded',
+    ]) {
+        assert.equal(ehLimiteDeFaixa(m), true, m);
+    }
+});
+
+test('erro que NÃO é de faixa não vira partição infinita', () => {
+    // Importa porque partir ao meio um erro de rede giraria para sempre,
+    // dobrando as chamadas a cada rodada até o provedor banir.
+    assert.equal(ehLimiteDeFaixa('connection reset by peer'), false);
+    assert.equal(ehLimiteDeFaixa('RPC HTTP 401: invalid api key'), false);
+    assert.equal(ehLimiteDeFaixa('unauthorized'), false);
 });
