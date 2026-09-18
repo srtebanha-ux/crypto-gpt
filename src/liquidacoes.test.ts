@@ -7,6 +7,8 @@ import {
     ehLimiteDeFaixa,
     gorjetaWei,
     lerDisputa,
+    lerDisputaPorPiso,
+    lerPosicao,
     multiploDaBase,
     enderecoDoTopico,
     faixasDeBlocos,
@@ -278,4 +280,99 @@ test('a gorjeta é só o que passou da base, nunca negativa', () => {
         }).toString(),
         '0',
     );
+});
+
+// ---------------------------------------------------------------------------
+// Cotação do ETH: opcional, e rotulada de aproximada quando usada.
+// ---------------------------------------------------------------------------
+
+test('dívida em WETH vira dólar SÓ quando alguém informa o preço do ETH', () => {
+    const l = decodificarLiquidacao(logDe({ dividaCrua: 2n * 10n ** 18n, ativoDaDivida: WETH }));
+    assert.equal(valorEmDolares(l), null, 'sem preço continua sendo null');
+    assert.equal(valorEmDolares(l, undefined, new Decimal(3000))?.toString(), '6000');
+});
+
+test('preço do ETH zero ou negativo é ignorado — não vira dívida de zero dólar', () => {
+    // Uma dívida de 2 ETH avaliada em $0 entraria no relatório como uma
+    // liquidação minúscula, e o histograma diria que não há nada grande.
+    const l = decodificarLiquidacao(logDe({ dividaCrua: 2n * 10n ** 18n, ativoDaDivida: WETH }));
+    assert.equal(valorEmDolares(l, undefined, new Decimal(0)), null);
+    assert.equal(valorEmDolares(l, undefined, new Decimal(-1)), null);
+});
+
+test('o preço do ETH não contamina as stablecoins', () => {
+    const l = decodificarLiquidacao(logDe({ dividaCrua: 250_000_000_000n }));
+    assert.equal(valorEmDolares(l, undefined, new Decimal(3000))?.toString(), '250000');
+});
+
+test('resumirHistorico repassa o preço e tira as liquidações de "sem cotação"', () => {
+    const ls = [
+        decodificarLiquidacao(logDe({ dividaCrua: 30n * 10n ** 18n, ativoDaDivida: WETH })),
+        decodificarLiquidacao(logDe({ dividaCrua: 1_000_000_000n })),
+    ];
+    assert.equal(resumirHistorico(ls).semCotacao, 1);
+
+    const comPreco = resumirHistorico(ls, undefined, new Decimal(3000));
+    assert.equal(comPreco.semCotacao, 0);
+    assert.equal(comPreco.maior?.toString(), '90000', '30 ETH a 3.000 = 90.000');
+    assert.equal(comPreco.porFaixa[50_000], 1, 'a que estava escondida era GRANDE');
+});
+
+// ---------------------------------------------------------------------------
+// Corrida ou leilão: a contagem, porque a mediana errou na primeira medição.
+// ---------------------------------------------------------------------------
+
+/** Os oito maiores prêmios da Base em 180 dias, medidos em 18/09. */
+const BASE_REAL = [1.3, 1.9, 1.9, 2.2, 4.2, 16.8, 69.6, 2651.3].map((n) => new Decimal(n));
+
+test('os números reais da Base: a mediana diz MISTO e a contagem diz CORRIDA', () => {
+    // Este teste existe para travar a correção. A mediana de 4,2x caiu na faixa
+    // "MISTO" de lerDisputa, mas metade dos vencedores levou prêmios de seis
+    // dígitos pagando menos de 2,5x. Isso é ausência de disputa, não disputa
+    // moderada — um único outlier de 2.651x puxou a mediana.
+    const ordenados = [...BASE_REAL].sort((a, b) => a.comparedTo(b));
+    const mediano = ordenados[Math.floor(ordenados.length / 2)];
+    assert.match(lerDisputa(mediano), /MISTO/, 'a leitura antiga, preservada como registro do erro');
+    assert.match(lerDisputaPorPiso(BASE_REAL), /CORRIDA/);
+    assert.match(lerDisputaPorPiso(BASE_REAL), /4 de 8/);
+});
+
+test('um outlier gigante não vira leilão sozinho', () => {
+    const quase = [1.1, 1.2, 1.2, 1.3, 1.4, 9000].map((n) => new Decimal(n));
+    assert.match(lerDisputaPorPiso(quase), /CORRIDA/);
+});
+
+test('leilão de verdade: quase ninguém escapa de pagar caro', () => {
+    const leilao = [40, 55, 70, 90, 120, 1.2].map((n) => new Decimal(n));
+    assert.match(lerDisputaPorPiso(leilao), /LEILÃO/);
+});
+
+test('amostra pequena demais não dá veredicto', () => {
+    assert.equal(lerDisputaPorPiso([new Decimal(1), new Decimal(2)]), 'sem dado suficiente');
+    assert.equal(lerDisputaPorPiso([]), 'sem dado suficiente');
+});
+
+// ---------------------------------------------------------------------------
+// Onde no bloco: a medida que o gás não alcança numa rede FCFS.
+// ---------------------------------------------------------------------------
+
+test('vencedores na cabeça do bloco = infraestrutura, e ela não compra isso', () => {
+    const cabeca = [0.01, 0.02, 0.03, 0.05, 0.11].map((n) => new Decimal(n));
+    assert.match(lerPosicao(cabeca), /NA FRENTE/);
+});
+
+test('vencedores no meio ou atrás = dá para competir', () => {
+    const meio = [0.4, 0.55, 0.6, 0.7, 0.9].map((n) => new Decimal(n));
+    assert.match(lerPosicao(meio), /NÃO chegam na frente/);
+});
+
+test('a posição no bloco não depende do tamanho do bloco', () => {
+    // 2 de 200 e 1 de 100 são a mesma coisa: a fração é o que importa.
+    const a = lerPosicao([2 / 200, 2 / 200, 2 / 200, 2 / 200].map((n) => new Decimal(n)));
+    const b = lerPosicao([1 / 100, 1 / 100, 1 / 100, 1 / 100].map((n) => new Decimal(n)));
+    assert.equal(a, b);
+});
+
+test('poucos dados não viram leitura de posição', () => {
+    assert.equal(lerPosicao([new Decimal(0.1)]), 'sem dado suficiente');
 });

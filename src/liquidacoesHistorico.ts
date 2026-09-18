@@ -31,7 +31,8 @@ import {
     ehLimiteDeFaixa,
     REDES,
     gorjetaWei,
-    lerDisputa,
+    lerDisputaPorPiso,
+    lerPosicao,
     multiploDaBase,
     decodificarLiquidacao,
     faixasDeBlocos,
@@ -71,6 +72,22 @@ const TIMEOUT_MS = Number(process.env.LIQUIDACOES_TIMEOUT_MS ?? '20000');
  * dividindo todos os "por dia" por seis.
  */
 const SEG_POR_BLOCO = Number(process.env.LIQUIDACOES_SEG_POR_BLOCO ?? String(REDE.segPorBloco));
+
+/**
+ * Preço do ETH em dólares, informado à mão — e por que NÃO é buscado sozinho.
+ *
+ * Sem ele, 31% das liquidações da Base somem do relatório porque a dívida está
+ * em WETH/cbETH, e o veredicto fica suspenso: a maior de todas pode estar
+ * escondida aí. Com ele, elas voltam — mas com um preço de HOJE aplicado a
+ * eventos de até seis meses atrás, o que é aproximado e está longe de exato.
+ *
+ * Deixar em branco continua sendo a opção correta quando o que se quer é um
+ * número em que dá para confiar. Preencher é para responder "a maior está
+ * escondida entre as não cotadas?" — e a resposta vem rotulada de aproximada.
+ */
+const PRECO_ETH = process.env.LIQUIDACOES_PRECO_ETH
+    ? new Decimal(process.env.LIQUIDACOES_PRECO_ETH)
+    : null;
 
 let rpcId = 0;
 
@@ -208,7 +225,7 @@ async function principal(): Promise<void> {
         return;
     }
 
-    const r = resumirHistorico(liquidacoes);
+    const r = resumirHistorico(liquidacoes, undefined, PRECO_ETH);
     const dias = (BLOCOS * SEG_POR_BLOCO) / 86400;
 
     log.info('HISTÓRICO DE LIQUIDAÇÕES.', {
@@ -295,18 +312,36 @@ async function principal(): Promise<void> {
     // obrigatória. A razão entre os dois separa as duas formas de disputa, que
     // pedem estratégias opostas: em corrida quem chega primeiro leva e dar
     // lance não adianta; em leilão quem aceita lucro menor pode pagar mais e
-    // ganhar. Ver `lerDisputa` em liquidacoes.ts.
+    // ganhar. Ver `lerDisputaPorPiso` e `lerPosicao` em liquidacoes.ts.
     //
     // São ~2 chamadas por transação, num punhado de transações. Barato.
     const multiplos: Decimal[] = [];
+    const posicoes: Decimal[] = [];
     const gorjetas: string[] = [];
+    const ondeCairam: string[] = [];
     for (const m of r.maioresLiquidacoes.slice(0, 8)) {
         try {
-            const rec = await chamar<{ gasUsed: string; effectiveGasPrice: string; blockNumber: string }>(
-                'eth_getTransactionReceipt',
-                [m.transacao],
+            const rec = await chamar<{
+                gasUsed: string;
+                effectiveGasPrice: string;
+                blockNumber: string;
+                transactionIndex: string;
+            }>('eth_getTransactionReceipt', [m.transacao]);
+            const bloco = await chamar<{ baseFeePerGas?: string; transactions?: string[] }>(
+                'eth_getBlockByNumber',
+                [rec.blockNumber, false],
             );
-            const bloco = await chamar<{ baseFeePerGas?: string }>('eth_getBlockByNumber', [rec.blockNumber, false]);
+
+            // A posição no bloco é medida ANTES do gás e independente dele: na
+            // Base o preço do gás não compra prioridade, então ele pode ser
+            // mudo por construção. A ordem de chegada não é.
+            const totalNoBloco = bloco.transactions?.length ?? 0;
+            if (totalNoBloco > 0 && rec.transactionIndex !== undefined) {
+                const indice = Number.parseInt(rec.transactionIndex, 16);
+                posicoes.push(new Decimal(indice).dividedBy(totalNoBloco));
+                ondeCairam.push(`$${m.usd.toFixed(0)}: transação ${indice + 1} de ${totalNoBloco}`);
+            }
+
             if (!bloco.baseFeePerGas) continue;
             const efetivoWei = new Decimal(Number.parseInt(rec.effectiveGasPrice, 16));
             const baseWei = new Decimal(Number.parseInt(bloco.baseFeePerGas, 16));
@@ -332,16 +367,26 @@ async function principal(): Promise<void> {
     const mediano = ordenados.length > 0 ? ordenados[Math.floor(ordenados.length / 2)] : null;
     log.info('CORRIDA OU LEILÃO — o que os vencedores pagaram.', {
         transacoesLidas: multiplos.length,
-        multiploMediano: mediano ? `${mediano.toFixed(1)}x a taxa base` : '—',
-        leitura: lerDisputa(mediano),
+        // A mediana fica no relatório porque a primeira medição mostrou que ela
+        // ENGANA, e apagá-la esconderia isso. A leitura vem de `lerDisputaPorPiso`.
+        multiploMediano: mediano ? `${mediano.toFixed(1)}x a taxa base (a mediana engana — ver leitura)` : '—',
+        leitura: lerDisputaPorPiso(multiplos),
         detalhe: gorjetas.join(' | '),
+    });
+
+    log.info('ONDE NO BLOCO — se dá para chegar lá.', {
+        transacoesLidas: posicoes.length,
+        leitura: lerPosicao(posicoes),
+        detalhe: ondeCairam.join(' | '),
     });
 
     log.info('VEREDICTO PRELIMINAR.', {
         acimaDe50k: grandes,
         porDia: (grandes / Math.max(dias, 1)).toFixed(2),
         pedacosQueFalharam: `${pedacosComErro} de ${tentados}`,
-        semCotacao: `${r.semCotacao} de ${r.total}`,
+        semCotacao: PRECO_ETH
+            ? `${r.semCotacao} de ${r.total} (WETH/cbETH convertidos por APROXIMAÇÃO, a US$${PRECO_ETH.toFixed(0)}/ETH que você informou)`
+            : `${r.semCotacao} de ${r.total}`,
         leitura,
         proximoPasso:
             'medir quantos BLOCOS cada posição ficou liquidável antes de alguém pegar — é isso que diz se dá tempo de chegar.',

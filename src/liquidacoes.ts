@@ -100,6 +100,17 @@ export interface Token {
     decimais: number;
     /** Vale ~1 dólar? Só para esses dá para dizer o valor sem consultar preço. */
     estavel: boolean;
+    /**
+     * Segue o preço do ETH? (WETH e cbETH seguem; cbETH com um ágio pequeno
+     * que ignoramos de propósito.)
+     *
+     * Marcar não basta para virar dólar: é preciso ALGUÉM informar o preço do
+     * ETH. Sem ele a liquidação continua caindo em "sem cotação", que é a
+     * resposta honesta. Com ele, vira um número aproximado e ROTULADO como
+     * aproximado — porque o preço de hoje aplicado a uma liquidação de cinco
+     * meses atrás está errado, e o relatório tem obrigação de dizer isso.
+     */
+    emEth?: boolean;
 }
 
 /**
@@ -115,8 +126,8 @@ export const TOKENS_BASE: Record<string, Token> = {
     '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': { simbolo: 'USDC', decimais: 6, estavel: true },
     '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca': { simbolo: 'USDbC', decimais: 6, estavel: true },
     '0x50c5725949a6f0c72e6c4a641f24049a917db0cb': { simbolo: 'DAI', decimais: 18, estavel: true },
-    '0x4200000000000000000000000000000000000006': { simbolo: 'WETH', decimais: 18, estavel: false },
-    '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22': { simbolo: 'cbETH', decimais: 18, estavel: false },
+    '0x4200000000000000000000000000000000000006': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+    '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22': { simbolo: 'cbETH', decimais: 18, estavel: false, emEth: true },
 };
 
 /**
@@ -126,10 +137,17 @@ export const TOKENS_BASE: Record<string, Token> = {
  * não sei cotar". Some do histograma de dólares e aparece contado à parte, em
  * vez de entrar com um valor inventado.
  */
-export function valorEmDolares(l: Liquidacao, tokens: Record<string, Token> = TOKENS_BASE): Decimal | null {
+export function valorEmDolares(
+    l: Liquidacao,
+    tokens: Record<string, Token> = TOKENS_BASE,
+    precoEth?: Decimal | null,
+): Decimal | null {
     const t = tokens[l.ativoDaDivida.toLowerCase()];
-    if (!t || !t.estavel) return null;
-    return fromRawUnits(l.dividaCrua, t.decimais);
+    if (!t) return null;
+    const cru = fromRawUnits(l.dividaCrua, t.decimais);
+    if (t.estavel) return cru;
+    if (t.emEth && precoEth && precoEth.greaterThan(0)) return cru.mul(precoEth);
+    return null;
 }
 
 /** As faixas do histograma, em dólares. A última é aberta para cima. */
@@ -179,6 +197,7 @@ export interface ResumoDoHistorico {
 export function resumirHistorico(
     liquidacoes: Liquidacao[],
     tokens: Record<string, Token> = TOKENS_BASE,
+    precoEth?: Decimal | null,
 ): ResumoDoHistorico {
     const porFaixa: Record<number, number> = {};
     for (const f of FAIXAS_USD) porFaixa[f] = 0;
@@ -190,7 +209,7 @@ export function resumirHistorico(
 
     for (const l of liquidacoes) {
         contagem.set(l.liquidante, (contagem.get(l.liquidante) ?? 0) + 1);
-        const usd = valorEmDolares(l, tokens);
+        const usd = valorEmDolares(l, tokens, precoEth);
         if (usd === null) {
             semCotacao += 1;
             continue;
@@ -405,4 +424,63 @@ export function lerDisputa(multiploMediano: Decimal | null): string {
         return 'MISTO: pagaram acima do mínimo, mas pouco. Há alguma disputa por prioridade.';
     }
     return 'LEILÃO: pagaram MUITO acima do mínimo para passar na frente. Aqui quem aceita lucro menor consegue dar lance maior e ganhar.';
+}
+
+/**
+ * A leitura pela CONTAGEM de quem pagou perto do mínimo — não pela mediana.
+ *
+ * A mediana foi um erro meu e a primeira medição real mostrou por quê. Os oito
+ * maiores prêmios da Base pagaram, em múltiplos da taxa base:
+ *
+ *     1,3x · 1,9x · 1,9x · 2,2x · 4,2x · 16,8x · 69,6x · 2.651,3x
+ *
+ * A mediana disso é 4,2x e `lerDisputa` a chamou de "MISTO: há alguma disputa
+ * por prioridade". Mas metade dos vencedores pagou MENOS DE 2,5x, ou seja,
+ * ganhou um prêmio de seis dígitos pagando quase nada. Isso não é disputa: é
+ * ausência de disputa. Um único maluco pagando 2.651x puxa a mediana para cima
+ * e apaga o fato que decide tudo.
+ *
+ * O que separa corrida de leilão não é o quanto o VENCEDOR MEDIANO pagou. É
+ * quantos vencedores conseguiram NÃO PAGAR. Num leilão de verdade isso não
+ * acontece: se dava para levar $156.899 pagando 1,9x, alguém teria oferecido
+ * 2x. Ninguém ofereceu — logo o lance não era o que decidia.
+ */
+export function lerDisputaPorPiso(multiplos: Decimal[], pisoAte = 2.5): string {
+    if (multiplos.length < 4) return 'sem dado suficiente';
+    const noPiso = multiplos.filter((m) => m.lessThanOrEqualTo(pisoAte)).length;
+    const fracao = noPiso / multiplos.length;
+    const quantos = `${noPiso} de ${multiplos.length} vencedores pagaram até ${pisoAte}x a taxa base`;
+    if (fracao >= 0.5) {
+        return `CORRIDA: ${quantos} — levaram prêmios grandes sem pagar por prioridade. Se dar lance adiantasse, alguém teria dado. Aceitar lucro menor NÃO ajuda aqui: não há leilão para ganhar, e sim chegada para vencer.`;
+    }
+    if (fracao <= 0.2) {
+        return `LEILÃO: só ${quantos} — o resto pagou caro para passar na frente. Aqui quem aceita lucro menor pode pagar mais e ganhar.`;
+    }
+    return `MISTO: ${quantos}. Parte das disputas se decide no lance e parte na chegada.`;
+}
+
+/**
+ * Onde no bloco o vencedor caiu — a medida que a de gás não alcança.
+ *
+ * A Base ordena por chegada, não por lance, então o preço do gás pode ser mudo
+ * de propósito e não dizer nada sobre a disputa. A posição dentro do bloco não
+ * é: ser a transação número 2 de 180 significa ter chegado ao sequenciador
+ * antes de praticamente todo mundo, e isso não se compra com dinheiro, se
+ * compra com infraestrutura. Ser a número 120 de 180 significa que o vencedor
+ * chegou pelo caminho comum — o mesmo que ela teria.
+ *
+ * Recebe a fração `indice / total` de cada vencedor.
+ */
+export function lerPosicao(fracoes: Decimal[]): string {
+    if (fracoes.length < 4) return 'sem dado suficiente';
+    const ordenados = [...fracoes].sort((a, b) => a.comparedTo(b));
+    const mediana = ordenados[Math.floor(ordenados.length / 2)];
+    const pct = mediana.mul(100).toFixed(0);
+    if (mediana.lessThan(0.15)) {
+        return `NA FRENTE (vencedor mediano nos primeiros ${pct}% do bloco): eles chegam ao sequenciador antes de quase todos. Isso é infraestrutura, não dinheiro — e é a parte mais cara de alcançar.`;
+    }
+    if (mediana.greaterThan(0.5)) {
+        return `NO MEIO OU ATRÁS (vencedor mediano nos ${pct}% do bloco): eles NÃO chegam na frente. Ganharam por ter visto a oportunidade, não por velocidade de rede. Esse é o cenário em que dá para competir.`;
+    }
+    return `INTERMEDIÁRIA (vencedor mediano nos ${pct}% do bloco): nem privilégio de chegada, nem caminho comum.`;
 }
