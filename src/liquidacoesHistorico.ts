@@ -265,8 +265,33 @@ async function principal(): Promise<void> {
 
 // Ponto de entrada: fica desligado até ATIVAR_LIQUIDACOESHISTORICO=1.
 if (require.main === module && exigirAtivacao('liquidacoesHistorico')) {
-    principal().catch((err) => {
-        log.error('Varredura falhou.', { erro: err instanceof Error ? err.message : String(err) });
-        process.exit(1);
-    });
+    /**
+     * Fica vivo e ocioso ao terminar — com sucesso OU com erro.
+     *
+     * Este programa roda uma vez e acaba, e sair tem dois efeitos ruins no
+     * Railway, os dois vistos hoje:
+     *
+     *   1. Sair com erro vira LAÇO. Quando o RPC devolveu 525, o processo saiu,
+     *      o Railway religou, falhou de novo — várias vezes por segundo,
+     *      queimando recurso e enterrando a mensagem útil no meio do ruído.
+     *   2. Sair com SUCESSO pinta o serviço de "CRASHED" na interface, porque
+     *      o Railway espera que serviço fique de pé. Um relatório que deu certo
+     *      parecia falha.
+     *
+     * O `ativacao.ts` já dizia isto num comentário escrito dias antes, e este
+     * arquivo não seguiu. Manter vivo custa o contêiner que o Railway cobraria
+     * de qualquer jeito, e o relatório continua legível no log.
+     */
+    const ficarQuieto = () => {
+        log.info('Terminado. O processo fica ocioso para não reiniciar em laço.', {
+            paraRodarDeNovo: 'reimplante o serviço, ou mude uma variável',
+            paraDesligar: 'apague ATIVAR_LIQUIDACOESHISTORICO',
+        });
+        setInterval(() => {}, 1 << 30);
+    };
+    principal()
+        .catch((err) => {
+            log.error('Varredura falhou.', { erro: err instanceof Error ? err.message : String(err) });
+        })
+        .finally(ficarQuieto);
 }
