@@ -31,6 +31,7 @@ import {
     ehLimiteDeFaixa,
     REDES,
     gorjetaWei,
+    aglomeracao,
     lerDisputaPorPiso,
     repartirOBolo,
     lerPosicao,
@@ -379,6 +380,13 @@ async function principal(): Promise<void> {
         transacoesLidas: posicoes.length,
         leitura: lerPosicao(posicoes),
         detalhe: ondeCairam.join(' | '),
+    });
+
+    // SOZINHA OU NO MONTE — de graça, os blocos já estão na mão.
+    const agl = aglomeracao(liquidacoes, r.maioresLiquidacoes);
+    log.info('SOZINHA OU NO MONTE — por que sobrou para quem levou.', {
+        leitura: agl.leitura,
+        detalhe: agl.detalhe.join(' | '),
     });
 
     // ONDE ESTÁ O DINHEIRO — a contagem não responde isso, e eu estava

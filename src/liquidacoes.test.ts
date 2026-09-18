@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import {
+    aglomeracao,
     contarPorTopico,
     decodificarLiquidacao,
     ehLimiteDeFaixa,
@@ -357,16 +358,6 @@ test('amostra pequena demais não dá veredicto', () => {
 // Onde no bloco: a medida que o gás não alcança numa rede FCFS.
 // ---------------------------------------------------------------------------
 
-test('vencedores na cabeça do bloco = infraestrutura, e ela não compra isso', () => {
-    const cabeca = [0.01, 0.02, 0.03, 0.05, 0.11].map((n) => new Decimal(n));
-    assert.match(lerPosicao(cabeca), /NA FRENTE/);
-});
-
-test('vencedores no meio ou atrás = dá para competir', () => {
-    const meio = [0.4, 0.55, 0.6, 0.7, 0.9].map((n) => new Decimal(n));
-    assert.match(lerPosicao(meio), /NÃO chegam na frente/);
-});
-
 test('a posição no bloco não depende do tamanho do bloco', () => {
     // 2 de 200 e 1 de 100 são a mesma coisa: a fração é o que importa.
     const a = lerPosicao([2 / 200, 2 / 200, 2 / 200, 2 / 200].map((n) => new Decimal(n)));
@@ -430,4 +421,63 @@ test('liquidação sem cotação não entra na soma nem na mediana', () => {
     const r = resumirHistorico([...varias(2, 100), semPreco]);
     assert.equal(r.somaCotada.toString(), '200');
     assert.equal(r.semCotacao, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Posição no bloco: contar o fundo, não medir o meio.
+// ---------------------------------------------------------------------------
+
+/** As oito maiores da Base em 180 dias, medidas em 18/09: fração do bloco. */
+const POSICOES_REAIS = [0.001, 0.007, 0.126, 0.167, 0.167, 0.861, 0.895, 0.929].map(
+    (n) => new Decimal(n),
+);
+
+test('os números reais da Base: a mediana some com as três do fundo', () => {
+    // A mediana é 0,167 e a leitura antiga era "INTERMEDIÁRIA". Não há nenhum
+    // vencedor intermediário nessa lista: há cinco na frente e três no fundo.
+    assert.match(lerPosicao(POSICOES_REAIS), /TEM ESPAÇO/);
+    assert.match(lerPosicao(POSICOES_REAIS), /3 de 8/);
+});
+
+test('sem ninguém no fundo, a porta está fechada', () => {
+    const sofrente = [0.001, 0.004, 0.01, 0.02, 0.03].map((n) => new Decimal(n));
+    assert.match(lerPosicao(sofrente), /NINGUÉM GANHOU DO FUNDO/);
+});
+
+test('uma só no fundo já conta — é prova de existência, não maioria', () => {
+    const uma = [0.01, 0.02, 0.03, 0.04, 0.88].map((n) => new Decimal(n));
+    assert.match(lerPosicao(uma), /TEM ESPAÇO/);
+    assert.match(lerPosicao(uma), /1 de 5/);
+});
+
+// ---------------------------------------------------------------------------
+// Sozinha ou no monte.
+// ---------------------------------------------------------------------------
+
+test('grande cercada de outras = pânico, os robôs saturaram', () => {
+    const todas = [1000, 1001, 1002, 1003, 1004].map((b) =>
+        decodificarLiquidacao(logDe({ dividaCrua: 100_000_000n, bloco: b })),
+    );
+    const a = aglomeracao(todas, [{ usd: new Decimal(200_000), bloco: 1002 }]);
+    assert.equal(a.emMonte, 1);
+    assert.match(a.leitura, /PÂNICO/);
+    assert.match(a.detalhe[0], /4 outras/, 'a própria não se conta');
+});
+
+test('grande isolada = ninguém estava olhando', () => {
+    const todas = [1000, 9000, 9001].map((b) =>
+        decodificarLiquidacao(logDe({ dividaCrua: 100_000_000n, bloco: b })),
+    );
+    const a = aglomeracao(todas, [{ usd: new Decimal(200_000), bloco: 1000 }]);
+    assert.equal(a.sozinhas, 1);
+    assert.match(a.leitura, /DESPERCEBIDAS/);
+    assert.match(a.detalhe[0], /0 outras/);
+});
+
+test('a janela é em blocos e conta dos dois lados', () => {
+    const todas = [970, 1000, 1030, 1031].map((b) =>
+        decodificarLiquidacao(logDe({ dividaCrua: 100_000_000n, bloco: b })),
+    );
+    const a = aglomeracao(todas, [{ usd: new Decimal(1), bloco: 1000 }], 30);
+    assert.match(a.detalhe[0], /2 outras/, '970 e 1030 entram; 1031 fica de fora');
 });

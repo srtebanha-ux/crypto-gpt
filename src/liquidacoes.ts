@@ -540,27 +540,84 @@ export function lerDisputaPorPiso(multiplos: Decimal[], pisoAte = 2.5): string {
 }
 
 /**
- * Onde no bloco o vencedor caiu — a medida que a de gás não alcança.
+ * Onde no bloco o vencedor caiu — e o que a mediana escondeu aqui também.
  *
- * A Base ordena por chegada, não por lance, então o preço do gás pode ser mudo
- * de propósito e não dizer nada sobre a disputa. A posição dentro do bloco não
- * é: ser a transação número 2 de 180 significa ter chegado ao sequenciador
- * antes de praticamente todo mundo, e isso não se compra com dinheiro, se
- * compra com infraestrutura. Ser a número 120 de 180 significa que o vencedor
- * chegou pelo caminho comum — o mesmo que ela teria.
+ * Esta é a TERCEIRA vez neste projeto que eu escolhi uma estatística do meio
+ * para um dado que não tem meio, e vale escrever por quê: a mediana só
+ * descreve bem uma pilha com um monte no centro. Liquidação grande não é
+ * assim. Ela é disputada de dois jeitos opostos, e o resultado são dois
+ * montes com um vazio entre eles. A mediana cai no vazio e descreve um
+ * vencedor que não existe.
  *
- * Recebe a fração `indice / total` de cada vencedor.
+ * As oito maiores da Base, em fração do bloco:
+ *
+ *     0,1% · 0,7% · 12,6% · 16,7% · 16,7% · 86,1% · 89,5% · 92,9%
+ *
+ * A mediana é 16,7% e a leitura antiga chamou de "INTERMEDIÁRIA: nem
+ * privilégio de chegada, nem caminho comum". Mas não existe nenhum vencedor
+ * intermediário ali. Existem cinco na frente e TRÊS NO FUNDO — inclusive a
+ * maior de todas, US$255.485 na transação 6.494 de 6.990.
+ *
+ * E é o fundo que importa, porque é prova de existência. Ganhar um prêmio de
+ * seis dígitos na transação 6.494 significa que 6.493 transações passaram
+ * antes sem levar. Quem levou não chegou primeiro nem pagou para passar na
+ * frente: simplesmente ninguém disputou. Uma vez seria sorte; três de oito é
+ * espaço.
+ *
+ * Contar o fundo, então, e não medir o meio.
  */
 export function lerPosicao(fracoes: Decimal[]): string {
     if (fracoes.length < 4) return 'sem dado suficiente';
-    const ordenados = [...fracoes].sort((a, b) => a.comparedTo(b));
-    const mediana = ordenados[Math.floor(ordenados.length / 2)];
-    const pct = mediana.mul(100).toFixed(0);
-    if (mediana.lessThan(0.15)) {
-        return `NA FRENTE (vencedor mediano nos primeiros ${pct}% do bloco): eles chegam ao sequenciador antes de quase todos. Isso é infraestrutura, não dinheiro — e é a parte mais cara de alcançar.`;
+    const fundo = fracoes.filter((f) => f.greaterThan(0.5)).length;
+    const frente = fracoes.filter((f) => f.lessThan(0.15)).length;
+    const n = fracoes.length;
+
+    if (fundo === 0) {
+        return `NINGUÉM GANHOU DO FUNDO (${frente} de ${n} vencedores na frente do bloco): toda vez que houve prêmio grande, quem levou estava na cabeça. Chegar tarde nunca deu certo — e chegar cedo é infraestrutura, não código.`;
     }
-    if (mediana.greaterThan(0.5)) {
-        return `NO MEIO OU ATRÁS (vencedor mediano nos ${pct}% do bloco): eles NÃO chegam na frente. Ganharam por ter visto a oportunidade, não por velocidade de rede. Esse é o cenário em que dá para competir.`;
+    return `TEM ESPAÇO: ${fundo} de ${n} vencedores levaram prêmios grandes estando na METADE DE TRÁS do bloco — passaram milhares de transações antes sem ninguém pegar. Não foi velocidade nem lance: foi ninguém ter disputado. É aqui que programar melhor ganha de chegar primeiro.`;
+}
+
+/**
+ * A grande caiu sozinha ou no meio de um monte?
+ *
+ * As duas situações são boas para ela, mas por motivos opostos, e pedem bots
+ * diferentes — por isso não dá para deixar as duas juntas num número só.
+ *
+ * SOZINHA significa que o evento passou despercebido: ninguém estava olhando
+ * aquela posição. Ganha quem tiver a lista mais completa de posições vigiadas,
+ * e isso é trabalho de código, feito com calma, antes do dia.
+ *
+ * NO MEIO DE UM MONTE significa pânico: abriu mais coisa do que os robôs
+ * conseguiram processar e sobrou para quem estava por perto. Ganha quem
+ * aguentar o tranco — e quem estiver ligado naquele minuto.
+ *
+ * Não custa chamada nenhuma de rede: os blocos já vieram na varredura.
+ */
+export function aglomeracao(
+    todas: Liquidacao[],
+    alvos: Array<{ usd: Decimal; bloco: number }>,
+    janelaBlocos = 30,
+): { sozinhas: number; emMonte: number; leitura: string; detalhe: string[] } {
+    const blocos = todas.map((l) => l.bloco).sort((a, b) => a - b);
+    let sozinhas = 0;
+    let emMonte = 0;
+    const detalhe: string[] = [];
+
+    for (const alvo of alvos) {
+        // -1 para não contar a própria.
+        const vizinhas =
+            blocos.filter((b) => Math.abs(b - alvo.bloco) <= janelaBlocos).length - 1;
+        if (vizinhas >= 3) emMonte += 1;
+        else sozinhas += 1;
+        detalhe.push(`$${alvo.usd.toFixed(0)}: ${vizinhas} outras em ±${janelaBlocos} blocos`);
     }
-    return `INTERMEDIÁRIA (vencedor mediano nos ${pct}% do bloco): nem privilégio de chegada, nem caminho comum.`;
+
+    const n = alvos.length;
+    const leitura =
+        emMonte > sozinhas
+            ? `PÂNICO: ${emMonte} de ${n} das grandes caíram no meio de um monte. Abre mais do que os robôs dão conta e sobra. O bot precisa estar LIGADO no minuto certo e aguentar várias de uma vez.`
+            : `DESPERCEBIDAS: ${sozinhas} de ${n} das grandes caíram sozinhas, sem outras por perto. Ninguém estava olhando aquela posição. Ganha quem tiver a lista de posições mais completa — e isso se faz com calma, antes.`;
+
+    return { sozinhas, emMonte, leitura, detalhe };
 }
