@@ -33,6 +33,13 @@ import {
     gorjetaWei,
     FAIXAS_USD,
     RPCS_PARA_TENTAR,
+    SELETOR_GET_RESERVES_LIST,
+    SELETOR_SYMBOL,
+    SELETOR_DECIMALS,
+    classificarToken,
+    decodificarListaDeEnderecos,
+    decodificarTexto,
+    type Token,
     TAMANHOS_PARA_SONDAR,
     escolherMelhorRpc,
     minutosEstimados,
@@ -208,6 +215,97 @@ async function sondar(topo: number): Promise<boolean> {
     return true;
 }
 
+/**
+ * O endereço do pool é mesmo um pool da Aave?
+ *
+ * Os endereços das redes baratas eu escrevi de memória. Um errado produziria
+ * uma varredura perfeita de zero eventos — e "zero liquidações grandes" é uma
+ * conclusão, não um defeito, para quem lê o relatório depois. Conferir custa
+ * duas chamadas e transforma o meu palpite em algo que o programa checa.
+ */
+async function verificarPool(): Promise<boolean> {
+    try {
+        const codigo = await chamar<string>('eth_getCode', [POOL, 'latest']);
+        if (!codigo || codigo === '0x') {
+            log.error('NÃO HÁ CONTRATO NENHUM neste endereço. A varredura acharia zero e pareceria resposta.', {
+                rede: REDE.nome,
+                endereco: POOL,
+                oQueFazer: 'confira o endereço do Pool da Aave V3 desta rede e use LIQUIDACOES_POOL',
+            });
+            return false;
+        }
+        const lista = decodificarListaDeEnderecos(
+            await chamar<string>('eth_call', [{ to: POOL, data: SELETOR_GET_RESERVES_LIST }, 'latest']),
+        );
+        if (lista.length === 0) {
+            log.error('Há contrato aqui, mas ele não responde como pool da Aave.', {
+                rede: REDE.nome,
+                endereco: POOL,
+                oQueFazer: 'o endereço existe mas é outra coisa; confira o Pool da Aave V3 desta rede',
+            });
+            return false;
+        }
+        log.info('Pool confirmado.', { rede: REDE.nome, endereco: POOL, ativosNoPool: lista.length });
+        return true;
+    } catch (err) {
+        log.error('Não deu para confirmar o pool; não vou varrer às cegas.', {
+            erro: err instanceof Error ? err.message : String(err),
+        });
+        return false;
+    }
+}
+
+/**
+ * Pergunta ao pool quais moedas ele tem, em vez de eu escrever a tabela.
+ *
+ * Eu escrevi `TOKENS_BASE` de cabeça e isso matou a rodada da Ethereum — o
+ * mesmo USDC tem endereço diferente em cada rede. Consertei escrevendo mais
+ * cinco tabelas de cabeça, que é a mesma aposta cinco vezes.
+ *
+ * Cai para a tabela à mão se a descoberta não funcionar, e o relatório diz
+ * qual das duas veio, para ninguém confundir "descoberto" com "chutado".
+ */
+async function descobrirMoedas(): Promise<Record<string, Token>> {
+    try {
+        const enderecos = decodificarListaDeEnderecos(
+            await chamar<string>('eth_call', [{ to: POOL, data: SELETOR_GET_RESERVES_LIST }, 'latest']),
+        );
+        const tabela: Record<string, Token> = {};
+        for (const e of enderecos) {
+            try {
+                const [sim, dec] = await Promise.all([
+                    chamar<string>('eth_call', [{ to: e, data: SELETOR_SYMBOL }, 'latest']),
+                    chamar<string>('eth_call', [{ to: e, data: SELETOR_DECIMALS }, 'latest']),
+                ]);
+                const simbolo = decodificarTexto(sim);
+                const decimais = Number(BigInt(dec === '0x' ? '0x0' : dec));
+                if (simbolo === '' || decimais === 0 || decimais > 36) continue;
+                tabela[e] = classificarToken(simbolo, decimais);
+            } catch {
+                // Um token que não responde não invalida os outros.
+            }
+            await dormir(PAUSA_MS);
+        }
+        if (Object.keys(tabela).length === 0) throw new Error('nenhuma moeda legível');
+        const cotaveis = Object.values(tabela).filter((t) => t.estavel || t.emEth).length;
+        log.info('MOEDAS DESCOBERTAS no pool — tabela lida, não escrita de memória.', {
+            quantas: Object.keys(tabela).length,
+            seiCotar: `${cotaveis} de ${Object.keys(tabela).length}`,
+            lista: Object.values(tabela)
+                .map((t) => `${t.simbolo}${t.estavel ? '=$' : t.emEth ? '=ETH' : '=?'}`)
+                .join(' '),
+        });
+        return tabela;
+    } catch (err) {
+        const reserva = REDE.tokens ?? {};
+        log.warn('Descoberta falhou; usando a tabela escrita à mão (que pode estar errada).', {
+            erro: err instanceof Error ? err.message : String(err),
+            moedasNaReserva: Object.keys(reserva).length,
+        });
+        return reserva;
+    }
+}
+
 async function principal(): Promise<void> {
     log.info('*** MODO LEITURA — nenhuma transação é enviada por este processo. ***');
 
@@ -217,6 +315,8 @@ async function principal(): Promise<void> {
     // pedaços e produziu um relatório inteiro de zeros depois de já saber que
     // não ia medir nada. Avisar e seguir é pior que não avisar — dá ao ruído
     // a aparência de resultado.
+    if (!(await verificarPool())) return;
+    const moedas = await descobrirMoedas();
     if (!(await sondar(topo))) {
         log.info('Varredura cancelada antes de começar: nenhum RPC serve.', {
             rede: REDE.nome,
@@ -345,7 +445,7 @@ async function principal(): Promise<void> {
         return;
     }
 
-    const r = resumirHistorico(liquidacoes, REDE.tokens, PRECO_ETH);
+    const r = resumirHistorico(liquidacoes, moedas, PRECO_ETH);
     const dias = (BLOCOS * SEG_POR_BLOCO) / 86400;
 
     log.info('HISTÓRICO DE LIQUIDAÇÕES.', {
@@ -441,6 +541,7 @@ async function principal(): Promise<void> {
     //
     // São ~2 chamadas por transação, num punhado de transações. Barato.
     const multiplos: Decimal[] = [];
+    const custos: Decimal[] = [];
     const posicoes: Decimal[] = [];
     const gorjetas: string[] = [];
     const ondeCairam: string[] = [];
@@ -474,6 +575,10 @@ async function principal(): Promise<void> {
             const mult = multiploDaBase({ efetivoWei, baseWei });
             if (mult === null) continue;
             multiplos.push(mult);
+            // O custo TOTAL, não a gorjeta: é isto que sai do bolso dela a
+            // cada tentativa, e é o número que decide em qual rede R$247
+            // compram tentativas suficientes para acertar uma.
+            custos.push(efetivoWei.mul(gasUsado).dividedBy(1e18));
             gorjetas.push(
                 `$${m.usd.toFixed(0)}: ${mult.toFixed(1)}x a base, gorjeta ${gorjetaWei({ efetivoWei, baseWei, gasUsado })
                     .dividedBy(1e18)
@@ -498,6 +603,28 @@ async function principal(): Promise<void> {
         leitura: lerDisputaPorPiso(multiplos),
         detalhe: gorjetas.join(' | '),
     });
+
+    // CUSTO POR TENTATIVA — a pergunta dela: onde o gás é mais barato?
+    if (custos.length > 0) {
+        const ordenadosCusto = [...custos].sort((a, b) => a.comparedTo(b));
+        const custoTipico = ordenadosCusto[Math.floor(ordenadosCusto.length / 2)];
+        const ehEth = REDE.moedaNativa === 'ETH';
+        const emReais =
+            ehEth && PRECO_ETH ? custoTipico.mul(PRECO_ETH).mul(5.5) : null;
+        log.info('CUSTO POR TENTATIVA — quanto custa jogar nesta rede.', {
+            moeda: REDE.moedaNativa,
+            tipico: `${custoTipico.toFixed(6)} ${REDE.moedaNativa}`,
+            maisBarata: `${ordenadosCusto[0].toFixed(6)} ${REDE.moedaNativa}`,
+            maisCara: `${ordenadosCusto[ordenadosCusto.length - 1].toFixed(6)} ${REDE.moedaNativa}`,
+            emReais: emReais
+                ? `~R$ ${emReais.toFixed(2)} por tentativa vencedora (a US$${PRECO_ETH!.toFixed(0)}/ETH e R$5,50/US$)`
+                : `informe o preço do ${REDE.moedaNativa} para ver em reais`,
+            // Uma tentativa PERDIDA custa menos: ela reverte cedo em vez de
+            // executar tudo. Quanto menos, ainda não medi — e dizer um número
+            // aqui seria inventar.
+            observacao: 'este é o custo de uma vitória; uma tentativa perdida custa menos, quanto eu ainda não medi',
+        });
+    }
 
     log.info('ONDE NO BLOCO — se dá para chegar lá.', {
         transacoesLidas: posicoes.length,

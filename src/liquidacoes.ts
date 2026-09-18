@@ -412,7 +412,26 @@ export function ehLimiteDeFaixa(mensagem: string): boolean {
  * que não presta, o programa experimenta todos e RELATA qual serve e com que
  * tamanho de pedaço. É o mesmo caminho que resolveu o palpite do tópico.
  */
+/**
+ * Redes de gás barato, para a pergunta dela: "tem outro lugar tipo a Base, ou
+ * menor, onde o gás seja mais barato?"
+ *
+ * Os endereços de pool abaixo eu escrevi de memória e NÃO confiro. Isso seria
+ * imprudente se o programa aceitasse — mas ele não aceita: antes de varrer ele
+ * pede `eth_getCode` no endereço e `getReservesList()` no pool, e um endereço
+ * errado aparece como "não há contrato aqui" ou "não é um pool da Aave" na
+ * largada, em segundos. Escrever palpite que o programa confere é diferente de
+ * escrever palpite que vira relatório.
+ */
+export const REDES_BARATAS = ['gnosis', 'bnb', 'scroll', 'metis', 'linea', 'celo'];
+
 export const RPCS_PARA_TENTAR: Record<string, string[]> = {
+    gnosis: ['https://rpc.gnosischain.com', 'https://gnosis-rpc.publicnode.com'],
+    bnb: ['https://bsc-dataseed.binance.org', 'https://bsc-rpc.publicnode.com'],
+    scroll: ['https://rpc.scroll.io', 'https://scroll-rpc.publicnode.com'],
+    metis: ['https://andromeda.metis.io/?owner=1088'],
+    linea: ['https://rpc.linea.build'],
+    celo: ['https://forno.celo.org'],
     base: ['https://mainnet.base.org', 'https://base-rpc.publicnode.com', 'https://base.llamarpc.com'],
     ethereum: [
         'https://ethereum-rpc.publicnode.com',
@@ -481,8 +500,15 @@ export interface Rede {
      * 100% "sem cotação" — e, pior, com aparência de resposta: varredura
      * completa, zero falhas, veredicto suspenso por "não sei cotar". Mais uma
      * da família de falhas que não dá erro na tela.
+     *
+     * Hoje serve de RESERVA: a tabela de verdade é descoberta no pool, com
+     * `getReservesList()`. Redes sem tabela à mão dependem inteiramente da
+     * descoberta, o que é o objetivo — escrever endereço de memória é o erro
+     * que se está tentando parar de cometer.
      */
-    tokens: Record<string, Token>;
+    tokens?: Record<string, Token>;
+    /** O que paga o gás nesta rede. Nem toda rede cobra em ETH. */
+    moedaNativa: string;
 }
 
 /** USDC/USDT/DAI/WETH de cada rede. São os ativos em que a dívida costuma estar. */
@@ -536,12 +562,61 @@ const TOKENS_AVALANCHE: Record<string, Token> = {
  * de verdade. O palpite do tópico da Base foi confirmado exatamente assim.
  */
 export const REDES: Record<string, Rede> = {
+    gnosis: {
+        nome: 'Gnosis',
+        rpc: 'https://rpc.gnosischain.com',
+        pool: '0xb50201558B00496A145fE76f7424749556E326D8',
+        segPorBloco: 5,
+        blocos180d: 3_110_400,
+        moedaNativa: 'xDAI',
+    },
+    bnb: {
+        nome: 'BNB Chain',
+        rpc: 'https://bsc-dataseed.binance.org',
+        pool: '0x6807dc923806fE8Fd134338EABCA509979a7e0cB',
+        segPorBloco: 3,
+        blocos180d: 5_184_000,
+        moedaNativa: 'BNB',
+    },
+    scroll: {
+        nome: 'Scroll',
+        rpc: 'https://rpc.scroll.io',
+        pool: '0x11fCfe756c05AD438e312a7fd934381537D3cFfe',
+        segPorBloco: 3,
+        blocos180d: 5_184_000,
+        moedaNativa: 'ETH',
+    },
+    metis: {
+        nome: 'Metis',
+        rpc: 'https://andromeda.metis.io/?owner=1088',
+        pool: '0x90df02551bB792286e8D4f13E0e357b4Bf1D6a57',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+        moedaNativa: 'METIS',
+    },
+    linea: {
+        nome: 'Linea',
+        rpc: 'https://rpc.linea.build',
+        pool: '0xc47b8C00b0f69a36fa203Ffeac0334874574a8Ac',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+        moedaNativa: 'ETH',
+    },
+    celo: {
+        nome: 'Celo',
+        rpc: 'https://forno.celo.org',
+        pool: '0x3E59A31363E2ad014dcbc521c4a0d5757d9f3402',
+        segPorBloco: 5,
+        blocos180d: 3_110_400,
+        moedaNativa: 'CELO',
+    },
     base: {
         nome: 'Base',
         rpc: 'https://mainnet.base.org',
         pool: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
         segPorBloco: 2,
         blocos180d: 7_776_000,
+        moedaNativa: 'ETH',
         tokens: TOKENS_BASE,
     },
     ethereum: {
@@ -550,6 +625,7 @@ export const REDES: Record<string, Rede> = {
         pool: '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',
         segPorBloco: 12,
         blocos180d: 1_296_000,
+        moedaNativa: 'ETH',
         tokens: TOKENS_ETHEREUM,
     },
     arbitrum: {
@@ -560,6 +636,7 @@ export const REDES: Record<string, Rede> = {
         // 180 dias dariam 62 milhões de blocos e horas de leitura. Aqui a
         // janela é menor de propósito: ~30 dias, que já mostra o tamanho.
         blocos180d: 10_368_000,
+        moedaNativa: 'ETH',
         tokens: TOKENS_ARBITRUM,
     },
     optimism: {
@@ -568,6 +645,7 @@ export const REDES: Record<string, Rede> = {
         pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
         segPorBloco: 2,
         blocos180d: 7_776_000,
+        moedaNativa: 'ETH',
         tokens: TOKENS_OPTIMISM,
     },
     polygon: {
@@ -576,6 +654,7 @@ export const REDES: Record<string, Rede> = {
         pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
         segPorBloco: 2,
         blocos180d: 7_776_000,
+        moedaNativa: 'POL',
         tokens: TOKENS_POLYGON,
     },
     avalanche: {
@@ -584,6 +663,7 @@ export const REDES: Record<string, Rede> = {
         pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
         segPorBloco: 2,
         blocos180d: 7_776_000,
+        moedaNativa: 'AVAX',
         tokens: TOKENS_AVALANCHE,
     },
 };
@@ -917,4 +997,77 @@ export function janelaDeOportunidade(
         medianaSegundos: segundos,
         leitura,
     };
+}
+
+// ---------------------------------------------------------------------------
+// DESCOBRIR as moedas da rede, em vez de eu escrever a tabela de memória.
+// ---------------------------------------------------------------------------
+
+export const SELETOR_GET_RESERVES_LIST = '0xd1946dbc';
+export const SELETOR_SYMBOL = '0x95d89b41';
+export const SELETOR_DECIMALS = '0x313ce567';
+
+/**
+ * Por que a tabela de moedas deixa de ser escrita à mão.
+ *
+ * Hoje eu escrevi `TOKENS_BASE` de cabeça e a rodada da Ethereum morreu por
+ * causa disso — o mesmo USDC tem endereço diferente em cada rede. Consertei
+ * escrevendo mais cinco tabelas de cabeça, o que é a mesma aposta cinco vezes.
+ *
+ * A Aave sabe a resposta: `getReservesList()` devolve todos os ativos do pool,
+ * e cada um responde `symbol()` e `decimals()`. Três chamadas e a tabela sai
+ * correta, para qualquer rede, inclusive as que eu nunca ouvi falar.
+ *
+ * As tabelas à mão ficam como reserva: se a descoberta falhar, usa-se a que
+ * existir, e o relatório diz qual das duas veio.
+ */
+export function decodificarListaDeEnderecos(dataHex: string): string[] {
+    const limpo = dataHex.replace(/^0x/, '');
+    if (limpo.length < 128) return [];
+    const quantos = Number(BigInt(`0x${limpo.slice(64, 128)}`));
+    const fora: string[] = [];
+    for (let i = 0; i < quantos; i += 1) {
+        const palavra = limpo.slice(128 + i * 64, 128 + (i + 1) * 64);
+        if (palavra.length < 64) break;
+        fora.push(`0x${palavra.slice(24)}`.toLowerCase());
+    }
+    return fora;
+}
+
+/** Decodifica uma string ABI, e também o formato curto de bytes32 que alguns tokens antigos usam. */
+export function decodificarTexto(dataHex: string): string {
+    const limpo = dataHex.replace(/^0x/, '');
+    if (limpo.length === 0) return '';
+    if (limpo.length === 64) {
+        // bytes32 cru: texto seguido de zeros.
+        const bytes = limpo.replace(/(00)+$/, '');
+        return Buffer.from(bytes, 'hex').toString('utf8').replace(/\0/g, '');
+    }
+    if (limpo.length < 128) return '';
+    const tamanho = Number(BigInt(`0x${limpo.slice(64, 128)}`));
+    return Buffer.from(limpo.slice(128, 128 + tamanho * 2), 'hex').toString('utf8');
+}
+
+/**
+ * Classifica pelo símbolo — e é aqui que o cuidado importa.
+ *
+ * Estável é o que vale ~1 dólar. Um símbolo com USD ou DAI é estável; um com
+ * ETH segue o preço do ETH. O resto fica sem cotação, que continua sendo a
+ * resposta honesta em vez de um chute.
+ *
+ * `wstETH` e `weETH` valem MAIS que um ETH (são ETH rendendo juros), então
+ * marcá-los como `emEth` subestimaria a dívida. Ficam de fora de propósito: é
+ * melhor aparecer em "sem cotação" do que entrar com um número baixo demais e
+ * fazer o histograma dizer que não há nada grande.
+ */
+export function classificarToken(simbolo: string, decimais: number): Token {
+    const s = simbolo.toUpperCase();
+    const estavel = /USD|DAI|EUR|BRZ|GHO|FRAX|LUSD|MAI/.test(s);
+    const puroEth = s === 'WETH' || s === 'ETH' || s === 'WETH.E';
+    return { simbolo, decimais, estavel, ...(puroEth ? { emEth: true } : {}) };
+}
+
+/** Uma chamada `eth_call` sem argumentos. */
+export function chamadaSimples(seletor: string): string {
+    return seletor;
 }

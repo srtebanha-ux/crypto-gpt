@@ -7,6 +7,10 @@ import {
     chamadaDeConfiguracao,
     janelaDeOportunidade,
     REDES,
+    REDES_BARATAS,
+    classificarToken,
+    decodificarListaDeEnderecos,
+    decodificarTexto,
     RPCS_PARA_TENTAR,
     TAMANHOS_PARA_SONDAR,
     escolherMelhorRpc,
@@ -26,6 +30,7 @@ import {
     resumirHistorico,
     valorEmDolares,
     type LogCru,
+    type Token,
 } from './liquidacoes';
 
 /** Uma palavra de 32 bytes, como o ABI codifica. */
@@ -620,9 +625,21 @@ test('o tempo de bloco da rede é respeitado', () => {
 // Cada rede tem a sua tabela de moedas.
 // ---------------------------------------------------------------------------
 
-test('toda rede traz tabela própria, e nenhuma vem vazia', () => {
+test('a tabela à mão virou reserva — quem manda é a descoberta no pool', () => {
+    // Já não é obrigatória: as redes baratas nascem sem tabela de propósito,
+    // porque escrever endereço de memória é o erro que se quer parar de
+    // cometer. Mas quem TEM uma não pode tê-la vazia.
     for (const [nome, rede] of Object.entries(REDES)) {
-        assert.ok(Object.keys(rede.tokens).length > 0, `${nome} sem tabela`);
+        if (rede.tokens === undefined) continue;
+        assert.ok(Object.keys(rede.tokens).length > 0, `${nome} com tabela vazia`);
+    }
+});
+
+test('toda rede diz o que paga o gás nela', () => {
+    // Nem toda rede cobra em ETH. Converter gás de Polygon pelo preço do ETH
+    // daria um custo 1.000 vezes maior do que o real.
+    for (const [nome, rede] of Object.entries(REDES)) {
+        assert.ok(rede.moedaNativa.length > 0, `${nome} sem moeda nativa`);
     }
 });
 
@@ -630,27 +647,26 @@ test('o USDC da Base não é o USDC da Ethereum', () => {
     // O bug que isso trava: rodar a Ethereum com a tabela da Base devolve
     // varredura completa, zero falhas e 100% sem cotação — com cara de
     // resposta, não de defeito.
-    const usdcBase = Object.keys(REDES.base.tokens).find(
-        (k) => REDES.base.tokens[k].simbolo === 'USDC',
-    );
-    const usdcEth = Object.keys(REDES.ethereum.tokens).find(
-        (k) => REDES.ethereum.tokens[k].simbolo === 'USDC',
-    );
+    const achar = (t: Record<string, Token> | undefined) =>
+        Object.keys(t ?? {}).find((k) => t![k].simbolo === 'USDC');
+    const usdcBase = achar(REDES.base.tokens);
+    const usdcEth = achar(REDES.ethereum.tokens);
     assert.ok(usdcBase && usdcEth);
     assert.notEqual(usdcBase, usdcEth);
 });
 
 test('os endereços das tabelas estão em minúsculas — a busca depende disso', () => {
     for (const [nome, rede] of Object.entries(REDES)) {
-        for (const k of Object.keys(rede.tokens)) {
+        for (const k of Object.keys(rede.tokens ?? {})) {
             assert.equal(k, k.toLowerCase(), `${nome}: ${k}`);
             assert.match(k, /^0x[0-9a-f]{40}$/, `${nome}: ${k}`);
         }
     }
 });
 
-test('toda rede sabe cotar pelo menos um estável e o WETH dela', () => {
+test('a rede que TEM tabela sabe cotar um estável e o WETH dela', () => {
     for (const [nome, rede] of Object.entries(REDES)) {
+        if (rede.tokens === undefined) continue;
         const vs = Object.values(rede.tokens);
         assert.ok(vs.some((t) => t.estavel), `${nome} sem estável`);
         assert.ok(vs.some((t) => t.emEth), `${nome} sem WETH`);
@@ -723,4 +739,63 @@ test('os tamanhos de sondagem vão do menor ao maior', () => {
     // A sondagem para no primeiro que falha, então a ordem é o algoritmo.
     const ordenado = [...TAMANHOS_PARA_SONDAR].sort((a, b) => a - b);
     assert.deepEqual(TAMANHOS_PARA_SONDAR, ordenado);
+});
+
+// ---------------------------------------------------------------------------
+// Descobrir as moedas no pool, em vez de escrever de memória.
+// ---------------------------------------------------------------------------
+
+/** Codifica um array de endereços como o ABI devolve. */
+function abiEnderecos(lista: string[]): string {
+    const cab = (32).toString(16).padStart(64, '0');
+    const n = lista.length.toString(16).padStart(64, '0');
+    return `0x${cab}${n}${lista.map((e) => e.replace(/^0x/, '').padStart(64, '0')).join('')}`;
+}
+
+test('a lista de reservas do pool é lida direito', () => {
+    const lista = ['0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', '0x6B175474E89094C44Da98b954EedeAC495271d0F'];
+    const fora = decodificarListaDeEnderecos(abiEnderecos(lista));
+    assert.deepEqual(fora, lista.map((e) => e.toLowerCase()));
+});
+
+test('lista vazia é lista vazia, e resposta curta não quebra', () => {
+    assert.deepEqual(decodificarListaDeEnderecos(abiEnderecos([])), []);
+    assert.deepEqual(decodificarListaDeEnderecos('0x'), []);
+    assert.deepEqual(decodificarListaDeEnderecos('0xabcd'), []);
+});
+
+test('symbol() é lido tanto no formato string quanto no bytes32 antigo', () => {
+    const comoString =
+        '0x' +
+        (32).toString(16).padStart(64, '0') +
+        (4).toString(16).padStart(64, '0') +
+        Buffer.from('USDC').toString('hex').padEnd(64, '0');
+    assert.equal(decodificarTexto(comoString), 'USDC');
+    // MKR e outros tokens antigos devolvem bytes32 cru, sem cabeçalho.
+    assert.equal(decodificarTexto(`0x${Buffer.from('DAI').toString('hex').padEnd(64, '0')}`), 'DAI');
+});
+
+test('a classificação acerta estável, ETH e desconhecido', () => {
+    assert.equal(classificarToken('USDC', 6).estavel, true);
+    assert.equal(classificarToken('USDbC', 6).estavel, true);
+    assert.equal(classificarToken('DAI', 18).estavel, true);
+    assert.equal(classificarToken('GHO', 18).estavel, true);
+    assert.equal(classificarToken('WETH', 18).emEth, true);
+    assert.equal(classificarToken('WBTC', 8).estavel, false);
+    assert.equal(classificarToken('WBTC', 8).emEth, undefined);
+});
+
+test('wstETH e weETH NÃO entram como ETH — valem mais que um ETH', () => {
+    // Marcá-los como emEth subestimaria a dívida em uns 20%, e o histograma
+    // diria que não há nada grande. "Sem cotação" é a resposta correta.
+    assert.equal(classificarToken('wstETH', 18).emEth, undefined);
+    assert.equal(classificarToken('weETH', 18).emEth, undefined);
+    assert.equal(classificarToken('rsETH', 18).emEth, undefined);
+});
+
+test('as redes baratas nascem sem tabela, mas com RPC para sondar', () => {
+    for (const nome of REDES_BARATAS) {
+        assert.ok(REDES[nome], `${nome} não existe em REDES`);
+        assert.ok((RPCS_PARA_TENTAR[nome] ?? []).length > 0, `${nome} sem RPC`);
+    }
 });
