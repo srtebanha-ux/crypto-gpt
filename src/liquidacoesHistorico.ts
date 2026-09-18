@@ -232,7 +232,7 @@ async function principal(): Promise<void> {
         return;
     }
 
-    const r = resumirHistorico(liquidacoes, undefined, PRECO_ETH);
+    const r = resumirHistorico(liquidacoes, REDE.tokens, PRECO_ETH);
     const dias = (BLOCOS * SEG_POR_BLOCO) / 86400;
 
     log.info('HISTÓRICO DE LIQUIDAÇÕES.', {
@@ -297,6 +297,11 @@ async function principal(): Promise<void> {
         leitura =
             `VEREDICTO SUSPENSO: ${pedacosComErro} de ${tentados} pedaços falharam ` +
             `(${(furo * 100).toFixed(0)}%). Esta amostra não mede nada — conserte o RPC e rode de novo.`;
+    } else if (semPreco > 0.9) {
+        leitura =
+            `VEREDICTO IMPOSSÍVEL: ${(semPreco * 100).toFixed(0)}% sem cotação. ` +
+            `Isso não é falta de dado, é a tabela de moedas não sendo a desta rede — ` +
+            `o mesmo USDC tem endereço diferente em cada uma. Não conclua nada desta rodada.`;
     } else if (semPreco > 0.2) {
         leitura =
             `VEREDICTO SUSPENSO: ${(semPreco * 100).toFixed(0)}% das liquidações são em tokens que eu não sei ` +

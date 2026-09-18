@@ -402,7 +402,56 @@ export interface Rede {
     segPorBloco: number;
     /** Blocos que cobrem ~180 dias, já calculado. */
     blocos180d: number;
+    /**
+     * As moedas DESTA rede.
+     *
+     * O mesmo USDC tem endereço diferente em cada rede, e a tabela era só da
+     * Base. Trocar `LIQUIDACOES_REDE` para ethereum e rodar teria devolvido
+     * 100% "sem cotação" — e, pior, com aparência de resposta: varredura
+     * completa, zero falhas, veredicto suspenso por "não sei cotar". Mais uma
+     * da família de falhas que não dá erro na tela.
+     */
+    tokens: Record<string, Token>;
 }
+
+/** USDC/USDT/DAI/WETH de cada rede. São os ativos em que a dívida costuma estar. */
+const TOKENS_ETHEREUM: Record<string, Token> = {
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0xdac17f958d2ee523a2206206994597c13d831ec7': { simbolo: 'USDT', decimais: 6, estavel: true },
+    '0x6b175474e89094c44da98b954eedeac495271d0f': { simbolo: 'DAI', decimais: 18, estavel: true },
+    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+};
+
+const TOKENS_ARBITRUM: Record<string, Token> = {
+    '0xaf88d065e77c8cc2239327c5edb3a432268e5831': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0xff970a61a04b1ca14834a43f5de4533ebddb5cc8': { simbolo: 'USDC.e', decimais: 6, estavel: true },
+    '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9': { simbolo: 'USDT', decimais: 6, estavel: true },
+    '0xda10009cbd5d07dd0cecc66161fc93d7c9000da1': { simbolo: 'DAI', decimais: 18, estavel: true },
+    '0x82af49447d8a07e3bd95bd0d56f35241523fbab1': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+};
+
+const TOKENS_OPTIMISM: Record<string, Token> = {
+    '0x0b2c639c533813f4aa9d7837caf62653d097ff85': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0x7f5c764cbc14f9669b88837ca1490cca17c31607': { simbolo: 'USDC.e', decimais: 6, estavel: true },
+    '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58': { simbolo: 'USDT', decimais: 6, estavel: true },
+    '0xda10009cbd5d07dd0cecc66161fc93d7c9000da1': { simbolo: 'DAI', decimais: 18, estavel: true },
+    '0x4200000000000000000000000000000000000006': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+};
+
+const TOKENS_POLYGON: Record<string, Token> = {
+    '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': { simbolo: 'USDC.e', decimais: 6, estavel: true },
+    '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': { simbolo: 'USDT', decimais: 6, estavel: true },
+    '0x8f3cf7ad23cd3cadbd9735aff958023239c6a063': { simbolo: 'DAI', decimais: 18, estavel: true },
+    '0x7ceb23fd6bc0add59e62ac25578270cff1b9f619': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+};
+
+const TOKENS_AVALANCHE: Record<string, Token> = {
+    '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7': { simbolo: 'USDt', decimais: 6, estavel: true },
+    '0xd586e7f844cea2f87f50152665bcbc2c279d8d70': { simbolo: 'DAI.e', decimais: 18, estavel: true },
+    '0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab': { simbolo: 'WETH.e', decimais: 18, estavel: false, emEth: true },
+};
 
 /**
  * Redes prontas, para a varredura não depender de acertar três variáveis.
@@ -422,6 +471,7 @@ export const REDES: Record<string, Rede> = {
         pool: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
         segPorBloco: 2,
         blocos180d: 7_776_000,
+        tokens: TOKENS_BASE,
     },
     ethereum: {
         nome: 'Ethereum',
@@ -429,6 +479,7 @@ export const REDES: Record<string, Rede> = {
         pool: '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',
         segPorBloco: 12,
         blocos180d: 1_296_000,
+        tokens: TOKENS_ETHEREUM,
     },
     arbitrum: {
         nome: 'Arbitrum',
@@ -438,6 +489,7 @@ export const REDES: Record<string, Rede> = {
         // 180 dias dariam 62 milhões de blocos e horas de leitura. Aqui a
         // janela é menor de propósito: ~30 dias, que já mostra o tamanho.
         blocos180d: 10_368_000,
+        tokens: TOKENS_ARBITRUM,
     },
     optimism: {
         nome: 'Optimism',
@@ -445,6 +497,7 @@ export const REDES: Record<string, Rede> = {
         pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
         segPorBloco: 2,
         blocos180d: 7_776_000,
+        tokens: TOKENS_OPTIMISM,
     },
     polygon: {
         nome: 'Polygon',
@@ -452,6 +505,7 @@ export const REDES: Record<string, Rede> = {
         pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
         segPorBloco: 2,
         blocos180d: 7_776_000,
+        tokens: TOKENS_POLYGON,
     },
     avalanche: {
         nome: 'Avalanche',
@@ -459,6 +513,7 @@ export const REDES: Record<string, Rede> = {
         pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
         segPorBloco: 2,
         blocos180d: 7_776_000,
+        tokens: TOKENS_AVALANCHE,
     },
 };
 

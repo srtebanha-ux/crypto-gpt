@@ -6,6 +6,7 @@ import {
     bonusDeLiquidacao,
     chamadaDeConfiguracao,
     janelaDeOportunidade,
+    REDES,
     lucroBruto,
     contarPorTopico,
     decodificarLiquidacao,
@@ -609,4 +610,54 @@ test('o tempo de bloco da rede é respeitado', () => {
     // conclusões diferentes em segundos.
     assert.equal(janelaDeOportunidade(ls, 2).medianaSegundos, 20);
     assert.equal(janelaDeOportunidade(ls, 12).medianaSegundos, 120);
+});
+
+// ---------------------------------------------------------------------------
+// Cada rede tem a sua tabela de moedas.
+// ---------------------------------------------------------------------------
+
+test('toda rede traz tabela própria, e nenhuma vem vazia', () => {
+    for (const [nome, rede] of Object.entries(REDES)) {
+        assert.ok(Object.keys(rede.tokens).length > 0, `${nome} sem tabela`);
+    }
+});
+
+test('o USDC da Base não é o USDC da Ethereum', () => {
+    // O bug que isso trava: rodar a Ethereum com a tabela da Base devolve
+    // varredura completa, zero falhas e 100% sem cotação — com cara de
+    // resposta, não de defeito.
+    const usdcBase = Object.keys(REDES.base.tokens).find(
+        (k) => REDES.base.tokens[k].simbolo === 'USDC',
+    );
+    const usdcEth = Object.keys(REDES.ethereum.tokens).find(
+        (k) => REDES.ethereum.tokens[k].simbolo === 'USDC',
+    );
+    assert.ok(usdcBase && usdcEth);
+    assert.notEqual(usdcBase, usdcEth);
+});
+
+test('os endereços das tabelas estão em minúsculas — a busca depende disso', () => {
+    for (const [nome, rede] of Object.entries(REDES)) {
+        for (const k of Object.keys(rede.tokens)) {
+            assert.equal(k, k.toLowerCase(), `${nome}: ${k}`);
+            assert.match(k, /^0x[0-9a-f]{40}$/, `${nome}: ${k}`);
+        }
+    }
+});
+
+test('toda rede sabe cotar pelo menos um estável e o WETH dela', () => {
+    for (const [nome, rede] of Object.entries(REDES)) {
+        const vs = Object.values(rede.tokens);
+        assert.ok(vs.some((t) => t.estavel), `${nome} sem estável`);
+        assert.ok(vs.some((t) => t.emEth), `${nome} sem WETH`);
+    }
+});
+
+test('a tabela errada faz a dívida virar null, não um número torto', () => {
+    // O USDC da Ethereum lido com a tabela da Base: endereço desconhecido.
+    const l = decodificarLiquidacao(
+        logDe({ dividaCrua: 250_000_000_000n, ativoDaDivida: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' }),
+    );
+    assert.equal(valorEmDolares(l, REDES.base.tokens), null);
+    assert.equal(valorEmDolares(l, REDES.ethereum.tokens)?.toString(), '250000');
 });
