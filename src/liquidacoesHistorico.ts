@@ -141,7 +141,7 @@ const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * provedor responde, inclusive os que não guardam histórico, e foi exatamente
  * isso que fez um pedaço passar e 648 falharem: o primeiro estava recente.
  */
-async function sondar(topo: number): Promise<void> {
+async function sondar(topo: number): Promise<boolean> {
     const candidatos = [RPC, ...(RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [])].filter(
         (v, i, a) => a.indexOf(v) === i,
     );
@@ -191,7 +191,7 @@ async function sondar(topo: number): Promise<void> {
                 'defina LIQUIDACOES_RPC_URL com um provedor que tenha histórico ' +
                 '(plano grátis costuma só enxergar bloco recente)',
         });
-        return;
+        return false;
     }
 
     rpcEmUso = melhor.rpc;
@@ -205,6 +205,7 @@ async function sondar(topo: number): Promise<void> {
                 ? `~${(minutos / 60).toFixed(1)} HORAS — longo demais; considere reduzir LIQUIDACOES_BLOCOS`
                 : `~${minutos.toFixed(0)} minutos`,
     });
+    return true;
 }
 
 async function principal(): Promise<void> {
@@ -212,7 +213,17 @@ async function principal(): Promise<void> {
 
     const topoHex = await chamar<string>('eth_blockNumber', []);
     const topo = Number.parseInt(topoHex, 16);
-    await sondar(topo);
+    // Escrevi o aviso e deixei a varredura começar assim mesmo: ela moeu 30
+    // pedaços e produziu um relatório inteiro de zeros depois de já saber que
+    // não ia medir nada. Avisar e seguir é pior que não avisar — dá ao ruído
+    // a aparência de resultado.
+    if (!(await sondar(topo))) {
+        log.info('Varredura cancelada antes de começar: nenhum RPC serve.', {
+            rede: REDE.nome,
+            paraTentarOutro: 'defina LIQUIDACOES_RPC_URL e reimplante',
+        });
+        return;
+    }
     const inicio = Math.max(0, topo - BLOCOS);
     const faixas = faixasDeBlocos(inicio, topo, pedacoEmUso);
 
@@ -298,7 +309,7 @@ async function principal(): Promise<void> {
                 naFila: fila.length,
                 eventos: todos.length,
                 falhas: pedacosComErro,
-                menorQueCoube,
+                menorPedacoQuePrecisou: menorQueCoube,
             });
         }
         await dormir(PAUSA_MS);
@@ -307,7 +318,7 @@ async function principal(): Promise<void> {
     log.info('Varredura terminada.', {
         pedacosLidos: lidos,
         partidasPorLimite: partidas,
-        maiorFaixaAceita: menorQueCoube,
+        menorPedacoQuePrecisou: menorQueCoube,
         falhas: pedacosComErro,
         eventos: todos.length,
     });
