@@ -96,6 +96,23 @@ interface JanelaAberta {
 const janelas: JanelaAberta[] = [];
 const estatistica = new EstatisticaDeAtraso();
 const porOrigem = { liquidacao: 0, rajada: 0 };
+
+/**
+ * Mensagens CRUAS por canal, contadas antes de qualquer interpretação.
+ *
+ * Existe porque em 18/09 o relatório passou horas dizendo
+ * `0 liquidações + 0 rajadas` com os dois canais anunciando "conectado", e
+ * não havia como distinguir três coisas completamente diferentes:
+ *
+ *   1. não chega mensagem nenhuma (canal mudo)
+ *   2. chegam e não casam com o formato esperado
+ *   3. chegam, casam, e o mercado é que está calmo
+ *
+ * Baixar os limiares até US$10 mil com maioria simples e continuar em zero
+ * apontou para (1), mas por eliminação — nenhum número no log mostrava isso
+ * diretamente. Um contador antes do parsing mostra.
+ */
+const crus = { futuros: 0, spot: 0 };
 const resultados: Array<{ apossMs: number; capturavel: number; contraria: number; perdido: number; origem: string }> = [];
 
 const detector = new DetectorDeRajada({
@@ -200,6 +217,7 @@ function conectarFuturos(): void {
     });
 
     ws.on('message', (raw) => {
+        crus.futuros += 1;
         let msg: { stream?: string; data?: Record<string, unknown> };
         try {
             msg = JSON.parse(raw.toString());
@@ -270,6 +288,7 @@ function conectarSpot(): void {
     });
 
     ws.on('message', (raw) => {
+        crus.spot += 1;
         let d: Record<string, string>;
         try {
             d = JSON.parse(raw.toString());
@@ -296,6 +315,8 @@ function relatar(): void {
 
     log.info('Relatório de lead-lag.', {
         eventos: `${porOrigem.liquidacao} liquidações + ${porOrigem.rajada} rajadas`,
+        // Antes do parsing: separa "canal mudo" de "chega e não casa".
+        mensagensCruas: `futuros ${crus.futuros} · spot ${crus.spot}`,
         janelasAbertas: janelas.length,
         spreadSpotAtual: `${(spread * 100).toFixed(4)}%`,
         // O custo a ser batido. Com taxa zero no par FDUSD, sobra o spread.
