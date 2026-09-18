@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import {
     FAIXAS_DE_RISCO,
+    QUEDAS_DA_CASCATA,
+    calcularCascata,
     SAUDE_UM,
     classificarRisco,
     decodificarContaDoUsuario,
@@ -136,4 +138,69 @@ test('o devedor sai do terceiro tópico, não do segundo', () => {
 
 test('log malformado é pulado em vez de virar endereço torto', () => {
     assert.deepEqual(devedoresDosEventos([{ topics: ['0xt0'] }, { topics: ['0xt0', '0xa', '0xb'] }]), []);
+});
+
+// ---------------------------------------------------------------------------
+// A cascata: o monte ANTES de ele acontecer.
+// ---------------------------------------------------------------------------
+
+/** Uma posição com a queda dada e a dívida dada, em dólares. */
+function comQueda(saudeVezes: string, dividaUsd: number): Posicao {
+    const saude = SAUDE_UM.mul(saudeVezes);
+    return {
+        devedor: `0x${saudeVezes.replace('.', '')}`,
+        conta: {
+            garantiaBase: new Decimal(dividaUsd * 2 * 1e8),
+            dividaBase: new Decimal(dividaUsd * 1e8),
+            limiarLiquidacao: new Decimal(8500),
+            saude,
+        },
+        quedaPct: quedaAteLiquidar(saude),
+    };
+}
+
+test('a cascata é acumulada: quem abre a 1% também abre a 5%', () => {
+    // saúde 1,0101 ≈ 1% de queda; 1,0309 ≈ 3%.
+    const c = calcularCascata([comQueda('1.0101', 1000), comQueda('1.0309', 5000)]);
+    assert.equal(c.quantasPorQueda[1], 1);
+    assert.equal(c.quantasPorQueda[3], 2);
+    assert.equal(c.porQueda[3].toString(), '6000');
+    assert.equal(c.porQueda[20].toString(), '6000', 'ninguém some nas faixas de cima');
+});
+
+test('quem não deve nada não entra na cascata', () => {
+    const semDivida: Posicao = {
+        devedor: '0xz',
+        conta: {
+            garantiaBase: new Decimal(9999e8),
+            dividaBase: new Decimal(0),
+            limiarLiquidacao: new Decimal(8500),
+            saude: new Decimal((2n ** 256n - 1n).toString()),
+        },
+        quedaPct: null,
+    };
+    const c = calcularCascata([comQueda('1.0101', 1000), semDivida]);
+    assert.equal(c.porQueda[20].toString(), '1000');
+});
+
+test('o degrau aponta onde a goteira vira cachoeira', () => {
+    // Pouca coisa até 3%, e uma avalanche entre 3% e 5%.
+    const c = calcularCascata([
+        comQueda('1.0101', 100),
+        comQueda('1.0417', 900_000),
+        comQueda('1.0421', 900_000),
+    ]);
+    assert.match(c.leitura, /degrau está em 5%/);
+    assert.match(c.leitura, /1800000/);
+});
+
+test('sem dívida nenhuma não há leitura de cascata', () => {
+    assert.match(calcularCascata([]).leitura, /sem dado suficiente/);
+});
+
+test('as faixas da cascata vão da menor para a maior', () => {
+    // O cálculo do degrau compara cada faixa com a anterior — a ordem é o
+    // algoritmo, não enfeite.
+    const ordenado = [...QUEDAS_DA_CASCATA].sort((a, b) => a - b);
+    assert.deepEqual(QUEDAS_DA_CASCATA, ordenado);
 });

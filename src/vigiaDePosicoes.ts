@@ -60,6 +60,8 @@ import {
     TOPIC_BORROW,
     decodificarContaDoUsuario,
     devedoresDosEventos,
+    QUEDAS_DA_CASCATA,
+    calcularCascata,
     quedaAteLiquidar,
     resumirPosicoes,
     type Posicao,
@@ -88,8 +90,22 @@ const TIMEOUT_MS = Number(process.env.VIGIA_TIMEOUT_MS ?? '20000');
 const LIMIAR_VIGIA = Number(process.env.VIGIA_LIMIAR ?? '10');
 /** Segundos entre duas passadas na lista curta. */
 const SEG_VIGIA = Number(process.env.VIGIA_SEG ?? '20');
-/** Minutos entre duas rondas completas. */
-const MIN_RONDA = Number(process.env.VIGIA_MIN_RONDA ?? '30');
+/**
+ * Minutos entre duas RONDAS — olhar todos os devedores conhecidos.
+ *
+ * Eram 30, porque a ronda estava grudada na coleta de devedores, que leva
+ * cinco minutos de `eth_getLogs`. Com o Multicall3 a ronda em si leva doze
+ * SEGUNDOS, e manter as duas juntas deixava um ponto cego de meia hora: quem
+ * estava a 15% (fora da zona vigiada) e despencava em vinte minutos aparecia
+ * como "de surpresa" — e não era surpresa nenhuma, era o vigia olhando para
+ * o outro lado.
+ *
+ * Separadas, o ponto cego cai de trinta minutos para dois.
+ */
+const MIN_RONDA = Number(process.env.VIGIA_MIN_RONDA ?? '2');
+
+/** Minutos entre duas COLETAS de devedores novos — essa sim é cara. */
+const MIN_COLETA = Number(process.env.VIGIA_MIN_COLETA ?? '30');
 
 let rpcEmUso = process.env.VIGIA_RPC_URL ?? REDE.rpc;
 let rpcId = 0;
@@ -395,6 +411,7 @@ async function principal(): Promise<void> {
         pool: POOL,
         limiarDeVigia: `${LIMIAR_VIGIA}% de queda`,
         rondaCompleta: `a cada ${MIN_RONDA} min`,
+        coletaDeDevedores: `a cada ${MIN_COLETA} min`,
         passadaRapida: `a cada ${SEG_VIGIA}s`,
         porQueDuasVelocidades:
             'a janela medida na Base foi de ~18 minutos; a ronda cabe dentro dela, então completo vence rápido',
@@ -411,15 +428,31 @@ async function principal(): Promise<void> {
 
     let naMira = relatar('RONDA COMPLETA.', await olhar(devedores), true);
     let ultimaRonda = Date.now();
+    let ultimaColeta = Date.now();
 
     let ultimoResumo = Date.now();
     let assinaturaAnterior = '';
 
     for (;;) {
         try {
-            if (Date.now() - ultimaRonda > MIN_RONDA * 60_000) {
+            // Coleta (cara, 5 min) e ronda (barata, 12 s) andam em ritmos
+            // diferentes de propósito. Juntas, a barata herdava o intervalo da
+            // cara e o vigia ficava meia hora sem olhar a maioria.
+            if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 devedores = await juntarDevedores();
-                naMira = relatar('RONDA COMPLETA.', await olhar(devedores), true);
+                ultimaColeta = Date.now();
+            }
+
+            if (Date.now() - ultimaRonda > MIN_RONDA * 60_000) {
+                const todas = await olhar(devedores);
+                naMira = relatar('RONDA COMPLETA.', todas, true);
+                const c = calcularCascata(todas);
+                log.info('CASCATA — o que abre se o mercado cair.', {
+                    porQueda: QUEDAS_DA_CASCATA.map(
+                        (q) => `${q}%: $${c.porQueda[q].toFixed(0)} (${c.quantasPorQueda[q]})`,
+                    ).join(' | '),
+                    leitura: c.leitura,
+                });
                 ultimaRonda = Date.now();
                 continue;
             }

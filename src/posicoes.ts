@@ -173,3 +173,77 @@ export function devedoresDosEventos(logs: Array<{ topics: string[] }>): string[]
     }
     return [...vistos];
 }
+
+/**
+ * A CASCATA — quanto dinheiro abre se o mercado cair X%.
+ *
+ * O resumo diz quem está perto AGORA. Isto diz o que acontece DEPOIS, e é
+ * outra pergunta: se o ETH cair 3%, quanto vira prêmio de uma vez só?
+ *
+ * Vale porque as oito maiores liquidações da Base em 180 dias caíram no meio
+ * de montes — 26 outras em trinta blocos, nos piores casos. Monte não é
+ * coincidência: é uma porção de posições cruzando a mesma linha junto, porque
+ * o preço que as sustentava é o mesmo. Esta curva mostra o monte ANTES de ele
+ * acontecer.
+ *
+ * E muda o que o bot faz. Se a 2% de queda abrem US$50 mil e a 5% abrem US$3
+ * milhões, então o dia em que o mercado cair 5% vale mais que os outros
+ * trezentos e sessenta somados — e é para ele que se prepara.
+ */
+export const QUEDAS_DA_CASCATA = [1, 2, 3, 5, 10, 20];
+
+export interface Cascata {
+    /** Chave = queda em %, valor = dívida que vira liquidável até ali. */
+    porQueda: Record<number, Decimal>;
+    /** Chave = queda em %, valor = quantas posições. */
+    quantasPorQueda: Record<number, number>;
+    leitura: string;
+}
+
+export function calcularCascata(posicoes: Posicao[], quedas = QUEDAS_DA_CASCATA): Cascata {
+    const porQueda: Record<number, Decimal> = {};
+    const quantasPorQueda: Record<number, number> = {};
+    for (const q of quedas) {
+        porQueda[q] = new Decimal(0);
+        quantasPorQueda[q] = 0;
+    }
+
+    for (const p of posicoes) {
+        if (p.quedaPct === null) continue;
+        const divida = p.conta.dividaBase.dividedBy(1e8);
+        for (const q of quedas) {
+            // Acumulada: quem abre a 1% também abre a 5%.
+            if (p.quedaPct.lessThanOrEqualTo(q)) {
+                porQueda[q] = porQueda[q].plus(divida);
+                quantasPorQueda[q] += 1;
+            }
+        }
+    }
+
+    const maior = quedas[quedas.length - 1];
+    if (porQueda[maior].lessThanOrEqualTo(0)) {
+        return { porQueda, quantasPorQueda, leitura: 'sem dado suficiente: nenhuma dívida cotada.' };
+    }
+
+    // O degrau mais íngreme é o que interessa: é a queda a partir da qual o
+    // mercado vira cachoeira em vez de goteira.
+    let degrau = quedas[0];
+    let maiorSalto = new Decimal(0);
+    let anterior = new Decimal(0);
+    for (const q of quedas) {
+        const salto = porQueda[q].minus(anterior);
+        if (salto.greaterThan(maiorSalto)) {
+            maiorSalto = salto;
+            degrau = q;
+        }
+        anterior = porQueda[q];
+    }
+
+    return {
+        porQueda,
+        quantasPorQueda,
+        leitura:
+            `O degrau está em ${degrau}% de queda: é aí que entram mais $${maiorSalto.toFixed(0)} de uma vez ` +
+            `(${quantasPorQueda[degrau]} posições até ali). É o dia de pânico a se preparar.`,
+    };
+}
