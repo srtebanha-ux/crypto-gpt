@@ -25,6 +25,7 @@ import WebSocket from 'ws';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import {
+    ehLiquidacao,
     DetectorDeRajada,
     EstatisticaDeAtraso,
     direcaoDaLiquidacao,
@@ -208,7 +209,7 @@ function conectarFuturos(): void {
         const d = msg.data;
         if (!d) return;
 
-        if (typeof msg.stream === 'string' && msg.stream.includes('forceorder')) {
+        if (ehLiquidacao(msg.stream)) {
             const o = d.o as Record<string, string> | undefined;
             if (!o) return;
             const liq: Liquidacao = {

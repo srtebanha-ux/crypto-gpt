@@ -382,3 +382,22 @@ export function medirJanela(j: JanelaDeEvento): ResultadoDaJanela | null {
 
     return { capturavel, excursaoContraria, perdidoNaLatencia };
 }
+
+/**
+ * A mensagem é de liquidação forçada?
+ *
+ * Existe como função separada porque a comparação tem uma armadilha que já
+ * custou uma medição inteira: o canal é assinado como `btcusdt@forceOrder`,
+ * com O MAIÚSCULO, e a Binance devolve o nome como foi assinado.
+ * `includes('forceorder')` é sensível a maiúscula, então dava falso em TODA
+ * liquidação — ela caía no ramo de negócio comum, onde os campos procurados
+ * não existem (numa forceOrder eles ficam aninhados em `d.o`), virava NaN e
+ * sumia sem uma linha de log.
+ *
+ * Visto ao vivo em 18/09: 51 minutos com o filtro em US$25 mil e
+ * `0 liquidações`, com os dois canais conectados e o spread do spot
+ * atualizando normal. Parecia mercado calmo; era dado sendo jogado fora.
+ */
+export function ehLiquidacao(stream: unknown): boolean {
+    return typeof stream === 'string' && stream.toLowerCase().includes('forceorder');
+}

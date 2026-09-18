@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     DetectorDeRajada,
+    ehLiquidacao,
     EstatisticaDeAtraso,
     direcaoDaLiquidacao,
     liquidacaoRelevante,
@@ -284,4 +285,29 @@ test('sem tick do Spot a tempo, a janela é descartada em vez de estimada', () =
         }),
         null,
     );
+});
+
+// ----------------------------------------------------------------------
+// Roteamento da mensagem de liquidação
+// ----------------------------------------------------------------------
+test('o nome do canal casa mesmo vindo com O maiúsculo', () => {
+    // É EXATAMENTE assim que a Binance devolve, porque é assim que o canal é
+    // assinado. A versão anterior comparava com 'forceorder' em minúsculas e
+    // dava falso aqui — jogando fora toda liquidação, em silêncio, por 51
+    // minutos ao vivo.
+    assert.equal(ehLiquidacao('btcusdt@forceOrder'), true);
+});
+
+test('minúsculo também casa', () => {
+    assert.equal(ehLiquidacao('btcusdt@forceorder'), true);
+});
+
+test('negócio comum não é confundido com liquidação', () => {
+    assert.equal(ehLiquidacao('btcusdt@aggTrade'), false);
+});
+
+test('mensagem sem nome de canal não vira liquidação', () => {
+    assert.equal(ehLiquidacao(undefined), false);
+    assert.equal(ehLiquidacao(null), false);
+    assert.equal(ehLiquidacao(42), false);
 });
