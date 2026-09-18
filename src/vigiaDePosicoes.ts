@@ -23,6 +23,16 @@
 // única razão pela qual este plano funciona, e se a janela medir diferente em
 // outra rede, este desenho precisa ser refeito para ela.
 //
+// ESSA AFIRMAÇÃO JÁ FOI FALSA UMA VEZ, e vale deixar registrado. Eu a escrevi
+// antes de saber quantos devedores existiam. A primeira lista real trouxe
+// 8.244, o que dava 62 minutos de ronda contra 18 de janela — o vigia passaria
+// três janelas inteiras varrendo e veria cada liquidação como fato consumado.
+// O conserto foi pedir em lote (`chamarLote`), que derruba a ronda para uns 90
+// segundos. A frase só voltou a ser verdade depois disso.
+//
+// Fica a lição para a próxima rede: medir a janela NÃO basta. Tem de medir
+// também quanto tempo a ronda leva naquela rede, e comparar as duas.
+//
 // *** NÃO ENVIA TRANSAÇÃO NENHUMA. *** Este processo só lê e mede. Ele existe
 // para responder, sem arriscar um centavo: o vigia vê a liquidação chegando
 // antes de ela acontecer? E com quanta antecedência?
@@ -95,6 +105,62 @@ async function chamarEm<T>(rpc: string, metodo: string, params: unknown[]): Prom
 
 const chamar = <T>(metodo: string, params: unknown[]): Promise<T> =>
     chamarEm<T>(rpcEmUso, metodo, params);
+
+/** Quantas chamadas cabem num pedido só. 0 desliga o lote. */
+let TAMANHO_DO_LOTE = Number(process.env.VIGIA_LOTE ?? '50');
+
+/**
+ * Muitas chamadas num pedido HTTP só — e por que isso não é otimização.
+ *
+ * A primeira lista real trouxe 8.244 devedores. Uma chamada por endereço, com
+ * a pausa que o provedor exige, dá 62 MINUTOS por ronda. A janela medida na
+ * Base é de 18. Ou seja: o vigia passaria três janelas inteiras varrendo, e
+ * qualquer posição que abrisse e fosse levada durante a varredura ele veria
+ * só depois, como fato consumado.
+ *
+ * O comentário no alto deste arquivo afirma que a ronda cabe dentro da janela.
+ * Eu escrevi isso antes de saber quantos devedores existiam, e a primeira
+ * medição desmentiu. Em lote de 50 a ronda cai para uns 90 segundos, e aí a
+ * afirmação passa a ser verdade — com doze vezes de folga em vez de nenhuma.
+ *
+ * Nem todo provedor aceita lote. Quando este recusar, o código volta para uma
+ * por vez e AVISA, em vez de devolver lista vazia — porque lista vazia aqui se
+ * lê como "ninguém está perto de liquidar", que é o oposto do que aconteceu.
+ */
+async function chamarLote<T>(
+    pedidos: Array<{ metodo: string; params: unknown[] }>,
+): Promise<Array<T | null>> {
+    if (pedidos.length === 0) return [];
+    const base = rpcId;
+    const corpo = pedidos.map((p, i) => ({
+        jsonrpc: '2.0',
+        id: base + i + 1,
+        method: p.metodo,
+        params: p.params,
+    }));
+    rpcId += pedidos.length;
+
+    const res = await fetch(rpcEmUso, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(corpo),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`RPC HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`);
+    const body = (await res.json()) as unknown;
+    // Provedor que não faz lote devolve um objeto de erro no lugar do array.
+    if (!Array.isArray(body)) throw new Error('provedor não aceitou lote');
+
+    const porId = new Map<number, { result?: T; error?: { message: string } }>();
+    for (const r of body as Array<{ id: number; result?: T; error?: { message: string } }>) {
+        porId.set(r.id, r);
+    }
+    return corpo.map((c) => {
+        const r = porId.get(c.id);
+        if (!r || r.error || r.result === undefined) return null;
+        return r.result;
+    });
+}
 
 /**
  * Como a varredura histórica: 429 quer dizer "devagar", não "não dá".
@@ -218,20 +284,72 @@ async function juntarDevedores(): Promise<string[]> {
 /** Uma passada por uma lista de endereços, perguntando a saúde de cada um. */
 async function olhar(devedores: string[]): Promise<Posicao[]> {
     const fora: Posicao[] = [];
-    for (const d of devedores) {
-        try {
-            const bruto = await comPaciencia<string>('eth_call', [
-                { to: POOL, data: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0') },
-                'latest',
-            ]);
-            const conta = decodificarContaDoUsuario(bruto);
-            fora.push({ devedor: d, conta, quedaPct: quedaAteLiquidar(conta.saude) });
-        } catch {
-            // Um endereço que não responde não invalida os outros — mas some
-            // da conta, e por isso `vigiados` no resumo é sempre o número de
-            // quem REALMENTE foi olhado, nunca o tamanho da lista.
+    const dados = (d: string) =>
+        SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0');
+
+    for (let i = 0; i < devedores.length; i += Math.max(TAMANHO_DO_LOTE, 1)) {
+        const pedaco = devedores.slice(i, i + Math.max(TAMANHO_DO_LOTE, 1));
+        let respostas: Array<string | null>;
+
+        if (TAMANHO_DO_LOTE > 0) {
+            try {
+                respostas = await chamarLote<string>(
+                    pedaco.map((d) => ({ metodo: 'eth_call', params: [{ to: POOL, data: dados(d) }, 'latest'] })),
+                );
+            } catch (err) {
+                // Desligar o lote é decisão de uma vez só, não por pedaço: sem
+                // isto o vigia tentaria e falharia em cada volta, e a ronda
+                // ficaria mais lenta do que se nunca tivesse tentado.
+                TAMANHO_DO_LOTE = 0;
+                log.warn('Este provedor não faz lote; voltando para uma por vez.', {
+                    erro: err instanceof Error ? err.message : String(err),
+                    consequencia: `a ronda passa a levar uns ${((devedores.length * 0.45) / 60).toFixed(0)} minutos`,
+                });
+                respostas = [];
+                for (const d of pedaco) {
+                    try {
+                        respostas.push(await comPaciencia<string>('eth_call', [{ to: POOL, data: dados(d) }, 'latest']));
+                    } catch {
+                        respostas.push(null);
+                    }
+                    await dormir(PAUSA_MS);
+                }
+            }
+        } else {
+            respostas = [];
+            for (const d of pedaco) {
+                try {
+                    respostas.push(await comPaciencia<string>('eth_call', [{ to: POOL, data: dados(d) }, 'latest']));
+                } catch {
+                    respostas.push(null);
+                }
+                await dormir(PAUSA_MS);
+            }
+        }
+
+        for (let j = 0; j < pedaco.length; j += 1) {
+            const bruto = respostas[j];
+            // Endereço que não respondeu some da conta — e por isso `vigiados`
+            // no resumo é sempre quem REALMENTE foi olhado, nunca o tamanho da
+            // lista. Sumir sem aparecer é a falha que este projeto já pegou
+            // seis vezes.
+            if (bruto === null) continue;
+            try {
+                const conta = decodificarContaDoUsuario(bruto);
+                fora.push({ devedor: pedaco[j], conta, quedaPct: quedaAteLiquidar(conta.saude) });
+            } catch {
+                // resposta ilegível: mesmo tratamento.
+            }
         }
         await dormir(PAUSA_MS);
+    }
+
+    const perdidos = devedores.length - fora.length;
+    if (perdidos > devedores.length * 0.1) {
+        log.warn('Muitos endereços sem resposta nesta passada.', {
+            semResposta: `${perdidos} de ${devedores.length}`,
+            consequencia: 'esses não foram olhados; a lista da borda pode estar incompleta',
+        });
     }
     return fora;
 }
