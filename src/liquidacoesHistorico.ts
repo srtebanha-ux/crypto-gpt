@@ -266,43 +266,66 @@ async function verificarPool(): Promise<boolean> {
  * qual das duas veio, para ninguém confundir "descoberto" com "chutado".
  */
 async function descobrirMoedas(): Promise<Record<string, Token>> {
+    const aMao = REDE.tokens ?? {};
     try {
         const enderecos = decodificarListaDeEnderecos(
             await chamar<string>('eth_call', [{ to: POOL, data: SELETOR_GET_RESERVES_LIST }, 'latest']),
         );
-        const tabela: Record<string, Token> = {};
+        const descobertas: Record<string, Token> = {};
+        const falhas: string[] = [];
+
         for (const e of enderecos) {
+            // Em SÉRIE, não em Promise.all. Disparar dois pedidos por token
+            // fez o provedor público recusar 14 de 15 — e como eu tinha escrito
+            // um catch mudo, o relatório disse "1 moeda" sem dizer por quê.
             try {
-                const [sim, dec] = await Promise.all([
-                    chamar<string>('eth_call', [{ to: e, data: SELETOR_SYMBOL }, 'latest']),
-                    chamar<string>('eth_call', [{ to: e, data: SELETOR_DECIMALS }, 'latest']),
-                ]);
-                const simbolo = decodificarTexto(sim);
+                const sim = await chamar<string>('eth_call', [{ to: e, data: SELETOR_SYMBOL }, 'latest']);
+                await dormir(PAUSA_MS);
+                const dec = await chamar<string>('eth_call', [{ to: e, data: SELETOR_DECIMALS }, 'latest']);
+                const simbolo = decodificarTexto(sim).trim();
                 const decimais = Number(BigInt(dec === '0x' ? '0x0' : dec));
-                if (simbolo === '' || decimais === 0 || decimais > 36) continue;
-                tabela[e] = classificarToken(simbolo, decimais);
-            } catch {
-                // Um token que não responde não invalida os outros.
+                if (simbolo === '') falhas.push(`${e.slice(0, 10)}: símbolo ilegível`);
+                else if (decimais === 0 || decimais > 36) falhas.push(`${e.slice(0, 10)}: decimais=${decimais}`);
+                else descobertas[e] = classificarToken(simbolo, decimais);
+            } catch (err) {
+                falhas.push(`${e.slice(0, 10)}: ${(err instanceof Error ? err.message : String(err)).slice(0, 50)}`);
             }
             await dormir(PAUSA_MS);
         }
-        if (Object.keys(tabela).length === 0) throw new Error('nenhuma moeda legível');
+
+        // UNIÃO, não substituição. A tabela à mão pode estar incompleta, mas o
+        // que ela tem foi conferido; a descoberta acrescenta o que falta. Trocar
+        // uma pela outra fez este relatório perder o USDC, que é onde está a
+        // maior parte das dívidas — regressão que eu causei tentando melhorar.
+        const tabela = { ...aMao, ...descobertas };
         const cotaveis = Object.values(tabela).filter((t) => t.estavel || t.emEth).length;
-        log.info('MOEDAS DESCOBERTAS no pool — tabela lida, não escrita de memória.', {
-            quantas: Object.keys(tabela).length,
+
+        log.info('MOEDAS — o que eu sei cotar nesta rede.', {
+            noPool: enderecos.length,
+            descobertas: Object.keys(descobertas).length,
+            daTabelaAMao: Object.keys(aMao).length,
+            usando: Object.keys(tabela).length,
             seiCotar: `${cotaveis} de ${Object.keys(tabela).length}`,
             lista: Object.values(tabela)
                 .map((t) => `${t.simbolo}${t.estavel ? '=$' : t.emEth ? '=ETH' : '=?'}`)
                 .join(' '),
         });
+
+        if (falhas.length > 0) {
+            log.warn('Moedas que o pool tem e eu NÃO consegui ler.', {
+                quantas: `${falhas.length} de ${enderecos.length}`,
+                porQue: falhas.slice(0, 6).join(' | '),
+                consequencia:
+                    'as dívidas nessas moedas caem em "sem cotação" e o veredicto pode ficar suspenso',
+            });
+        }
         return tabela;
     } catch (err) {
-        const reserva = REDE.tokens ?? {};
-        log.warn('Descoberta falhou; usando a tabela escrita à mão (que pode estar errada).', {
+        log.warn('Descoberta falhou inteira; usando só a tabela escrita à mão.', {
             erro: err instanceof Error ? err.message : String(err),
-            moedasNaReserva: Object.keys(reserva).length,
+            moedasNaReserva: Object.keys(aMao).length,
         });
-        return reserva;
+        return aMao;
     }
 }
 
