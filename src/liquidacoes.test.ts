@@ -196,3 +196,34 @@ test('erro que NÃO é de faixa não vira partição infinita', () => {
     assert.equal(ehLimiteDeFaixa('RPC HTTP 401: invalid api key'), false);
     assert.equal(ehLimiteDeFaixa('unauthorized'), false);
 });
+
+test('as maiores saem uma a uma, com quem levou cada', () => {
+    // O ranking por contagem não separa "cata migalha" de "leva as grandes", e
+    // são conclusões opostas. Aqui o ROBO tem 3 capturas contra 1 do OUTRO —
+    // ganha no ranking por contagem — e mesmo assim a maior de todas foi do
+    // OUTRO. Era essa distinção que faltava.
+    const ROBO = '0x1111111111111111111111111111111111111111';
+    const OUTRO = '0x2222222222222222222222222222222222222222';
+    const ls = [
+        decodificarLiquidacao(logDe({ dividaCrua: 1_000_000_000n, liquidante: ROBO })),
+        decodificarLiquidacao(logDe({ dividaCrua: 2_000_000_000n, liquidante: ROBO })),
+        decodificarLiquidacao(logDe({ dividaCrua: 3_000_000_000n, liquidante: ROBO })),
+        decodificarLiquidacao(logDe({ dividaCrua: 900_000_000_000n, liquidante: OUTRO })),
+    ];
+    const r = resumirHistorico(ls);
+    assert.equal(r.maioresLiquidantes[0].endereco, ROBO);
+    assert.equal(r.maioresLiquidacoes[0].liquidante, OUTRO);
+    assert.equal(r.maioresLiquidacoes[0].usd.toString(), '900000');
+    assert.equal(r.maioresLiquidacoes.length, 4);
+});
+
+test('liquidação sem cotação não entra na lista das maiores', () => {
+    const WETH2 = '0x4200000000000000000000000000000000000006';
+    const ls = [
+        decodificarLiquidacao(logDe({ dividaCrua: 10n ** 20n, ativoDaDivida: WETH2 })),
+        decodificarLiquidacao(logDe({ dividaCrua: 5_000_000_000n })),
+    ];
+    const r = resumirHistorico(ls);
+    assert.equal(r.maioresLiquidacoes.length, 1);
+    assert.equal(r.maioresLiquidacoes[0].usd.toString(), '5000');
+});

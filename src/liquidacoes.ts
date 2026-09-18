@@ -146,6 +146,25 @@ export interface ResumoDoHistorico {
     /** Os maiores capturadores, do maior para o menor. */
     maioresLiquidantes: Array<{ endereco: string; quantas: number }>;
     maior: Decimal | null;
+    /**
+     * As MAIORES liquidações, uma por uma, com quem ficou com cada bônus.
+     *
+     * O ranking por CONTAGEM esconde a única coisa que decide se há espaço
+     * para quem chega agora. Em 180 dias na Base, um endereço capturou 3.166
+     * de 5.043 — 63% —, e desse número não se conclui nada: ele pode estar
+     * catando milhares de migalhas de US$200 e nem disputar as sete acima de
+     * US$100 mil, ou pode estar levando as sete também.
+     *
+     * São situações opostas. Uma diz "tem espaço nas grandes"; a outra diz
+     * "o lugar está tomado". Contar quantas cada um pegou não separa as duas;
+     * olhar QUEM pegou as maiores separa.
+     */
+    maioresLiquidacoes: Array<{
+        usd: Decimal;
+        liquidante: string;
+        bloco: number;
+        transacao: string;
+    }>;
 }
 
 /**
@@ -165,6 +184,7 @@ export function resumirHistorico(
     for (const f of FAIXAS_USD) porFaixa[f] = 0;
 
     const contagem = new Map<string, number>();
+    const comValor: Array<{ l: Liquidacao; usd: Decimal }> = [];
     let semCotacao = 0;
     let maior: Decimal | null = null;
 
@@ -175,6 +195,7 @@ export function resumirHistorico(
             semCotacao += 1;
             continue;
         }
+        comValor.push({ l, usd });
         if (maior === null || usd.greaterThan(maior)) maior = usd;
         for (const f of FAIXAS_USD) {
             if (usd.greaterThanOrEqualTo(f)) porFaixa[f] += 1;
@@ -186,6 +207,16 @@ export function resumirHistorico(
         .sort((a, b) => b.quantas - a.quantas)
         .slice(0, 5);
 
+    const maioresLiquidacoes = comValor
+        .sort((a, b) => b.usd.comparedTo(a.usd))
+        .slice(0, 10)
+        .map((x) => ({
+            usd: x.usd,
+            liquidante: x.l.liquidante,
+            bloco: x.l.bloco,
+            transacao: x.l.transacao,
+        }));
+
     return {
         total: liquidacoes.length,
         semCotacao,
@@ -193,6 +224,7 @@ export function resumirHistorico(
         liquidantesDistintos: contagem.size,
         maioresLiquidantes: maiores,
         maior,
+        maioresLiquidacoes,
     };
 }
 

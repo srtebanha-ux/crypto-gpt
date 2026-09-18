@@ -216,6 +216,26 @@ async function principal(): Promise<void> {
         maioresLiquidantes: r.maioresLiquidantes.map((m) => `${m.endereco} x${m.quantas}`).join(' | '),
     });
 
+    // As maiores UMA A UMA, com quem levou cada uma. Ver o comentário em
+    // ResumoDoHistorico: o ranking por contagem não separa "cata migalha" de
+    // "leva tudo", e são conclusões opostas.
+    const donos = new Set(r.maioresLiquidacoes.map((m) => m.liquidante));
+    log.info('AS MAIORES, UMA A UMA — quem levou cada uma.', {
+        quantasOlhadas: r.maioresLiquidacoes.length,
+        enderecosDiferentes: donos.size,
+        leitura:
+            r.maioresLiquidacoes.length === 0
+                ? 'nenhuma com valor conhecido'
+                : donos.size === 1
+                  ? 'UM endereço levou TODAS as maiores: o lugar está tomado nas grandes.'
+                  : donos.size >= r.maioresLiquidacoes.length * 0.6
+                    ? 'Bem espalhadas entre endereços diferentes: as grandes NÃO são de um dono só.'
+                    : 'Espalhamento parcial — alguns endereços repetem nas grandes.',
+        lista: r.maioresLiquidacoes
+            .map((m) => `$${m.usd.toFixed(0)} -> ${m.liquidante.slice(0, 10)} (bloco ${m.bloco})`)
+            .join(' | '),
+    });
+
     const grandes = r.porFaixa[50_000] ?? 0;
     const tentados = lidos + pedacosComErro;
     const furo = tentados > 0 ? pedacosComErro / tentados : 1;
