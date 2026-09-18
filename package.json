@@ -30,7 +30,9 @@
     "leadlag": "ts-node src/leadLagSniffer.ts",
     "leadlag:prod": "node dist/leadLagSniffer.js",
     "scalping": "ts-node src/scalpingLive.ts",
-    "scalping:prod": "node dist/scalpingLive.js"
+    "scalping:prod": "node dist/scalpingLive.js",
+    "liquidacoes": "ts-node src/liquidacoesHistorico.ts",
+    "liquidacoes:prod": "node dist/liquidacoesHistorico.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",
