@@ -47,6 +47,14 @@ const BLOCOS = Number(process.env.LIQUIDACOES_BLOCOS ?? '200000');
 const PEDACO = Number(process.env.LIQUIDACOES_PEDACO ?? '2000');
 const PAUSA_MS = Number(process.env.LIQUIDACOES_PAUSA_MS ?? '120');
 const TIMEOUT_MS = Number(process.env.LIQUIDACOES_TIMEOUT_MS ?? '20000');
+/**
+ * Segundos por bloco, para converter janela de blocos em DIAS.
+ *
+ * Estava fixo em 2 (o da Base) e por isso o relatório anunciou "~30,0 dias"
+ * para 1.296.000 blocos do Ethereum, que são 180. Um número de aparência certa
+ * dividindo todos os "por dia" por seis.
+ */
+const SEG_POR_BLOCO = Number(process.env.LIQUIDACOES_SEG_POR_BLOCO ?? '2');
 
 let rpcId = 0;
 
@@ -184,7 +192,7 @@ async function principal(): Promise<void> {
     }
 
     const r = resumirHistorico(liquidacoes);
-    const dias = (BLOCOS * 2) / 86400; // Base fecha bloco a cada ~2s.
+    const dias = (BLOCOS * SEG_POR_BLOCO) / 86400;
 
     log.info('HISTÓRICO DE LIQUIDAÇÕES.', {
         periodo: `~${dias.toFixed(1)} dias (${BLOCOS} blocos)`,
@@ -209,15 +217,47 @@ async function principal(): Promise<void> {
     });
 
     const grandes = r.porFaixa[50_000] ?? 0;
+    const tentados = lidos + pedacosComErro;
+    const furo = tentados > 0 ? pedacosComErro / tentados : 1;
+    const semPreco = r.total > 0 ? r.semCotacao / r.total : 0;
+
+    // O veredicto se RECUSA a concluir quando a amostra não sustenta conclusão.
+    //
+    // Escrito depois de ele anunciar "a ideia morre aqui" duas vezes em vinte
+    // minutos: uma com 645 de 649 pedaços falhando, outra com 25% das
+    // liquidações em tokens sem cotação. Nos dois casos a frase estava
+    // gramaticalmente perfeita e factualmente vazia — ele lia `grandes === 0`
+    // sem olhar se tinha lido alguma coisa.
+    //
+    // Matar uma ideia é uma decisão cara; ela merece o mesmo cuidado que
+    // aprovar uma.
+    let leitura: string;
+    if (furo > 0.05) {
+        leitura =
+            `VEREDICTO SUSPENSO: ${pedacosComErro} de ${tentados} pedaços falharam ` +
+            `(${(furo * 100).toFixed(0)}%). Esta amostra não mede nada — conserte o RPC e rode de novo.`;
+    } else if (semPreco > 0.2) {
+        leitura =
+            `VEREDICTO SUSPENSO: ${(semPreco * 100).toFixed(0)}% das liquidações são em tokens que eu não sei ` +
+            `cotar, então o tamanho delas é invisível. A maior pode estar entre elas.`;
+    } else if (dias < 14) {
+        leitura =
+            `VEREDICTO FRACO: ${dias.toFixed(1)} dias é janela curta demais para evento raro. ` +
+            `Liquidação gorda acontece em dia de pânico; aumente LIQUIDACOES_BLOCOS antes de decidir.`;
+    } else if (grandes === 0) {
+        leitura = 'NENHUMA liquidação grande numa amostra limpa e longa. A ideia morre aqui, e custou zero.';
+    } else if (r.liquidantesDistintos <= 5) {
+        leitura = 'Existem liquidações grandes, mas pouquíssimos endereços pegam todas: lugar tomado.';
+    } else {
+        leitura = 'Existem liquidações grandes E muitos endereços diferentes capturam. Vale o próximo passo.';
+    }
+
     log.info('VEREDICTO PRELIMINAR.', {
         acimaDe50k: grandes,
         porDia: (grandes / Math.max(dias, 1)).toFixed(2),
-        leitura:
-            grandes === 0
-                ? 'NENHUMA liquidação grande no período. A ideia morre aqui, e custou zero.'
-                : r.liquidantesDistintos <= 5
-                  ? 'Existem liquidações grandes, mas pouquíssimos endereços pegam todas: lugar tomado.'
-                  : 'Existem liquidações grandes E muitos endereços diferentes capturam. Vale investigar o próximo passo.',
+        pedacosQueFalharam: `${pedacosComErro} de ${tentados}`,
+        semCotacao: `${r.semCotacao} de ${r.total}`,
+        leitura,
         proximoPasso:
             'medir quantos BLOCOS cada posição ficou liquidável antes de alguém pegar — é isso que diz se dá tempo de chegar.',
     });
