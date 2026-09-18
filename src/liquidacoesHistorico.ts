@@ -29,6 +29,10 @@ import {
     TOPIC_LIQUIDATION_CALL,
     contarPorTopico,
     ehLimiteDeFaixa,
+    REDES,
+    gorjetaWei,
+    lerDisputa,
+    multiploDaBase,
     decodificarLiquidacao,
     faixasDeBlocos,
     resumirHistorico,
@@ -38,12 +42,24 @@ import {
 
 const log = createLogger('liquidacoes');
 
-const RPC = process.env.LIQUIDACOES_RPC_URL ?? 'https://mainnet.base.org';
+/**
+ * Rede escolhida por NOME, com endereço, contrato e tempo de bloco juntos.
+ *
+ * Antes eram três variáveis que tinham de concordar entre si, e errar uma
+ * produzia número de aparência certa: com o tempo de bloco da Base aplicado
+ * ao Ethereum, o relatório anunciou "~30 dias" para 180 e dividiu todo
+ * "por dia" por seis. Um nome só não tem como discordar de si mesmo.
+ *
+ * As variáveis individuais continuam valendo e têm prioridade, para ajustar
+ * um campo sem abandonar o resto do preset.
+ */
+const REDE = REDES[(process.env.LIQUIDACOES_REDE ?? 'base').toLowerCase()] ?? REDES.base;
+const RPC = process.env.LIQUIDACOES_RPC_URL ?? REDE.rpc;
 /** Aave V3 Pool na Base. Variável porque eu não pude conferir o endereço. */
-const POOL = (process.env.LIQUIDACOES_POOL ?? '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5').toLowerCase();
+const POOL = (process.env.LIQUIDACOES_POOL ?? REDE.pool).toLowerCase();
 /** Vazio = modo descoberta. Ver o comentário no topo. */
 const TOPIC0 = process.env.LIQUIDACOES_TOPIC0 ?? '';
-const BLOCOS = Number(process.env.LIQUIDACOES_BLOCOS ?? '200000');
+const BLOCOS = Number(process.env.LIQUIDACOES_BLOCOS ?? String(REDE.blocos180d));
 const PEDACO = Number(process.env.LIQUIDACOES_PEDACO ?? '2000');
 const PAUSA_MS = Number(process.env.LIQUIDACOES_PAUSA_MS ?? '120');
 const TIMEOUT_MS = Number(process.env.LIQUIDACOES_TIMEOUT_MS ?? '20000');
@@ -54,7 +70,7 @@ const TIMEOUT_MS = Number(process.env.LIQUIDACOES_TIMEOUT_MS ?? '20000');
  * para 1.296.000 blocos do Ethereum, que são 180. Um número de aparência certa
  * dividindo todos os "por dia" por seis.
  */
-const SEG_POR_BLOCO = Number(process.env.LIQUIDACOES_SEG_POR_BLOCO ?? '2');
+const SEG_POR_BLOCO = Number(process.env.LIQUIDACOES_SEG_POR_BLOCO ?? String(REDE.segPorBloco));
 
 let rpcId = 0;
 
@@ -85,6 +101,7 @@ async function principal(): Promise<void> {
     const faixas = faixasDeBlocos(inicio, topo, PEDACO);
 
     log.info('Varredura de liquidações iniciada.', {
+        rede: REDE.nome,
         rpc: RPC.replace(/\/v2\/.*$/, '/v2/***'),
         contrato: POOL,
         blocos: `${inicio} → ${topo} (${BLOCOS})`,
@@ -271,6 +288,54 @@ async function principal(): Promise<void> {
     } else {
         leitura = 'Existem liquidações grandes E muitos endereços diferentes capturam. Vale o próximo passo.';
     }
+
+    // CORRIDA OU LEILÃO — a pergunta que decide se dá para competir.
+    //
+    // Cada vencedor pagou um preço por gás, e o bloco tinha uma taxa base
+    // obrigatória. A razão entre os dois separa as duas formas de disputa, que
+    // pedem estratégias opostas: em corrida quem chega primeiro leva e dar
+    // lance não adianta; em leilão quem aceita lucro menor pode pagar mais e
+    // ganhar. Ver `lerDisputa` em liquidacoes.ts.
+    //
+    // São ~2 chamadas por transação, num punhado de transações. Barato.
+    const multiplos: Decimal[] = [];
+    const gorjetas: string[] = [];
+    for (const m of r.maioresLiquidacoes.slice(0, 8)) {
+        try {
+            const rec = await chamar<{ gasUsed: string; effectiveGasPrice: string; blockNumber: string }>(
+                'eth_getTransactionReceipt',
+                [m.transacao],
+            );
+            const bloco = await chamar<{ baseFeePerGas?: string }>('eth_getBlockByNumber', [rec.blockNumber, false]);
+            if (!bloco.baseFeePerGas) continue;
+            const efetivoWei = new Decimal(Number.parseInt(rec.effectiveGasPrice, 16));
+            const baseWei = new Decimal(Number.parseInt(bloco.baseFeePerGas, 16));
+            const gasUsado = new Decimal(Number.parseInt(rec.gasUsed, 16));
+            const mult = multiploDaBase({ efetivoWei, baseWei });
+            if (mult === null) continue;
+            multiplos.push(mult);
+            gorjetas.push(
+                `$${m.usd.toFixed(0)}: ${mult.toFixed(1)}x a base, gorjeta ${gorjetaWei({ efetivoWei, baseWei, gasUsado })
+                    .dividedBy(1e18)
+                    .toFixed(6)} ETH`,
+            );
+        } catch (err) {
+            log.warn('Não deu para ler a taxa desta transação.', {
+                transacao: m.transacao,
+                erro: err instanceof Error ? err.message : String(err),
+            });
+        }
+        await dormir(PAUSA_MS);
+    }
+
+    const ordenados = [...multiplos].sort((a, b) => a.comparedTo(b));
+    const mediano = ordenados.length > 0 ? ordenados[Math.floor(ordenados.length / 2)] : null;
+    log.info('CORRIDA OU LEILÃO — o que os vencedores pagaram.', {
+        transacoesLidas: multiplos.length,
+        multiploMediano: mediano ? `${mediano.toFixed(1)}x a taxa base` : '—',
+        leitura: lerDisputa(mediano),
+        detalhe: gorjetas.join(' | '),
+    });
 
     log.info('VEREDICTO PRELIMINAR.', {
         acimaDe50k: grandes,

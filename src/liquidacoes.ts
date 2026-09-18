@@ -291,3 +291,118 @@ export function ehLimiteDeFaixa(mensagem: string): boolean {
         m.includes('limit exceeded')
     );
 }
+
+export interface Rede {
+    nome: string;
+    rpc: string;
+    /** Endereço do Pool da Aave V3 nessa rede. */
+    pool: string;
+    segPorBloco: number;
+    /** Blocos que cobrem ~180 dias, já calculado. */
+    blocos180d: number;
+}
+
+/**
+ * Redes prontas, para a varredura não depender de acertar três variáveis.
+ *
+ * A Aave V3 usa o MESMO endereço de Pool em várias redes porque foi implantada
+ * de forma determinística; Ethereum e Base fogem disso e têm os seus.
+ *
+ * Todos os endereços aqui são melhor-esforço de quem não conseguia alcançar a
+ * rede para conferir. Isso não é problema: endereço errado aparece como "zero
+ * eventos com zero falhas", e o modo descoberta mostra o que o contrato emite
+ * de verdade. O palpite do tópico da Base foi confirmado exatamente assim.
+ */
+export const REDES: Record<string, Rede> = {
+    base: {
+        nome: 'Base',
+        rpc: 'https://mainnet.base.org',
+        pool: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+    },
+    ethereum: {
+        nome: 'Ethereum',
+        rpc: 'https://eth.drpc.org',
+        pool: '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',
+        segPorBloco: 12,
+        blocos180d: 1_296_000,
+    },
+    arbitrum: {
+        nome: 'Arbitrum',
+        rpc: 'https://arb1.arbitrum.io/rpc',
+        pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+        segPorBloco: 0.25,
+        // 180 dias dariam 62 milhões de blocos e horas de leitura. Aqui a
+        // janela é menor de propósito: ~30 dias, que já mostra o tamanho.
+        blocos180d: 10_368_000,
+    },
+    optimism: {
+        nome: 'Optimism',
+        rpc: 'https://mainnet.optimism.io',
+        pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+    },
+    polygon: {
+        nome: 'Polygon',
+        rpc: 'https://polygon-rpc.com',
+        pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+    },
+    avalanche: {
+        nome: 'Avalanche',
+        rpc: 'https://api.avax.network/ext/bc/C/rpc',
+        pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+    },
+};
+
+/**
+ * Quanto o vencedor pagou ACIMA do obrigatório, em múltiplos da taxa base.
+ *
+ * É esta razão que separa as duas formas de disputa, e elas pedem estratégias
+ * opostas:
+ *
+ *   ~1x   → CORRIDA. Todo mundo paga o mínimo e quem chega primeiro leva.
+ *           Quem não tem servidor colado no sequenciador não entra.
+ *   >>1x  → LEILÃO. Está sendo pago um prêmio para passar na frente, e
+ *           quem aceita lucro menor pode dar lance maior e ganhar.
+ *
+ * Deliberadamente em múltiplos da base, e não em dólares: a razão responde a
+ * pergunta sem precisar da cotação do ETH, que eu não tenho e não vou
+ * inventar.
+ */
+export function multiploDaBase(params: {
+    /** Preço efetivo pago por gás, em wei. */
+    efetivoWei: Decimal;
+    /** Taxa base do bloco, em wei. */
+    baseWei: Decimal;
+}): Decimal | null {
+    if (params.baseWei.lessThanOrEqualTo(0)) return null;
+    return params.efetivoWei.dividedBy(params.baseWei);
+}
+
+/** O que foi de fato entregue ao validador como gorjeta, em wei. */
+export function gorjetaWei(params: {
+    efetivoWei: Decimal;
+    baseWei: Decimal;
+    gasUsado: Decimal;
+}): Decimal {
+    const prioridade = Decimal.max(params.efetivoWei.minus(params.baseWei), 0);
+    return prioridade.mul(params.gasUsado);
+}
+
+/** A leitura em português do que a razão significa. */
+export function lerDisputa(multiploMediano: Decimal | null): string {
+    if (multiploMediano === null) return 'sem dado suficiente';
+    if (multiploMediano.lessThan(1.5)) {
+        return 'CORRIDA: os vencedores pagaram quase a taxa mínima. Quem leva é quem chega primeiro, e dar lance não adianta.';
+    }
+    if (multiploMediano.lessThan(5)) {
+        return 'MISTO: pagaram acima do mínimo, mas pouco. Há alguma disputa por prioridade.';
+    }
+    return 'LEILÃO: pagaram MUITO acima do mínimo para passar na frente. Aqui quem aceita lucro menor consegue dar lance maior e ganhar.';
+}

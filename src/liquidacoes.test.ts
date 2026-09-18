@@ -5,6 +5,9 @@ import {
     contarPorTopico,
     decodificarLiquidacao,
     ehLimiteDeFaixa,
+    gorjetaWei,
+    lerDisputa,
+    multiploDaBase,
     enderecoDoTopico,
     faixasDeBlocos,
     resumirHistorico,
@@ -226,4 +229,53 @@ test('liquidação sem cotação não entra na lista das maiores', () => {
     const r = resumirHistorico(ls);
     assert.equal(r.maioresLiquidacoes.length, 1);
     assert.equal(r.maioresLiquidacoes[0].usd.toString(), '5000');
+});
+
+// ----------------------------------------------------------------------
+// Corrida ou leilão — a pergunta que decide se dá para competir
+// ----------------------------------------------------------------------
+test('pagar a taxa mínima é CORRIDA, e dar lance não adianta', () => {
+    const m = multiploDaBase({ efetivoWei: new Decimal('1000'), baseWei: new Decimal('1000') });
+    assert.equal(m?.toString(), '1');
+    assert.match(lerDisputa(m), /CORRIDA/);
+});
+
+test('pagar cem vezes a base é LEILÃO, e aí dá para competir com dinheiro', () => {
+    const m = multiploDaBase({ efetivoWei: new Decimal('100000'), baseWei: new Decimal('1000') });
+    assert.equal(m?.toString(), '100');
+    assert.match(lerDisputa(m), /LEILÃO/);
+});
+
+test('a razão dispensa a cotação do ETH', () => {
+    // O ponto do desenho: responder "corrida ou leilão" sem precisar de um
+    // preço que eu não tenho. Dobrar os dois lados não muda a resposta.
+    const a = multiploDaBase({ efetivoWei: new Decimal('4000'), baseWei: new Decimal('1000') });
+    const b = multiploDaBase({ efetivoWei: new Decimal('8000'), baseWei: new Decimal('2000') });
+    assert.equal(a?.toString(), b?.toString());
+});
+
+test('taxa base zero devolve null em vez de dividir por zero', () => {
+    assert.equal(multiploDaBase({ efetivoWei: new Decimal('1'), baseWei: new Decimal('0') }), null);
+    assert.equal(lerDisputa(null), 'sem dado suficiente');
+});
+
+test('a gorjeta é só o que passou da base, nunca negativa', () => {
+    assert.equal(
+        gorjetaWei({
+            efetivoWei: new Decimal('3000'),
+            baseWei: new Decimal('1000'),
+            gasUsado: new Decimal('500000'),
+        }).toString(),
+        '1000000000',
+    );
+    // Efetivo abaixo da base não existe em cadeia sã, mas se vier não vira
+    // gorjeta negativa somando de volta ao "lucro" do vencedor.
+    assert.equal(
+        gorjetaWei({
+            efetivoWei: new Decimal('500'),
+            baseWei: new Decimal('1000'),
+            gasUsado: new Decimal('100'),
+        }).toString(),
+        '0',
+    );
 });
