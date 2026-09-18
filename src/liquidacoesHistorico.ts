@@ -279,9 +279,26 @@ async function descobrirMoedas(): Promise<Record<string, Token>> {
             // fez o provedor público recusar 14 de 15 — e como eu tinha escrito
             // um catch mudo, o relatório disse "1 moeda" sem dizer por quê.
             try {
-                const sim = await chamar<string>('eth_call', [{ to: e, data: SELETOR_SYMBOL }, 'latest']);
+                // 429 = "devagar". Treze de quinze moedas morreram assim mesmo
+                // já indo em série: a pausa de 120ms é curta para o servidor
+                // público. Espera crescente resolve, e custa uns segundos UMA
+                // vez no arranque.
+                const comPaciencia = async (dados: string): Promise<string> => {
+                    let espera = 400;
+                    for (let tentativa = 0; ; tentativa += 1) {
+                        try {
+                            return await chamar<string>('eth_call', [{ to: e, data: dados }, 'latest']);
+                        } catch (err) {
+                            const msg = err instanceof Error ? err.message : String(err);
+                            if (tentativa >= 3 || !msg.includes('429')) throw err;
+                            await dormir(espera);
+                            espera *= 3;
+                        }
+                    }
+                };
+                const sim = await comPaciencia(SELETOR_SYMBOL);
                 await dormir(PAUSA_MS);
-                const dec = await chamar<string>('eth_call', [{ to: e, data: SELETOR_DECIMALS }, 'latest']);
+                const dec = await comPaciencia(SELETOR_DECIMALS);
                 const simbolo = decodificarTexto(sim).trim();
                 const decimais = Number(BigInt(dec === '0x' ? '0x0' : dec));
                 if (simbolo === '') falhas.push(`${e.slice(0, 10)}: símbolo ilegível`);
