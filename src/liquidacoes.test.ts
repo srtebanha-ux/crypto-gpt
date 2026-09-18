@@ -12,6 +12,7 @@ import {
     multiploDaBase,
     enderecoDoTopico,
     faixasDeBlocos,
+    repartirOBolo,
     resumirHistorico,
     valorEmDolares,
     type LogCru,
@@ -375,4 +376,58 @@ test('a posição no bloco não depende do tamanho do bloco', () => {
 
 test('poucos dados não viram leitura de posição', () => {
     assert.equal(lerPosicao([new Decimal(0.1)]), 'sem dado suficiente');
+});
+
+// ---------------------------------------------------------------------------
+// Onde está o dinheiro: somar, não contar.
+// ---------------------------------------------------------------------------
+
+/** n liquidações do mesmo tamanho, em USDC. */
+function varias(quantas: number, dolares: number) {
+    const cru = BigInt(Math.round(dolares * 1e6));
+    return Array.from({ length: quantas }, () => decodificarLiquidacao(logDe({ dividaCrua: cru })));
+}
+
+test('a soma e a mediana aparecem no resumo', () => {
+    const r = resumirHistorico([...varias(4, 100), ...varias(1, 600)]);
+    assert.equal(r.somaCotada.toString(), '1000');
+    assert.equal(r.medianaCotada?.toString(), '100', 'a típica é 100, não a média de 200');
+});
+
+test('a contagem diz volume e a soma diz o contrário — o buraco que isso fecha', () => {
+    // 90 migalhas de $100 e 1 grande de $200.000. Por contagem, 99% das
+    // liquidações são migalhas. Por dinheiro, elas são 4,3% do bolo — e é o
+    // dinheiro que decide qual bot construir.
+    const r = resumirHistorico([...varias(90, 100), ...varias(1, 200_000)]);
+    const bolo = repartirOBolo(r);
+    assert.equal(r.porFaixa[50_000], 1);
+    assert.match(bolo.leitura, /PLANTÃO/);
+    assert.equal(bolo.fracaoNasGrandes!.mul(100).toFixed(1), '95.7');
+});
+
+test('quando o bolo está mesmo espalhado, ser o louco que pega todas é certo', () => {
+    const r = resumirHistorico(varias(500, 2_000));
+    const bolo = repartirOBolo(r);
+    assert.equal(r.porFaixa[50_000], 0);
+    assert.match(bolo.leitura, /volume É o negócio/);
+});
+
+test('somaAcimaDe é acumulada para cima, igual a porFaixa', () => {
+    const r = resumirHistorico([...varias(1, 60_000), ...varias(1, 120_000)]);
+    assert.equal(r.somaAcimaDe[50_000].toString(), '180000');
+    assert.equal(r.somaAcimaDe[100_000].toString(), '120000');
+    assert.equal(r.somaAcimaDe[500_000].toString(), '0');
+});
+
+test('sem nada cotado não há veredicto sobre o bolo', () => {
+    const r = resumirHistorico([]);
+    assert.equal(repartirOBolo(r).fracaoNasGrandes, null);
+    assert.equal(r.medianaCotada, null);
+});
+
+test('liquidação sem cotação não entra na soma nem na mediana', () => {
+    const semPreco = decodificarLiquidacao(logDe({ dividaCrua: 10n ** 22n, ativoDaDivida: WETH }));
+    const r = resumirHistorico([...varias(2, 100), semPreco]);
+    assert.equal(r.somaCotada.toString(), '200');
+    assert.equal(r.semCotacao, 1);
 });

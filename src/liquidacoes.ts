@@ -165,6 +165,26 @@ export interface ResumoDoHistorico {
     maioresLiquidantes: Array<{ endereco: string; quantas: number }>;
     maior: Decimal | null;
     /**
+     * A SOMA de tudo que deu para cotar, em dólares — o buraco que a contagem
+     * escondia.
+     *
+     * `porFaixa` responde "quantas são grandes?". Não responde "onde está o
+     * dinheiro?", e as duas perguntas têm respostas diferentes: 3.082 migalhas
+     * de US$200 são 88% das liquidações e podem ser 4% do bolo. Quem olha só a
+     * contagem conclui que o negócio é volume; quem soma descobre que o
+     * negócio são treze eventos por semestre.
+     */
+    somaCotada: Decimal;
+    /** A soma em dólares de cada faixa, para cima. Chave = piso da faixa. */
+    somaAcimaDe: Record<number, Decimal>;
+    /**
+     * O tamanho do meio. A MÉDIA aqui mentiria: uma de US$255 mil no meio de
+     * milhares de US$200 puxa a média para um valor que nenhuma liquidação
+     * real tem. A mediana diz como é a liquidação TÍPICA — que é a que se
+     * pegaria num dia comum.
+     */
+    medianaCotada: Decimal | null;
+    /**
      * As MAIORES liquidações, uma por uma, com quem ficou com cada bônus.
      *
      * O ranking por CONTAGEM esconde a única coisa que decide se há espaço
@@ -200,7 +220,12 @@ export function resumirHistorico(
     precoEth?: Decimal | null,
 ): ResumoDoHistorico {
     const porFaixa: Record<number, number> = {};
-    for (const f of FAIXAS_USD) porFaixa[f] = 0;
+    const somaAcimaDe: Record<number, Decimal> = {};
+    for (const f of FAIXAS_USD) {
+        porFaixa[f] = 0;
+        somaAcimaDe[f] = new Decimal(0);
+    }
+    let somaCotada = new Decimal(0);
 
     const contagem = new Map<string, number>();
     const comValor: Array<{ l: Liquidacao; usd: Decimal }> = [];
@@ -216,8 +241,12 @@ export function resumirHistorico(
         }
         comValor.push({ l, usd });
         if (maior === null || usd.greaterThan(maior)) maior = usd;
+        somaCotada = somaCotada.plus(usd);
         for (const f of FAIXAS_USD) {
-            if (usd.greaterThanOrEqualTo(f)) porFaixa[f] += 1;
+            if (usd.greaterThanOrEqualTo(f)) {
+                porFaixa[f] += 1;
+                somaAcimaDe[f] = somaAcimaDe[f].plus(usd);
+            }
         }
     }
 
@@ -236,6 +265,10 @@ export function resumirHistorico(
             transacao: x.l.transacao,
         }));
 
+    // `comValor` ficou ordenado do MAIOR para o menor pelo sort acima, e o
+    // meio de uma lista ordenada é o meio em qualquer direção.
+    const medianaCotada = comValor.length > 0 ? comValor[Math.floor(comValor.length / 2)].usd : null;
+
     return {
         total: liquidacoes.length,
         semCotacao,
@@ -243,7 +276,54 @@ export function resumirHistorico(
         liquidantesDistintos: contagem.size,
         maioresLiquidantes: maiores,
         maior,
+        somaCotada,
+        somaAcimaDe,
+        medianaCotada,
         maioresLiquidacoes,
+    };
+}
+
+/**
+ * Onde está o dinheiro: nas migalhas ou nas poucas grandes?
+ *
+ * A pergunta veio dela, e ela estava certa em fazê-la: "a gente não pode ser o
+ * louco que pega todas?". O relatório até aqui não tinha como responder, porque
+ * só sabia CONTAR. Contando, as migalhas são 88% e a resposta parece óbvia.
+ * Somando, pode ser o contrário.
+ *
+ * As duas respostas pedem bots opostos. Se o bolo está nas migalhas, o negócio
+ * é volume: estar sempre ligada, gastar pouco de gás, pegar o que aparecer. Se
+ * o bolo está em treze eventos por semestre, volume é só o plantão que te
+ * mantém presente — e o dinheiro está em ganhar disputas raras.
+ */
+export function repartirOBolo(
+    r: ResumoDoHistorico,
+    pisoGrande = 50_000,
+): { fracaoNasGrandes: Decimal | null; leitura: string } {
+    if (r.somaCotada.lessThanOrEqualTo(0)) {
+        return { fracaoNasGrandes: null, leitura: 'sem dado suficiente' };
+    }
+    const nasGrandes = r.somaAcimaDe[pisoGrande] ?? new Decimal(0);
+    const fracao = nasGrandes.dividedBy(r.somaCotada);
+    const pct = fracao.mul(100).toFixed(0);
+    const quantas = r.porFaixa[pisoGrande] ?? 0;
+    const resto = r.total - r.semCotacao - quantas;
+
+    if (fracao.greaterThanOrEqualTo(0.5)) {
+        return {
+            fracaoNasGrandes: fracao,
+            leitura: `${pct}% do dinheiro está em ${quantas} liquidações, e os outros ${100 - Number(pct)}% espalhados em ${resto}. Pegar todas é PLANTÃO, não é o negócio: o negócio são essas ${quantas}.`,
+        };
+    }
+    if (fracao.lessThanOrEqualTo(0.2)) {
+        return {
+            fracaoNasGrandes: fracao,
+            leitura: `só ${pct}% do dinheiro está nas ${quantas} grandes — o resto está espalhado em ${resto} liquidações. Aqui volume É o negócio, e ser "o louco que pega todas" é a estratégia certa.`,
+        };
+    }
+    return {
+        fracaoNasGrandes: fracao,
+        leitura: `${pct}% do dinheiro nas ${quantas} grandes e o resto em ${resto}. Os dois negócios valem parecido — dá para começar pelo volume e subir.`,
     };
 }
 

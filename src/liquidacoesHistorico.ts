@@ -32,6 +32,7 @@ import {
     REDES,
     gorjetaWei,
     lerDisputaPorPiso,
+    repartirOBolo,
     lerPosicao,
     multiploDaBase,
     decodificarLiquidacao,
@@ -378,6 +379,16 @@ async function principal(): Promise<void> {
         transacoesLidas: posicoes.length,
         leitura: lerPosicao(posicoes),
         detalhe: ondeCairam.join(' | '),
+    });
+
+    // ONDE ESTÁ O DINHEIRO — a contagem não responde isso, e eu estava
+    // respondendo assim mesmo.
+    const bolo = repartirOBolo(r);
+    log.info('ONDE ESTÁ O DINHEIRO — migalhas ou poucas grandes?', {
+        somaTotal: `$${r.somaCotada.toFixed(0)}`,
+        liquidacaoTipica: r.medianaCotada ? `$${r.medianaCotada.toFixed(0)} (mediana)` : '—',
+        acimaDe50k: `$${(r.somaAcimaDe[50_000] ?? new Decimal(0)).toFixed(0)}`,
+        leitura: bolo.leitura,
     });
 
     log.info('VEREDICTO PRELIMINAR.', {
