@@ -676,3 +676,119 @@ export function bonusDeLiquidacao(dataHex: string): Decimal | null {
 export function lucroBruto(dividaUsd: Decimal, bonus: Decimal): Decimal {
     return dividaUsd.mul(bonus);
 }
+
+// ---------------------------------------------------------------------------
+// A JANELA — quanto tempo a porta fica aberta.
+// ---------------------------------------------------------------------------
+
+/** Faixas da janela, em blocos, da mais apertada para a mais folgada. */
+export const FAIXAS_DE_JANELA: Array<{ ate: number; nome: string }> = [
+    { ate: 0, nome: 'mesmo bloco' },
+    { ate: 5, nome: '1-5 blocos' },
+    { ate: 30, nome: '6-30 blocos' },
+    { ate: 300, nome: '31-300 blocos' },
+    { ate: 1800, nome: '301-1800 blocos' },
+];
+
+export interface Janela {
+    pares: number;
+    mesmoBloco: number;
+    porFaixa: Record<string, number>;
+    medianaBlocos: number | null;
+    medianaSegundos: number | null;
+    leitura: string;
+}
+
+/**
+ * Quanto tempo uma posição liquidável sobrevive antes de alguém pegar.
+ *
+ * É a pergunta que decide se ela consegue competir, e até agora eu só sabia
+ * fazê-la com nó de rede caro. Dá para responder de graça, e a chave é o
+ * `devedor`, que já vem no evento e que eu não estava usando para nada.
+ *
+ * A Aave não deixa quitar a dívida inteira de uma vez no caso comum: fecha-se
+ * uma parte e o resto continua lá, liquidável, à vista de todo mundo. Então
+ * quando o MESMO devedor aparece duas vezes, o intervalo entre as duas é
+ * tempo em que havia dinheiro exposto e ninguém pegou.
+ *
+ * Mesmo bloco significa que a porta fecha antes de dar para reagir do Brasil.
+ * Trinta blocos na Base são um minuto — e um minuto é uma eternidade para
+ * código que já estava pronto esperando.
+ *
+ * O que isto NÃO é: medição direta da janela. O segundo evento pode ser um
+ * episódio novo, com o preço tendo caído mais depois. Por isso pares acima de
+ * `limiteBlocos` são descartados em vez de entrarem como janelas enormes, e
+ * pares da mesma transação também — um liquidante fechando duas posições de
+ * uma vez é uma ação só, não é disputa. É um limite SUPERIOR mal-humorado, e
+ * serve porque a resposta que interessa é de ordem de grandeza: segundos ou
+ * minutos.
+ */
+export function janelaDeOportunidade(
+    todas: Liquidacao[],
+    segPorBloco = 2,
+    limiteBlocos = 1800,
+): Janela {
+    const porDevedor = new Map<string, Liquidacao[]>();
+    for (const l of todas) {
+        const k = l.devedor.toLowerCase();
+        const lista = porDevedor.get(k);
+        if (lista) lista.push(l);
+        else porDevedor.set(k, [l]);
+    }
+
+    const porFaixa: Record<string, number> = {};
+    for (const f of FAIXAS_DE_JANELA) porFaixa[f.nome] = 0;
+    const vaos: number[] = [];
+    let mesmoBloco = 0;
+
+    for (const lista of porDevedor.values()) {
+        if (lista.length < 2) continue;
+        const ordenada = [...lista].sort((a, b) => a.bloco - b.bloco);
+        for (let i = 1; i < ordenada.length; i += 1) {
+            const antes = ordenada[i - 1];
+            const agora = ordenada[i];
+            // Mesma transação é uma ação só, não é alguém tendo chegado depois.
+            if (antes.transacao === agora.transacao) continue;
+            const vao = agora.bloco - antes.bloco;
+            if (vao > limiteBlocos) continue;
+            vaos.push(vao);
+            if (vao === 0) mesmoBloco += 1;
+            const faixa = FAIXAS_DE_JANELA.find((f) => vao <= f.ate);
+            if (faixa) porFaixa[faixa.nome] += 1;
+        }
+    }
+
+    if (vaos.length === 0) {
+        return {
+            pares: 0,
+            mesmoBloco: 0,
+            porFaixa,
+            medianaBlocos: null,
+            medianaSegundos: null,
+            leitura: 'sem dado suficiente: nenhum devedor apareceu duas vezes.',
+        };
+    }
+
+    vaos.sort((a, b) => a - b);
+    const mediana = vaos[Math.floor(vaos.length / 2)];
+    const segundos = mediana * segPorBloco;
+    const fracaoInstantanea = mesmoBloco / vaos.length;
+
+    let leitura: string;
+    if (fracaoInstantanea >= 0.5) {
+        leitura = `PORTA FECHA NA HORA: ${mesmoBloco} de ${vaos.length} pares aconteceram no MESMO bloco. Não sobra tempo para reagir de fora — competir aqui é questão de infraestrutura, não de código.`;
+    } else if (segundos >= 30) {
+        leitura = `DÁ TEMPO: a janela típica é de ${mediana} blocos, uns ${segundos} segundos. Para código que já estava pronto esperando, isso é uma eternidade. É aqui que programar melhor ganha de chegar primeiro.`;
+    } else {
+        leitura = `JANELA APERTADA: a típica é de ${mediana} blocos, uns ${segundos} segundos. Dá, mas só com a transação pronta e assinada antes — não dá para montar nada na hora.`;
+    }
+
+    return {
+        pares: vaos.length,
+        mesmoBloco,
+        porFaixa,
+        medianaBlocos: mediana,
+        medianaSegundos: segundos,
+        leitura,
+    };
+}

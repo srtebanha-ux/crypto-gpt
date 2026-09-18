@@ -31,9 +31,11 @@ import {
     ehLimiteDeFaixa,
     REDES,
     gorjetaWei,
+    FAIXAS_USD,
     aglomeracao,
     bonusDeLiquidacao,
     chamadaDeConfiguracao,
+    janelaDeOportunidade,
     lucroBruto,
     lerDisputaPorPiso,
     repartirOBolo,
@@ -397,9 +399,33 @@ async function principal(): Promise<void> {
     const bolo = repartirOBolo(r);
     log.info('ONDE ESTÁ O DINHEIRO — migalhas ou poucas grandes?', {
         somaTotal: `$${r.somaCotada.toFixed(0)}`,
-        liquidacaoTipica: r.medianaCotada ? `$${r.medianaCotada.toFixed(0)} (mediana)` : '—',
-        acimaDe50k: `$${(r.somaAcimaDe[50_000] ?? new Decimal(0)).toFixed(0)}`,
+        // `toFixed(0)` imprimiu "$0" e isso pareceu defeito, mas era a resposta:
+        // mais da metade das liquidações é poeira de menos de um dólar. O
+        // arredondamento é que escondia o fato, transformando "a típica é
+        // minúscula" em "o número quebrou".
+        liquidacaoTipica:
+            r.medianaCotada === null
+                ? '—'
+                : r.medianaCotada.lessThan(1)
+                  ? `menos de $1 — mais da metade é poeira (${r.medianaCotada.toFixed(4)})`
+                  : `$${r.medianaCotada.toFixed(2)} (mediana)`,
+        // Só a faixa dos 50k estava somada, e faltando as outras não dava para
+        // ver que o dinheiro não está nem nas grandes nem na poeira: está no MEIO.
+        porFaixa: FAIXAS_USD.map(
+            (f) => `>$${f / 1000}k: $${(r.somaAcimaDe[f] ?? new Decimal(0)).toFixed(0)}`,
+        ).join(' | '),
         leitura: bolo.leitura,
+    });
+
+    // A JANELA — de graça, e é ela que decide se dá para competir.
+    const j = janelaDeOportunidade(liquidacoes, SEG_POR_BLOCO);
+    log.info('A JANELA — quanto tempo a porta fica aberta.', {
+        paresMedidos: j.pares,
+        tipica: j.medianaBlocos === null ? '—' : `${j.medianaBlocos} blocos (~${j.medianaSegundos}s)`,
+        porFaixa: Object.entries(j.porFaixa)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join(' | '),
+        leitura: j.leitura,
     });
 
     // QUANTO SOBRA — o bônus lido do contrato, não chutado por mim.

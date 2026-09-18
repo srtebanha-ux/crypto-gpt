@@ -5,6 +5,7 @@ import {
     aglomeracao,
     bonusDeLiquidacao,
     chamadaDeConfiguracao,
+    janelaDeOportunidade,
     lucroBruto,
     contarPorTopico,
     decodificarLiquidacao,
@@ -532,4 +533,80 @@ test('a chamada carrega o ativo em palavra de 32 bytes', () => {
     assert.ok(c.startsWith('0xc44b11f7'));
     assert.equal(c.length, 10 + 64);
     assert.ok(c.endsWith('4200000000000000000000000000000000000006'));
+});
+
+// ---------------------------------------------------------------------------
+// A janela: quanto tempo a porta fica aberta.
+// ---------------------------------------------------------------------------
+
+/** Uma liquidação do mesmo devedor, num bloco e transação escolhidos. */
+function doDevedor(devedor: string, bloco: number, tx: string) {
+    return {
+        ...decodificarLiquidacao({
+            ...logDe({ dividaCrua: 100_000_000n, bloco }),
+            topics: [
+                '0xtopic0',
+                `0x${palavra(WETH)}`,
+                `0x${palavra(USDC)}`,
+                `0x${palavra(devedor)}`,
+            ],
+        }),
+        transacao: tx,
+    };
+}
+
+const DEV_A = '0xaaaa000000000000000000000000000000000001';
+const DEV_B = '0xbbbb000000000000000000000000000000000002';
+
+test('devedor que aparece uma vez só não vira par', () => {
+    const j = janelaDeOportunidade([doDevedor(DEV_A, 100, '0x1')]);
+    assert.equal(j.pares, 0);
+    assert.match(j.leitura, /sem dado suficiente/);
+});
+
+test('pares do mesmo bloco dizem que a porta fecha na hora', () => {
+    const ls = [
+        doDevedor(DEV_A, 100, '0x1'),
+        doDevedor(DEV_A, 100, '0x2'),
+        doDevedor(DEV_B, 500, '0x3'),
+        doDevedor(DEV_B, 500, '0x4'),
+    ];
+    const j = janelaDeOportunidade(ls);
+    assert.equal(j.mesmoBloco, 2);
+    assert.match(j.leitura, /PORTA FECHA NA HORA/);
+});
+
+test('janela folgada em blocos vira segundos e vira "dá tempo"', () => {
+    const ls = [
+        doDevedor(DEV_A, 100, '0x1'),
+        doDevedor(DEV_A, 140, '0x2'),
+        doDevedor(DEV_B, 500, '0x3'),
+        doDevedor(DEV_B, 560, '0x4'),
+    ];
+    const j = janelaDeOportunidade(ls, 2);
+    assert.equal(j.medianaBlocos, 60);
+    assert.equal(j.medianaSegundos, 120);
+    assert.match(j.leitura, /DÁ TEMPO/);
+});
+
+test('a mesma transação não conta como disputa', () => {
+    // Um liquidante fechando duas posições do mesmo devedor de uma vez é uma
+    // ação só. Contar isso como "mesmo bloco" inventaria uma corrida.
+    const ls = [doDevedor(DEV_A, 100, '0xigual'), doDevedor(DEV_A, 100, '0xigual')];
+    assert.equal(janelaDeOportunidade(ls).pares, 0);
+});
+
+test('pares muito distantes são descartados, não viram janelas gigantes', () => {
+    // Dois episódios separados por semanas não são uma porta aberta por
+    // semanas. Entrar com esse número inflaria a mediana e mentiria a favor.
+    const ls = [doDevedor(DEV_A, 100, '0x1'), doDevedor(DEV_A, 900_000, '0x2')];
+    assert.equal(janelaDeOportunidade(ls, 2, 1800).pares, 0);
+});
+
+test('o tempo de bloco da rede é respeitado', () => {
+    const ls = [doDevedor(DEV_A, 100, '0x1'), doDevedor(DEV_A, 110, '0x2')];
+    // Na Base cada bloco são 2s; na Ethereum, 12s. Mesma janela em blocos,
+    // conclusões diferentes em segundos.
+    assert.equal(janelaDeOportunidade(ls, 2).medianaSegundos, 20);
+    assert.equal(janelaDeOportunidade(ls, 12).medianaSegundos, 120);
 });
