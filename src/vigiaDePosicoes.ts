@@ -318,35 +318,61 @@ async function olhar(devedores: string[]): Promise<Posicao[]> {
     return fora;
 }
 
-/** Quem já estava na mira e virou liquidável — a previsão se confirmando. */
-const primeiraVezVisto = new Map<string, number>();
+/**
+ * Desde quando cada devedor está PERTO da borda — e não desde quando existe.
+ *
+ * A primeira versão guardava o instante em que o vigia viu o endereço pela
+ * primeira vez, qualquer que fosse a saúde dele. Isso daria, numa noite
+ * inteira, `avisoPrevio: 7 horas` para alguém que passou a madrugada a 80% de
+ * folga e despencou nos últimos dois minutos. O número seria verdadeiro e
+ * responderia a pergunta errada.
+ *
+ * A pergunta é: DEU TEMPO DE AGIR? E isso começa a contar quando a posição
+ * entra na zona vigiada, não quando ela aparece no mundo.
+ */
+const desdeQuandoNaZona = new Map<string, number>();
+
+/** Quantas o vigia viu chegando, e quantas apareceram do nada. */
+const placar = { previstas: 0, deSurpresa: 0 };
 
 function anunciarQuedas(posicoes: Posicao[]): void {
     for (const p of posicoes) {
         if (p.quedaPct === null) continue;
         const chave = p.devedor;
+
         if (p.quedaPct.greaterThan(0)) {
-            if (!primeiraVezVisto.has(chave)) primeiraVezVisto.set(chave, Date.now());
+            if (p.quedaPct.lessThanOrEqualTo(LIMIAR_VIGIA)) {
+                if (!desdeQuandoNaZona.has(chave)) desdeQuandoNaZona.set(chave, Date.now());
+            } else {
+                // Saiu da zona (o preço subiu, ou pagou dívida). Se voltar, o
+                // relógio recomeça — porque a folga anterior não vale como
+                // aviso para a queda seguinte.
+                desdeQuandoNaZona.delete(chave);
+            }
             continue;
         }
-        // Virou liquidável agora.
-        const desde = primeiraVezVisto.get(chave);
-        primeiraVezVisto.delete(chave);
+
+        const desde = desdeQuandoNaZona.get(chave);
+        desdeQuandoNaZona.delete(chave);
+        if (desde === undefined) placar.deSurpresa += 1;
+        else placar.previstas += 1;
+
         log.info('*** LIQUIDÁVEL AGORA ***', {
             devedor: chave,
             dividaUsd: `$${p.conta.dividaBase.dividedBy(1e8).toFixed(0)}`,
             avisoPrevio:
                 desde === undefined
-                    ? 'NENHUM — apareceu já liquidável, o vigia não viu chegando'
-                    : `${((Date.now() - desde) / 60000).toFixed(1)} minutos de antecedência`,
-            observacao: 'MODO LEITURA: nada foi enviado. Isto é a medição da previsão, não uma operação.',
+                    ? `NENHUM — nunca passou pela zona de ${LIMIAR_VIGIA}%; o vigia não viu chegando`
+                    : `${((Date.now() - desde) / 60000).toFixed(1)} minutos dentro da zona de ${LIMIAR_VIGIA}%`,
+            placarAteAgora: `${placar.previstas} previstas / ${placar.deSurpresa} de surpresa`,
+            observacao: 'MODO LEITURA: nada foi enviado.',
         });
     }
 }
 
-function relatar(titulo: string, posicoes: Posicao[]): Posicao[] {
+function relatar(titulo: string, posicoes: Posicao[], falar = true): Posicao[] {
     const r = resumirPosicoes(posicoes, LIMIAR_VIGIA);
-    log.info(titulo, {
+    if (falar) log.info(titulo, {
         olhados: posicoes.length,
         comDivida: r.vigiados,
         semDivida: r.semDivida,
@@ -383,23 +409,55 @@ async function principal(): Promise<void> {
         return;
     }
 
-    let naMira = relatar('RONDA COMPLETA.', await olhar(devedores));
+    let naMira = relatar('RONDA COMPLETA.', await olhar(devedores), true);
     let ultimaRonda = Date.now();
 
+    let ultimoResumo = Date.now();
+    let assinaturaAnterior = '';
+
     for (;;) {
-        if (Date.now() - ultimaRonda > MIN_RONDA * 60_000) {
-            devedores = await juntarDevedores();
-            naMira = relatar('RONDA COMPLETA.', await olhar(devedores));
-            ultimaRonda = Date.now();
-            continue;
+        try {
+            if (Date.now() - ultimaRonda > MIN_RONDA * 60_000) {
+                devedores = await juntarDevedores();
+                naMira = relatar('RONDA COMPLETA.', await olhar(devedores), true);
+                ultimaRonda = Date.now();
+                continue;
+            }
+
+            if (naMira.length > 0) {
+                const atual = await olhar(naMira.map((p) => p.devedor));
+                // Falar de 20 em 20 segundos a noite inteira são mais de mil
+                // linhas iguais, e aí a UMA que importa se perde no meio. Só
+                // fala quando a lista muda de verdade.
+                const assinatura = atual
+                    .filter((p) => p.quedaPct !== null)
+                    .map((p) => `${p.devedor}:${p.quedaPct!.toFixed(1)}`)
+                    .sort()
+                    .join(',');
+                naMira = relatar('VIGIA — mudou algo na borda.', atual, assinatura !== assinaturaAnterior);
+                assinaturaAnterior = assinatura;
+            }
+
+            // Sinal de vida de hora em hora, para de manhã dar para saber que
+            // ele passou a noite acordado — e não que morreu às duas.
+            if (Date.now() - ultimoResumo > 60 * 60_000) {
+                log.info('DE PLANTÃO — uma hora se passou.', {
+                    naBorda: naMira.length,
+                    devedoresNaLista: devedores.length,
+                    placar: `${placar.previstas} previstas / ${placar.deSurpresa} de surpresa`,
+                    proximaRonda: `${Math.max(0, MIN_RONDA - (Date.now() - ultimaRonda) / 60_000).toFixed(0)} min`,
+                });
+                ultimoResumo = Date.now();
+            }
+        } catch (err) {
+            // Uma falha de rede às três da manhã não pode custar a noite
+            // inteira. Antes, qualquer erro aqui derrubava `principal` e o
+            // processo ficava ocioso até alguém olhar — exatamente o que não
+            // acontece de madrugada.
+            log.warn('Tropeço no laço; seguindo.', {
+                erro: err instanceof Error ? err.message : String(err),
+            });
         }
-        if (naMira.length === 0) {
-            log.info('Ninguém na mira. De plantão.', { proximaRonda: `${MIN_RONDA} min` });
-            await dormir(SEG_VIGIA * 1000);
-            continue;
-        }
-        const atual = await olhar(naMira.map((p) => p.devedor));
-        naMira = relatar('VIGIA — só quem está perto da borda.', atual);
         await dormir(SEG_VIGIA * 1000);
     }
 }
