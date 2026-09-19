@@ -86,7 +86,11 @@ const ENVIAR = process.env.CACA_ENVIAR === '1';
 // impressão de que a borda está sendo coberta.
 const BLOCOS = Number(process.env.CACA_BLOCOS ?? '1296000');
 const PEDACO = Number(process.env.CACA_PEDACO ?? '2000');
-const SEG = Number(process.env.CACA_SEG ?? '20');
+// 2s = um bloco da Base. So da para olhar tao rapido porque a passada rapida
+// le PRECO (1 chamada), nao as 126 posicoes (1 multicall cada vez). Olhar a
+// cada 20s era piscar a cada 10 blocos, e quem ganha a liquidacao pega no
+// bloco em que ela abre: chegavamos tarde em 90% das vezes.
+const SEG = Number(process.env.CACA_SEG ?? '2');
 // 37 e não 30 de propósito: o vigia recolhe de 30 em 30 minutos, e dois
 // processos varrendo 648 faixas de blocos ao mesmo tempo, no único RPC que a
 // Base responde, é como o caçador morreu da primeira vez. Um número que não
@@ -473,6 +477,8 @@ async function principal(): Promise<'parar' | void> {
     });
 
     let naMira: string[] = [];
+    /** A menor distância até liquidar na borda: o gatilho do preço. */
+    let menorQueda = new Decimal(100);
     let ultimaRonda = 0;
 
     for (;;) {
@@ -485,6 +491,45 @@ async function principal(): Promise<'parar' | void> {
 
             // Ronda completa de vez em quando; borda a cada passada.
             const ehRonda = Date.now() - ultimaRonda > MIN_RONDA * 60_000;
+
+            // Ler os precos e uma chamada; reler as posicoes sao muitas. Entao
+            // a passada rapida pergunta ao PRECO, e so acorda as posicoes
+            // quando o preco cai o bastante para alguem da borda ter cruzado.
+            // A conta ja existia virada do outro lado: se a mais frageil esta a
+            // X% de cair, uma queda de X% no preco abre ela.
+            let acordar = ehRonda;
+            if (!ehRonda && naMira.length > 0) {
+                const agora = await lerEmLote(
+                    moedas.map((m) => ({
+                        alvo: oraculo,
+                        dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0'),
+                    })),
+                );
+                let maiorQueda = new Decimal(0);
+                moedas.forEach((m, i) => {
+                    const base = precos.get(m.toLowerCase());
+                    if (!agora[i] || !base || base.lessThanOrEqualTo(0)) return;
+                    try {
+                        const q = base.minus(new Decimal(BigInt(agora[i]!).toString())).dividedBy(base).mul(100);
+                        if (q.greaterThan(maiorQueda)) maiorQueda = q;
+                    } catch {
+                        /* ilegível */
+                    }
+                });
+                if (maiorQueda.greaterThanOrEqualTo(menorQueda)) {
+                    acordar = true;
+                    log.info('PREÇO CRUZOU — acordando a borda.', {
+                        maiorQuedaPct: maiorQueda.toFixed(3),
+                        maisFragilEstavaA: `${menorQueda.toFixed(3)}%`,
+                        naMira: naMira.length,
+                    });
+                }
+            }
+            if (!acordar) {
+                await dormir(SEG * 1000);
+                continue;
+            }
+
             const olharAgora = ehRonda ? devedores : naMira;
             if (olharAgora.length === 0) {
                 await dormir(SEG * 1000);
@@ -499,6 +544,7 @@ async function principal(): Promise<'parar' | void> {
             );
             const caidos: string[] = [];
             const perto: string[] = [];
+            let menorVista = new Decimal(100);
             const saudaveis: string[] = [];
             for (let i = 0; i < olharAgora.length; i += 1) {
                 if (!contas[i]) continue;
@@ -507,6 +553,7 @@ async function principal(): Promise<'parar' | void> {
                     if (queda === null) continue;
                     if (queda.isZero()) caidos.push(olharAgora[i]);
                     else {
+                        if (queda.lessThan(menorVista)) menorVista = queda;
                         if (queda.lessThanOrEqualTo(LIMIAR)) perto.push(olharAgora[i]);
                         if (saudaveis.length < ENSAIAR) saudaveis.push(olharAgora[i]);
                     }
@@ -534,13 +581,15 @@ async function principal(): Promise<'parar' | void> {
                 });
 
                 naMira = perto;
+                menorQueda = menorVista;
                 ultimaRonda = Date.now();
                 log.info('RONDA COMPLETA.', {
                     olhados: olharAgora.length,
                     naBorda: naMira.length,
                     jaLiquidaveis: caidos.length,
                     limiar: `${LIMIAR}% de queda`,
-                    proximasPassadas: `só os ${naMira.length} da borda, a cada ${SEG}s`,
+                    maisFragilA: `${menorVista.toFixed(3)}% de cair`,
+                    proximasPassadas: `preço a cada ${SEG}s; a borda só quando o preço cruzar`,
                 });
             }
 
