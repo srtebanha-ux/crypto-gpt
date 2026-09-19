@@ -63,6 +63,18 @@ const PAUSA_MS = Number(process.env.CACA_PAUSA_MS ?? '600');
 /** Quantos saudáveis ensaiar por rodada, para provar o formato sem alvo real. */
 const ENSAIAR = Number(process.env.CACA_ENSAIAR ?? '3');
 
+// Tetos de gasto. Sem eles, um alvo que fica caído e cuja caçada reverte faz o
+// laço tentar a cada CACA_SEG segundos: 180 tentativas por hora a US$0,01 são
+// US$1,80/hora, e os US$13,61 de gás somem em 7,6 horas. Dormindo oito, daria
+// para gastar o saldo inteiro sem ganhar nada — e o log da manhã seria uma
+// parede de reversões idênticas.
+//
+// Dois tetos porque são dois defeitos diferentes: um alvo teimoso (um erro que
+// se repete contra a mesma posição) e um dia ruim inteiro (muitos alvos, todos
+// falhando). O primeiro pede desistir DAQUELE; o segundo, parar de enviar.
+const MAX_POR_ALVO = Number(process.env.CACA_MAX_POR_ALVO ?? '3');
+const MAX_ENVIOS = Number(process.env.CACA_MAX_ENVIOS ?? '25');
+
 let rpc = process.env.CACA_RPC_URL ?? REDE.rpc;
 let rpcId = 0;
 const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -236,6 +248,9 @@ async function principal(): Promise<void> {
 
     let devedores = await juntarDevedores(topo);
     let ultimaColeta = Date.now();
+    /** Quantas vezes cada alvo já falhou. Desistir dele é mais barato que insistir. */
+    const falhasPorAlvo = new Map<string, number>();
+    let enviados = 0;
     log.info('Lista de devedores pronta.', { devedores: devedores.length });
 
     for (;;) {
@@ -319,6 +334,25 @@ async function principal(): Promise<void> {
                 if (!ENVIAR || !carteira || ehEnsaio) continue;
                 if (leitura.desfecho !== 'mediu' || leitura.lucroCru === null || leitura.lucroCru === 0n) continue;
 
+                const jaFalhou = falhasPorAlvo.get(alvo.devedor) ?? 0;
+                if (jaFalhou >= MAX_POR_ALVO) {
+                    log.warn('Alvo desistido: já falhou o bastante.', {
+                        devedor: alvo.devedor,
+                        falhas: jaFalhou,
+                        porQue: 'insistir contra o mesmo erro só queima gás; o defeito não está na sorte',
+                    });
+                    continue;
+                }
+                if (enviados >= MAX_ENVIOS) {
+                    log.error('TETO DE ENVIOS ATINGIDO — parando de enviar nesta execução.', {
+                        enviados,
+                        teto: MAX_ENVIOS,
+                        aindaMede: 'a medição continua; só o envio parou',
+                        comoResolver: 'olhe os desfechos acima antes de subir CACA_MAX_ENVIOS',
+                    });
+                    continue;
+                }
+
                 // O piso real: 80% do que a medição acabou de ver. A folga
                 // existe porque entre medir e executar o pool se move, e
                 // exigir o exato faria reverter por centavos.
@@ -331,14 +365,23 @@ async function principal(): Promise<void> {
                     poolDeVenda,
                     lucroMinimo: piso,
                 });
+                enviados += 1;
                 const tx = await carteira.sendTransaction({ to: cacador.endereco, data: envio });
-                log.info('CAÇADA ENVIADA.', { devedor: alvo.devedor, hash: tx.hash, piso: piso.toString() });
+                log.info('CAÇADA ENVIADA.', {
+                    devedor: alvo.devedor,
+                    hash: tx.hash,
+                    piso: piso.toString(),
+                    envioNumero: `${enviados} de ${MAX_ENVIOS} permitidos`,
+                });
                 const recibo = await tx.wait();
+                const deuCerto = recibo?.status === 1;
+                if (!deuCerto) falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
                 log.info('CAÇADA CONCLUÍDA.', {
                     devedor: alvo.devedor,
                     hash: tx.hash,
-                    status: recibo?.status === 1 ? 'SUCESSO' : 'REVERTIDA',
+                    status: deuCerto ? 'SUCESSO' : 'REVERTIDA',
                     gasUsado: recibo?.gasUsed?.toString() ?? '-',
+                    falhasDesteAlvo: deuCerto ? 0 : jaFalhou + 1,
                     ondeVerLucro: cacador.cofre,
                 });
             }
