@@ -13,6 +13,8 @@ import {
     reservaDoOutroLado,
     emUnidades,
     escolherPoolDeVenda,
+    ladoEmDolar,
+    profundidadeEmDolar,
     type Pool,
 } from './pools';
 
@@ -104,4 +106,27 @@ test('acha o par na ordem invertida também', () => {
     const e = escolherPoolDeVenda([invertido], GARANTIA, DIVIDA);
     assert.equal(e.pool!.endereco, invertido.endereco);
     assert.equal(e.recebe!.toNumber(), 777);
+});
+
+test('acha o lado em dólar pelo símbolo, e admite quando não tem', () => {
+    const comUsdc = pool({ simbolo0: 'WETH', simbolo1: 'USDC', decimais1: 6 });
+    assert.equal(ladoEmDolar(comUsdc), 1);
+    assert.equal(ladoEmDolar(pool({ simbolo0: 'USDbC', simbolo1: 'cbBTC', decimais0: 6 })), 0);
+    assert.equal(ladoEmDolar(pool({ simbolo0: 'WETH', simbolo1: 'cbBTC' })), null);
+});
+
+test('profundidade em dólar sai do lado certo, com as casas certas', () => {
+    // 648.537 USDC guardados como 648537000000 (6 casas). Ler isso como 18
+    // casas daria 0,00000065 e o pool sumiria do ranking.
+    const p = pool({
+        simbolo0: 'WETH', simbolo1: 'USDC',
+        decimais0: 18, decimais1: 6,
+        reserva0: new Decimal('248000000000000000000'),
+        reserva1: new Decimal('648537000000'),
+    });
+    assert.equal(profundidadeEmDolar(p)!.toFixed(0), '648537');
+});
+
+test('pool sem lado em dólar não recebe profundidade inventada', () => {
+    assert.equal(profundidadeEmDolar(pool({ simbolo0: 'WETH', simbolo1: 'cbBTC' })), null);
 });

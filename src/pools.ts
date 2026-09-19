@@ -163,3 +163,30 @@ export function escolherPoolDeVenda(pools: Pool[], garantia: string, divida: str
         motivo: `o mais fundo de ${soV2.length} pool(s) V2 do par (${doPar.length} no total, com Solidly)`,
     };
 }
+
+/**
+ * Qual lado do pool é dinheiro de verdade, para poder comparar pools.
+ *
+ * Reservas em unidades não se comparam entre moedas: 248 WETH e 648.537 USDC
+ * são o mesmo dinheiro. Ordenar pools pelo número maior colocaria o de USDC
+ * na frente sempre, e o de cbBTC por último, por causa da unidade e não da
+ * profundidade.
+ *
+ * Sem tabela de preços, a única âncora honesta é o dólar: um lado cujo símbolo
+ * diz USD vale ~1. Quando nenhum dos dois diz, este pool NÃO entra no ranking
+ * em dólar — ele vai para uma lista à parte, dizendo que não deu para comparar.
+ * Chutar o preço para não deixar buraco no relatório é como se inventa número.
+ */
+export function ladoEmDolar(pool: Pool): 0 | 1 | null {
+    const ehDolar = (s?: string) => !!s && /USD/i.test(s);
+    if (ehDolar(pool.simbolo1)) return 1;
+    if (ehDolar(pool.simbolo0)) return 0;
+    return null;
+}
+
+/** A reserva em dólares, quando um dos lados é dólar. Null quando não dá para saber. */
+export function profundidadeEmDolar(pool: Pool): Decimal | null {
+    const lado = ladoEmDolar(pool);
+    if (lado === null) return null;
+    return emUnidades(lado === 0 ? pool.reserva0 : pool.reserva1, lado === 0 ? pool.decimais0 : pool.decimais1);
+}

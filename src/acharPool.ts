@@ -26,6 +26,7 @@ import {
     ordenarPorAtividade,
     escolherPoolDeVenda,
     emUnidades,
+    profundidadeEmDolar,
     type Familia,
     type Pool,
     type LogDeSync,
@@ -38,7 +39,11 @@ const REDE_ESCOLHIDA = (process.env.POOL_REDE ?? 'base').toLowerCase();
 const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const BLOCOS = Number(process.env.POOL_BLOCOS ?? '10000');
 const PEDACO = Number(process.env.POOL_PEDACO ?? '2000');
-const QUANTOS = Number(process.env.POOL_QUANTOS ?? '150');
+// Alto de propósito. A primeira versão olhava 150 dos 1.044 pools V2 da Base,
+// e olhava os 150 MAIS MOVIMENTADOS — que não são os mais fundos. É o mesmo
+// defeito que o vigia tinha (`slice(0, 10)` de uma lista na ordem errada),
+// repetido aqui. Ler todos custa quatro multicalls a mais e nada de tempo.
+const QUANTOS = Number(process.env.POOL_QUANTOS ?? '2000');
 const TIMEOUT_MS = Number(process.env.POOL_TIMEOUT_MS ?? '25000');
 const PAUSA_MS = Number(process.env.POOL_PAUSA_MS ?? '400');
 const SELETOR_SYMBOL = id('symbol()').slice(0, 10);
@@ -217,50 +222,69 @@ async function principal(): Promise<void> {
     const nome = (p: Pool, qual: 0 | 1) =>
         (qual === 0 ? p.simbolo0 : p.simbolo1) ?? (qual === 0 ? p.token0 : p.token1).slice(0, 10);
 
-    const interessantes = pools
-        .filter((p) => daAave.size === 0 || (daAave.has(p.token0.toLowerCase()) && daAave.has(p.token1.toLowerCase())))
-        .sort((a, b) => b.trocas - a.trocas)
-        .slice(0, 20);
+    const teto = new Decimal('0.01');
+    const doParDaAave = pools.filter(
+        (p) => daAave.size === 0 || (daAave.has(p.token0.toLowerCase()) && daAave.has(p.token1.toLowerCase())),
+    );
 
-    log.info('POOLS QUE SERVEM — os dois lados são moeda que a Aave aceita.', {
-        achados: interessantes.length,
+    // Ordenar por profundidade em dólar, não por movimento. Reservas em
+    // unidades não se comparam entre moedas — 248 WETH e 648.537 USDC são o
+    // mesmo dinheiro — e o pool mais movimentado não é o mais fundo.
+    const comDolar = doParDaAave
+        .filter((p) => profundidadeEmDolar(p) !== null)
+        .sort((a, b) => profundidadeEmDolar(b)!.comparedTo(profundidadeEmDolar(a)!));
+    const semDolar = doParDaAave.filter((p) => profundidadeEmDolar(p) === null);
+
+    // Os dois tamanhos que este projeto mediu e persegue, já em dólares a
+    // VENDER: metade da dívida coberta mais 5% de ágio.
+    const TAMANHOS: Array<[string, Decimal]> = [
+        ['faixa de baixo', new Decimal(2_654).mul('0.5').mul('1.05')],
+        ['faixa do meio', new Decimal(20_406).mul('0.5').mul('1.05')],
+    ];
+
+    log.info('POOLS QUE SERVEM — ordenados pelo mais fundo, não pelo mais movimentado.', {
+        comDolar: comDolar.length,
+        semDolarParaComparar: semDolar.length,
         deUmTotalDe: pools.length,
-        detalhe: interessantes
+        soVeOQueNegociou: `pool parado nesta janela de ${BLOCOS} blocos não aparece — de propósito`,
+        detalhe: comDolar
+            .slice(0, 15)
             .map((p) => {
-                const r0 = emUnidades(p.reserva0, p.decimais0);
-                const r1 = emUnidades(p.reserva1, p.decimais1);
-                return (
-                    `${p.endereco} ${nome(p, 0)}/${nome(p, 1)} ` +
-                    `reservas ${r0 ? r0.toFixed(0) : '?'}/${r1 ? r1.toFixed(0) : '?'} (${p.trocas} trocas)`
-                );
+                const d = profundidadeEmDolar(p)!;
+                return `${p.endereco} ${nome(p, 0)}/${nome(p, 1)} $${d.toFixed(0)} (${p.trocas} trocas)`;
             })
             .join(' | '),
     });
 
-    // O que isso significa em tamanho de caçada: para cada pool, até quanto dá
-    // para vender sem passar de 1% de empurrão — a pergunta que decide tudo.
-    const teto = new Decimal('0.01');
-    log.info('ATÉ QUANTO DÁ PARA VENDER — 1% de empurrão no preço.', {
-        referencia: `faixa do meio pede pool de $${poolNecessarioPara(new Decimal(20_406).mul('0.5').mul('1.05'), teto).toFixed(0)}`,
-        detalhe: interessantes
+    // Num pool de produto constante os dois lados valem o mesmo em dólar, então
+    // a profundidade do lado em dólar serve para os dois sentidos da venda.
+    log.info('QUANTO CUSTARIA VENDER, nos tamanhos que a gente persegue.', {
+        detalhe: comDolar
             .slice(0, 10)
             .map((p) => {
-                const r1 = emUnidades(p.reserva1, p.decimais1);
-                if (!r1) return `${p.endereco}: casas da moeda ilegíveis, não dá para dizer`;
-                const cabe = r1.mul(teto).dividedBy(new Decimal(1).minus(teto));
-                const p5 = perdaNaVenda(r1.mul('0.05'), {
-                    reserveIn: r1,
-                    reserveOut: r1,
-                    feeFraction: new Decimal('0.003'),
-                });
-                return (
-                    `${nome(p, 0)}/${nome(p, 1)}: cabe ${cabe.toFixed(0)} ${nome(p, 1)} a 1%; ` +
-                    `5% da reserva custaria ${p5.total.mul(100).toFixed(2)}%`
-                );
+                const d = profundidadeEmDolar(p)!;
+                const custos = TAMANHOS.map(([rotulo, v]) => {
+                    const perda = perdaNaVenda(v, { reserveIn: d, reserveOut: d, feeFraction: new Decimal('0.003') });
+                    return `${rotulo} ($${v.toFixed(0)}): ${perda.total.mul(100).toFixed(2)}%`;
+                }).join(', ');
+                const cabe1pct = d.mul(teto).dividedBy(new Decimal(1).minus(teto));
+                return `${nome(p, 0)}/${nome(p, 1)} $${d.toFixed(0)} -> ${custos}; a 1% cabe $${cabe1pct.toFixed(0)}`;
             })
             .join(' | '),
+        paraReferencia:
+            `para ficar em 1% de empurrão, a faixa do meio pede pool de ` +
+            `$${poolNecessarioPara(TAMANHOS[1][1], teto).toFixed(0)} e a de baixo, ` +
+            `$${poolNecessarioPara(TAMANHOS[0][1], teto).toFixed(0)}`,
+        lembrete: 'o ágio da liquidação é 5% — perda acima disso come o lucro inteiro',
         observacao: 'MODO LEITURA: nada foi enviado. Isto mede o pool, não usa ele.',
     });
+
+    if (semDolar.length > 0) {
+        log.info('Pools sem lado em dólar — não dá para comparar profundidade sem tabela de preço.', {
+            quantos: semDolar.length,
+            quais: semDolar.slice(0, 5).map((p) => `${p.endereco} ${nome(p, 0)}/${nome(p, 1)}`).join(' | '),
+        });
+    }
 
     // Se quem chama já sabe o par, responde direto qual endereço usar.
     const garantia = process.env.POOL_GARANTIA;
