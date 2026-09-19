@@ -244,3 +244,131 @@ test('o lucro acompanha o ágio da moeda — 7,5% rende mais que 5%', async () =
     // 7,5% − 0,05% = 7,45%
     assert.equal(BigInt(await c.exigir(c.token, saldoDe(COFRE))), 74_500n);
 });
+
+// ---------------------------------------------------------------------------
+// O caminho com TROCA: garantia diferente da dívida.
+//
+// É o caso comum de verdade — quem deve USDC quase sempre deu ETH em garantia.
+// O contrato recebe o ETH com ágio, precisa vendê-lo para ter USDC de volta, e
+// é na venda que mora o risco: a taxa do pool e o deslizamento comem parte do
+// ágio, e se comerem tudo a caçada vira prejuízo. Por isso o piso de lucro é
+// conferido DEPOIS da venda, e não antes.
+// ---------------------------------------------------------------------------
+
+/** A mesma conta do contrato, em TypeScript, para conferir de fora. */
+function saidaDoSwap(entrada: bigint, reservaEntrada: bigint, reservaSaida: bigint): bigint {
+    const comTaxa = entrada * 997n;
+    return (comTaxa * reservaSaida) / (reservaEntrada * 1000n + comTaxa);
+}
+
+const RESERVA = 10n ** 12n;
+
+/** Cenário com dois tokens e um par para vender a garantia. */
+async function cenarioComTroca(bonusBps = 500n, premioBps = 5n, reserva = RESERVA) {
+    const b = await montarBancada();
+    const garantia = await b.subir('TokenFalso', ['string'], ['WETH']);
+    const divida = await b.subir('TokenFalso', ['string'], ['USDC']);
+    const pool = await b.subir('PoolFalso', ['uint256', 'uint256'], [premioBps, bonusBps]);
+    const par = await b.subir(
+        'ParFalso',
+        ['address', 'address', 'uint112', 'uint112'],
+        [garantia, divida, reserva, reserva],
+    );
+    // O pool precisa de dívida para emprestar e de garantia para pagar o ágio.
+    await b.exigir(divida, criar(pool, EMPRESTIMO * 10n));
+    await b.exigir(garantia, criar(pool, EMPRESTIMO * 10n));
+    // O par precisa ter de fato o que as reservas dizem.
+    await b.exigir(garantia, criar(par, reserva));
+    await b.exigir(divida, criar(par, reserva));
+    return { ...b, garantia, divida, pool, par };
+}
+
+test('com troca de moeda o lucro é o ágio MENOS a taxa do pool e o deslizamento', async () => {
+    const c = await cenarioComTroca();
+
+    // 5% de ágio sobre o emprestado.
+    const garantiaRecebida = (EMPRESTIMO * 10_500n) / 10_000n;
+    // Vender essa garantia no par, com a taxa de 0,3% e o deslizamento.
+    const dividaDeVolta = saidaDoSwap(garantiaRecebida, RESERVA, RESERVA);
+    const aDevolver = EMPRESTIMO + (EMPRESTIMO * 5n) / 10_000n;
+    const esperado = dividaDeVolta - aDevolver;
+
+    const cacador = await c.subir('CacadorDeLiquidacoes', ['address', 'address'], [c.pool, COFRE]);
+    await c.exigir(
+        cacador,
+        cacar({
+            garantia: c.garantia, divida: c.divida, devedor: VITIMA,
+            quanto: EMPRESTIMO, poolVenda: c.par, lucroMinimo: 0n,
+        }),
+    );
+
+    assert.equal(BigInt(await c.exigir(c.divida, saldoDe(COFRE))), esperado);
+    // E o ágio de 5% encolheu de verdade: a venda custou alguma coisa.
+    assert.ok(esperado < 49_500n, `a troca tem de custar algo: ${esperado}`);
+    assert.ok(esperado > 40_000n, `mas não pode comer quase tudo: ${esperado}`);
+});
+
+test('a garantia recebida some toda na venda — nada fica parado no contrato', async () => {
+    const c = await cenarioComTroca();
+    const cacador = await c.subir('CacadorDeLiquidacoes', ['address', 'address'], [c.pool, COFRE]);
+    await c.exigir(
+        cacador,
+        cacar({
+            garantia: c.garantia, divida: c.divida, devedor: VITIMA,
+            quanto: EMPRESTIMO, poolVenda: c.par, lucroMinimo: 0n,
+        }),
+    );
+    assert.equal(BigInt(await c.exigir(c.garantia, saldoDe(cacador))), 0n, 'garantia parada');
+    assert.equal(BigInt(await c.exigir(c.divida, saldoDe(cacador))), 0n, 'dívida parada');
+});
+
+test('par raso REVERTE: o deslizamento come o ágio inteiro', async () => {
+    // O risco de verdade deste caminho. Um pool pequeno devolve muito menos do
+    // que a garantia vale, e sem o piso isso viraria prejuízo a cada caçada —
+    // com a transação passando e o cofre encolhendo.
+    const c = await cenarioComTroca(500n, 5n, 2_000_000n);
+    const cacador = await c.subir('CacadorDeLiquidacoes', ['address', 'address'], [c.pool, COFRE]);
+    const r = await c.chamar(
+        cacador,
+        cacar({
+            garantia: c.garantia, divida: c.divida, devedor: VITIMA,
+            quanto: EMPRESTIMO, poolVenda: c.par, lucroMinimo: 1n,
+        }),
+    );
+    assert.equal(r.reverteu, true, 'par raso tem de reverter');
+    assert.equal(BigInt(await c.exigir(c.divida, saldoDe(COFRE))), 0n);
+});
+
+test('a ordem dos tokens no par não muda o resultado', async () => {
+    // O contrato pergunta ao par quem é `token0` e inverte as reservas
+    // conforme. Trocar a ordem e obter outro lucro seria o sinal de que essa
+    // inversão está errada — e o erro sairia como número plausível, nunca
+    // como exceção.
+    const b = await montarBancada();
+    const garantia = await b.subir('TokenFalso', ['string'], ['WETH']);
+    const divida = await b.subir('TokenFalso', ['string'], ['USDC']);
+    const pool = await b.subir('PoolFalso', ['uint256', 'uint256'], [5n, 500n]);
+    // Aqui a DÍVIDA é o token0, ao contrário do outro cenário.
+    const par = await b.subir(
+        'ParFalso',
+        ['address', 'address', 'uint112', 'uint112'],
+        [divida, garantia, RESERVA, RESERVA],
+    );
+    await b.exigir(divida, criar(pool, EMPRESTIMO * 10n));
+    await b.exigir(garantia, criar(pool, EMPRESTIMO * 10n));
+    await b.exigir(garantia, criar(par, RESERVA));
+    await b.exigir(divida, criar(par, RESERVA));
+    const cacador = await b.subir('CacadorDeLiquidacoes', ['address', 'address'], [pool, COFRE]);
+
+    await b.exigir(
+        cacador,
+        cacar({
+            garantia, divida, devedor: VITIMA,
+            quanto: EMPRESTIMO, poolVenda: par, lucroMinimo: 0n,
+        }),
+    );
+
+    const garantiaRecebida = (EMPRESTIMO * 10_500n) / 10_000n;
+    const esperado = saidaDoSwap(garantiaRecebida, RESERVA, RESERVA) - (EMPRESTIMO + 500n);
+    assert.equal(BigInt(await b.exigir(divida, saldoDe(COFRE))), esperado);
+});
