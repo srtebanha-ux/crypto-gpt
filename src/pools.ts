@@ -116,11 +116,28 @@ export interface EscolhaDePool {
  * "Melhor" é o mais fundo do lado que se RECEBE, porque é essa reserva que
  * define o empurrão no preço — a do lado que entra só importa pela proporção.
  *
- * Devolve motivo sempre, inclusive quando não acha: "não achei" sem dizer
- * quantos foram olhados e por que nenhum serviu manda adivinhar o próximo
- * passo, e adivinhar é o que este arquivo existe para acabar.
+ * `familiasAceitas` NÃO tem padrão, e isso é deliberado. Esta função recusava
+ * Solidly em toda chamada, de volta a quando o contrato só sabia ler V2. Duas
+ * horas depois de o contrato novo passar a alcançar Aerodrome, ela continuava
+ * recusando — e recusando em silêncio, devolvendo o pool de US$649 mil no
+ * lugar do de US$4,4 milhões, sem erro nenhum. Seria a noite inteira desfeita
+ * por um filtro que ninguém lembrou de mexer.
+ *
+ * Um padrão qualquer repetiria o defeito: "só V2" perde o pool fundo em
+ * silêncio, e "as duas" faz o contrato velho reverter. Sem padrão, quem chama
+ * é obrigado a dizer o que o SEU contrato lê — e `CACADORES[].vendeEm`, em
+ * contratos.ts, é onde essa resposta mora.
+ *
+ * Devolve motivo sempre, inclusive quando não acha, e conta quantos foram
+ * recusados por família: "não achei" sem dizer quantos foram olhados e por
+ * que nenhum serviu manda adivinhar o próximo passo.
  */
-export function escolherPoolDeVenda(pools: Pool[], garantia: string, divida: string): EscolhaDePool {
+export function escolherPoolDeVenda(
+    pools: Pool[],
+    garantia: string,
+    divida: string,
+    familiasAceitas: Familia[],
+): EscolhaDePool {
     const g = garantia.toLowerCase();
     const d = divida.toLowerCase();
     const doPar = pools.filter((p) => {
@@ -137,20 +154,21 @@ export function escolherPoolDeVenda(pools: Pool[], garantia: string, divida: str
         };
     }
 
-    const soV2 = doPar.filter((p) => p.familia === 'v2');
-    if (soV2.length === 0) {
+    const aceitos = doPar.filter((p) => familiasAceitas.includes(p.familia));
+    const recusados = doPar.length - aceitos.length;
+    if (aceitos.length === 0) {
         return {
             pool: null,
             recebe: null,
             motivo:
-                `${doPar.length} pool(s) negociam o par, mas nenhum é da família V2. ` +
-                'O contrato lê getReserves() como (uint112,uint112,uint32) e não serve para Solidly',
+                `${doPar.length} pool(s) negociam o par, mas nenhum e de familia que este ` +
+                `contrato alcanca (${familiasAceitas.join(', ')})`,
         };
     }
 
-    let melhor = soV2[0];
+    let melhor = aceitos[0];
     let maior = reservaDoOutroLado(melhor, garantia) ?? new Decimal(0);
-    for (const p of soV2.slice(1)) {
+    for (const p of aceitos.slice(1)) {
         const r = reservaDoOutroLado(p, garantia) ?? new Decimal(0);
         if (r.greaterThan(maior)) {
             melhor = p;
@@ -160,7 +178,10 @@ export function escolherPoolDeVenda(pools: Pool[], garantia: string, divida: str
     return {
         pool: melhor,
         recebe: maior,
-        motivo: `o mais fundo de ${soV2.length} pool(s) V2 do par (${doPar.length} no total, com Solidly)`,
+        motivo:
+            `o mais fundo de ${aceitos.length} pool(s) do par entre as familias que o contrato ` +
+            `alcanca (${familiasAceitas.join(', ')})` +
+            (recusados > 0 ? `; ${recusados} recusado(s) por familia que ele nao le` : ''),
     };
 }
 

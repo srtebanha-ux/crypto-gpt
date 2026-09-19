@@ -34,6 +34,7 @@ import {
     type LogDeSync,
 } from './pools';
 import { poolNecessarioPara, perdaNaVenda } from './venda';
+import { cacadorDaRede } from './contratos';
 
 const log = createLogger('acharPool');
 const coderDeSonda = AbiCoder.defaultAbiCoder();
@@ -159,6 +160,15 @@ function texto(hex: string | null): string | undefined {
 }
 
 async function principal(): Promise<void> {
+    // Quem manda no relatorio e o contrato que esta NA REDE, nao o que estava
+    // quando estas linhas foram escritas. Duas horas depois de publicar o
+    // cacador que le Aerodrome, este programa ainda anunciava "so os V2" com
+    // toda a confianca — e a frase estava cravada no texto, nao lida de lugar
+    // nenhum. Agora vem de contratos.ts, que e conferido por teste.
+    const cacador = cacadorDaRede(REDE_ESCOLHIDA);
+    const familias: Familia[] = cacador?.vendeEm === 'v2+solidly' ? ['v2', 'solidly'] : ['v2'];
+    const leSolidly = familias.includes('solidly');
+
     log.info('*** MODO LEITURA — nenhuma transação é enviada por este processo. ***');
     const rpcs = process.env.POOL_RPC_URL ? [process.env.POOL_RPC_URL] : (RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [REDE.rpc]);
     let topo = 0;
@@ -186,7 +196,9 @@ async function principal(): Promise<void> {
     log.info('Quem é quem na rede.', {
         poolsV2: v2.size,
         poolsSolidly: solidly.size,
-        usaveis: 'só os V2: o contrato lê getReserves() como (uint112,uint112,uint32)',
+        usaveis: leSolidly
+            ? `as duas: ${cacador!.endereco} le getReserves() nos dois formatos`
+            : 'so os V2: o contrato publicado le getReserves() como (uint112,uint112,uint32)',
     });
     if (v2.size === 0) {
         log.error('Nenhum pool V2 encontrado na janela. Sem pool não há venda.', { janelaDeBlocos: BLOCOS });
@@ -335,9 +347,11 @@ async function principal(): Promise<void> {
     // a Solidly for materialmente mais funda.
     const maisFundoV2 = comDolar[0] ? profundidadeEmDolar(comDolar[0]) : null;
     const maisFundoSolidly = solidlyFundos[0] ? profundidadeEmDolar(solidlyFundos[0]) : null;
-    log.info('VALE MUDAR O CONTRATO PARA ALCANÇAR A OUTRA FAMÍLIA?', {
-        melhorV2: maisFundoV2 ? `$${maisFundoV2.toFixed(0)} (usável HOJE)` : 'nenhum',
-        melhorSolidly: maisFundoSolidly ? `$${maisFundoSolidly.toFixed(0)} (exigiria mudar o contrato)` : 'nenhum',
+    log.info(leSolidly ? 'AS DUAS FAMÍLIAS, E O CONTRATO ALCANÇA AS DUAS.' : 'VALE MUDAR O CONTRATO PARA ALCANÇAR A OUTRA FAMÍLIA?', {
+        melhorV2: maisFundoV2 ? `$${maisFundoV2.toFixed(0)}` : 'nenhum',
+        melhorSolidly: maisFundoSolidly
+            ? `$${maisFundoSolidly.toFixed(0)}${leSolidly ? ' (usável HOJE)' : ' (exigiria mudar o contrato)'}`
+            : 'nenhum',
         quantasVezesMaisFundo:
             maisFundoV2 && maisFundoSolidly && maisFundoV2.greaterThan(0)
                 ? `${maisFundoSolidly.dividedBy(maisFundoV2).toFixed(1)}x`
@@ -346,8 +360,9 @@ async function principal(): Promise<void> {
             .slice(0, 8)
             .map((p) => `${p.endereco} ${nome(p, 0)}/${nome(p, 1)} $${profundidadeEmDolar(p)!.toFixed(0)}`)
             .join(' | '),
-        porQueNaoDaParaUsarAgora:
-            'CacadorDeLiquidacoes lê getReserves() como (uint112,uint112,uint32); Solidly devolve (uint256,uint256,uint256)',
+        comoEleAlcanca: leSolidly
+            ? 'pergunta getAmountOut ao pool; quem responde traz a taxa e a curva dele ja embutidas'
+            : 'NAO alcanca: le getReserves() como (uint112,uint112,uint32) e Solidly devolve (uint256,uint256,uint256)',
     });
 
     // A prova que falta antes de qualquer deploy: o pool de verdade responde
@@ -406,10 +421,12 @@ async function principal(): Promise<void> {
     const garantia = process.env.POOL_GARANTIA;
     const divida = process.env.POOL_DIVIDA;
     if (garantia && divida) {
-        const e = escolherPoolDeVenda(pools, garantia, divida);
+        const e = escolherPoolDeVenda(pools, garantia, divida, familias);
         log.info('ESCOLHA PARA O PAR PEDIDO.', {
             garantia,
             divida,
+            contratoQueVaiUsar: cacador?.endereco ?? 'nenhum publicado nesta rede',
+            familiasQueEleLe: familias.join(', '),
             poolDeVenda: e.pool?.endereco ?? 'NENHUM',
             recebeDoOutroLado: e.recebe?.toFixed(0) ?? '-',
             motivo: e.motivo,

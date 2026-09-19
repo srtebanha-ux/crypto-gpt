@@ -80,7 +80,7 @@ test('sem saber as casas da moeda, não converte — devolve null', () => {
 test('escolhe o pool V2 mais fundo do lado que se recebe', () => {
     const raso = pool({ endereco: '0xraso', reserva1: new Decimal(5_000) });
     const fundo = pool({ endereco: '0xfundo', reserva1: new Decimal(900_000) });
-    const e = escolherPoolDeVenda([raso, fundo], GARANTIA, DIVIDA);
+    const e = escolherPoolDeVenda([raso, fundo], GARANTIA, DIVIDA, ['v2']);
     assert.equal(e.pool!.endereco, '0xfundo');
     assert.equal(e.recebe!.toNumber(), 900_000);
 });
@@ -90,20 +90,20 @@ test('recusa pool Solidly mesmo sendo o único do par', () => {
     // Solidly isso pode decodificar POR ACIDENTE — reserva pequena cabe em 112
     // bits, timestamp cabe em 32 — e acerto por acidente passa no teste e
     // falha no dia. Melhor não ter pool que ter o pool errado.
-    const e = escolherPoolDeVenda([pool({ familia: 'solidly' })], GARANTIA, DIVIDA);
+    const e = escolherPoolDeVenda([pool({ familia: 'solidly' })], GARANTIA, DIVIDA, ['v2']);
     assert.equal(e.pool, null);
-    assert.match(e.motivo, /uint112/);
+    assert.match(e.motivo, /familia que este contrato alcanca/);
 });
 
 test('quando não acha, diz quantos olhou — não só "não achei"', () => {
-    const e = escolherPoolDeVenda([pool({ token0: '0x1', token1: '0x2' })], GARANTIA, DIVIDA);
+    const e = escolherPoolDeVenda([pool({ token0: '0x1', token1: '0x2' })], GARANTIA, DIVIDA, ['v2']);
     assert.equal(e.pool, null);
     assert.match(e.motivo, /nenhum dos 1 pools/);
 });
 
 test('acha o par na ordem invertida também', () => {
     const invertido = pool({ token0: DIVIDA, token1: GARANTIA, reserva0: new Decimal(777) });
-    const e = escolherPoolDeVenda([invertido], GARANTIA, DIVIDA);
+    const e = escolherPoolDeVenda([invertido], GARANTIA, DIVIDA, ['v2']);
     assert.equal(e.pool!.endereco, invertido.endereco);
     assert.equal(e.recebe!.toNumber(), 777);
 });
@@ -129,4 +129,22 @@ test('profundidade em dólar sai do lado certo, com as casas certas', () => {
 
 test('pool sem lado em dólar não recebe profundidade inventada', () => {
     assert.equal(profundidadeEmDolar(pool({ simbolo0: 'WETH', simbolo1: 'cbBTC' })), null);
+});
+
+test('com o contrato novo, o pool Aerodrome mais fundo GANHA do V2', () => {
+    // Este e o teste que faltava e que teria pego o defeito: por duas horas a
+    // escolha recusou Solidly enquanto o contrato publicado ja a alcancava.
+    // Teria devolvido o pool de US$649 mil no lugar do de US$4,4 milhoes, sem
+    // erro nenhum — a noite inteira desfeita por um filtro esquecido.
+    const v2 = pool({ endereco: '0xv2', familia: 'v2', reserva1: new Decimal(649_462) });
+    const aero = pool({ endereco: '0xaero', familia: 'solidly', reserva1: new Decimal(4_409_274) });
+
+    const comAsDuas = escolherPoolDeVenda([v2, aero], GARANTIA, DIVIDA, ['v2', 'solidly']);
+    assert.equal(comAsDuas.pool!.endereco, '0xaero');
+    assert.equal(comAsDuas.recebe!.toNumber(), 4_409_274);
+
+    // E o contrato antigo continua achando o dele, sem quebrar.
+    const soV2 = escolherPoolDeVenda([v2, aero], GARANTIA, DIVIDA, ['v2']);
+    assert.equal(soV2.pool!.endereco, '0xv2');
+    assert.match(soV2.motivo, /1 recusado\(s\) por familia que ele nao le/);
 });
