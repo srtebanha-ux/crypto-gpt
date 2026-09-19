@@ -47,6 +47,7 @@ import {
     faixasDeBlocos,
     type Sonda,
 } from './liquidacoes';
+import { avaliar, pisoParaOContrato } from './decisao';
 import {
     CHAMADAS_POR_MULTICALL,
     MULTICALL3,
@@ -106,6 +107,40 @@ const MIN_RONDA = Number(process.env.VIGIA_MIN_RONDA ?? '2');
 
 /** Minutos entre duas COLETAS de devedores novos — essa sim é cara. */
 const MIN_COLETA = Number(process.env.VIGIA_MIN_COLETA ?? '30');
+
+/**
+ * Preço da moeda que paga o gás, informado à mão.
+ *
+ * Sem ele, o vigia mede o gás em wei e não consegue dizer se uma caçada vale a
+ * pena — porque valer a pena é uma comparação entre dólares de lucro e dólares
+ * de gás. Com ele, a decisão sai em número.
+ *
+ * Continua vindo de fora, como o preço do ETH da varredura histórica: inventar
+ * cotação foi erro meu antes e não vai virar hábito.
+ */
+const PRECO_NATIVO_USD = process.env.VIGIA_PRECO_NATIVO
+    ? new Decimal(process.env.VIGIA_PRECO_NATIVO)
+    : null;
+
+/**
+ * Ágio suposto quando o vigia ainda não sabe qual é a garantia.
+ *
+ * Os medidos na Base foram 5%, 7,5% e 8,5%. Usar o MENOR faz a estimativa
+ * errar para baixo — e errar para baixo aqui é a direção segura: uma caçada
+ * aprovada com o ágio mínimo continua valendo quando o real é maior.
+ */
+const AGIO_SUPOSTO = new Decimal('0.05');
+
+/**
+ * Fração da dívida que a Aave deixa cobrir de uma vez.
+ *
+ * Metade é o caso comum; ela libera o total quando a posição está muito
+ * quebrada. Supor metade subestima o prêmio, de novo na direção segura.
+ */
+const FATIA_COBRIVEL = new Decimal('0.5');
+
+/** Gás estimado de uma caçada inteira, até a medição real existir. */
+const GAS_ESTIMADO = new Decimal(process.env.VIGIA_GAS_ESTIMADO ?? '700000');
 
 let rpcEmUso = process.env.VIGIA_RPC_URL ?? REDE.rpc;
 let rpcId = 0;
@@ -404,6 +439,79 @@ function relatar(titulo: string, posicoes: Posicao[], falar = true): Posicao[] {
     return posicoes.filter((p) => p.quedaPct !== null && p.quedaPct.lessThanOrEqualTo(LIMIAR_VIGIA));
 }
 
+/**
+ * Quanto valeria cada posição da borda, se abrisse AGORA.
+ *
+ * O vigia até aqui dizia quem está perto. Isto diz quanto isso vale — e é
+ * outra pergunta: uma posição a 0,04% de liquidar com US$1 de dívida não
+ * interessa, e uma a 9% com US$1,8 milhão interessa muito.
+ *
+ * Nada é enviado. O que se mede aqui é se a decisão TERIA sido disparar, e
+ * com que número — para que a taxa de acerto deixe de ser chute antes de
+ * existir dinheiro em jogo.
+ */
+async function quantoValeriaAborda(naMira: Posicao[]): Promise<void> {
+    if (naMira.length === 0) return;
+
+    let precoDoGasWei: Decimal;
+    try {
+        precoDoGasWei = new Decimal(Number.parseInt(await chamar<string>('eth_gasPrice', []), 16));
+    } catch (err) {
+        log.warn('Não deu para ler o preço do gás; sem ele não dá para decidir.', {
+            erro: err instanceof Error ? err.message : String(err),
+        });
+        return;
+    }
+
+    const gwei = precoDoGasWei.dividedBy('1e9');
+    if (PRECO_NATIVO_USD === null) {
+        log.info('PREÇO DO GÁS agora.', {
+            gwei: gwei.toFixed(4),
+            custoDeUmaCacada: `${GAS_ESTIMADO.mul(precoDoGasWei).dividedBy('1e18').toFixed(8)} ${REDE.moedaNativa}`,
+            paraVerEmDolar: `defina VIGIA_PRECO_NATIVO com o preço do ${REDE.moedaNativa}`,
+        });
+        return;
+    }
+
+    const linhas: string[] = [];
+    let valeriamAPena = 0;
+    let somaLiquida = new Decimal(0);
+
+    for (const p of naMira.slice(0, 10)) {
+        const dividaUsd = p.conta.dividaBase.dividedBy(1e8);
+        const v = avaliar({
+            dividaCobertaUsd: dividaUsd.mul(FATIA_COBRIVEL),
+            bonus: AGIO_SUPOSTO,
+            premioFlashLoan: new Decimal('0.0005'),
+            // Sem saber em qual pool a garantia seria vendida, suponho a perda
+            // de um pool fundo. Num pool raso isso subestima o custo, e é por
+            // isso que a decisão de valer não basta: o contrato reconfere.
+            perdaNaTroca: new Decimal('0.003'),
+            gasEstimado: GAS_ESTIMADO,
+            precoDoGasWei,
+            precoNativoUsd: PRECO_NATIVO_USD,
+        });
+        if (v.vale) {
+            valeriamAPena += 1;
+            somaLiquida = somaLiquida.plus(v.lucroLiquidoUsd);
+        }
+        linhas.push(
+            `${p.devedor.slice(0, 10)} a ${p.quedaPct?.toFixed(2)}%: dívida $${dividaUsd.toFixed(0)} -> ` +
+                `${v.vale ? `VALERIA $${v.lucroLiquidoUsd.toFixed(2)}` : 'não valeria'}`,
+        );
+    }
+
+    log.info('QUANTO VALERIA — se a borda abrisse agora.', {
+        gasAgora: `${gwei.toFixed(4)} gwei`,
+        custoDeUmaTentativa: `$${GAS_ESTIMADO.mul(precoDoGasWei).dividedBy('1e18').mul(PRECO_NATIVO_USD).toFixed(2)}`,
+        valeriamAPena: `${valeriamAPena} de ${Math.min(naMira.length, 10)}`,
+        somaSeGanhasseTodas: `$${somaLiquida.toFixed(2)}`,
+        // O piso que iria no contrato, para a maior delas.
+        observacao: 'MODO LEITURA: nada é enviado. Isto mede a DECISÃO, não a execução.',
+        detalhe: linhas.join(' | '),
+    });
+}
+
 async function principal(): Promise<void> {
     log.info('*** MODO LEITURA — nenhuma transação é enviada por este processo. ***');
     log.info('Vigia de posições.', {
@@ -453,6 +561,7 @@ async function principal(): Promise<void> {
                     ).join(' | '),
                     leitura: c.leitura,
                 });
+                await quantoValeriaAborda(naMira);
                 ultimaRonda = Date.now();
                 continue;
             }
