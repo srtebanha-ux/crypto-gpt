@@ -31,6 +31,8 @@
     "leadlag:prod": "node dist/leadLagSniffer.js",
     "scalping": "ts-node src/scalpingLive.ts",
     "scalping:prod": "node dist/scalpingLive.js",
+    "ensaio": "ts-node src/ensaioDeLiquidacao.ts",
+    "ensaio:prod": "node dist/ensaioDeLiquidacao.js",
     "vigia": "ts-node src/vigiaDePosicoes.ts",
     "vigia:prod": "node dist/vigiaDePosicoes.js",
     "liquidacoes": "ts-node src/liquidacoesHistorico.ts",
