@@ -518,6 +518,19 @@ async function principal(): Promise<'parar' | void> {
                 });
                 if (maiorQueda.greaterThanOrEqualTo(menorQueda)) {
                     acordar = true;
+                    // Re-armar no nivel novo. Sem isto o gatilho FICA preso:
+                    // a comparacao e sempre contra o preco da ultima ronda, de
+                    // 2 em 2 minutos, entao uma vez cruzado ele dispararia a
+                    // cada bloco ate la — 60 releituras da borda, estourando o
+                    // RPC justamente na hora em que o mercado se mexe.
+                    moedas.forEach((m, i) => {
+                        if (!agora[i]) return;
+                        try {
+                            precos.set(m.toLowerCase(), new Decimal(BigInt(agora[i]!).toString()));
+                        } catch {
+                            /* ilegível */
+                        }
+                    });
                     log.info('PREÇO CRUZOU — acordando a borda.', {
                         maiorQuedaPct: maiorQueda.toFixed(3),
                         maisFragilEstavaA: `${menorQueda.toFixed(3)}%`,
@@ -562,6 +575,10 @@ async function principal(): Promise<'parar' | void> {
                 }
             }
 
+            // A distância da mais frágil vale para qualquer leitura, não só
+            // para a ronda: foi lida agora, é o gatilho de agora.
+            if (menorVista.lessThan(100)) menorQueda = menorVista;
+
             if (ehRonda) {
                 // Preços a cada ronda: eles mudam, e é deles que sai a escolha
                 // do par. Um multicall para as 15 moedas.
@@ -581,7 +598,6 @@ async function principal(): Promise<'parar' | void> {
                 });
 
                 naMira = perto;
-                menorQueda = menorVista;
                 ultimaRonda = Date.now();
                 log.info('RONDA COMPLETA.', {
                     olhados: olharAgora.length,
