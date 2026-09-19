@@ -127,3 +127,43 @@ test('cada erro do caçador tem um seletor próprio', () => {
         assert.equal(ERROS_DO_CACADOR[id(nome).slice(0, 10)], nome);
     }
 });
+
+// ------------------------------------------------- conferência pelo bytecode
+
+import { contemSeletor, lerArgumentosDoFim, conferirPrograma } from './conferirContrato';
+
+/** A cauda real do deploy na Base, bloco 51497086: os dois endereços. */
+const CAUDA_DO_DEPLOY =
+    '000000000000000000000000a238dd80c259a72e81d7e4664a9801593f98d1c5' +
+    '0000000000000000000000003dffa934170bdd491724747be2c4f56e3f1512a7';
+
+test('lê os argumentos do construtor colados no fim do bytecode', () => {
+    const [pool, cofre] = lerArgumentosDoFim('0x6080604052' + CAUDA_DO_DEPLOY, ['address', 'address']);
+    assert.equal(pool, '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5');
+    assert.equal(cofre, '0x3dffA934170bdD491724747Be2c4F56E3f1512A7');
+});
+
+test('acha seletor comum no bytecode', () => {
+    assert.equal(contemSeletor('0x8063e7eb56ec1461078a57', '0xe7eb56ec'), true);
+    assert.equal(contemSeletor('0x8063e7eb56ec1461078a57', '0xdeadbeef'), false);
+});
+
+test('acha seletor que começa com byte zero, que o solc guarda sem o zero', () => {
+    // Trecho literal do contrato publicado: `PUSH31 e2a5cd00…` para o seletor
+    // 0x00e2a5cd de ChamadaInesperada(). O zero da frente não está escrito.
+    //
+    // A primeira versão desta conferência procurava os oito caracteres e dizia
+    // AUSENTE — um REPROVADO inteiro, confiante e errado, sobre um contrato
+    // onde a função está. Este teste é o que impede a volta disso.
+    const trecho = '0x6040517ee2a5cd00000000000000000000000000000000000000000000000000000000815260040160405180910390fd';
+    assert.equal(contemSeletor(trecho, '0x00e2a5cd'), true);
+    assert.equal(contemSeletor(trecho, '0x00a718a9'), false);
+});
+
+test('conferirPrograma separa o que está do que falta', () => {
+    const comDono = '0x' + id('dono()').slice(2, 10) + 'ffff';
+    const r = conferirPrograma(comDono, ['dono()', 'cofre()']);
+    assert.deepEqual(r.presentes, ['dono()']);
+    assert.deepEqual(r.ausentes, ['cofre()']);
+    assert.equal(r.completo, false);
+});

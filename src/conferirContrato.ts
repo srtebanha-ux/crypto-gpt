@@ -275,3 +275,62 @@ async function principal(): Promise<void> {
 if (require.main === module && exigirAtivacao('conferirContrato')) {
     principal().catch((e) => log.error('Conferência tropeçou.', { erro: (e as Error).message }));
 }
+
+// --------------------------------------------------------------------------
+// Conferir o programa publicado a partir do bytecode de criação, sem rede.
+//
+// Isto existe porque a rede nem sempre está ao alcance: o RPC da Base está
+// bloqueado de onde este código foi escrito, e mesmo assim dava para provar o
+// que foi publicado — o explorador mostra o `Input Data` da transação de
+// criação, e ali está o programa inteiro mais os argumentos do construtor.
+
+/**
+ * O seletor está no bytecode?
+ *
+ * A sutileza que derrubou a primeira versão desta conferência: o solc guarda
+ * um seletor que começa com byte zero SEM esse zero. Em vez de
+ * `PUSH32 00e2a5cd00…`, ele emite `PUSH31 e2a5cd00…`, porque o zero da frente
+ * é implícito. Procurar os oito caracteres literais não acha nada, e a busca
+ * responde "AUSENTE" com toda a confiança do mundo.
+ *
+ * Foi exatamente o que aconteceu: `ChamadaInesperada()` e `liquidationCall`
+ * apareceram como faltando num contrato onde as duas estão. Um veredicto
+ * REPROVADO, inteiro e errado, por causa de um byte que o compilador não
+ * escreve.
+ */
+export function contemSeletor(bytecodeHex: string, seletor: string): boolean {
+    const hex = bytecodeHex.toLowerCase().replace(/^0x/, '');
+    const s = seletor.toLowerCase().replace(/^0x/, '');
+    return hex.includes(s) || hex.includes(s.replace(/^(00)+/, ''));
+}
+
+/**
+ * Lê os argumentos do construtor, que ficam colados no fim do bytecode de
+ * criação — é assim que a EVM os entrega, e é por isso que dá para conferir
+ * sem chamar nada.
+ */
+export function lerArgumentosDoFim(bytecodeHex: string, tipos: string[]): unknown[] {
+    const hex = bytecodeHex.toLowerCase().replace(/^0x/, '');
+    const quantos = tipos.length * 64;
+    if (hex.length < quantos) throw new Error('bytecode curto demais para esses argumentos');
+    return [...coder.decode(tipos, '0x' + hex.slice(-quantos))];
+}
+
+export interface ConferenciaDoPrograma {
+    presentes: string[];
+    ausentes: string[];
+    completo: boolean;
+}
+
+/** Toda assinatura declarada na fonte tem que aparecer no que foi publicado. */
+export function conferirPrograma(bytecodeHex: string, assinaturas: string[]): ConferenciaDoPrograma {
+    const presentes: string[] = [];
+    const ausentes: string[] = [];
+    for (const s of assinaturas) {
+        const cheio = id(s);
+        // Evento é identificado pelo hash inteiro; função e erro, por 4 bytes.
+        const alvo = /^[A-Z]/.test(s) && !s.includes('()') ? cheio : cheio.slice(0, 10);
+        (contemSeletor(bytecodeHex, alvo) ? presentes : ausentes).push(s);
+    }
+    return { presentes, ausentes, completo: ausentes.length === 0 };
+}
