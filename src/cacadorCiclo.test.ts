@@ -372,3 +372,127 @@ test('a ordem dos tokens no par não muda o resultado', async () => {
     const esperado = saidaDoSwap(garantiaRecebida, RESERVA, RESERVA) - (EMPRESTIMO + 500n);
     assert.equal(BigInt(await b.exigir(divida, saldoDe(COFRE))), esperado);
 });
+
+// ---------------------------------------------------------------------------
+// O caminho Aerodrome (estilo Solidly).
+//
+// A medição que motivou isto: o melhor pool V2 da Base tem US$649.772 e o
+// melhor Aerodrome tem US$4.409.026 — 6,8 vezes mais fundo. Em lucro máximo
+// por caçada, US$300 contra US$2.103.
+//
+// O que estes testes precisam provar não é que o ciclo roda: é que a TAXA
+// deixou de estar escrita à mão. O contrato tinha `entrada * 997 / 1000`
+// cravado, e a Aerodrome cobra o que cada pool configurar. Por isso todo
+// cenário aqui usa taxa DIFERENTE de 0,3% — com a fórmula antiga, o valor
+// pedido não bateria com o que a curva permite e o pool reverteria.
+// ---------------------------------------------------------------------------
+
+/** A conta do pool Solidly, em TypeScript, para conferir de fora. */
+function saidaSolidly(entrada: bigint, rIn: bigint, rOut: bigint, taxaBps: bigint): bigint {
+    const comTaxa = entrada * (10_000n - taxaBps);
+    return (comTaxa * rOut) / (rIn * 10_000n + comTaxa);
+}
+
+async function cenarioSolidly(taxaBps: bigint, reserva = RESERVA, inverterOrdem = false) {
+    const b = await montarBancada();
+    const garantia = await b.subir('TokenFalso', ['string'], ['WETH']);
+    const divida = await b.subir('TokenFalso', ['string'], ['USDC']);
+    const pool = await b.subir('PoolFalso', ['uint256', 'uint256'], [5n, 500n]);
+    const par = await b.subir(
+        'ParSolidlyFalso',
+        ['address', 'address', 'uint256', 'uint256', 'uint256'],
+        inverterOrdem ? [divida, garantia, reserva, reserva, taxaBps] : [garantia, divida, reserva, reserva, taxaBps],
+    );
+    await b.exigir(divida, criar(pool, EMPRESTIMO * 10n));
+    await b.exigir(garantia, criar(pool, EMPRESTIMO * 10n));
+    await b.exigir(garantia, criar(par, reserva));
+    await b.exigir(divida, criar(par, reserva));
+    return { ...b, garantia, divida, pool, par };
+}
+
+async function lucroNoCofre(c: Awaited<ReturnType<typeof cenarioSolidly>>): Promise<bigint> {
+    const cacador = await c.subir('CacadorDeLiquidacoes', ['address', 'address'], [c.pool, COFRE]);
+    await c.exigir(
+        cacador,
+        cacar({
+            garantia: c.garantia, divida: c.divida, devedor: VITIMA,
+            quanto: EMPRESTIMO, poolVenda: c.par, lucroMinimo: 0n,
+        }),
+    );
+    return BigInt(await c.exigir(c.divida, saldoDe(COFRE)));
+}
+
+test('o ciclo inteiro fecha num pool Aerodrome, com a taxa DELE', async () => {
+    const TAXA = 5n; // 0,05% — nada a ver com os 0,3% que estavam cravados
+    const c = await cenarioSolidly(TAXA);
+    const garantiaRecebida = (EMPRESTIMO * 10_500n) / 10_000n;
+    const esperado = saidaSolidly(garantiaRecebida, RESERVA, RESERVA, TAXA) - (EMPRESTIMO + (EMPRESTIMO * 5n) / 10_000n);
+
+    assert.equal(await lucroNoCofre(c), esperado);
+});
+
+test('a taxa do pool manda: 1% rende menos que 0,05%, e na medida exata', async () => {
+    const barato = await lucroNoCofre(await cenarioSolidly(5n));
+    const caro = await lucroNoCofre(await cenarioSolidly(100n));
+    assert.ok(caro < barato, `1% tinha de render menos: ${caro} vs ${barato}`);
+
+    const garantiaRecebida = (EMPRESTIMO * 10_500n) / 10_000n;
+    const aDevolver = EMPRESTIMO + (EMPRESTIMO * 5n) / 10_000n;
+    assert.equal(caro, saidaSolidly(garantiaRecebida, RESERVA, RESERVA, 100n) - aDevolver);
+});
+
+test('a fórmula antiga de 0,3% daria OUTRO número — é isso que mudou', async () => {
+    // Se `997/1000` ainda estivesse cravado, o contrato pediria esta saída…
+    const TAXA = 5n;
+    const garantiaRecebida = (EMPRESTIMO * 10_500n) / 10_000n;
+    const comFormulaAntiga = saidaDoSwap(garantiaRecebida, RESERVA, RESERVA);
+    const comTaxaDoPool = saidaSolidly(garantiaRecebida, RESERVA, RESERVA, TAXA);
+    assert.notEqual(comFormulaAntiga, comTaxaDoPool);
+
+    // …e o que sai de verdade é o do pool, não o da fórmula.
+    const aDevolver = EMPRESTIMO + (EMPRESTIMO * 5n) / 10_000n;
+    assert.equal(await lucroNoCofre(await cenarioSolidly(TAXA)), comTaxaDoPool - aDevolver);
+});
+
+test('reserva acima de uint112 passa — prova que não há decodificação V2 no caminho', async () => {
+    // 2^112 é o teto do formato Uniswap V2. Um pool Solidly com reserva acima
+    // disso faria `getReserves()` no formato antigo reverter na decodificação.
+    // Se o ciclo fecha, é porque a venda foi pelo `getAmountOut` do pool.
+    const ENORME = 2n ** 120n;
+    const c = await cenarioSolidly(5n, ENORME);
+    assert.ok((await lucroNoCofre(c)) > 0n);
+});
+
+test('a ordem dos tokens no par Aerodrome não muda o resultado', async () => {
+    const normal = await lucroNoCofre(await cenarioSolidly(5n, RESERVA, false));
+    const invertido = await lucroNoCofre(await cenarioSolidly(5n, RESERVA, true));
+    assert.equal(normal, invertido);
+});
+
+test('pool Aerodrome vazio REVERTE em vez de entregar a garantia por nada', async () => {
+    // getAmountOut devolve zero sem reserva. Seguir com zero transferiria a
+    // garantia e receberia nada — e o piso só confere DEPOIS da venda.
+    const b = await montarBancada();
+    const garantia = await b.subir('TokenFalso', ['string'], ['WETH']);
+    const divida = await b.subir('TokenFalso', ['string'], ['USDC']);
+    const pool = await b.subir('PoolFalso', ['uint256', 'uint256'], [5n, 500n]);
+    const par = await b.subir(
+        'ParSolidlyFalso',
+        ['address', 'address', 'uint256', 'uint256', 'uint256'],
+        [garantia, divida, 0n, 0n, 5n],
+    );
+    await b.exigir(divida, criar(pool, EMPRESTIMO * 10n));
+    await b.exigir(garantia, criar(pool, EMPRESTIMO * 10n));
+    const cacador = await b.subir('CacadorDeLiquidacoes', ['address', 'address'], [pool, COFRE]);
+
+    await assert.rejects(
+        b.exigir(
+            cacador,
+            cacar({
+                garantia, divida, devedor: VITIMA,
+                quanto: EMPRESTIMO, poolVenda: par, lucroMinimo: 0n,
+            }),
+        ),
+    );
+    assert.equal(BigInt(await b.exigir(divida, saldoDe(COFRE))), 0n);
+});

@@ -14,6 +14,7 @@
 // troca. Quem emitiu, é. E o tipo do evento separa as famílias sozinho, o que
 // importa porque o contrato lê `getReserves()` no formato do Uniswap V2.
 import { Decimal } from 'decimal.js';
+import { AbiCoder } from 'ethers';
 import { id } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
@@ -35,6 +36,7 @@ import {
 import { poolNecessarioPara, perdaNaVenda } from './venda';
 
 const log = createLogger('acharPool');
+const coderDeSonda = AbiCoder.defaultAbiCoder();
 
 const REDE_ESCOLHIDA = (process.env.POOL_REDE ?? 'base').toLowerCase();
 const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
@@ -50,6 +52,9 @@ const TIMEOUT_MS = Number(process.env.POOL_TIMEOUT_MS ?? '25000');
 // sondagem, então não há para onde escoar pedido — a folga tem de vir daqui.
 const PAUSA_MS = Number(process.env.POOL_PAUSA_MS ?? '600');
 const SELETOR_SYMBOL = id('symbol()').slice(0, 10);
+/** O que o contrato pergunta ao pool antes de calcular qualquer coisa. */
+export const ASSINATURA_GET_AMOUNT_OUT = 'getAmountOut(uint256,address)';
+const SELETOR_GET_AMOUNT_OUT = id(ASSINATURA_GET_AMOUNT_OUT).slice(0, 10);
 
 let rpc = process.env.POOL_RPC_URL ?? REDE.rpc;
 let rpcId = 0;
@@ -344,6 +349,40 @@ async function principal(): Promise<void> {
         porQueNaoDaParaUsarAgora:
             'CacadorDeLiquidacoes lê getReserves() como (uint112,uint112,uint32); Solidly devolve (uint256,uint256,uint256)',
     });
+
+    // A prova que falta antes de qualquer deploy: o pool de verdade responde
+    // `getAmountOut`? O contrato pergunta isso e, se ninguem responde, cai na
+    // formula V2 — que num pool Solidly reverte na decodificacao das reservas.
+    // Descobrir isso aqui custa uma leitura; descobrir depois custa um deploy.
+    const paraSondar = solidlyFundos.slice(0, 5);
+    if (paraSondar.length > 0) {
+        const linhas: string[] = [];
+        for (const p of paraSondar) {
+            const dados =
+                SELETOR_GET_AMOUNT_OUT +
+                coderDeSonda.encode(['uint256', 'address'], [10n ** 18n, p.token0]).slice(2);
+            try {
+                const r = await chamar<string>('eth_call', [{ to: p.endereco, data: dados }, 'latest']);
+                const respondeu = typeof r === 'string' && r.length === 66;
+                linhas.push(
+                    `${p.endereco} ${nome(p, 0)}/${nome(p, 1)}: ` +
+                        (respondeu
+                            ? `RESPONDE (1 ${nome(p, 0)} -> ${BigInt(r).toString()} unidades de ${nome(p, 1)})`
+                            : `resposta estranha (${String(r).slice(0, 20)})`),
+                );
+            } catch (e) {
+                linhas.push(`${p.endereco} ${nome(p, 0)}/${nome(p, 1)}: NAO RESPONDE (${(e as Error).message})`);
+            }
+            await dormir(PAUSA_MS);
+        }
+        log.info('O POOL CALCULA SOZINHO? — a prova que o contrato precisa.', {
+            perguntado: ASSINATURA_GET_AMOUNT_OUT,
+            porQueImporta:
+                'se responde, o contrato usa a resposta e acerta a taxa seja ela qual for; ' +
+                'se nao responde, ele cairia na formula V2 e a venda reverteria',
+            detalhe: linhas.join(' | '),
+        });
+    }
 
     if (semDolar.length > 0) {
         log.info('Pools sem lado em dólar — não dá para comparar profundidade sem tabela de preço.', {
