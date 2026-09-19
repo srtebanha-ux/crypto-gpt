@@ -24,7 +24,7 @@
 // Passar por esse teste não garante lucro. Garante que, no dia em que uma
 // posição abrir, o pedido vai estar escrito na língua certa — e não vai
 // falhar por um motivo bobo que dava para ter descoberto hoje, de graça.
-import { AbiCoder } from 'ethers';
+import { AbiCoder, id } from 'ethers';
 
 /** `liquidationCall(address,address,address,uint256,bool)` — conferido com keccak. */
 export const SELETOR_LIQUIDATION_CALL = '0x00a718a9';
@@ -94,6 +94,45 @@ export const ERROS_DA_AAVE: Record<string, string> = {
     '92': 'A liquidação deixaria uma sobra pequena demais de dívida.',
 };
 
+/**
+ * Os erros da Aave NOVA — que não fala por números, fala por assinatura.
+ *
+ * O primeiro ensaio contra a Base reprovou, e reprovou por um motivo que eu
+ * não tinha previsto: a resposta não veio como `execution reverted: 45`, veio
+ * como `execution reverted | 0x930bb771`. As versões recentes da Aave
+ * trocaram os códigos em texto por erros personalizados, que viajam como os
+ * quatro primeiros bytes do keccak do nome.
+ *
+ * `0x930bb771` é `HealthFactorNotBelowThreshold()` — exatamente o mesmo
+ * significado do antigo 45. Ou seja: a Aave tinha entendido o pedido desde o
+ * começo e recusado pelo motivo certo. Quem não entendeu a resposta fui eu.
+ *
+ * Os dois dicionários ficam, porque redes diferentes rodam versões diferentes
+ * e a mesma recusa chega das duas formas conforme o lugar.
+ *
+ * As assinaturas são CALCULADAS a partir dos nomes, não copiadas à mão. Um
+ * seletor digitado errado não falha: ele simplesmente nunca casa, e o erro
+ * vira "desconhecido" para sempre — silencioso, do jeito que este projeto
+ * vem aprendendo a não deixar passar.
+ */
+export const NOMES_DE_ERRO_DA_AAVE: Array<[string, string]> = [
+    ['HealthFactorNotBelowThreshold()', 'A posição está SAUDÁVEL — não dá para liquidar. (É a resposta esperada para quem ainda não caiu.)'],
+    ['CollateralCannotBeLiquidated()', 'Essa garantia não pode ser liquidada — o dono não a marcou como garantia, ou ela está desabilitada.'],
+    ['SpecifiedCurrencyNotBorrowedByUser()', 'Este usuário não deve nada NESTE token — o par de dívida está errado.'],
+    ['ReserveInactive()', 'Esta reserva está desativada no pool.'],
+    ['ReservePaused()', 'Esta reserva está pausada.'],
+    ['InvalidAmount()', 'Valor inválido para cobrir.'],
+    ['MustNotLeaveDust()', 'A liquidação deixaria uma sobra pequena demais de dívida.'],
+    ['PriceOracleSentinelCheckFailed()', 'O oráculo está em modo de proteção; liquidações estão barradas agora.'],
+    ['LiquidationGracePeriodNotOver()', 'A reserva está em período de carência: liquidação ainda não liberada.'],
+    ['CollateralBalanceIsZero()', 'O usuário não tem saldo desta garantia.'],
+];
+
+/** assinatura -> explicação, calculada a partir dos nomes acima. */
+export const ERROS_PERSONALIZADOS: Record<string, { nome: string; texto: string }> = Object.fromEntries(
+    NOMES_DE_ERRO_DA_AAVE.map(([nome, texto]) => [id(nome).slice(0, 10), { nome, texto }]),
+);
+
 export interface LeituraDaResposta {
     entendeu: boolean;
     codigo: string | null;
@@ -110,8 +149,21 @@ export interface LeituraDaResposta {
  */
 export function lerRespostaDaAave(mensagem: string): LeituraDaResposta {
     const m = mensagem.trim();
-    // A Aave V3 reverte com o número como string: "execution reverted: 45",
-    // "reverted: '45'", ou só "45" conforme o provedor embrulha.
+
+    // Aave nova: erro personalizado, 4 bytes de keccak do nome.
+    const personalizado = m.match(/0x[0-9a-fA-F]{8}\b/);
+    if (personalizado) {
+        const sel = personalizado[0].toLowerCase();
+        const conhecido = ERROS_PERSONALIZADOS[sel];
+        if (conhecido) return { entendeu: true, codigo: conhecido.nome, texto: conhecido.texto };
+        return {
+            entendeu: true,
+            codigo: sel,
+            texto: `A Aave recusou com o erro ${sel}, que eu ainda não traduzi — mas responder com erro DELA já prova que ela leu o pedido.`,
+        };
+    }
+
+    // Aave antiga: o número como texto.
     const achado = m.match(/(?:reverted:?\s*['"]?|^)(\d{1,3})['"]?\s*$/);
     if (achado) {
         const codigo = achado[1];
@@ -122,10 +174,11 @@ export function lerRespostaDaAave(mensagem: string): LeituraDaResposta {
             texto: conhecido ?? `A Aave recusou com o código ${codigo}, que eu ainda não traduzi.`,
         };
     }
+
     return {
         entendeu: false,
         codigo: null,
-        texto: `A Aave NÃO respondeu com código dela: "${m.slice(0, 120)}". Isso é problema de formato meu, não da posição.`,
+        texto: `A Aave NÃO respondeu com erro dela: "${m.slice(0, 120)}". Isso é problema de formato meu, ou do provedor (um "over rate limit" cai aqui e não é erro de formato).`,
     };
 }
 

@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AbiCoder } from 'ethers';
+import { AbiCoder, id } from 'ethers';
 import {
     COBRIR_O_MAXIMO,
     ERROS_DA_AAVE,
+    ERROS_PERSONALIZADOS,
+    NOMES_DE_ERRO_DA_AAVE,
     SELETOR_LIQUIDATION_CALL,
     codificarLiquidacao,
     codificarUserReserveData,
@@ -159,4 +161,53 @@ test('a consulta de reserva leva ativo e usuário, nessa ordem', () => {
     const [a, u] = coder.decode(['address', 'address'], `0x${c.slice(10)}`) as unknown as [string, string];
     assert.equal(a.toLowerCase(), WETH);
     assert.equal(u.toLowerCase(), DEVEDOR);
+});
+
+// ---------------------------------------------------------------------------
+// A Aave NOVA fala por assinatura, não por número. Achado no primeiro ensaio.
+// ---------------------------------------------------------------------------
+
+test('0x930bb771 é HealthFactorNotBelowThreshold — o 45 da Aave nova', () => {
+    // Este seletor veio da Base de verdade, no ensaio de 19/09. O teste trava
+    // a descoberta: se a lista de nomes mudar e este deixar de casar, quebra
+    // aqui em vez de virar "erro desconhecido" silencioso lá na frente.
+    assert.equal(id('HealthFactorNotBelowThreshold()').slice(0, 10), '0x930bb771');
+    const r = lerRespostaDaAave('execution reverted | 0x930bb771');
+    assert.equal(r.entendeu, true);
+    assert.equal(r.codigo, 'HealthFactorNotBelowThreshold()');
+    assert.match(r.texto, /SAUDÁVEL/);
+});
+
+test('as assinaturas são calculadas dos nomes, nunca copiadas à mão', () => {
+    // Seletor digitado errado não falha alto: ele nunca casa, e o erro vira
+    // "desconhecido" para sempre. Calcular elimina a classe inteira.
+    for (const [nome] of NOMES_DE_ERRO_DA_AAVE) {
+        const sel = id(nome).slice(0, 10);
+        assert.equal(ERROS_PERSONALIZADOS[sel].nome, nome);
+    }
+    assert.equal(Object.keys(ERROS_PERSONALIZADOS).length, NOMES_DE_ERRO_DA_AAVE.length);
+});
+
+test('erro personalizado que eu não traduzi ainda conta como ENTENDIDO', () => {
+    // Responder com erro dela já prova que leu o pedido, mesmo que eu não
+    // saiba o nome. Tratar isso como reprovação esconderia um ensaio aprovado.
+    const r = lerRespostaDaAave('execution reverted | 0xdeadbeef');
+    assert.equal(r.entendeu, true);
+    assert.equal(r.codigo, '0xdeadbeef');
+    assert.match(r.texto, /já prova que ela leu/);
+});
+
+test('a língua antiga continua sendo entendida', () => {
+    // Redes diferentes rodam versões diferentes da Aave.
+    const r = lerRespostaDaAave('execution reverted: 45');
+    assert.equal(r.entendeu, true);
+    assert.equal(r.codigo, '45');
+});
+
+test('"over rate limit" NÃO é erro de formato, e a mensagem diz isso', () => {
+    // Dois dos cinco ensaios caíram assim, e contá-los como reprovação
+    // culparia o meu código por um limite do provedor.
+    const r = lerRespostaDaAave('over rate limit');
+    assert.equal(r.entendeu, false);
+    assert.match(r.texto, /over rate limit/);
 });

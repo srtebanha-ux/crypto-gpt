@@ -34,7 +34,7 @@ const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const POOL = (process.env.ENSAIO_POOL ?? REDE.pool).toLowerCase();
 const BLOCOS = Number(process.env.ENSAIO_BLOCOS ?? '200000');
 const PEDACO = Number(process.env.ENSAIO_PEDACO ?? '2000');
-const PAUSA_MS = Number(process.env.ENSAIO_PAUSA_MS ?? '200');
+const PAUSA_MS = Number(process.env.ENSAIO_PAUSA_MS ?? '700');
 const TIMEOUT_MS = Number(process.env.ENSAIO_TIMEOUT_MS ?? '20000');
 /** Quantos devedores ensaiar. Poucos bastam: o que se testa é o FORMATO. */
 const QUANTOS = Number(process.env.ENSAIO_QUANTOS ?? '5');
