@@ -1,0 +1,284 @@
+// Arquivo: src/acharPool.ts
+//
+// Varre a Base atrás dos pools de verdade e diz qual serve para vender.
+//
+// *** MODO LEITURA. NENHUMA TRANSAÇÃO É ENVIADA. NENHUM GÁS É GASTO. ***
+//
+// Por que um programa e não um endereço copiado de um site: este é o único
+// ponto do projeto onde errar não reverte. A Aave recusa pedido malformado e o
+// contrato reverte abaixo do piso, mas um endereço que não é pool ACEITA a
+// transferência e some com o dinheiro. Endereço de site é endereço de memória
+// de outra pessoa — aqui só vale o que a rede confirmou.
+//
+// A varredura procura `Sync`, que todo pool de produto constante emite a cada
+// troca. Quem emitiu, é. E o tipo do evento separa as famílias sozinho, o que
+// importa porque o contrato lê `getReserves()` no formato do Uniswap V2.
+import { Decimal } from 'decimal.js';
+import { id } from 'ethers';
+import { createLogger } from './logger';
+import { exigirAtivacao } from './ativacao';
+import { REDES, RPCS_PARA_TENTAR, faixasDeBlocos, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos } from './liquidacoes';
+import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
+import { SELECTORS, decodeAddressWord, decodeReserves, decodeDecimals } from './evmAbi';
+import {
+    TOPICO_DA_FAMILIA,
+    contarAtividade,
+    ordenarPorAtividade,
+    escolherPoolDeVenda,
+    emUnidades,
+    type Familia,
+    type Pool,
+    type LogDeSync,
+} from './pools';
+import { poolNecessarioPara, perdaNaVenda } from './venda';
+
+const log = createLogger('acharPool');
+
+const REDE_ESCOLHIDA = (process.env.POOL_REDE ?? 'base').toLowerCase();
+const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
+const BLOCOS = Number(process.env.POOL_BLOCOS ?? '10000');
+const PEDACO = Number(process.env.POOL_PEDACO ?? '2000');
+const QUANTOS = Number(process.env.POOL_QUANTOS ?? '150');
+const TIMEOUT_MS = Number(process.env.POOL_TIMEOUT_MS ?? '25000');
+const PAUSA_MS = Number(process.env.POOL_PAUSA_MS ?? '400');
+const SELETOR_SYMBOL = id('symbol()').slice(0, 10);
+
+let rpc = process.env.POOL_RPC_URL ?? REDE.rpc;
+let rpcId = 0;
+const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function chamar<T>(metodo: string, params: unknown[]): Promise<T> {
+    const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: metodo, params }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    const corpo = (await res.json()) as { result?: T; error?: { message?: string } };
+    if (corpo.error) throw new Error(corpo.error.message ?? 'erro sem mensagem');
+    return corpo.result as T;
+}
+
+/** Uma varredura por família — separadas, porque a família é a resposta. */
+async function varrer(familia: Familia, de: number, ate: number): Promise<Map<string, number>> {
+    const logs: LogDeSync[] = [];
+    const faixas = faixasDeBlocos(de, ate, PEDACO);
+    let falhas = 0;
+    for (const [a, b] of faixas) {
+        try {
+            const parte = await chamar<LogDeSync[]>('eth_getLogs', [
+                { fromBlock: `0x${a.toString(16)}`, toBlock: `0x${b.toString(16)}`, topics: [TOPICO_DA_FAMILIA[familia]] },
+            ]);
+            logs.push(...parte);
+        } catch {
+            falhas += 1;
+        }
+        await dormir(PAUSA_MS);
+    }
+    if (falhas > 0) {
+        log.warn('Faixas que não deram para ler — a contagem desta família está por baixo.', {
+            familia,
+            falharam: `${falhas} de ${faixas.length}`,
+            consequencia: 'pools que só trocaram nessas faixas podem não aparecer',
+        });
+    }
+    return contarAtividade(logs);
+}
+
+/** Uma leitura por candidato, em lote. Devolve null onde a chamada falhou. */
+async function lerEmLote(alvos: string[], dados: (a: string) => string): Promise<Array<string | null>> {
+    const fora: Array<string | null> = [];
+    for (const pedaco of partirEmPedacos(alvos, CHAMADAS_POR_MULTICALL)) {
+        const bruto = await chamar<string>('eth_call', [
+            { to: MULTICALL3, data: codificarAggregate3(pedaco.map((a) => ({ alvo: a, dados: dados(a) }))) },
+            'latest',
+        ]);
+        const rs = decodificarAggregate3(bruto);
+        for (let i = 0; i < pedaco.length; i += 1) fora.push(rs[i]?.ok ? rs[i].dados : null);
+        await dormir(PAUSA_MS);
+    }
+    return fora;
+}
+
+function texto(hex: string | null): string | undefined {
+    if (!hex || hex === '0x') return undefined;
+    try {
+        const bytes = Buffer.from(hex.replace(/^0x/, ''), 'hex');
+        // Uma string ABI vem com deslocamento e tamanho; um bytes32 vem cru.
+        const s = bytes.length > 64 ? bytes.subarray(64).toString('utf8') : bytes.toString('utf8');
+        const limpo = s.replace(/\0/g, '').trim();
+        return limpo.length > 0 && limpo.length < 32 ? limpo : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+async function principal(): Promise<void> {
+    log.info('*** MODO LEITURA — nenhuma transação é enviada por este processo. ***');
+    const rpcs = process.env.POOL_RPC_URL ? [process.env.POOL_RPC_URL] : (RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [REDE.rpc]);
+    let topo = 0;
+    for (const c of rpcs) {
+        try {
+            rpc = c;
+            topo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
+            break;
+        } catch { /* tenta o próximo */ }
+    }
+    if (!topo) {
+        log.error('Nenhum RPC respondeu; sem rede não há varredura.', { tentados: rpcs });
+        return;
+    }
+
+    const de = topo - BLOCOS + 1;
+    log.info('Varrendo atrás de pools vivos.', {
+        rede: REDE.nome,
+        blocos: `${de} → ${topo}`,
+        comoSabeQueEPool: 'só entram endereços que EMITIRAM Sync — comportamento, não lista',
+    });
+
+    const v2 = await varrer('v2', de, topo);
+    const solidly = await varrer('solidly', de, topo);
+    log.info('Quem é quem na rede.', {
+        poolsV2: v2.size,
+        poolsSolidly: solidly.size,
+        usaveis: 'só os V2: o contrato lê getReserves() como (uint112,uint112,uint32)',
+    });
+    if (v2.size === 0) {
+        log.error('Nenhum pool V2 encontrado na janela. Sem pool não há venda.', { janelaDeBlocos: BLOCOS });
+        return;
+    }
+
+    const candidatos = ordenarPorAtividade(v2, QUANTOS);
+    const enderecos = candidatos.map((c) => c.pool);
+    const [t0, t1, res] = await Promise.all([
+        lerEmLote(enderecos, () => SELECTORS.token0),
+        lerEmLote(enderecos, () => SELECTORS.token1),
+        lerEmLote(enderecos, () => SELECTORS.getReserves),
+    ]);
+
+    const pools: Pool[] = [];
+    let descartados = 0;
+    for (let i = 0; i < candidatos.length; i += 1) {
+        if (!t0[i] || !t1[i] || !res[i]) { descartados += 1; continue; }
+        try {
+            const r = decodeReserves(res[i]!);
+            pools.push({
+                endereco: candidatos[i].pool,
+                familia: 'v2',
+                trocas: candidatos[i].trocas,
+                token0: decodeAddressWord(t0[i]!, 0),
+                token1: decodeAddressWord(t1[i]!, 0),
+                reserva0: r.reserve0,
+                reserva1: r.reserve1,
+            });
+        } catch {
+            descartados += 1;
+        }
+    }
+    if (descartados > 0) {
+        log.warn('Candidatos descartados por não responderem como par V2.', {
+            descartados,
+            de: candidatos.length,
+            observacao: 'emitir Sync e não responder token0/getReserves é contradição — ficam de fora',
+        });
+    }
+
+    // Símbolos e casas: sem as casas, reserva é número sem unidade, e supor 18
+    // onde a moeda tem 6 erra por um fator de um trilhão.
+    const moedas = [...new Set(pools.flatMap((p) => [p.token0.toLowerCase(), p.token1.toLowerCase()]))];
+    const [simbolos, casas] = await Promise.all([
+        lerEmLote(moedas, () => SELETOR_SYMBOL),
+        lerEmLote(moedas, () => SELECTORS.decimals),
+    ]);
+    const simboloDe = new Map<string, string | undefined>();
+    const casasDe = new Map<string, number | undefined>();
+    moedas.forEach((m, i) => {
+        simboloDe.set(m, texto(simbolos[i]));
+        try { casasDe.set(m, casas[i] ? decodeDecimals(casas[i]!) : undefined); } catch { casasDe.set(m, undefined); }
+    });
+    for (const p of pools) {
+        p.simbolo0 = simboloDe.get(p.token0.toLowerCase());
+        p.simbolo1 = simboloDe.get(p.token1.toLowerCase());
+        p.decimais0 = casasDe.get(p.token0.toLowerCase());
+        p.decimais1 = casasDe.get(p.token1.toLowerCase());
+    }
+
+    // Quais moedas a Aave realmente aceita aqui: é só nelas que se liquida.
+    let daAave = new Set<string>();
+    try {
+        const bruto = await chamar<string>('eth_call', [{ to: REDE.pool, data: SELETOR_GET_RESERVES_LIST }, 'latest']);
+        daAave = new Set(decodificarListaDeEnderecos(bruto).map((a) => a.toLowerCase()));
+    } catch (e) {
+        log.warn('Não deu para ler a lista de moedas da Aave; o relatório sai sem esse filtro.', {
+            erro: (e as Error).message,
+        });
+    }
+
+    const nome = (p: Pool, qual: 0 | 1) =>
+        (qual === 0 ? p.simbolo0 : p.simbolo1) ?? (qual === 0 ? p.token0 : p.token1).slice(0, 10);
+
+    const interessantes = pools
+        .filter((p) => daAave.size === 0 || (daAave.has(p.token0.toLowerCase()) && daAave.has(p.token1.toLowerCase())))
+        .sort((a, b) => b.trocas - a.trocas)
+        .slice(0, 20);
+
+    log.info('POOLS QUE SERVEM — os dois lados são moeda que a Aave aceita.', {
+        achados: interessantes.length,
+        deUmTotalDe: pools.length,
+        detalhe: interessantes
+            .map((p) => {
+                const r0 = emUnidades(p.reserva0, p.decimais0);
+                const r1 = emUnidades(p.reserva1, p.decimais1);
+                return (
+                    `${p.endereco} ${nome(p, 0)}/${nome(p, 1)} ` +
+                    `reservas ${r0 ? r0.toFixed(0) : '?'}/${r1 ? r1.toFixed(0) : '?'} (${p.trocas} trocas)`
+                );
+            })
+            .join(' | '),
+    });
+
+    // O que isso significa em tamanho de caçada: para cada pool, até quanto dá
+    // para vender sem passar de 1% de empurrão — a pergunta que decide tudo.
+    const teto = new Decimal('0.01');
+    log.info('ATÉ QUANTO DÁ PARA VENDER — 1% de empurrão no preço.', {
+        referencia: `faixa do meio pede pool de $${poolNecessarioPara(new Decimal(20_406).mul('0.5').mul('1.05'), teto).toFixed(0)}`,
+        detalhe: interessantes
+            .slice(0, 10)
+            .map((p) => {
+                const r1 = emUnidades(p.reserva1, p.decimais1);
+                if (!r1) return `${p.endereco}: casas da moeda ilegíveis, não dá para dizer`;
+                const cabe = r1.mul(teto).dividedBy(new Decimal(1).minus(teto));
+                const p5 = perdaNaVenda(r1.mul('0.05'), {
+                    reserveIn: r1,
+                    reserveOut: r1,
+                    feeFraction: new Decimal('0.003'),
+                });
+                return (
+                    `${nome(p, 0)}/${nome(p, 1)}: cabe ${cabe.toFixed(0)} ${nome(p, 1)} a 1%; ` +
+                    `5% da reserva custaria ${p5.total.mul(100).toFixed(2)}%`
+                );
+            })
+            .join(' | '),
+        observacao: 'MODO LEITURA: nada foi enviado. Isto mede o pool, não usa ele.',
+    });
+
+    // Se quem chama já sabe o par, responde direto qual endereço usar.
+    const garantia = process.env.POOL_GARANTIA;
+    const divida = process.env.POOL_DIVIDA;
+    if (garantia && divida) {
+        const e = escolherPoolDeVenda(pools, garantia, divida);
+        log.info('ESCOLHA PARA O PAR PEDIDO.', {
+            garantia,
+            divida,
+            poolDeVenda: e.pool?.endereco ?? 'NENHUM',
+            recebeDoOutroLado: e.recebe?.toFixed(0) ?? '-',
+            motivo: e.motivo,
+        });
+    } else {
+        log.info('Para escolher o pool de um par específico, defina POOL_GARANTIA e POOL_DIVIDA.');
+    }
+}
+
+if (require.main === module && exigirAtivacao('acharPool')) {
+    principal().catch((e) => log.error('Varredura tropeçou.', { erro: (e as Error).message }));
+}

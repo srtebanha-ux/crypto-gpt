@@ -38,7 +38,9 @@
     "liquidacoes": "ts-node src/liquidacoesHistorico.ts",
     "liquidacoes:prod": "node dist/liquidacoesHistorico.js",
     "conferir": "ts-node src/conferirContrato.ts",
-    "conferir:prod": "node dist/conferirContrato.js"
+    "conferir:prod": "node dist/conferirContrato.js",
+    "achar-pool": "ts-node src/acharPool.ts",
+    "achar-pool:prod": "node dist/acharPool.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",
