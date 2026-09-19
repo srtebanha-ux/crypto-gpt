@@ -76,13 +76,29 @@ test('lista vazia não quebra', () => {
 });
 
 test('partir em pedaços não perde nem duplica ninguém', () => {
+    // Os números vêm da constante, não escritos à mão. A primeira versão
+    // tinha "17" e "8243 % 500" fixos, e quebrou assim que o tamanho do
+    // pedaço mudou de 500 para 250 — um teste que testava a constante em vez
+    // do comportamento.
     const itens = Array.from({ length: 8243 }, (_, i) => i);
     const pedacos = partirEmPedacos(itens, CHAMADAS_POR_MULTICALL);
-    assert.equal(pedacos.length, 17);
+    assert.equal(pedacos.length, Math.ceil(8243 / CHAMADAS_POR_MULTICALL));
     assert.deepEqual(pedacos.flat(), itens);
-    assert.equal(pedacos[pedacos.length - 1].length, 8243 % 500);
+    assert.equal(pedacos[pedacos.length - 1].length, 8243 % CHAMADAS_POR_MULTICALL);
+    for (const p of pedacos.slice(0, -1)) assert.equal(p.length, CHAMADAS_POR_MULTICALL);
 });
 
 test('pedaço de tamanho zero é erro, não laço infinito', () => {
     assert.throws(() => partirEmPedacos([1, 2, 3], 0), /pelo menos 1/);
+});
+
+test('o pedaço padrão caiu de 500 para 250, e a conta continua fechando', () => {
+    // 500 fazia o provedor da Base recusar por excesso, e 742 de 8.242
+    // endereços ficavam sem olhar a cada ronda — 9%, logo abaixo do alarme de
+    // 10%, com o vigia calado.
+    assert.ok(CHAMADAS_POR_MULTICALL <= 250, `pedaço grande demais: ${CHAMADAS_POR_MULTICALL}`);
+    const pedacos = partirEmPedacos(Array.from({ length: 8242 }, (_, i) => i));
+    assert.equal(pedacos.flat().length, 8242, 'ninguém pode se perder na divisão');
+    // Ainda rápido: dezenas de chamadas, não milhares.
+    assert.ok(pedacos.length < 50, `${pedacos.length} chamadas é demais`);
 });

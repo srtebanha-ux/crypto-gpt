@@ -175,15 +175,15 @@ let temMulticall = false;
  * tipo que não aparece como erro, só como ausência.
  */
 async function comPaciencia<T>(metodo: string, params: unknown[]): Promise<T> {
-    let espera = 400;
+    let espera = 600;
     for (let tentativa = 0; ; tentativa += 1) {
         try {
             return await chamar<T>(metodo, params);
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            if (tentativa >= 3 || !msg.includes('429')) throw err;
+            if (tentativa >= 5 || !msg.includes('429')) throw err;
             await dormir(espera);
-            espera *= 3;
+            espera *= 2;
         }
     }
 }
@@ -359,11 +359,21 @@ async function olhar(devedores: string[]): Promise<Posicao[]> {
         }
     }
 
+    // QUALQUER perda é dita, e não só acima de um limiar.
+    //
+    // O limiar era 10%, e a realidade ficou em 9%: 742 de 8.242 endereços sem
+    // olhar, a cada ronda, com o vigia calado. Passar raspando de um alarme é
+    // pior que estourá-lo — o número fica errado e nada no log indica.
     const perdidos = devedores.length - fora.length;
-    if (perdidos > devedores.length * 0.1) {
-        log.warn('Muitos endereços sem resposta nesta passada.', {
-            semResposta: `${perdidos} de ${devedores.length}`,
-            consequencia: 'esses não foram olhados; a lista da borda pode estar incompleta',
+    if (perdidos > 0) {
+        const fracao = perdidos / Math.max(devedores.length, 1);
+        const dizer = fracao > 0.02 ? log.warn.bind(log) : log.info.bind(log);
+        dizer('Endereços sem resposta nesta passada.', {
+            semResposta: `${perdidos} de ${devedores.length} (${(fracao * 100).toFixed(1)}%)`,
+            consequencia:
+                fracao > 0.02
+                    ? 'esses NÃO foram olhados; a lista da borda pode estar incompleta'
+                    : 'perda pequena; a borda continua confiável',
         });
     }
     return fora;

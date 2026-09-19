@@ -73,10 +73,17 @@ export function decodificarAggregate3(dataHex: string): RespostaMulti[] {
  *
  * Oito mil leituras numa chamada só estouram o limite de gás que o provedor
  * aceita para leitura, e a resposta viria como erro — sem dizer que o problema
- * era tamanho. Quinhentas por vez cabem com folga e ainda derrubam a ronda de
- * 62 minutos para menos de um.
+ * era tamanho.
+ *
+ * Eram 500, e 500 fazia o `mainnet.base.org` recusar por excesso: 742 de 8.242
+ * endereços ficavam sem ser olhados a cada ronda. Nove por cento — logo abaixo
+ * do alarme de dez, então o vigia ficava calado sobre gente que ele não
+ * olhou. Passar raspando de um alarme é pior que estourá-lo, porque não deixa
+ * rastro.
+ *
+ * 250 dobra o número de chamadas e continua deixando a ronda em segundos.
  */
-export const CHAMADAS_POR_MULTICALL = 500;
+export const CHAMADAS_POR_MULTICALL = Number(process.env.MULTICALL_PEDACO ?? '250');
 
 export function partirEmPedacos<T>(itens: T[], tamanho = CHAMADAS_POR_MULTICALL): T[][] {
     if (tamanho < 1) throw new Error('tamanho de pedaço tem de ser pelo menos 1');
