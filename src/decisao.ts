@@ -14,6 +14,7 @@
 // Confundir ágio com lucro é o mesmo erro de confundir dívida com prêmio, que
 // este projeto já cometeu uma vez hoje.
 import { Decimal } from 'decimal.js';
+import { poolNecessarioPara } from './venda';
 
 export interface Oportunidade {
     /** Quanto da dívida será coberto, em dólares. */
@@ -173,6 +174,14 @@ export interface ItemAvaliado {
     queda: number | null;
     dividaUsd: Decimal;
     veredicto: Veredicto;
+    /**
+     * Quanto de garantia essa caçada teria de VENDER. Opcional porque nem todo
+     * chamador sabe — mas quem sabe ganha a coluna que desmente o resto: o
+     * tamanho de pool que a venda exigiria. Uma dívida de $42 milhões produz
+     * um lucro previsto lindo e pede um pool de dois bilhões numa moeda só.
+     * Sem essa coluna, o log mostra só o lado bonito da conta.
+     */
+    vendaUsd?: Decimal;
 }
 
 export interface ResumoDeAvaliacoes {
@@ -187,6 +196,9 @@ export interface ResumoDeAvaliacoes {
 
 export const LINHAS_NO_LOG = 10;
 
+/** Quanto de empurrão no preço se aceita ao vender. 1% é o teto do relatório. */
+export const EMPURRAO_TOLERADO = new Decimal('0.01');
+
 export function resumirAvaliacoes(itens: ItemAvaliado[], quantasLinhas = LINHAS_NO_LOG): ResumoDeAvaliacoes {
     const valem = itens.filter((i) => i.veredicto.vale);
     const somaLiquidaUsd = valem.reduce((s, i) => s.plus(i.veredicto.lucroLiquidoUsd), new Decimal(0));
@@ -194,11 +206,14 @@ export function resumirAvaliacoes(itens: ItemAvaliado[], quantasLinhas = LINHAS_
     const linhas = [...valem]
         .sort((a, b) => b.veredicto.lucroLiquidoUsd.comparedTo(a.veredicto.lucroLiquidoUsd))
         .slice(0, quantasLinhas)
-        .map(
-            (i) =>
+        .map((i) => {
+            const base =
                 `${i.chave} a ${i.queda === null ? '?' : i.queda.toFixed(2)}%: ` +
-                `dívida $${i.dividaUsd.toFixed(0)} -> VALERIA $${i.veredicto.lucroLiquidoUsd.toFixed(2)}`,
-        );
+                `dívida $${i.dividaUsd.toFixed(0)} -> VALERIA $${i.veredicto.lucroLiquidoUsd.toFixed(2)}`;
+            if (!i.vendaUsd) return base;
+            const pool = poolNecessarioPara(i.vendaUsd, EMPURRAO_TOLERADO);
+            return `${base} (venderia $${i.vendaUsd.toFixed(0)}, pede pool de $${pool.toFixed(0)})`;
+        });
 
     return {
         quantasValem: valem.length,

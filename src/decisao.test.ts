@@ -237,3 +237,18 @@ test('lista vazia não inventa linha nem soma', () => {
     assert.equal(r.somaLiquidaUsd.toNumber(), 0);
     assert.deepEqual(r.linhas, []);
 });
+
+test('a linha do log mostra o pool que a venda exigiria', () => {
+    // Sem essa coluna o log mostra só o lado bonito da conta: "VALERIA
+    // $978.037" sem dizer que embolsar isso pede um pool de dois bilhões numa
+    // moeda só. Com ela, a impossibilidade aparece na mesma linha do prêmio.
+    const gigante = item('0xe883426b', 42_202_270, 978_037, 6.05);
+    gigante.vendaUsd = new Decimal(42_202_270).mul('0.5').mul('1.05');
+    const r = resumirAvaliacoes([gigante]);
+    assert.match(r.linhas[0], /pede pool de \$2\d{9}/);
+});
+
+test('sem saber o que venderia, a linha não inventa a coluna', () => {
+    const r = resumirAvaliacoes([item('0xsemvenda', 20_406, 500)]);
+    assert.doesNotMatch(r.linhas[0], /pede pool/);
+});

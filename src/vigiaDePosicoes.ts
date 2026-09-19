@@ -501,7 +501,14 @@ async function quantoValeriaAborda(naMira: Posicao[]): Promise<void> {
             precoDoGasWei,
             precoNativoUsd: PRECO_NATIVO_USD,
         });
-        return { chave: p.devedor.slice(0, 10), queda: p.quedaPct?.toNumber() ?? null, dividaUsd, veredicto: v };
+        return {
+            chave: p.devedor.slice(0, 10),
+            queda: p.quedaPct?.toNumber() ?? null,
+            dividaUsd,
+            veredicto: v,
+            // O que teria de ser VENDIDO: a fatia cobrível da dívida mais o ágio.
+            vendaUsd: dividaUsd.mul(FATIA_COBRIVEL).mul(new Decimal(1).plus(AGIO_SUPOSTO)),
+        };
     });
 
     const r = resumirAvaliacoes(avaliadas);
