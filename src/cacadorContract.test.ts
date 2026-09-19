@@ -14,37 +14,11 @@
 // removesse apareceria aqui, e não apareceria numa leitura do arquivo.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { id } from 'ethers';
+import { compilarContratos, type ContratoCompilado } from './compilarContrato';
 
-interface Compilado {
-    abi: Array<{ type: string; name?: string; stateMutability?: string }>;
-    evm: { bytecode: { object: string } };
-}
-
-function compilar(): Compilado {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const solc = require('solc');
-    const fonte = readFileSync(join(__dirname, '..', 'contracts', 'CacadorDeLiquidacoes.sol'), 'utf8');
-    const saida = JSON.parse(
-        solc.compile(
-            JSON.stringify({
-                language: 'Solidity',
-                sources: { 'C.sol': { content: fonte } },
-                settings: {
-                    optimizer: { enabled: true, runs: 200 },
-                    outputSelection: { '*': { '*': ['abi', 'evm.bytecode.object'] } },
-                },
-            }),
-        ),
-    ) as {
-        errors?: Array<{ severity: string; formattedMessage: string }>;
-        contracts: Record<string, Record<string, Compilado>>;
-    };
-    const erros = (saida.errors ?? []).filter((e) => e.severity === 'error');
-    assert.equal(erros.length, 0, erros.map((e) => e.formattedMessage).join('\n'));
-    return saida.contracts['C.sol'].CacadorDeLiquidacoes;
+function compilar(): ContratoCompilado {
+    return compilarContratos(['CacadorDeLiquidacoes.sol']).contratos.CacadorDeLiquidacoes;
 }
 
 const palavra = (v: string | bigint) =>
