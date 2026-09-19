@@ -524,6 +524,33 @@ async function quantoValeriaAborda(naMira: Posicao[]): Promise<void> {
     });
 }
 
+/**
+ * Uma ronda completa: olhar todo mundo, dizer quem está na borda, o que a
+ * cascata abre e quanto valeria se abrisse agora.
+ *
+ * Isto virou função porque a PRIMEIRA ronda — a que roda antes do laço —
+ * fazia só a primeira parte. Cascata e QUANTO VALERIA só existiam dentro do
+ * laço, então todo reinício começava com o relatório pela metade.
+ *
+ * O custo disso não era teórico: cada push reimplanta o Railway e reinicia o
+ * vigia, e o relatório completo só aparecia MIN_RONDA minutos depois. Ou
+ * seja, justo quando se está olhando o log para saber se a mudança funcionou,
+ * o log não conta a parte que mudou.
+ */
+async function rondaCompleta(devedores: string[]): Promise<Posicao[]> {
+    const todas = await olhar(devedores);
+    const naMira = relatar('RONDA COMPLETA.', todas, true);
+    const c = calcularCascata(todas);
+    log.info('CASCATA — o que abre se o mercado cair.', {
+        porQueda: QUEDAS_DA_CASCATA.map(
+            (q) => `${q}%: $${c.porQueda[q].toFixed(0)} (${c.quantasPorQueda[q]})`,
+        ).join(' | '),
+        leitura: c.leitura,
+    });
+    await quantoValeriaAborda(naMira);
+    return naMira;
+}
+
 async function principal(): Promise<void> {
     log.info('*** MODO LEITURA — nenhuma transação é enviada por este processo. ***');
     log.info('Vigia de posições.', {
@@ -546,7 +573,7 @@ async function principal(): Promise<void> {
         return;
     }
 
-    let naMira = relatar('RONDA COMPLETA.', await olhar(devedores), true);
+    let naMira = await rondaCompleta(devedores);
     let ultimaRonda = Date.now();
     let ultimaColeta = Date.now();
 
@@ -564,16 +591,7 @@ async function principal(): Promise<void> {
             }
 
             if (Date.now() - ultimaRonda > MIN_RONDA * 60_000) {
-                const todas = await olhar(devedores);
-                naMira = relatar('RONDA COMPLETA.', todas, true);
-                const c = calcularCascata(todas);
-                log.info('CASCATA — o que abre se o mercado cair.', {
-                    porQueda: QUEDAS_DA_CASCATA.map(
-                        (q) => `${q}%: $${c.porQueda[q].toFixed(0)} (${c.quantasPorQueda[q]})`,
-                    ).join(' | '),
-                    leitura: c.leitura,
-                });
-                await quantoValeriaAborda(naMira);
+                naMira = await rondaCompleta(devedores);
                 ultimaRonda = Date.now();
                 continue;
             }
