@@ -298,7 +298,7 @@ async function confirmarMulticall(): Promise<void> {
         endereco: MULTICALL3,
         existe: temMulticall,
         efeito: temMulticall
-            ? 'a ronda vai em pedaços de 500 leituras por chamada'
+            ? `a ronda vai em pedaços de ${CHAMADAS_POR_MULTICALL} leituras por chamada`
             : 'NÃO existe nesta rede; a ronda vai uma por vez e leva muito mais',
     });
 }
