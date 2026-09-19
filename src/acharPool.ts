@@ -358,16 +358,27 @@ async function principal(): Promise<void> {
     if (paraSondar.length > 0) {
         const linhas: string[] = [];
         for (const p of paraSondar) {
+            // UMA moeda inteira, e não 10^18 unidades cruas. Não é a mesma
+            // coisa: 10^18 é uma moeda só quando ela tem 18 casas. Em USDC,
+            // que tem 6, são um trilhão de dólares — o suficiente para esvaziar
+            // o pool e devolver a reserva inteira, sob um rótulo dizendo
+            // "1 USDC". A resposta do WETH/USDC estava certa por coincidência
+            // de o WETH ter 18 casas, e a do USDC/cbBTC era ficção.
+            if (p.decimais0 === undefined || p.decimais1 === undefined) {
+                linhas.push(`${p.endereco} ${nome(p, 0)}/${nome(p, 1)}: casas da moeda ilegíveis, não dá para sondar`);
+                continue;
+            }
+            const uma = 10n ** BigInt(p.decimais0);
             const dados =
-                SELETOR_GET_AMOUNT_OUT +
-                coderDeSonda.encode(['uint256', 'address'], [10n ** 18n, p.token0]).slice(2);
+                SELETOR_GET_AMOUNT_OUT + coderDeSonda.encode(['uint256', 'address'], [uma, p.token0]).slice(2);
             try {
                 const r = await chamar<string>('eth_call', [{ to: p.endereco, data: dados }, 'latest']);
                 const respondeu = typeof r === 'string' && r.length === 66;
+                const saida = respondeu ? new Decimal(BigInt(r).toString()).dividedBy(new Decimal(10).pow(p.decimais1)) : null;
                 linhas.push(
                     `${p.endereco} ${nome(p, 0)}/${nome(p, 1)}: ` +
-                        (respondeu
-                            ? `RESPONDE (1 ${nome(p, 0)} -> ${BigInt(r).toString()} unidades de ${nome(p, 1)})`
+                        (saida
+                            ? `RESPONDE (1 ${nome(p, 0)} -> ${saida.toSignificantDigits(8).toString()} ${nome(p, 1)})`
                             : `resposta estranha (${String(r).slice(0, 20)})`),
                 );
             } catch (e) {
