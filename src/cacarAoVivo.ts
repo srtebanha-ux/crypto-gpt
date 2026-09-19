@@ -30,8 +30,8 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, faixasDeBlocos, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos } from './liquidacoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
-import { codificarUserReserveData, decodificarUserReserveData, escolherPar, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
-import { enderecoDaResposta } from './reservas';
+import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
+import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCaca, lerRespostaDaCaca, PISO_IMPOSSIVEL, lucroEmDolar } from './caca';
 import { cacadorDaRede, POOLS } from './contratos';
 
@@ -53,6 +53,12 @@ const SELETOR_SYMBOL = id('symbol()').slice(0, 10);
 // respondidos pela rede.
 const SELETOR_ADDRESSES_PROVIDER = '0x0542975c';
 const SELETOR_GET_POOL_DATA_PROVIDER = '0xe860accb';
+
+// O oraculo da propria Aave, pelo mesmo caminho: provedor.getPriceOracle().
+// Ele existe porque escolher o par exige comparar VALOR, e valor precisa de
+// preco. `getAssetPrice` devolve em moeda base — dolar com 8 casas.
+const SELETOR_GET_PRICE_ORACLE = '0xfca513a8';
+const SELETOR_GET_ASSET_PRICE = '0xb3596f07';
 
 /** O símbolo da moeda, quando dá para ler. Nunca inventado. */
 function simboloDe(hex: string | null): string {
@@ -248,28 +254,76 @@ interface Alvo {
     quedaPct: Decimal | null;
     garantia: string;
     divida: string;
+    garantiaUsd?: Decimal;
+    dividaUsd?: Decimal;
 }
 
 /** Descobre, para cada devedor, qual par de moedas usar. */
-async function montarAlvos(devedores: string[], moedas: string[], dataProvider: string): Promise<Alvo[]> {
+/**
+ * Descobre, para cada devedor, qual par de moedas usar — POR VALOR.
+ *
+ * A primeira versao usava `escolherPar`, que compara unidades cruas. O
+ * proprio projeto ja tinha escrito, em reservas.ts, por que isso e errado:
+ * "escolheria quase sempre o token de mais casas decimais, e o par escolhido
+ * pareceria plausivel". E foi exatamente o que apareceu no log — tres ensaios
+ * seguidos com garantia e divida no MESMO token, porque 1 WETH sao 10^18
+ * unidades e 5.000 USDC sao 5x10^9: o WETH ganha por doze ordens de grandeza
+ * valendo metade.
+ *
+ * Plausivel e o problema. Um par errado nao reverte de um jeito que se
+ * reconheca: ele liquida a divida pequena em vez da grande, e o lucro sai
+ * menor sem nada apontar o motivo.
+ */
+async function montarAlvos(
+    devedores: string[],
+    moedas: string[],
+    dataProvider: string,
+    precos: Map<string, Decimal>,
+    casas: Map<string, number>,
+): Promise<Alvo[]> {
     const chamadas = devedores.flatMap((d) =>
         moedas.map((m) => ({ alvo: dataProvider, dados: codificarUserReserveData(m, d) })),
     );
     const rs = await lerEmLote(chamadas);
+
+    // Preco vem do oraculo em dolar com 8 casas; a quantia, em unidades da
+    // moeda. Sem qualquer um dos dois, este ativo nao entra na comparacao —
+    // entrar com valor chutado e como o par errado parece certo.
+    const valorDe = (ativo: string, cru: Decimal): Decimal | null => {
+        const preco = precos.get(ativo.toLowerCase());
+        const dec = casas.get(ativo.toLowerCase());
+        if (preco === undefined || dec === undefined) return null;
+        return cru.dividedBy(new Decimal(10).pow(dec)).mul(preco).dividedBy(1e8);
+    };
+
     const fora: Alvo[] = [];
     for (let i = 0; i < devedores.length; i += 1) {
-        const reservas: Array<{ ativo: string; dados: ReturnType<typeof decodificarUserReserveData> }> = [];
+        const saldos: SaldoNaMoeda[] = [];
         for (let j = 0; j < moedas.length; j += 1) {
             const bruto = rs[i * moedas.length + j];
             if (!bruto) continue;
             try {
-                reservas.push({ ativo: moedas[j], dados: decodificarUserReserveData(bruto) });
+                const d = decodificarUserReserveData(bruto);
+                saldos.push({
+                    ativo: moedas[j],
+                    garantiaCrua: d.usadaComoGarantia ? new Decimal(d.garantiaCrua.toString()) : new Decimal(0),
+                    dividaCrua: new Decimal(d.dividaCrua.toString()),
+                });
             } catch {
                 /* resposta ilegível: some da conta */
             }
         }
-        const par = escolherPar(reservas);
-        if (par) fora.push({ devedor: devedores[i], quedaPct: null, garantia: par.garantia, divida: par.divida });
+        const par = escolherParPorValor(saldos, valorDe);
+        if (par) {
+            fora.push({
+                devedor: devedores[i],
+                quedaPct: null,
+                garantia: par.garantia,
+                divida: par.divida,
+                garantiaUsd: par.garantiaUsd,
+                dividaUsd: par.dividaUsd,
+            });
+        }
     }
     return fora;
 }
@@ -357,10 +411,52 @@ async function principal(): Promise<'parar' | void> {
     }
     log.info('Protocol Data Provider descoberto pela rede.', { endereco: dataProvider });
 
+    let oraculo: string | null = null;
+    try {
+        const prov = enderecoDaResposta(
+            await chamar<string>('eth_call', [{ to: REDE.pool, data: SELETOR_ADDRESSES_PROVIDER }, 'latest']),
+        );
+        if (prov) {
+            oraculo = enderecoDaResposta(
+                await chamar<string>('eth_call', [{ to: prov, data: SELETOR_GET_PRICE_ORACLE }, 'latest']),
+            );
+        }
+    } catch (e) {
+        log.error('Não deu para descobrir o oráculo.', { erro: (e as Error).message });
+    }
+    if (!oraculo) {
+        log.error('Sem o oráculo não dá para escolher o par por VALOR.', {
+            porQueImporta: 'comparar unidades cruas escolhe o token de mais casas decimais, não o que vale mais',
+        });
+        return 'parar';
+    }
+    log.info('Oráculo de preços descoberto pela rede.', { endereco: oraculo });
+
     const moedas = decodificarListaDeEnderecos(
         await chamar<string>('eth_call', [{ to: REDE.pool, data: SELETOR_GET_RESERVES_LIST }, 'latest']),
     );
     log.info('Moedas que a Aave aceita nesta rede.', { quantas: moedas.length });
+
+    // As casas de cada moeda, uma vez só: elas não mudam.
+    const casas = new Map<string, number>();
+    const respDec = await lerEmLote(moedas.map((m) => ({ alvo: m, dados: SELETOR_DECIMALS })));
+    moedas.forEach((m, i) => {
+        if (respDec[i]) {
+            try {
+                casas.set(m.toLowerCase(), Number(BigInt(respDec[i]!)));
+            } catch {
+                /* ilegível: fica de fora e o ativo não entra na comparação */
+            }
+        }
+    });
+    if (casas.size < moedas.length) {
+        log.warn('Moedas sem casas legíveis ficam fora da escolha do par.', {
+            lidas: casas.size,
+            de: moedas.length,
+            consequencia: 'se a maior dívida for numa delas, o par escolhido será o segundo melhor',
+        });
+    }
+    const precos = new Map<string, Decimal>();
 
     let devedores = await juntarDevedores(topo);
     let ultimaColeta = Date.now();
@@ -420,6 +516,23 @@ async function principal(): Promise<'parar' | void> {
             }
 
             if (ehRonda) {
+                // Preços a cada ronda: eles mudam, e é deles que sai a escolha
+                // do par. Um multicall para as 15 moedas.
+                const respPreco = await lerEmLote(
+                    moedas.map((m) => ({
+                        alvo: oraculo,
+                        dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0'),
+                    })),
+                );
+                moedas.forEach((m, i) => {
+                    if (!respPreco[i]) return;
+                    try {
+                        precos.set(m.toLowerCase(), new Decimal(BigInt(respPreco[i]!).toString()));
+                    } catch {
+                        /* ilegível */
+                    }
+                });
+
                 naMira = perto;
                 ultimaRonda = Date.now();
                 log.info('RONDA COMPLETA.', {
@@ -439,7 +552,7 @@ async function principal(): Promise<'parar' | void> {
                 continue;
             }
 
-            const alvos = await montarAlvos(paraOlhar, moedas, dataProvider);
+            const alvos = await montarAlvos(paraOlhar, moedas, dataProvider, precos, casas);
 
             // Silêncio é o defeito, não o sintoma. Se havia quem olhar e não
             // saiu alvo nenhum, isso TEM de aparecer: foi assim que duas rondas
@@ -481,8 +594,8 @@ async function principal(): Promise<'parar' | void> {
 
                 log.info(ehEnsaio ? 'ENSAIO contra posição saudável.' : 'ALVO CAÍDO — medição da caçada.', {
                     devedor: alvo.devedor,
-                    garantia: alvo.garantia,
-                    divida: alvo.divida,
+                    garantia: `${alvo.garantia}${alvo.garantiaUsd ? ` ($${alvo.garantiaUsd.toFixed(0)})` : ''}`,
+                    divida: `${alvo.divida}${alvo.dividaUsd ? ` ($${alvo.dividaUsd.toFixed(0)})` : ''}`,
                     desfecho: leitura.desfecho,
                     lucro: emMoeda,
                     lucroCru: leitura.lucroCru?.toString() ?? '-',
