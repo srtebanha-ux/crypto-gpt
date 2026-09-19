@@ -31,6 +31,7 @@ import { REDES, RPCS_PARA_TENTAR, faixasDeBlocos, SELETOR_GET_RESERVES_LIST, dec
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { codificarUserReserveData, decodificarUserReserveData, escolherPar, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
+import { enderecoDaResposta } from './reservas';
 import { codificarCaca, lerRespostaDaCaca, PISO_IMPOSSIVEL, lucroEmDolar } from './caca';
 import { cacadorDaRede, POOLS } from './contratos';
 
@@ -38,6 +39,20 @@ const log = createLogger('caca');
 
 const SELETOR_DECIMALS = '0x313ce567';
 const SELETOR_SYMBOL = id('symbol()').slice(0, 10);
+
+// `getUserReserveData` NAO mora no Pool — mora no Protocol Data Provider, que
+// e outro contrato. O codigo perguntava ao Pool, toda chamada falhava, o
+// multicall devolvia nulo, `escolherPar` devolvia null, a lista de alvos
+// ficava vazia e o laço nao tinha o que percorrer. Resultado: duas RONDA
+// COMPLETA seguidas e nenhum ensaio, sem uma linha de erro. O programa
+// funcionava perfeitamente sem nunca fazer o trabalho.
+//
+// O endereco do data provider nao vai escrito de memoria: sai do proprio Pool,
+// que ja esta conferido. Pool.ADDRESSES_PROVIDER() da o provedor, e
+// provedor.getPoolDataProvider() da o endereco certo. Dois saltos, os dois
+// respondidos pela rede.
+const SELETOR_ADDRESSES_PROVIDER = '0x0542975c';
+const SELETOR_GET_POOL_DATA_PROVIDER = '0xe860accb';
 
 /** O símbolo da moeda, quando dá para ler. Nunca inventado. */
 function simboloDe(hex: string | null): string {
@@ -178,6 +193,20 @@ async function juntarDevedores(topo: number): Promise<string[]> {
     const vistos = new Set<string>();
     const faixas = faixasDeBlocos(topo - BLOCOS + 1, topo, PEDACO);
     let falhas = 0;
+
+    // Anunciar a demora ANTES dela. A varredura leva uns 14 minutos — 648
+    // faixas com 600ms de pausa cada, o dobro do vigia, porque a pausa maior
+    // existe para não atropelar ele no único RPC da Base. Eu disse "5 minutos"
+    // de cabeça e ela ficou olhando um log parado achando que tinha travado.
+    const minutos = ((faixas.length * (PAUSA_MS + 700)) / 60_000).toFixed(0);
+    log.info('Juntando devedores — isto demora.', {
+        faixas: faixas.length,
+        janela: `${BLOCOS} blocos = ${((BLOCOS * 2) / 86400).toFixed(1)} dias`,
+        estimativa: `~${minutos} minutos`,
+        porQueDevagar: `pausa de ${PAUSA_MS}ms por faixa para não disputar o RPC com o vigia`,
+    });
+
+    let lidas = 0;
     for (const [a, b] of faixas) {
         try {
             const logs = await chamar<Array<{ topics: string[] }>>('eth_getLogs', [
@@ -191,6 +220,17 @@ async function juntarDevedores(topo: number): Promise<string[]> {
             for (const d of devedoresDosEventos(logs)) vistos.add(d);
         } catch {
             falhas += 1;
+        }
+        // Um programa calado por catorze minutos é indistinguível de um
+        // programa morto. Falar de 100 em 100 faixas custa seis linhas de log
+        // e remove a dúvida inteira.
+        lidas += 1;
+        if (lidas % 100 === 0) {
+            log.info('Progresso da varredura.', {
+                lidas: `${lidas} de ${faixas.length}`,
+                devedoresAteAgora: vistos.size,
+                falhas,
+            });
         }
         await dormir(PAUSA_MS);
     }
@@ -211,9 +251,9 @@ interface Alvo {
 }
 
 /** Descobre, para cada devedor, qual par de moedas usar. */
-async function montarAlvos(devedores: string[], moedas: string[]): Promise<Alvo[]> {
+async function montarAlvos(devedores: string[], moedas: string[], dataProvider: string): Promise<Alvo[]> {
     const chamadas = devedores.flatMap((d) =>
-        moedas.map((m) => ({ alvo: REDE.pool, dados: codificarUserReserveData(m, d) })),
+        moedas.map((m) => ({ alvo: dataProvider, dados: codificarUserReserveData(m, d) })),
     );
     const rs = await lerEmLote(chamadas);
     const fora: Alvo[] = [];
@@ -294,6 +334,28 @@ async function principal(): Promise<'parar' | void> {
         log.error('Nenhum RPC respondeu.', { tentados: rpcs });
         return;
     }
+
+    let dataProvider: string | null = null;
+    try {
+        const prov = enderecoDaResposta(
+            await chamar<string>('eth_call', [{ to: REDE.pool, data: SELETOR_ADDRESSES_PROVIDER }, 'latest']),
+        );
+        if (prov) {
+            dataProvider = enderecoDaResposta(
+                await chamar<string>('eth_call', [{ to: prov, data: SELETOR_GET_POOL_DATA_PROVIDER }, 'latest']),
+            );
+        }
+    } catch (e) {
+        log.error('Não deu para descobrir o data provider.', { erro: (e as Error).message });
+    }
+    if (!dataProvider) {
+        log.error('Sem o Protocol Data Provider não dá para saber QUAL moeda o devedor deve.', {
+            comoSeriaDescoberto: 'Pool.ADDRESSES_PROVIDER() e depois provedor.getPoolDataProvider()',
+            porQueNaoEscrevoDeMemoria: 'endereço errado aqui não reverte: faz o caçador não achar alvo nenhum, em silêncio',
+        });
+        return 'parar';
+    }
+    log.info('Protocol Data Provider descoberto pela rede.', { endereco: dataProvider });
 
     const moedas = decodificarListaDeEnderecos(
         await chamar<string>('eth_call', [{ to: REDE.pool, data: SELETOR_GET_RESERVES_LIST }, 'latest']),
@@ -377,7 +439,18 @@ async function principal(): Promise<'parar' | void> {
                 continue;
             }
 
-            const alvos = await montarAlvos(paraOlhar, moedas);
+            const alvos = await montarAlvos(paraOlhar, moedas, dataProvider);
+
+            // Silêncio é o defeito, não o sintoma. Se havia quem olhar e não
+            // saiu alvo nenhum, isso TEM de aparecer: foi assim que duas rondas
+            // inteiras passaram sem ensaiar nada e sem uma linha dizendo isso.
+            if (alvos.length === 0) {
+                log.warn('Nenhum par de moedas montado — não dá para caçar sem saber o que ele deve.', {
+                    olhados: paraOlhar.length,
+                    dataProvider,
+                    suspeitas: 'getUserReserveData não respondeu, ou os devedores não têm garantia marcada',
+                });
+            }
             for (const alvo of alvos) {
                 const dados = codificarCaca({
                     garantia: alvo.garantia,
