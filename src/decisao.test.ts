@@ -170,3 +170,70 @@ test('preço de token desconhecido devolve piso zero, não um número torto', ()
     });
     assert.equal(p.toString(), '0');
 });
+
+// ---------------------------------------------------------------- resumo
+
+import { resumirAvaliacoes, LINHAS_NO_LOG, type ItemAvaliado, type Veredicto } from './decisao';
+
+function item(chave: string, dividaUsd: number, lucro: number, queda: number | null = 5): ItemAvaliado {
+    const veredicto: Veredicto = {
+        lucroBrutoUsd: new Decimal(lucro),
+        custoEmprestimoUsd: new Decimal(0),
+        custoTrocaUsd: new Decimal(0),
+        custoGasUsd: new Decimal('0.01'),
+        lucroLiquidoUsd: new Decimal(lucro),
+        vezesOGas: new Decimal(lucro).dividedBy('0.01'),
+        vale: lucro > 0,
+        leitura: '',
+    };
+    return { chave, queda, dividaUsd: new Decimal(dividaUsd), veredicto };
+}
+
+test('mostra as que mais pagam, não as que chegaram primeiro', () => {
+    // O defeito medido numa ronda de verdade: o vigia cortava `slice(0, 10)`
+    // da lista de descoberta, e a posição mais valiosa da borda — $1.875.733
+    // a 2,12% de queda — era a décima primeira. O relatório saía inteiro, sem
+    // erro nenhum, e sem o número que mais importava.
+    const itens = [
+        ...Array.from({ length: 10 }, (_, i) => item(`0xpequena${i}`, 1_000, 20)),
+        item('0x67d0938f', 1_875_733, 43_000, 2.12),
+    ];
+    const r = resumirAvaliacoes(itens);
+    assert.equal(r.linhas.length, LINHAS_NO_LOG);
+    assert.match(r.linhas[0], /0x67d0938f/);
+    assert.match(r.linhas[0], /43000\.00/);
+});
+
+test('a soma é de todas as que valem, não só das que aparecem no log', () => {
+    // `somaSeGanhasseTodas` dizia "todas" somando a amostra. Aqui 15 valem,
+    // 10 aparecem, e a soma tem que ser das 15.
+    const itens = Array.from({ length: 15 }, (_, i) => item(`0x${i}`, 1_000, 100));
+    const r = resumirAvaliacoes(itens);
+    assert.equal(r.quantasValem, 15);
+    assert.equal(r.quantasAvaliadas, 15);
+    assert.equal(r.linhas.length, LINHAS_NO_LOG);
+    assert.equal(r.somaLiquidaUsd.toNumber(), 1_500);
+});
+
+test('quem não vale o gás fica fora da soma e das linhas', () => {
+    const r = resumirAvaliacoes([item('0xvale', 50_000, 1_044), item('0xnao', 95, 0)]);
+    assert.equal(r.quantasValem, 1);
+    assert.equal(r.quantasAvaliadas, 2);
+    assert.equal(r.somaLiquidaUsd.toNumber(), 1_044);
+    assert.equal(r.linhas.length, 1);
+});
+
+test('conta as posições na mira com dívida zero em vez de escondê-las', () => {
+    // Estar na mira significa estar perto de liquidar; ler dívida $0 aí é
+    // contradição, e contradição contada vira pergunta — escondida, vira nada.
+    const r = resumirAvaliacoes([item('0x1c976fa1', 0, 0, 2.24), item('0xok', 45_049, 1_044)]);
+    assert.equal(r.semDivida, 1);
+});
+
+test('lista vazia não inventa linha nem soma', () => {
+    const r = resumirAvaliacoes([]);
+    assert.equal(r.quantasValem, 0);
+    assert.equal(r.quantasAvaliadas, 0);
+    assert.equal(r.somaLiquidaUsd.toNumber(), 0);
+    assert.deepEqual(r.linhas, []);
+});

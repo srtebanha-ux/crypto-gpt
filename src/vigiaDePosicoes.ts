@@ -47,7 +47,7 @@ import {
     faixasDeBlocos,
     type Sonda,
 } from './liquidacoes';
-import { avaliar, pisoParaOContrato } from './decisao';
+import { avaliar, pisoParaOContrato, resumirAvaliacoes, type ItemAvaliado } from './decisao';
 import {
     CHAMADAS_POR_MULTICALL,
     MULTICALL3,
@@ -483,11 +483,11 @@ async function quantoValeriaAborda(naMira: Posicao[]): Promise<void> {
         return;
     }
 
-    const linhas: string[] = [];
-    let valeriamAPena = 0;
-    let somaLiquida = new Decimal(0);
-
-    for (const p of naMira.slice(0, 10)) {
+    // Todas, e não as dez primeiras: `avaliar()` é aritmética pura, sem uma
+    // chamada de rede dentro do laço, então amostrar não economizava nada e
+    // custava a posição mais valiosa da borda. Quem escolhe o que MOSTRAR é
+    // `resumirAvaliacoes`, depois de tudo estar medido.
+    const avaliadas: ItemAvaliado[] = naMira.map((p) => {
         const dividaUsd = p.conta.dividaBase.dividedBy(1e8);
         const v = avaliar({
             dividaCobertaUsd: dividaUsd.mul(FATIA_COBRIVEL),
@@ -501,24 +501,26 @@ async function quantoValeriaAborda(naMira: Posicao[]): Promise<void> {
             precoDoGasWei,
             precoNativoUsd: PRECO_NATIVO_USD,
         });
-        if (v.vale) {
-            valeriamAPena += 1;
-            somaLiquida = somaLiquida.plus(v.lucroLiquidoUsd);
-        }
-        linhas.push(
-            `${p.devedor.slice(0, 10)} a ${p.quedaPct?.toFixed(2)}%: dívida $${dividaUsd.toFixed(0)} -> ` +
-                `${v.vale ? `VALERIA $${v.lucroLiquidoUsd.toFixed(2)}` : 'não valeria'}`,
-        );
-    }
+        return { chave: p.devedor.slice(0, 10), queda: p.quedaPct?.toNumber() ?? null, dividaUsd, veredicto: v };
+    });
+
+    const r = resumirAvaliacoes(avaliadas);
 
     log.info('QUANTO VALERIA — se a borda abrisse agora.', {
         gasAgora: `${gwei.toFixed(4)} gwei`,
         custoDeUmaTentativa: `$${GAS_ESTIMADO.mul(precoDoGasWei).dividedBy('1e18').mul(PRECO_NATIVO_USD).toFixed(2)}`,
-        valeriamAPena: `${valeriamAPena} de ${Math.min(naMira.length, 10)}`,
-        somaSeGanhasseTodas: `$${somaLiquida.toFixed(2)}`,
-        // O piso que iria no contrato, para a maior delas.
+        valeriamAPena: `${r.quantasValem} de ${r.quantasAvaliadas}`,
+        somaSeGanhasseTodas: `$${r.somaLiquidaUsd.toFixed(2)}`,
+        // Dívida zero numa posição que está na mira por estar perto de
+        // liquidar é contradição: ou a leitura da moeda falhou, ou a posição
+        // se fechou entre uma medida e outra. Contar em vez de esconder.
+        dividaIlegivel:
+            r.semDivida > 0 ? `${r.semDivida} na mira com dívida $0 — leitura a conferir` : 'nenhuma',
         observacao: 'MODO LEITURA: nada é enviado. Isto mede a DECISÃO, não a execução.',
-        detalhe: linhas.join(' | '),
+        detalhe:
+            r.linhas.length > 0
+                ? `as ${r.linhas.length} que mais pagam, de ${r.quantasValem}: ${r.linhas.join(' | ')}`
+                : 'nenhuma valeria o gás agora',
     });
 }
 

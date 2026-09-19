@@ -145,3 +145,66 @@ export function pisoParaOContrato(params: {
         .mul(new Decimal(10).pow(params.decimaisDoToken))
         .floor();
 }
+
+// --------------------------------------------------------------------------
+// Resumir muitas avaliações numa linha de log — sem deixar a escolha do que
+// mostrar decidir o que foi medido.
+//
+// O vigia media `naMira.slice(0, 10)`: dez quaisquer, na ordem em que os
+// devedores tinham sido descobertos, que não é nem a ordem de quem cai
+// primeiro nem a de quem vale mais. O log saía completo, plausível, sem erro
+// nenhum à vista — e publicava `somaSeGanhasseTodas` como se fosse uma soma,
+// sendo a soma de uma amostra arbitrária.
+//
+// O preço disso apareceu numa ronda de verdade: a posição mais valiosa da
+// borda, $1.875.733 a 2,12% de queda, ficou de fora do relatório por estar
+// fora dos dez primeiros da lista de descoberta. O número que mais importava
+// era exatamente o que não estava lá.
+//
+// A separação que conserta é esta: MEDIR tudo, MOSTRAR pouco. Avaliar custa
+// aritmética e nada mais — nenhuma chamada de rede — então não há motivo para
+// amostrar. O corte em dez existe só porque log gigante ninguém lê, e passa a
+// cair sobre as que mais pagam.
+
+export interface ItemAvaliado {
+    /** Como a linha identifica esta posição no log. */
+    chave: string;
+    /** Quanto o mercado precisa cair para liquidar, em %. Null = não deu para ler. */
+    queda: number | null;
+    dividaUsd: Decimal;
+    veredicto: Veredicto;
+}
+
+export interface ResumoDeAvaliacoes {
+    /** Quantas valeriam o gás — de quantas foram avaliadas, não de quantas foram mostradas. */
+    quantasValem: number;
+    quantasAvaliadas: number;
+    somaLiquidaUsd: Decimal;
+    /** Posições na mira cuja dívida leu zero: medição a conferir, não oportunidade. */
+    semDivida: number;
+    linhas: string[];
+}
+
+export const LINHAS_NO_LOG = 10;
+
+export function resumirAvaliacoes(itens: ItemAvaliado[], quantasLinhas = LINHAS_NO_LOG): ResumoDeAvaliacoes {
+    const valem = itens.filter((i) => i.veredicto.vale);
+    const somaLiquidaUsd = valem.reduce((s, i) => s.plus(i.veredicto.lucroLiquidoUsd), new Decimal(0));
+
+    const linhas = [...valem]
+        .sort((a, b) => b.veredicto.lucroLiquidoUsd.comparedTo(a.veredicto.lucroLiquidoUsd))
+        .slice(0, quantasLinhas)
+        .map(
+            (i) =>
+                `${i.chave} a ${i.queda === null ? '?' : i.queda.toFixed(2)}%: ` +
+                `dívida $${i.dividaUsd.toFixed(0)} -> VALERIA $${i.veredicto.lucroLiquidoUsd.toFixed(2)}`,
+        );
+
+    return {
+        quantasValem: valem.length,
+        quantasAvaliadas: itens.length,
+        somaLiquidaUsd,
+        semDivida: itens.filter((i) => i.dividaUsd.isZero()).length,
+        linhas,
+    };
+}
