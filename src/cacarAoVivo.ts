@@ -30,7 +30,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, faixasDeBlocos, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos } from './liquidacoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
-import { codificarUserReserveData, decodificarUserReserveData, escolherPar, COBRIR_O_MAXIMO } from './liquidar';
+import { codificarUserReserveData, decodificarUserReserveData, escolherPar, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { codificarCaca, lerRespostaDaCaca, PISO_IMPOSSIVEL, lucroEmDolar } from './caca';
 import { cacadorDaRede, POOLS } from './contratos';
 
@@ -58,6 +58,16 @@ const BLOCOS = Number(process.env.CACA_BLOCOS ?? '200000');
 const PEDACO = Number(process.env.CACA_PEDACO ?? '2000');
 const SEG = Number(process.env.CACA_SEG ?? '20');
 const MIN_COLETA = Number(process.env.CACA_MIN_COLETA ?? '30');
+// Duas velocidades, pelo mesmo motivo do vigia — e desta vez a conta é de
+// tráfego. Varrer os 8.200 devedores a cada 20 segundos são 33 multicalls, 99
+// pedidos por minuto: seis vezes o ritmo do vigia, no único RPC que a Base
+// responde, com o vigia rodando ao lado. Por isso ele morria de cara.
+//
+// A ronda completa acha quem está perto; a passada rápida olha SÓ esses. A
+// lista curta é de ~120 endereços, um multicall só.
+const MIN_RONDA = Number(process.env.CACA_MIN_RONDA ?? '2');
+/** Quem entra na lista curta: a menos de tantos % de cair. */
+const LIMIAR = Number(process.env.CACA_LIMIAR ?? '10');
 const TIMEOUT_MS = Number(process.env.CACA_TIMEOUT_MS ?? '20000');
 const PAUSA_MS = Number(process.env.CACA_PAUSA_MS ?? '600');
 /** Quantos saudáveis ensaiar por rodada, para provar o formato sem alvo real. */
@@ -79,7 +89,10 @@ let rpc = process.env.CACA_RPC_URL ?? REDE.rpc;
 let rpcId = 0;
 const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function chamar<T>(metodo: string, params: unknown[]): Promise<T> {
+/**
+ * Uma chamada, sem paciência. Quem quiser esperar usa `chamar`.
+ */
+async function umaChamada<T>(metodo: string, params: unknown[]): Promise<T> {
     const res = await fetch(rpc, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -89,6 +102,28 @@ async function chamar<T>(metodo: string, params: unknown[]): Promise<T> {
     const corpo = (await res.json()) as { result?: T; error?: { message?: string } };
     if (corpo.error) throw new Error(corpo.error.message ?? 'erro sem mensagem');
     return corpo.result as T;
+}
+
+/**
+ * A mesma chamada, esperando quando o provedor pede calma.
+ *
+ * Sem isto, o caçador morria no primeiro "over rate limit" — literalmente meio
+ * segundo depois de carregar a carteira. O achador de pools já tinha levado
+ * esse conserto duas horas antes; escrevi o arquivo novo sem ele.
+ */
+async function chamar<T>(metodo: string, params: unknown[], tentativas = 4): Promise<T> {
+    let espera = 1000;
+    for (let i = 0; ; i += 1) {
+        try {
+            return await umaChamada<T>(metodo, params);
+        } catch (e) {
+            const msg = (e as Error).message;
+            if (i >= tentativas - 1 || !ehLimiteDoProvedor(msg)) throw e;
+            log.warn('O provedor pediu calma; esperando.', { erro: msg, esperandoMs: espera });
+            await dormir(espera);
+            espera *= 2;
+        }
+    }
 }
 
 /** Como `chamar`, mas a reversão é o resultado desejado e não pode ser engolida. */
@@ -186,11 +221,17 @@ async function montarAlvos(devedores: string[], moedas: string[]): Promise<Alvo[
     return fora;
 }
 
-async function principal(): Promise<void> {
+/**
+ * Devolve 'parar' quando o problema é de configuração — chave errada, contrato
+ * ausente. Reiniciar nesses casos só encheria o log com a mesma queixa a cada
+ * meio minuto, e a diferença entre "tenta de novo" e "não adianta tentar" é a
+ * mesma que este projeto vem perseguindo a noite toda.
+ */
+async function principal(): Promise<'parar' | void> {
     const cacador = cacadorDaRede(REDE_ESCOLHIDA);
     if (!cacador) {
         log.error('Nenhum caçador publicado nesta rede.', { rede: REDE_ESCOLHIDA });
-        return;
+        return 'parar';
     }
     const poolDeVenda = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
 
@@ -212,7 +253,7 @@ async function principal(): Promise<void> {
             log.error('CACA_ENVIAR=1 mas falta CACA_CHAVE_PRIVADA. Não envio nada sem ela.', {
                 comoResolver: 'defina a chave da conta dona do contrato nas variáveis do Railway, nunca no código',
             });
-            return;
+            return 'parar';
         }
         carteira = new Wallet(chave, new JsonRpcProvider(rpc));
         if (carteira.address.toLowerCase() !== cacador.dono.toLowerCase()) {
@@ -222,7 +263,7 @@ async function principal(): Promise<void> {
                 chaveCorrespondeA: carteira.address,
                 donoDoContrato: cacador.dono,
             });
-            return;
+            return 'parar';
         }
         log.info('Carteira carregada.', { endereco: carteira.address });
     }
@@ -253,6 +294,9 @@ async function principal(): Promise<void> {
     let enviados = 0;
     log.info('Lista de devedores pronta.', { devedores: devedores.length });
 
+    let naMira: string[] = [];
+    let ultimaRonda = 0;
+
     for (;;) {
         try {
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
@@ -261,25 +305,48 @@ async function principal(): Promise<void> {
                 ultimaColeta = Date.now();
             }
 
-            // Quem está liquidável AGORA.
+            // Ronda completa de vez em quando; borda a cada passada.
+            const ehRonda = Date.now() - ultimaRonda > MIN_RONDA * 60_000;
+            const olharAgora = ehRonda ? devedores : naMira;
+            if (olharAgora.length === 0) {
+                await dormir(SEG * 1000);
+                continue;
+            }
+
             const contas = await lerEmLote(
-                devedores.map((d) => ({
+                olharAgora.map((d) => ({
                     alvo: REDE.pool,
                     dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
                 })),
             );
             const caidos: string[] = [];
+            const perto: string[] = [];
             const saudaveis: string[] = [];
-            for (let i = 0; i < devedores.length; i += 1) {
+            for (let i = 0; i < olharAgora.length; i += 1) {
                 if (!contas[i]) continue;
                 try {
                     const queda = quedaAteLiquidar(decodificarContaDoUsuario(contas[i]!).saude);
                     if (queda === null) continue;
-                    if (queda.isZero()) caidos.push(devedores[i]);
-                    else if (saudaveis.length < ENSAIAR) saudaveis.push(devedores[i]);
+                    if (queda.isZero()) caidos.push(olharAgora[i]);
+                    else {
+                        if (queda.lessThanOrEqualTo(LIMIAR)) perto.push(olharAgora[i]);
+                        if (saudaveis.length < ENSAIAR) saudaveis.push(olharAgora[i]);
+                    }
                 } catch {
                     /* ilegível */
                 }
+            }
+
+            if (ehRonda) {
+                naMira = perto;
+                ultimaRonda = Date.now();
+                log.info('RONDA COMPLETA.', {
+                    olhados: olharAgora.length,
+                    naBorda: naMira.length,
+                    jaLiquidaveis: caidos.length,
+                    limiar: `${LIMIAR}% de queda`,
+                    proximasPassadas: `só os ${naMira.length} da borda, a cada ${SEG}s`,
+                });
             }
 
             // Os saudáveis viram ensaio: provam o formato sem existir alvo.
@@ -393,5 +460,24 @@ async function principal(): Promise<void> {
 }
 
 if (require.main === module && exigirAtivacao('cacarAoVivo')) {
-    principal().catch((e) => log.error('O caçador parou.', { erro: (e as Error).message }));
+    // Ele morreu meio segundo depois de carregar a carteira, num "over rate
+    // limit" durante o preparo. Um processo que deve passar a noite acordado
+    // não pode sair do ar por soluço de provedor — e deixar o Railway
+    // reiniciar é pior: cada reinício refaz os cinco minutos de descoberta.
+    //
+    // Reinicia por tropeço, PARA por configuração errada.
+    void (async () => {
+        for (;;) {
+            try {
+                if ((await principal()) === 'parar') {
+                    log.error('Configuração impede rodar. Não reinicio sozinho — corrija e reimplante.');
+                    return;
+                }
+                log.warn('O laço terminou sem erro, o que não devia acontecer. Reiniciando.');
+            } catch (e) {
+                log.warn('O caçador tropeçou; reiniciando em 30s.', { erro: (e as Error).message });
+            }
+            await dormir(30_000);
+        }
+    })();
 }
