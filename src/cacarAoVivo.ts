@@ -453,14 +453,53 @@ async function principal(): Promise<'parar' | void> {
                     lucroMinimo: piso,
                 });
                 enviados += 1;
-                const tx = await carteira.sendTransaction({ to: cacador.endereco, data: envio });
+                let tx;
+                try {
+                    tx = await carteira.sendTransaction({ to: cacador.endereco, data: envio });
+                } catch (e) {
+                    // Um envio que nem sai — saldo insuficiente, estimativa de
+                    // gás que reverteu, nonce recusado — também é falha DESTE
+                    // alvo. Sem contar aqui, `MAX_POR_ALVO` só olhava recibos e
+                    // o laço insistiria para sempre num envio que nunca parte.
+                    falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
+                    log.warn('O envio não saiu.', {
+                        devedor: alvo.devedor,
+                        erro: (e as Error).message.slice(0, 200),
+                        falhasDesteAlvo: jaFalhou + 1,
+                    });
+                    continue;
+                }
+
                 log.info('CAÇADA ENVIADA.', {
                     devedor: alvo.devedor,
                     hash: tx.hash,
                     piso: piso.toString(),
                     envioNumero: `${enviados} de ${MAX_ENVIOS} permitidos`,
                 });
-                const recibo = await tx.wait();
+
+                // Com prazo. `wait()` sem prazo espera para SEMPRE, e uma
+                // transação que nunca mina congelaria o caçador em silêncio —
+                // parado, sem erro, parecendo de plantão. Na Base um bloco sai
+                // a cada 2 segundos; passou de dois minutos, não vai minar.
+                let recibo;
+                try {
+                    recibo = await Promise.race([
+                        tx.wait(),
+                        new Promise((_, rej) =>
+                            setTimeout(() => rej(new Error('a transação não minou em 2 minutos')), 120_000),
+                        ),
+                    ]) as Awaited<ReturnType<typeof tx.wait>>;
+                } catch (e) {
+                    falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
+                    log.warn('Não deu para confirmar a transação; sigo caçando.', {
+                        devedor: alvo.devedor,
+                        hash: tx.hash,
+                        erro: (e as Error).message,
+                        ondeConferir: 'basescan, pelo hash acima — ela pode minar depois',
+                    });
+                    continue;
+                }
+
                 const deuCerto = recibo?.status === 1;
                 if (!deuCerto) falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
                 log.info('CAÇADA CONCLUÍDA.', {
