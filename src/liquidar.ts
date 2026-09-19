@@ -137,6 +137,29 @@ export interface LeituraDaResposta {
     entendeu: boolean;
     codigo: string | null;
     texto: string;
+    /**
+     * A resposta nem chegou a ser da Aave — o provedor recusou antes.
+     *
+     * Separado de `entendeu: false` porque as duas conclusões são opostas e o
+     * veredicto do ensaio estava misturando as duas: um "over rate limit"
+     * aparecia como chamada reprovada e rebaixava o resultado inteiro de
+     * APROVADO para PARCIAL. Culpar o meu formato por um limite do servidor é
+     * a mesma família de erro que faz perder tempo consertando o que não está
+     * quebrado.
+     */
+    naoDeuParaTestar: boolean;
+}
+
+/** Recusas do PROVEDOR, que não dizem nada sobre a chamada em si. */
+export function ehLimiteDoProvedor(mensagem: string): boolean {
+    const m = mensagem.toLowerCase();
+    return (
+        m.includes('rate limit') ||
+        m.includes('429') ||
+        m.includes('too many requests') ||
+        m.includes('timeout') ||
+        m.includes('capacity')
+    );
 }
 
 /**
@@ -155,9 +178,12 @@ export function lerRespostaDaAave(mensagem: string): LeituraDaResposta {
     if (personalizado) {
         const sel = personalizado[0].toLowerCase();
         const conhecido = ERROS_PERSONALIZADOS[sel];
-        if (conhecido) return { entendeu: true, codigo: conhecido.nome, texto: conhecido.texto };
+        if (conhecido) {
+            return { entendeu: true, naoDeuParaTestar: false, codigo: conhecido.nome, texto: conhecido.texto };
+        }
         return {
             entendeu: true,
+            naoDeuParaTestar: false,
             codigo: sel,
             texto: `A Aave recusou com o erro ${sel}, que eu ainda não traduzi — mas responder com erro DELA já prova que ela leu o pedido.`,
         };
@@ -170,15 +196,25 @@ export function lerRespostaDaAave(mensagem: string): LeituraDaResposta {
         const conhecido = ERROS_DA_AAVE[codigo];
         return {
             entendeu: true,
+            naoDeuParaTestar: false,
             codigo,
             texto: conhecido ?? `A Aave recusou com o código ${codigo}, que eu ainda não traduzi.`,
         };
     }
 
+    if (ehLimiteDoProvedor(m)) {
+        return {
+            entendeu: false,
+            naoDeuParaTestar: true,
+            codigo: null,
+            texto: `NÃO DEU PARA TESTAR: o provedor recusou ("${m.slice(0, 60)}"). Não diz nada sobre o formato da chamada.`,
+        };
+    }
     return {
         entendeu: false,
+        naoDeuParaTestar: false,
         codigo: null,
-        texto: `A Aave NÃO respondeu com erro dela: "${m.slice(0, 120)}". Isso é problema de formato meu, ou do provedor (um "over rate limit" cai aqui e não é erro de formato).`,
+        texto: `A Aave NÃO respondeu com erro dela: "${m.slice(0, 120)}". Isso é problema de FORMATO meu.`,
     };
 }
 

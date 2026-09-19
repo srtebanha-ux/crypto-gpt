@@ -8,6 +8,7 @@ import {
     NOMES_DE_ERRO_DA_AAVE,
     SELETOR_LIQUIDATION_CALL,
     codificarLiquidacao,
+    ehLimiteDoProvedor,
     codificarUserReserveData,
     decodificarUserReserveData,
     escolherPar,
@@ -96,7 +97,7 @@ test('erro que NÃO é da Aave aponta o dedo para mim, não para a posição', (
     const r = lerRespostaDaAave('invalid opcode');
     assert.equal(r.entendeu, false);
     assert.equal(r.codigo, null);
-    assert.match(r.texto, /formato meu/);
+    assert.match(r.texto, /FORMATO meu/);
 });
 
 test('o dicionário cobre os erros de liquidação que importam', () => {
@@ -210,4 +211,35 @@ test('"over rate limit" NÃO é erro de formato, e a mensagem diz isso', () => {
     const r = lerRespostaDaAave('over rate limit');
     assert.equal(r.entendeu, false);
     assert.match(r.texto, /over rate limit/);
+});
+
+test('limite do provedor NÃO é reprovação — é ausência de teste', () => {
+    // O ensaio voltou "PARCIAL: 4 de 5" porque um alvo caiu em "over rate
+    // limit". A mensagem já dizia que não era erro de formato, mas o veredicto
+    // contava como falha e rebaixava um ensaio aprovado.
+    const r = lerRespostaDaAave('over rate limit');
+    assert.equal(r.entendeu, false);
+    assert.equal(r.naoDeuParaTestar, true);
+    assert.match(r.texto, /NÃO DEU PARA TESTAR/);
+});
+
+test('as formas de recusa do provedor são reconhecidas', () => {
+    for (const m of ['over rate limit', 'HTTP 429', 'Too Many Requests', 'query timeout', 'over capacity']) {
+        assert.equal(ehLimiteDoProvedor(m), true, m);
+    }
+    assert.equal(ehLimiteDoProvedor('execution reverted'), false);
+    assert.equal(ehLimiteDoProvedor('invalid opcode'), false);
+});
+
+test('erro de formato de verdade continua apontando para mim', () => {
+    const r = lerRespostaDaAave('invalid opcode');
+    assert.equal(r.entendeu, false);
+    assert.equal(r.naoDeuParaTestar, false);
+    assert.match(r.texto, /FORMATO meu/);
+});
+
+test('recusa reconhecida da Aave nunca é confundida com limite de provedor', () => {
+    const r = lerRespostaDaAave('execution reverted | 0x930bb771');
+    assert.equal(r.naoDeuParaTestar, false);
+    assert.equal(r.entendeu, true);
 });

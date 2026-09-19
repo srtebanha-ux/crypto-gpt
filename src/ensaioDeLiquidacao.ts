@@ -165,6 +165,7 @@ async function principal(): Promise<void> {
     }
 
     let entenderam = 0;
+    let naoDeuParaTestar = 0;
     const linhas: string[] = [];
     for (const devedor of alvos) {
         // O par é qualquer um plausível de propósito. Se o devedor não tiver
@@ -183,22 +184,31 @@ async function principal(): Promise<void> {
         } else {
             const leitura = lerRespostaDaAave(r.mensagem);
             if (leitura.entendeu) entenderam += 1;
+            else if (leitura.naoDeuParaTestar) naoDeuParaTestar += 1;
             linhas.push(`${devedor.slice(0, 10)}: ${leitura.codigo ?? '?'} — ${leitura.texto}`);
         }
         await dormir(PAUSA_MS);
     }
 
+    // O que decide o veredicto é quantas foram REPROVADAS por formato — não
+    // quantas foram testadas. Uma que o provedor recusou não é evidência
+    // contra a chamada, é ausência de evidência, e misturar as duas fazia um
+    // ensaio aprovado aparecer como PARCIAL.
+    const testadas = alvos.length - naoDeuParaTestar;
+    const reprovadas = testadas - entenderam;
     log.info('RESULTADO DO ENSAIO.', {
         ensaiados: alvos.length,
-        aAaveEntendeu: `${entenderam} de ${alvos.length}`,
+        aAaveEntendeu: `${entenderam} de ${testadas} que deram para testar`,
+        naoDeramParaTestar: naoDeuParaTestar > 0 ? `${naoDeuParaTestar} (limite do provedor)` : 'nenhuma',
         veredicto:
-            entenderam === alvos.length
-                ? 'APROVADO: a Aave leu TODAS as chamadas e recusou por motivo dela. O formato está certo — no dia de valer, se falhar, será corrida perdida e não erro meu.'
-                : entenderam > 0
-                  ? 'PARCIAL: algumas ela leu, outras não. Ver as linhas abaixo antes de escrever o contrato.'
-                  : 'REPROVADO: a Aave não reconheceu nenhuma chamada. O formato está errado, e é bom ter descoberto agora.',
+            testadas === 0
+                ? 'INCONCLUSIVO: o provedor recusou todas. Nenhuma chegou à Aave; tente de novo mais devagar.'
+                : reprovadas === 0
+                  ? 'APROVADO: a Aave leu todas as que chegaram nela e recusou por motivo dela. O formato está certo — no dia de valer, se falhar, será corrida perdida e não erro meu.'
+                  : `REPROVADO: ${reprovadas} de ${testadas} não foram reconhecidas. O formato está errado, e é bom ter descoberto agora.`,
         detalhe: linhas.join(' | '),
     });
+
     log.info('Terminado. O processo fica ocioso para não reiniciar em laço.', {
         paraDesligar: 'apague ATIVAR_ENSAIODELIQUIDACAO',
     });
