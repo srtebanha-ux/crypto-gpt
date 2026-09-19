@@ -188,7 +188,14 @@ async function principal(): Promise<void> {
         return;
     }
 
-    const candidatos = ordenarPorAtividade(v2, QUANTOS);
+    // As duas famílias são LIDAS; só uma é USÁVEL hoje. Medir a Solidly não
+    // custa contrato nenhum — e é o único jeito de saber se vale mudar o
+    // contrato para alcançá-la. Contar 594 pools e nunca abri-los era deixar
+    // a decisão mais cara do projeto sem o dado que a decide.
+    const candidatos: Array<{ pool: string; trocas: number; familia: Familia }> = [
+        ...ordenarPorAtividade(v2, QUANTOS).map((c) => ({ ...c, familia: 'v2' as Familia })),
+        ...ordenarPorAtividade(solidly, QUANTOS).map((c) => ({ ...c, familia: 'solidly' as Familia })),
+    ];
     const enderecos = candidatos.map((c) => c.pool);
     // Uma de cada vez, e não `Promise.all`. Com 150 pools cada leitura era um
     // pedaço só e o paralelo passava despercebido; com 1.059 viraram cinco
@@ -206,7 +213,7 @@ async function principal(): Promise<void> {
             const r = decodeReserves(res[i]!);
             pools.push({
                 endereco: candidatos[i].pool,
-                familia: 'v2',
+                familia: candidatos[i].familia,
                 trocas: candidatos[i].trocas,
                 token0: decodeAddressWord(t0[i]!, 0),
                 token1: decodeAddressWord(t1[i]!, 0),
@@ -265,9 +272,13 @@ async function principal(): Promise<void> {
     // Ordenar por profundidade em dólar, não por movimento. Reservas em
     // unidades não se comparam entre moedas — 248 WETH e 648.537 USDC são o
     // mesmo dinheiro — e o pool mais movimentado não é o mais fundo.
-    const comDolar = doParDaAave
-        .filter((p) => profundidadeEmDolar(p) !== null)
-        .sort((a, b) => profundidadeEmDolar(b)!.comparedTo(profundidadeEmDolar(a)!));
+    const porProfundidade = (lista: Pool[]) =>
+        lista
+            .filter((p) => profundidadeEmDolar(p) !== null)
+            .sort((a, b) => profundidadeEmDolar(b)!.comparedTo(profundidadeEmDolar(a)!));
+
+    const comDolar = porProfundidade(doParDaAave.filter((p) => p.familia === 'v2'));
+    const solidlyFundos = porProfundidade(doParDaAave.filter((p) => p.familia === 'solidly'));
     const semDolar = doParDaAave.filter((p) => profundidadeEmDolar(p) === null);
 
     // Os dois tamanhos que este projeto mediu e persegue, já em dólares a
@@ -312,6 +323,26 @@ async function principal(): Promise<void> {
             `$${poolNecessarioPara(TAMANHOS[0][1], teto).toFixed(0)}`,
         lembrete: 'o ágio da liquidação é 5% — perda acima disso come o lucro inteiro',
         observacao: 'MODO LEITURA: nada foi enviado. Isto mede o pool, não usa ele.',
+    });
+
+    // A conta que decide a obra: o contrato só lê V2, e mudá-lo custa um deploy
+    // ($0,03) mais o risco de mexer em código já conferido. Vale se, e só se,
+    // a Solidly for materialmente mais funda.
+    const maisFundoV2 = comDolar[0] ? profundidadeEmDolar(comDolar[0]) : null;
+    const maisFundoSolidly = solidlyFundos[0] ? profundidadeEmDolar(solidlyFundos[0]) : null;
+    log.info('VALE MUDAR O CONTRATO PARA ALCANÇAR A OUTRA FAMÍLIA?', {
+        melhorV2: maisFundoV2 ? `$${maisFundoV2.toFixed(0)} (usável HOJE)` : 'nenhum',
+        melhorSolidly: maisFundoSolidly ? `$${maisFundoSolidly.toFixed(0)} (exigiria mudar o contrato)` : 'nenhum',
+        quantasVezesMaisFundo:
+            maisFundoV2 && maisFundoSolidly && maisFundoV2.greaterThan(0)
+                ? `${maisFundoSolidly.dividedBy(maisFundoV2).toFixed(1)}x`
+                : 'não dá para comparar',
+        solidlyNoTopo: solidlyFundos
+            .slice(0, 8)
+            .map((p) => `${p.endereco} ${nome(p, 0)}/${nome(p, 1)} $${profundidadeEmDolar(p)!.toFixed(0)}`)
+            .join(' | '),
+        porQueNaoDaParaUsarAgora:
+            'CacadorDeLiquidacoes lê getReserves() como (uint112,uint112,uint32); Solidly devolve (uint256,uint256,uint256)',
     });
 
     if (semDolar.length > 0) {
