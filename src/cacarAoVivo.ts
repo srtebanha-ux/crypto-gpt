@@ -164,7 +164,18 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4): Pro
     }
 }
 
-/** Como `chamar`, mas a reversão é o resultado desejado e não pode ser engolida. */
+/**
+ * Como `chamar`, mas a reversão é o resultado desejado e não pode ser engolida.
+ *
+ * Tem a mesma paciência, e a distinção e toda: uma reversão vem COM dados — o
+ * seletor do erro — e e resposta final. Um limite de provedor vem sem dados e
+ * nao e resposta nenhuma. Repetir a primeira apagaria a medicao; nao repetir a
+ * segunda desiste de uma cacada por soluco de rede.
+ *
+ * Eu criei esta funcao separada de `chamar` e pus o backoff so la. O log
+ * classificou certo — "isto NAO e veredicto sobre a cacada, e para tentar de
+ * novo" — e entao nao tentou de novo. Diagnostico certo sem conserto.
+ */
 async function chamarCru(
     params: unknown[],
 ): Promise<{ ok: true; dados: string } | { ok: false; mensagem: string; dados?: string }> {
@@ -179,6 +190,21 @@ async function chamarCru(
         return { ok: false, mensagem: corpo.error.message ?? 'erro sem mensagem', dados: corpo.error.data };
     }
     return { ok: true, dados: corpo.result ?? '0x' };
+}
+
+async function chamarCruComPaciencia(
+    params: unknown[],
+    tentativas = 4,
+): Promise<{ ok: true; dados: string } | { ok: false; mensagem: string; dados?: string }> {
+    let espera = 1000;
+    for (let i = 0; ; i += 1) {
+        const r = await chamarCru(params);
+        // Reversão traz dados e é palavra final; limite de provedor não traz.
+        if (r.ok || r.dados || i >= tentativas - 1 || !ehLimiteDoProvedor(r.mensagem)) return r;
+        log.warn('O provedor pediu calma no meio da caçada; esperando.', { esperandoMs: espera });
+        await dormir(espera);
+        espera *= 2;
+    }
 }
 
 async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Promise<Array<string | null>> {
@@ -638,7 +664,7 @@ async function principal(): Promise<'parar' | void> {
                     poolDeVenda,
                     lucroMinimo: PISO_IMPOSSIVEL,
                 });
-                const r = await chamarCru([{ from: cacador.dono, to: cacador.endereco, data: dados }, 'latest']);
+                const r = await chamarCruComPaciencia([{ from: cacador.dono, to: cacador.endereco, data: dados }, 'latest']);
                 const leitura = lerRespostaDaCaca(r);
 
                 // O lucro vem em unidades cruas, e cru é ilegível: 1044000000
