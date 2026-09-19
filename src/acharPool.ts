@@ -17,6 +17,7 @@ import { Decimal } from 'decimal.js';
 import { id } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
+import { ehLimiteDoProvedor } from './liquidar';
 import { REDES, RPCS_PARA_TENTAR, faixasDeBlocos, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos } from './liquidacoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { SELECTORS, decodeAddressWord, decodeReserves, decodeDecimals } from './evmAbi';
@@ -45,14 +46,16 @@ const PEDACO = Number(process.env.POOL_PEDACO ?? '2000');
 // repetido aqui. Ler todos custa quatro multicalls a mais e nada de tempo.
 const QUANTOS = Number(process.env.POOL_QUANTOS ?? '2000');
 const TIMEOUT_MS = Number(process.env.POOL_TIMEOUT_MS ?? '25000');
-const PAUSA_MS = Number(process.env.POOL_PAUSA_MS ?? '400');
+// 600ms e não 400: o mainnet.base.org é o único RPC da Base que respondeu na
+// sondagem, então não há para onde escoar pedido — a folga tem de vir daqui.
+const PAUSA_MS = Number(process.env.POOL_PAUSA_MS ?? '600');
 const SELETOR_SYMBOL = id('symbol()').slice(0, 10);
 
 let rpc = process.env.POOL_RPC_URL ?? REDE.rpc;
 let rpcId = 0;
 const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function chamar<T>(metodo: string, params: unknown[]): Promise<T> {
+async function umaChamada<T>(metodo: string, params: unknown[]): Promise<T> {
     const res = await fetch(rpc, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -62,6 +65,29 @@ async function chamar<T>(metodo: string, params: unknown[]): Promise<T> {
     const corpo = (await res.json()) as { result?: T; error?: { message?: string } };
     if (corpo.error) throw new Error(corpo.error.message ?? 'erro sem mensagem');
     return corpo.result as T;
+}
+
+/**
+ * A mesma chamada, com paciência para o limite do provedor.
+ *
+ * "over rate limit" não é falha da medição, é a rede pedindo para esperar —
+ * e tratar isso como erro joga fora tudo que já foi lido. Foi o que aconteceu:
+ * a varredura achou 1.059 pools, esbarrou no limite na leitura seguinte, e
+ * morreu sem relatar nada. Descobrir e não contar é o pior dos resultados.
+ */
+async function chamar<T>(metodo: string, params: unknown[], tentativas = 4): Promise<T> {
+    let espera = 1000;
+    for (let i = 0; ; i += 1) {
+        try {
+            return await umaChamada<T>(metodo, params);
+        } catch (e) {
+            const msg = (e as Error).message;
+            if (i >= tentativas - 1 || !ehLimiteDoProvedor(msg)) throw e;
+            log.warn('O provedor pediu calma; esperando.', { erro: msg, esperandoMs: espera, tentativa: i + 1 });
+            await dormir(espera);
+            espera *= 2;
+        }
+    }
 }
 
 /** Uma varredura por família — separadas, porque a família é a resposta. */
@@ -93,15 +119,24 @@ async function varrer(familia: Familia, de: number, ate: number): Promise<Map<st
 /** Uma leitura por candidato, em lote. Devolve null onde a chamada falhou. */
 async function lerEmLote(alvos: string[], dados: (a: string) => string): Promise<Array<string | null>> {
     const fora: Array<string | null> = [];
+    let pedacosPerdidos = 0;
     for (const pedaco of partirEmPedacos(alvos, CHAMADAS_POR_MULTICALL)) {
-        const bruto = await chamar<string>('eth_call', [
-            { to: MULTICALL3, data: codificarAggregate3(pedaco.map((a) => ({ alvo: a, dados: dados(a) }))) },
-            'latest',
-        ]);
-        const rs = decodificarAggregate3(bruto);
-        for (let i = 0; i < pedaco.length; i += 1) fora.push(rs[i]?.ok ? rs[i].dados : null);
+        try {
+            const bruto = await chamar<string>('eth_call', [
+                { to: MULTICALL3, data: codificarAggregate3(pedaco.map((a) => ({ alvo: a, dados: dados(a) }))) },
+                'latest',
+            ]);
+            const rs = decodificarAggregate3(bruto);
+            for (let i = 0; i < pedaco.length; i += 1) fora.push(rs[i]?.ok ? rs[i].dados : null);
+        } catch (e) {
+            // Perder um pedaço custa alguns pools; perder a varredura custa tudo.
+            pedacosPerdidos += 1;
+            for (let i = 0; i < pedaco.length; i += 1) fora.push(null);
+            log.warn('Um pedaço não foi lido; esses pools ficam de fora.', { erro: (e as Error).message });
+        }
         await dormir(PAUSA_MS);
     }
+    if (pedacosPerdidos > 0) log.warn('Leitura incompleta.', { pedacosPerdidos, consequencia: 'o ranking pode não ter o pool mais fundo' });
     return fora;
 }
 
@@ -155,11 +190,13 @@ async function principal(): Promise<void> {
 
     const candidatos = ordenarPorAtividade(v2, QUANTOS);
     const enderecos = candidatos.map((c) => c.pool);
-    const [t0, t1, res] = await Promise.all([
-        lerEmLote(enderecos, () => SELECTORS.token0),
-        lerEmLote(enderecos, () => SELECTORS.token1),
-        lerEmLote(enderecos, () => SELECTORS.getReserves),
-    ]);
+    // Uma de cada vez, e não `Promise.all`. Com 150 pools cada leitura era um
+    // pedaço só e o paralelo passava despercebido; com 1.059 viraram cinco
+    // pedaços cada, quinze pedidos quase simultâneos, e o provedor cortou.
+    // As pausas entre pedaços só valem se ninguém estiver correndo ao lado.
+    const t0 = await lerEmLote(enderecos, () => SELECTORS.token0);
+    const t1 = await lerEmLote(enderecos, () => SELECTORS.token1);
+    const res = await lerEmLote(enderecos, () => SELECTORS.getReserves);
 
     const pools: Pool[] = [];
     let descartados = 0;
@@ -191,10 +228,8 @@ async function principal(): Promise<void> {
     // Símbolos e casas: sem as casas, reserva é número sem unidade, e supor 18
     // onde a moeda tem 6 erra por um fator de um trilhão.
     const moedas = [...new Set(pools.flatMap((p) => [p.token0.toLowerCase(), p.token1.toLowerCase()]))];
-    const [simbolos, casas] = await Promise.all([
-        lerEmLote(moedas, () => SELETOR_SYMBOL),
-        lerEmLote(moedas, () => SELECTORS.decimals),
-    ]);
+    const simbolos = await lerEmLote(moedas, () => SELETOR_SYMBOL);
+    const casas = await lerEmLote(moedas, () => SELECTORS.decimals);
     const simboloDe = new Map<string, string | undefined>();
     const casasDe = new Map<string, number | undefined>();
     moedas.forEach((m, i) => {
