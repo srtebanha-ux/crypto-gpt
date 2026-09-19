@@ -54,10 +54,23 @@ function simboloDe(hex: string | null): string {
 const REDE_ESCOLHIDA = (process.env.CACA_REDE ?? 'base').toLowerCase();
 const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const ENVIAR = process.env.CACA_ENVIAR === '1';
-const BLOCOS = Number(process.env.CACA_BLOCOS ?? '200000');
+// 1.296.000 blocos = 30 dias na Base, a MESMA janela do vigia. O padrão era
+// 200.000 — 4,6 dias — e a diferença não aparecia em lugar nenhum: o vigia
+// achava 8.237 devedores e o caçador acharia uns 1.271, cego para os outros
+// 7.000. Sem erro, sem aviso, sem linha no log. Quem pegou emprestado há vinte
+// dias e cair hoje seria invisível justamente para o programa que existe para
+// pegá-lo.
+//
+// Um caçador que enxerga menos que o vigia é pior que inútil: ele dá a
+// impressão de que a borda está sendo coberta.
+const BLOCOS = Number(process.env.CACA_BLOCOS ?? '1296000');
 const PEDACO = Number(process.env.CACA_PEDACO ?? '2000');
 const SEG = Number(process.env.CACA_SEG ?? '20');
-const MIN_COLETA = Number(process.env.CACA_MIN_COLETA ?? '30');
+// 37 e não 30 de propósito: o vigia recolhe de 30 em 30 minutos, e dois
+// processos varrendo 648 faixas de blocos ao mesmo tempo, no único RPC que a
+// Base responde, é como o caçador morreu da primeira vez. Um número que não
+// divide o outro faz as duas varreduras se afastarem sozinhas.
+const MIN_COLETA = Number(process.env.CACA_MIN_COLETA ?? '37');
 // Duas velocidades, pelo mesmo motivo do vigia — e desta vez a conta é de
 // tráfego. Varrer os 8.200 devedores a cada 20 segundos são 33 multicalls, 99
 // pedidos por minuto: seis vezes o ritmo do vigia, no único RPC que a Base
@@ -292,7 +305,14 @@ async function principal(): Promise<'parar' | void> {
     /** Quantas vezes cada alvo já falhou. Desistir dele é mais barato que insistir. */
     const falhasPorAlvo = new Map<string, number>();
     let enviados = 0;
-    log.info('Lista de devedores pronta.', { devedores: devedores.length });
+    // A janela vai no log em DIAS, não em blocos. "200000 blocos" não denuncia
+    // nada; "4,6 dias" ao lado de um vigia que olha 30 diria na hora.
+    log.info('Lista de devedores pronta.', {
+        devedores: devedores.length,
+        janela: `${BLOCOS} blocos = ${((BLOCOS * 2) / 86400).toFixed(1)} dias`,
+        recolheDeNovo: `a cada ${MIN_COLETA} min`,
+        quemFicaDeFora: 'quem pegou emprestado antes dessa janela e não pegou mais desde então',
+    });
 
     let naMira: string[] = [];
     let ultimaRonda = 0;
