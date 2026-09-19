@@ -40,7 +40,9 @@
     "conferir": "ts-node src/conferirContrato.ts",
     "conferir:prod": "node dist/conferirContrato.js",
     "achar-pool": "ts-node src/acharPool.ts",
-    "achar-pool:prod": "node dist/acharPool.js"
+    "achar-pool:prod": "node dist/acharPool.js",
+    "caca": "ts-node src/cacarAoVivo.ts",
+    "caca:prod": "node dist/cacarAoVivo.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",
