@@ -18,6 +18,7 @@ const SELETOR_SYMBOL = id('symbol()').slice(0, 10);
 const SELETOR_ADDRESSES_PROVIDER = '0x0542975c';
 const SELETOR_GET_POOL_DATA_PROVIDER = '0xe860accb';
 const SELETOR_GET_PRICE_ORACLE = '0xfca513a8';
+const SELETOR_GET_ASSET_PRICE = '0xb3596f07'; // <-- Adicione esta linha
 
 function simboloDe(hex: string | null): string {
     if (!hex || hex === '0x') return 'unidades';
