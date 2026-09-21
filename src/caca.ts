@@ -17,10 +17,24 @@
 // perdida reverte — e reverte igual se foi concorrente mais rápido, preço que
 // mexeu, ou código errado. Pelo `eth_call` a resposta vem com nome: o erro é
 // da Aave, é do pool, é do piso, ou é meu.
+
 import { AbiCoder, id } from 'ethers';
 import { Decimal } from 'decimal.js';
 
 const coder = AbiCoder.defaultAbiCoder();
+
+// ============================================================================
+// TRAVA DE SEGURANÇA: LISTA NEGRA DE ALVOS TÓXICOS (DUST)
+// ============================================================================
+export const DEVEDORES_IGNORADOS = [
+    '0xf20e421cf0b314d61177466d3c9c0cb5e1342ecb' // Alvo de centavos preso em loop
+];
+
+/** Verifica instantaneamente se o devedor é um fantasma tóxico que devemos pular. */
+export function isDevedorIgnorado(endereco: string): boolean {
+    return DEVEDORES_IGNORADOS.includes(endereco.toLowerCase());
+}
+// ============================================================================
 
 export const ASSINATURA_CACAR = 'cacar(address,address,address,uint256,address,uint256)';
 export const SELETOR_CACAR = id(ASSINATURA_CACAR).slice(0, 10);
