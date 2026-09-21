@@ -474,6 +474,9 @@ async function principal(): Promise<'parar' | void> {
                         nonce: nonceAtual++ // Incrementa a senha instantaneamente para o próximo alvo
                     });
                     
+                    // === A TRAVA QUE IMPEDE O GASTO DUPLO DE GÁS ===
+                    falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
+                    
                     log.info('CAÇADA ENVIADA COMO FOGUETE (Sem esperar confirmação).', { 
                         devedor: alvo.devedor, 
                         hash: tx.hash 
