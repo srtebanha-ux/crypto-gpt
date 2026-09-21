@@ -8,7 +8,7 @@ import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodifica
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
-import { codificarCaca, lerRespostaDaCaca, PISO_IMPOSSIVEL, lucroEmDolar } from './caca';
+import { codificarCaca, lerRespostaDaCaca, PISO_IMPOSSIVEL, lucroEmDolar, isDevedorIgnorado } from './caca';
 import { cacadorDaRede, POOLS } from './contratos';
 
 const log = createLogger('caca');
@@ -18,7 +18,7 @@ const SELETOR_SYMBOL = id('symbol()').slice(0, 10);
 const SELETOR_ADDRESSES_PROVIDER = '0x0542975c';
 const SELETOR_GET_POOL_DATA_PROVIDER = '0xe860accb';
 const SELETOR_GET_PRICE_ORACLE = '0xfca513a8';
-const SELETOR_GET_ASSET_PRICE = '0xb3596f07'; // <-- Adicione esta linha
+const SELETOR_GET_ASSET_PRICE = '0xb3596f07'; 
 
 function simboloDe(hex: string | null): string {
     if (!hex || hex === '0x') return 'unidades';
@@ -304,6 +304,9 @@ async function principal(): Promise<'parar' | void> {
     const precos = new Map<string, Decimal>();
 
     let devedores = await juntarDevedores(topo);
+    // === IGNORAR POEIRA INICIAL ===
+    devedores = devedores.filter(d => !isDevedorIgnorado(d));
+
     let ultimaColeta = Date.now();
     const falhasPorAlvo = new Map<string, number>();
     let enviados = 0;
@@ -319,6 +322,8 @@ async function principal(): Promise<'parar' | void> {
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 topo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
                 devedores = await juntarDevedores(topo);
+                // === IGNORAR POEIRA NOS REFRESHES ===
+                devedores = devedores.filter(d => !isDevedorIgnorado(d));
                 ultimaColeta = Date.now();
             }
 
@@ -419,6 +424,9 @@ async function principal(): Promise<'parar' | void> {
 
             const alvos = await montarAlvos(caidos, moedas, dataProvider, precos, casas);
 
+            // === UPGRADE DA METRALHADORA: Pega a senha (nonce) atual uma única vez ===
+            let nonceAtual = ENVIAR && carteira ? await carteira.getNonce() : 0;
+
             for (const alvo of alvos) {
                 const dados = codificarCaca({
                     garantia: alvo.garantia,
@@ -458,30 +466,22 @@ async function principal(): Promise<'parar' | void> {
                 });
                 
                 enviados += 1;
-                let tx;
                 try {
-                    tx = await carteira.sendTransaction({ to: cacador.endereco, data: envio });
+                    // === TIRO RÁPIDO: Dispara com o nonce manual e NÃO FAZ await tx.wait() ===
+                    const tx = await carteira.sendTransaction({ 
+                        to: cacador.endereco, 
+                        data: envio,
+                        nonce: nonceAtual++ // Incrementa a senha instantaneamente para o próximo alvo
+                    });
+                    
+                    log.info('CAÇADA ENVIADA COMO FOGUETE (Sem esperar confirmação).', { 
+                        devedor: alvo.devedor, 
+                        hash: tx.hash 
+                    });
                 } catch (e) {
                     falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
-                    continue;
+                    log.warn('Falha ao disparar.', { erro: String(e) });
                 }
-
-                log.info('CAÇADA ENVIADA.', { devedor: alvo.devedor, hash: tx.hash });
-
-                let recibo;
-                try {
-                    recibo = await Promise.race([
-                        tx.wait(),
-                        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 120_000)),
-                    ]) as Awaited<ReturnType<typeof tx.wait>>;
-                } catch (e) {
-                    falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
-                    continue;
-                }
-
-                const deuCerto = recibo?.status === 1;
-                if (!deuCerto) falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
-                log.info('CAÇADA CONCLUÍDA.', { devedor: alvo.devedor, status: deuCerto ? 'SUCESSO' : 'REVERTIDA' });
             }
         } catch (err) {
             log.warn('A rodada tropeçou; sigo na próxima.', { erro: err instanceof Error ? err.message : String(err) });
