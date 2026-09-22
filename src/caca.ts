@@ -56,7 +56,7 @@ export function lerRespostaDaCaca(r: { ok: boolean; dados: string; mensagem?: st
     erro?: string;
 } {
     if (!r.ok) {
-        if (r.dados && r.dados !== ' పాత్ర') {
+        if (r.dados && r.dados !== '0x') {
             try {
                 if (r.dados.startsWith('0x08c379a0')) {
                     const decoded = '0x' + r.dados.substring(138);
