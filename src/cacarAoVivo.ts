@@ -227,7 +227,7 @@ async function principal(): Promise<'parar' | void> {
     const poolDeVendaV1 = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
 
     log.info(ENVIAR ? '*** MODO ENVIO (DOIS CONTRATOS ATIVOS) — GASTO DE GÁS REAL. ***' : '*** MODO MEDIÇÃO (DOIS CONTRATOS ATIVOS) — NENHUM GÁS GASTO. ***');
-    log.info('Caçador duplo em execução.', {
+    log.info('Caçador duplo em execução com Cooldown Inteligente.', {
         rede: REDE.nome,
         contratoV1: CONTRATOS_ATIVOS[0].endereco,
         contratoV2: CONTRATOS_ATIVOS[1].endereco,
@@ -296,6 +296,8 @@ async function principal(): Promise<'parar' | void> {
 
     let ultimaColeta = Date.now();
     const falhasPorAlvo = new Map<string, number>();
+    // MAPA DE COOLDOWN: Evita gastar tempo testando o mesmo alvo sem lucro repetidamente
+    const simulacoesFalhas = new Map<string, { count: number; timestamp: number }>();
     let enviados = 0;
 
     log.info('Lista de devedores pronta. Iniciando patrulha com dois contratos.', { devedores: devedores.length });
@@ -402,9 +404,18 @@ async function principal(): Promise<'parar' | void> {
 
             const alvos = await montarAlvos(caidos, moedas, dataProvider, precos, casas);
             let nonceAtual = ENVIAR && carteira ? await carteira.getNonce() : 0;
+            const agoraMs = Date.now();
 
             for (const alvo of alvos) {
                 for (const contrato of CONTRATOS_ATIVOS) {
+                    const chaveSimulacao = `${alvo.devedor}-${contrato.tipo}`;
+                    const historico = simulacoesFalhas.get(chaveSimulacao);
+
+                    // COOLDOWN: Se falhou 3 vezes seguidas na simulação, ignora este alvo por 5 minutos
+                    if (historico && historico.count >= 3 && (agoraMs - historico.timestamp) < 5 * 60 * 1000) {
+                        continue;
+                    }
+
                     const dados = contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
@@ -429,6 +440,15 @@ async function principal(): Promise<'parar' | void> {
                         dados: r.dados ?? '0x',
                         mensagem: 'mensagem' in r ? r.mensagem : undefined
                     });
+
+                    // Regista o resultado da simulação para o Cooldown
+                    if (leitura.desfecho === 'revertido') {
+                        const atual = simulacoesFalhas.get(chaveSimulacao) ?? { count: 0, timestamp: agoraMs };
+                        simulacoesFalhas.set(chaveSimulacao, { count: atual.count + 1, timestamp: agoraMs });
+                    } else if (leitura.desfecho === 'mediu') {
+                        // Se encontrou lucro ou mudou o estado, limpa o cooldown
+                        simulacoesFalhas.delete(chaveSimulacao);
+                    }
 
                     log.info(`ALVO CAÍDO (${contrato.nome}) — medição.`, {
                         devedor: alvo.devedor,
