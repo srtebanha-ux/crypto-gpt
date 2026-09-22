@@ -420,7 +420,11 @@ async function principal(): Promise<'parar' | void> {
                 });
                 
                 const r = await chamarCruComPaciencia([{ from: cacador.dono, to: cacador.endereco, data: dados }, 'latest']);
-                const leitura = lerRespostaDaCaca(r);
+                const leitura = lerRespostaDaCaca({
+                    ok: r.ok,
+                    dados: r.dados ?? '0x',
+                    mensagem: 'mensagem' in r ? r.mensagem : undefined
+                });
 
                 log.info('ALVO CAÍDO — medição da caçada.', {
                     devedor: alvo.devedor,
@@ -431,13 +435,14 @@ async function principal(): Promise<'parar' | void> {
                 });
 
                 if (!ENVIAR || !carteira) continue;
-                if (leitura.desfecho !== 'mediu' || leitura.lucroCru === null || leitura.lucroCru === 0n) continue;
+                if (leitura.desfecho !== 'mediu' || leitura.lucroCru === undefined || leitura.lucroCru === null || leitura.lucroCru === 0n) continue;
 
+                const lucroCruValido = leitura.lucroCru;
                 const jaFalhou = falhasPorAlvo.get(alvo.devedor) ?? 0;
                 if (jaFalhou >= MAX_POR_ALVO) continue;
                 if (enviados >= MAX_ENVIOS) continue;
 
-                const piso = (leitura.lucroCru * 80n) / 100n;
+                const piso = (lucroCruValido * 80n) / 100n;
                 const envio = codificarCaca({
                     garantia: alvo.garantia,
                     divida: alvo.divida,
