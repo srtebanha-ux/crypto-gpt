@@ -1,14 +1,38 @@
 // Arquivo: src/caca.ts
 import { Interface } from 'ethers';
 
-const cacadorInterface = new Interface([
+// Interface do Contrato V1 (usa o endereço da pool de venda diretamente)
+const cacadorV1Interface = new Interface([
+    'function cacar(address collateralAsset, address debtAsset, address userToLiquidate, uint256 debtToCover, address poolDeVenda, uint256 minProfit)'
+]);
+
+// Interface do Contrato V2 (usa o booleano de pool estável/volátil)
+const cacadorV2Interface = new Interface([
     'function cacar(address collateralAsset, address debtAsset, address userToLiquidate, uint256 debtToCover, bool isStablePool, uint256 minProfit)'
 ]);
 
 export const PISO_IMPOSSIVEL = 99999999999999999999999999999999999999999999n;
 export const COBRIR_O_MAXIMO = PISO_IMPOSSIVEL; 
 
-export function codificarCaca(alvo: {
+export function codificarCacaV1(alvo: {
+    garantia: string;
+    divida: string;
+    devedor: string;
+    quantoCobrir: bigint;
+    poolDeVenda: string;
+    lucroMinimo: bigint;
+}): string {
+    return cacadorV1Interface.encodeFunctionData('cacar', [
+        alvo.garantia,
+        alvo.divida,
+        alvo.devedor,
+        alvo.quantoCobrir,
+        alvo.poolDeVenda,
+        alvo.lucroMinimo,
+    ]);
+}
+
+export function codificarCacaV2(alvo: {
     garantia: string;
     divida: string;
     devedor: string;
@@ -16,7 +40,7 @@ export function codificarCaca(alvo: {
     isStablePool: boolean;
     lucroMinimo: bigint;
 }): string {
-    return cacadorInterface.encodeFunctionData('cacar', [
+    return cacadorV2Interface.encodeFunctionData('cacar', [
         alvo.garantia,
         alvo.divida,
         alvo.devedor,
