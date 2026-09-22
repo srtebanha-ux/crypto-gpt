@@ -8,28 +8,16 @@ import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodifica
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
-import { codificarCaca, lerRespostaDaCaca, PISO_IMPOSSIVEL, lucroEmDolar, isDevedorIgnorado } from './caca';
-import { cacadorDaRede, POOLS } from './contratos';
+import { codificarCaca, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado } from './caca';
+import { cacadorDaRede } from './contratos';
 
 const log = createLogger('caca');
 
 const SELETOR_DECIMALS = '0x313ce567';
-const SELETOR_SYMBOL = id('symbol()').slice(0, 10);
 const SELETOR_ADDRESSES_PROVIDER = '0x0542975c';
 const SELETOR_GET_POOL_DATA_PROVIDER = '0xe860accb';
 const SELETOR_GET_PRICE_ORACLE = '0xfca513a8';
 const SELETOR_GET_ASSET_PRICE = '0xb3596f07'; 
-
-function simboloDe(hex: string | null): string {
-    if (!hex || hex === '0x') return 'unidades';
-    try {
-        const b = Buffer.from(hex.replace(/^0x/, ''), 'hex');
-        const t = (b.length > 64 ? b.subarray(64) : b).toString('utf8').replace(/\0/g, '').trim();
-        return t.length > 0 && t.length < 32 ? t : 'unidades';
-    } catch {
-        return 'unidades';
-    }
-}
 
 const REDE_ESCOLHIDA = (process.env.CACA_REDE ?? 'base').toLowerCase();
 const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
@@ -235,14 +223,13 @@ async function principal(): Promise<'parar' | void> {
         log.error('Nenhum caçador publicado nesta rede.', { rede: REDE_ESCOLHIDA });
         return 'parar';
     }
-    const poolDeVenda = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
 
     log.info(ENVIAR ? '*** MODO ENVIO — ESTE PROCESSO GASTA GÁS DE VERDADE. ***' : '*** MODO MEDIÇÃO — nada é enviado, nenhum gás é gasto. ***');
-    log.info('Caçador ao vivo otimizado.', {
+    log.info('Caçador ao vivo otimizado (V2).', {
         rede: REDE.nome,
         contrato: cacador.endereco,
         modo: ENVIAR ? 'ENVIAR' : 'MEDIR',
-        status: 'Fim dos ensaios saudáveis. Silêncio absoluto até o HF < 1.0',
+        status: 'Roteador dinâmico ativo para cbBTC, wstETH e WETH.',
     });
 
     let carteira: Wallet | null = null;
@@ -304,7 +291,6 @@ async function principal(): Promise<'parar' | void> {
     const precos = new Map<string, Decimal>();
 
     let devedores = await juntarDevedores(topo);
-    // === IGNORAR POEIRA INICIAL ===
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
 
     let ultimaColeta = Date.now();
@@ -322,7 +308,6 @@ async function principal(): Promise<'parar' | void> {
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 topo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
                 devedores = await juntarDevedores(topo);
-                // === IGNORAR POEIRA NOS REFRESHES ===
                 devedores = devedores.filter(d => !isDevedorIgnorado(d));
                 ultimaColeta = Date.now();
             }
@@ -416,15 +401,12 @@ async function principal(): Promise<'parar' | void> {
                 });
             }
 
-            // *** O CORAÇÃO DA MUDANÇA: SÓ OLHAR CAÍDOS ***
             if (caidos.length === 0) {
                 await dormir(SEG * 1000);
                 continue; 
             }
 
             const alvos = await montarAlvos(caidos, moedas, dataProvider, precos, casas);
-
-            // === UPGRADE DA METRALHADORA: Pega a senha (nonce) atual uma única vez ===
             let nonceAtual = ENVIAR && carteira ? await carteira.getNonce() : 0;
 
             for (const alvo of alvos) {
@@ -433,7 +415,7 @@ async function principal(): Promise<'parar' | void> {
                     divida: alvo.divida,
                     devedor: alvo.devedor,
                     quantoCobrir: COBRIR_O_MAXIMO,
-                    poolDeVenda,
+                    isStablePool: false,
                     lucroMinimo: PISO_IMPOSSIVEL,
                 });
                 
@@ -461,20 +443,18 @@ async function principal(): Promise<'parar' | void> {
                     divida: alvo.divida,
                     devedor: alvo.devedor,
                     quantoCobrir: COBRIR_O_MAXIMO,
-                    poolDeVenda,
+                    isStablePool: false,
                     lucroMinimo: piso,
                 });
                 
                 enviados += 1;
                 try {
-                    // === TIRO RÁPIDO: Dispara com o nonce manual e NÃO FAZ await tx.wait() ===
                     const tx = await carteira.sendTransaction({ 
                         to: cacador.endereco, 
                         data: envio,
-                        nonce: nonceAtual++ // Incrementa a senha instantaneamente para o próximo alvo
+                        nonce: nonceAtual++
                     });
                     
-                    // === A TRAVA QUE IMPEDE O GASTO DUPLO DE GÁS ===
                     falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
                     
                     log.info('CAÇADA ENVIADA COMO FOGUETE (Sem esperar confirmação).', { 
