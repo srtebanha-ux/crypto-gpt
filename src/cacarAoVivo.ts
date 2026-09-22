@@ -8,8 +8,8 @@ import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodifica
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
-import { codificarCaca, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado } from './caca';
-import { cacadorDaRede } from './contratos';
+import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado } from './caca';
+import { POOLS } from './contratos';
 
 const log = createLogger('caca');
 
@@ -32,6 +32,12 @@ const TIMEOUT_MS = Number(process.env.CACA_TIMEOUT_MS ?? '20000');
 const PAUSA_MS = Number(process.env.CACA_PAUSA_MS ?? '600');
 const MAX_POR_ALVO = Number(process.env.CACA_MAX_POR_ALVO ?? '3');
 const MAX_ENVIOS = Number(process.env.CACA_MAX_ENVIOS ?? '25');
+
+// Configuração dos dois contratos em paralelo
+const CONTRATOS_ATIVOS = [
+    { nome: 'V1 (WETH)', endereco: '0x9066b0ba6783322FEdE3BF5cd520C0f3A9AF3C78', tipo: 'V1' as const },
+    { nome: 'V2 (Multi-Ativo)', endereco: process.env.CACA_CONTRATO ?? '0xd87AeEcCb5969BA28C49581736cD2c0b58B117A8', tipo: 'V2' as const }
+];
 
 let rpc = process.env.CACA_RPC_URL ?? REDE.rpc;
 let rpcId = 0;
@@ -218,21 +224,18 @@ async function montarAlvos(
 }
 
 async function principal(): Promise<'parar' | void> {
-    const cacador = cacadorDaRede(REDE_ESCOLHIDA);
-    if (!cacador) {
-        log.error('Nenhum caçador publicado nesta rede.', { rede: REDE_ESCOLHIDA });
-        return 'parar';
-    }
+    const poolDeVendaV1 = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
 
-    log.info(ENVIAR ? '*** MODO ENVIO — ESTE PROCESSO GASTA GÁS DE VERDADE. ***' : '*** MODO MEDIÇÃO — nada é enviado, nenhum gás é gasto. ***');
-    log.info('Caçador ao vivo otimizado (V2).', {
+    log.info(ENVIAR ? '*** MODO ENVIO (DOIS CONTRATOS ATIVOS) — GASTO DE GÁS REAL. ***' : '*** MODO MEDIÇÃO (DOIS CONTRATOS ATIVOS) — NENHUM GÁS GASTO. ***');
+    log.info('Caçador duplo em execução.', {
         rede: REDE.nome,
-        contrato: cacador.endereco,
+        contratoV1: CONTRATOS_ATIVOS[0].endereco,
+        contratoV2: CONTRATOS_ATIVOS[1].endereco,
         modo: ENVIAR ? 'ENVIAR' : 'MEDIR',
-        status: 'Roteador dinâmico ativo para cbBTC, wstETH e WETH.',
     });
 
     let carteira: Wallet | null = null;
+    let donoCarteira: string | null = null;
     if (ENVIAR) {
         const chave = process.env.CACA_CHAVE_PRIVADA;
         if (!chave) {
@@ -240,10 +243,8 @@ async function principal(): Promise<'parar' | void> {
             return 'parar';
         }
         carteira = new Wallet(chave, new JsonRpcProvider(rpc));
-        if (carteira.address.toLowerCase() !== cacador.dono.toLowerCase()) {
-            return 'parar';
-        }
-        log.info('Carteira carregada.', { endereco: carteira.address });
+        donoCarteira = carteira.address;
+        log.info('Carteira carregada.', { endereco: donoCarteira });
     }
 
     const rpcs = process.env.CACA_RPC_URL ? [process.env.CACA_RPC_URL] : (RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [REDE.rpc]);
@@ -297,7 +298,7 @@ async function principal(): Promise<'parar' | void> {
     const falhasPorAlvo = new Map<string, number>();
     let enviados = 0;
 
-    log.info('Lista de devedores pronta. Iniciando patrulha silenciosa.', { devedores: devedores.length });
+    log.info('Lista de devedores pronta. Iniciando patrulha com dois contratos.', { devedores: devedores.length });
 
     let naMira: string[] = [];
     let menorQueda = new Decimal(100);
@@ -338,7 +339,6 @@ async function principal(): Promise<'parar' | void> {
                         if (!agora[i]) return;
                         try { precos.set(m.toLowerCase(), new Decimal(BigInt(agora[i]!).toString())); } catch {}
                     });
-                    log.info('PREÇO CRUZOU — acordando a borda.', { naMira: naMira.length });
                 }
             }
             if (!acordar) {
@@ -393,12 +393,6 @@ async function principal(): Promise<'parar' | void> {
 
                 naMira = perto;
                 ultimaRonda = Date.now();
-                log.info('RONDA COMPLETA.', {
-                    olhados: olharAgora.length,
-                    naBorda: naMira.length,
-                    jaLiquidaveis: caidos.length,
-                    limiar: `${LIMIAR}% de queda`
-                });
             }
 
             if (caidos.length === 0) {
@@ -410,65 +404,85 @@ async function principal(): Promise<'parar' | void> {
             let nonceAtual = ENVIAR && carteira ? await carteira.getNonce() : 0;
 
             for (const alvo of alvos) {
-                const dados = codificarCaca({
-                    garantia: alvo.garantia,
-                    divida: alvo.divida,
-                    devedor: alvo.devedor,
-                    quantoCobrir: COBRIR_O_MAXIMO,
-                    isStablePool: false,
-                    lucroMinimo: PISO_IMPOSSIVEL,
-                });
+                for (const contrato of CONTRATOS_ATIVOS) {
+                    const dados = contrato.tipo === 'V1'
+                        ? codificarCacaV1({
+                            garantia: alvo.garantia,
+                            divida: alvo.divida,
+                            devedor: alvo.devedor,
+                            quantoCobrir: COBRIR_O_MAXIMO,
+                            poolDeVenda: poolDeVendaV1,
+                            lucroMinimo: PISO_IMPOSSIVEL,
+                          })
+                        : codificarCacaV2({
+                            garantia: alvo.garantia,
+                            divida: alvo.divida,
+                            devedor: alvo.devedor,
+                            quantoCobrir: COBRIR_O_MAXIMO,
+                            isStablePool: false,
+                            lucroMinimo: PISO_IMPOSSIVEL,
+                          });
                 
-                const r = await chamarCruComPaciencia([{ from: cacador.dono, to: cacador.endereco, data: dados }, 'latest']);
-                const leitura = lerRespostaDaCaca({
-                    ok: r.ok,
-                    dados: r.dados ?? '0x',
-                    mensagem: 'mensagem' in r ? r.mensagem : undefined
-                });
-
-                log.info('ALVO CAÍDO — medição da caçada.', {
-                    devedor: alvo.devedor,
-                    desfecho: leitura.desfecho,
-                    lucroCru: leitura.lucroCru?.toString() ?? '-',
-                    erro: leitura.erro ?? '-',
-                    observacao: ENVIAR ? 'envio decidido a seguir' : 'MODO MEDIÇÃO: nada foi enviado',
-                });
-
-                if (!ENVIAR || !carteira) continue;
-                if (leitura.desfecho !== 'mediu' || leitura.lucroCru === undefined || leitura.lucroCru === null || leitura.lucroCru === 0n) continue;
-
-                const lucroCruValido = leitura.lucroCru;
-                const jaFalhou = falhasPorAlvo.get(alvo.devedor) ?? 0;
-                if (jaFalhou >= MAX_POR_ALVO) continue;
-                if (enviados >= MAX_ENVIOS) continue;
-
-                const piso = (lucroCruValido * 80n) / 100n;
-                const envio = codificarCaca({
-                    garantia: alvo.garantia,
-                    divida: alvo.divida,
-                    devedor: alvo.devedor,
-                    quantoCobrir: COBRIR_O_MAXIMO,
-                    isStablePool: false,
-                    lucroMinimo: piso,
-                });
-                
-                enviados += 1;
-                try {
-                    const tx = await carteira.sendTransaction({ 
-                        to: cacador.endereco, 
-                        data: envio,
-                        nonce: nonceAtual++
+                    const r = await chamarCruComPaciencia([{ from: donoCarteira ?? undefined, to: contrato.endereco, data: dados }, 'latest']);
+                    const leitura = lerRespostaDaCaca({
+                        ok: r.ok,
+                        dados: r.dados ?? '0x',
+                        mensagem: 'mensagem' in r ? r.mensagem : undefined
                     });
-                    
-                    falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
-                    
-                    log.info('CAÇADA ENVIADA COMO FOGUETE (Sem esperar confirmação).', { 
-                        devedor: alvo.devedor, 
-                        hash: tx.hash 
+
+                    log.info(`ALVO CAÍDO (${contrato.nome}) — medição.`, {
+                        devedor: alvo.devedor,
+                        desfecho: leitura.desfecho,
+                        lucroCru: leitura.lucroCru?.toString() ?? '-',
+                        erro: leitura.erro ?? '-',
                     });
-                } catch (e) {
-                    falhasPorAlvo.set(alvo.devedor, jaFalhou + 1);
-                    log.warn('Falha ao disparar.', { erro: String(e) });
+
+                    if (!ENVIAR || !carteira) continue;
+                    if (leitura.desfecho !== 'mediu' || leitura.lucroCru === undefined || leitura.lucroCru === null || leitura.lucroCru === 0n) continue;
+
+                    const lucroCruValido = leitura.lucroCru;
+                    const chaveAlvo = `${alvo.devedor}-${contrato.tipo}`;
+                    const jaFalhou = falhasPorAlvo.get(chaveAlvo) ?? 0;
+                    if (jaFalhou >= MAX_POR_ALVO) continue;
+                    if (enviados >= MAX_ENVIOS) continue;
+
+                    const piso = (lucroCruValido * 80n) / 100n;
+                    const envio = contrato.tipo === 'V1'
+                        ? codificarCacaV1({
+                            garantia: alvo.garantia,
+                            divida: alvo.divida,
+                            devedor: alvo.devedor,
+                            quantoCobrir: COBRIR_O_MAXIMO,
+                            poolDeVenda: poolDeVendaV1,
+                            lucroMinimo: piso,
+                          })
+                        : codificarCacaV2({
+                            garantia: alvo.garantia,
+                            divida: alvo.divida,
+                            devedor: alvo.devedor,
+                            quantoCobrir: COBRIR_O_MAXIMO,
+                            isStablePool: false,
+                            lucroMinimo: piso,
+                          });
+                    
+                    enviados += 1;
+                    try {
+                        const tx = await carteira.sendTransaction({ 
+                            to: contrato.endereco, 
+                            data: envio,
+                            nonce: nonceAtual++
+                        });
+                        
+                        falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
+                        
+                        log.info(`CAÇADA ENVIADA (${contrato.nome}) COMO FOGUETE!`, { 
+                            devedor: alvo.devedor, 
+                            hash: tx.hash 
+                        });
+                    } catch (e) {
+                        falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
+                        log.warn(`Falha ao disparar (${contrato.nome}).`, { erro: String(e) });
+                    }
                 }
             }
         } catch (err) {
