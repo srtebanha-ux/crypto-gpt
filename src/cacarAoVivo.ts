@@ -118,18 +118,21 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
     return fora;
 }
 
-async function juntarDevedores(topo: number): Promise<string[]> {
+// NOVO: Adicionado blocoInicial para suportar varredura incremental rápida
+async function juntarDevedores(topo: number, blocoInicial?: number): Promise<string[]> {
     const vistos = new Set<string>();
-    const faixas = faixasDeBlocos(topo - BLOCOS + 1, topo, PEDACO);
+    const inicio = blocoInicial !== undefined ? Math.max(0, blocoInicial) : Math.max(0, topo - BLOCOS + 1);
+    const faixas = faixasDeBlocos(inicio, topo, PEDACO);
     let falhas = 0;
 
-    const minutos = ((faixas.length * (PAUSA_MS + 700)) / 60_000).toFixed(0);
-    log.info('Juntando devedores — isto demora.', {
-        faixas: faixas.length,
-        janela: `${BLOCOS} blocos = ${((BLOCOS * 2) / 86400).toFixed(1)} dias`,
-        estimativa: `~${minutos} minutos`,
-        porQueDevagar: `pausa de ${PAUSA_MS}ms por faixa para não disputar o RPC com o vigia`,
-    });
+    if (faixas.length > 10) {
+        const minutos = ((faixas.length * (PAUSA_MS + 700)) / 60_000).toFixed(0);
+        log.info('Juntando histórico de devedores — isto demora na primeira vez.', {
+            faixas: faixas.length,
+            janela: `${BLOCOS} blocos = ${((BLOCOS * 2) / 86400).toFixed(1)} dias`,
+            estimativa: `~${minutos} minutos`,
+        });
+    }
 
     let lidas = 0;
     for (const [a, b] of faixas) {
@@ -147,8 +150,8 @@ async function juntarDevedores(topo: number): Promise<string[]> {
             falhas += 1;
         }
         lidas += 1;
-        if (lidas % 100 === 0) {
-            log.info('Progresso da varredura.', {
+        if (lidas % 100 === 0 && faixas.length > 100) {
+            log.info('Progresso da varredura profunda.', {
                 lidas: `${lidas} de ${faixas.length}`,
                 devedoresAteAgora: vistos.size,
                 falhas,
@@ -157,10 +160,7 @@ async function juntarDevedores(topo: number): Promise<string[]> {
         await dormir(PAUSA_MS);
     }
     if (falhas > 0) {
-        log.warn('Faixas não lidas — a lista está por baixo.', {
-            falharam: `${falhas} de ${faixas.length}`,
-            consequencia: 'devedores que só apareceram nessas faixas ficam de fora desta rodada',
-        });
+        log.warn('Algumas faixas de blocos falharam.', { falharam: `${falhas} de ${faixas.length}` });
     }
     return [...vistos];
 }
@@ -226,8 +226,8 @@ async function montarAlvos(
 async function principal(): Promise<'parar' | void> {
     const poolDeVendaV1 = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
 
-    log.info(ENVIAR ? '*** MODO ENVIO (DOIS CONTRATOS ATIVOS) — GASTO DE GÁS REAL. ***' : '*** MODO MEDIÇÃO (DOIS CONTRATOS ATIVOS) — NENHUM GÁS GASTO. ***');
-    log.info('Caçador duplo em execução com Cooldown Inteligente.', {
+    log.info(ENVIAR ? '*** MODO ENVIO (ALTA VELOCIDADE TOTAL) — GASTO DE GÁS REAL. ***' : '*** MODO MEDIÇÃO (ALTA VELOCIDADE TOTAL) — NENHUM GÁS GASTO. ***');
+    log.info('Caçador duplo em execução com Atualizações Incrementais (Sem Pausas).', {
         rede: REDE.nome,
         contratoV1: CONTRATOS_ATIVOS[0].endereco,
         contratoV2: CONTRATOS_ATIVOS[1].endereco,
@@ -291,16 +291,16 @@ async function principal(): Promise<'parar' | void> {
     });
     const precos = new Map<string, Decimal>();
 
+    // Varredura Inicial Profunda (Só acontece 1 vez ao iniciar o bot)
     let devedores = await juntarDevedores(topo);
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
 
     let ultimaColeta = Date.now();
+    let ultimoTopoLido = topo; // Guarda onde parámos para ler só o que é novo depois
     const falhasPorAlvo = new Map<string, number>();
-    // MAPA DE COOLDOWN: Evita gastar tempo testando o mesmo alvo sem lucro repetidamente
-    const simulacoesFalhas = new Map<string, { count: number; timestamp: number }>();
     let enviados = 0;
 
-    log.info('Lista de devedores pronta. Iniciando patrulha com dois contratos.', { devedores: devedores.length });
+    log.info('Lista inicial pronta. Patrulhando todos os alvos sem pausas longas.', { devedores: devedores.length });
 
     let naMira: string[] = [];
     let menorQueda = new Decimal(100);
@@ -308,10 +308,19 @@ async function principal(): Promise<'parar' | void> {
 
     for (;;) {
         try {
+            // ATUALIZAÇÃO INCREMENTAL: Lê apenas blocos novos a cada 37 minutos
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
-                topo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
-                devedores = await juntarDevedores(topo);
-                devedores = devedores.filter(d => !isDevedorIgnorado(d));
+                const novoTopo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
+                if (novoTopo > ultimoTopoLido) {
+                    log.info('Buscando devedores novos rapidamente...', { blocosNovos: novoTopo - ultimoTopoLido });
+                    
+                    const novos = await juntarDevedores(novoTopo, ultimoTopoLido + 1);
+                    const setDevedores = new Set([...devedores, ...novos]);
+                    
+                    devedores = [...setDevedores].filter(d => !isDevedorIgnorado(d));
+                    ultimoTopoLido = novoTopo;
+                    log.info('Atualização incremental concluída.', { totalDevedoresNaLista: devedores.length });
+                }
                 ultimaColeta = Date.now();
             }
 
@@ -404,18 +413,9 @@ async function principal(): Promise<'parar' | void> {
 
             const alvos = await montarAlvos(caidos, moedas, dataProvider, precos, casas);
             let nonceAtual = ENVIAR && carteira ? await carteira.getNonce() : 0;
-            const agoraMs = Date.now();
 
             for (const alvo of alvos) {
                 for (const contrato of CONTRATOS_ATIVOS) {
-                    const chaveSimulacao = `${alvo.devedor}-${contrato.tipo}`;
-                    const historico = simulacoesFalhas.get(chaveSimulacao);
-
-                    // COOLDOWN: Se falhou 3 vezes seguidas na simulação, ignora este alvo por 5 minutos
-                    if (historico && historico.count >= 3 && (agoraMs - historico.timestamp) < 5 * 60 * 1000) {
-                        continue;
-                    }
-
                     const dados = contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
@@ -440,15 +440,6 @@ async function principal(): Promise<'parar' | void> {
                         dados: r.dados ?? '0x',
                         mensagem: 'mensagem' in r ? r.mensagem : undefined
                     });
-
-                    // Regista o resultado da simulação para o Cooldown
-                    if (leitura.desfecho === 'revertido') {
-                        const atual = simulacoesFalhas.get(chaveSimulacao) ?? { count: 0, timestamp: agoraMs };
-                        simulacoesFalhas.set(chaveSimulacao, { count: atual.count + 1, timestamp: agoraMs });
-                    } else if (leitura.desfecho === 'mediu') {
-                        // Se encontrou lucro ou mudou o estado, limpa o cooldown
-                        simulacoesFalhas.delete(chaveSimulacao);
-                    }
 
                     log.info(`ALVO CAÍDO (${contrato.nome}) — medição.`, {
                         devedor: alvo.devedor,
