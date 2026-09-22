@@ -24,10 +24,7 @@ const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const ENVIAR = process.env.CACA_ENVIAR === '1';
 const BLOCOS = Number(process.env.CACA_BLOCOS ?? '1296000');
 const PEDACO = Number(process.env.CACA_PEDACO ?? '2000');
-const SEG = Number(process.env.CACA_SEG ?? '2');
 const MIN_COLETA = Number(process.env.CACA_MIN_COLETA ?? '37');
-const MIN_RONDA = Number(process.env.CACA_MIN_RONDA ?? '2');
-const LIMIAR = Number(process.env.CACA_LIMIAR ?? '10');
 const TIMEOUT_MS = Number(process.env.CACA_TIMEOUT_MS ?? '20000');
 const PAUSA_MS = Number(process.env.CACA_PAUSA_MS ?? '600');
 const MAX_POR_ALVO = Number(process.env.CACA_MAX_POR_ALVO ?? '3');
@@ -113,7 +110,6 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
         } catch {
             for (let i = 0; i < pedaco.length; i += 1) fora.push(null);
         }
-        await dormir(PAUSA_MS);
     }
     return fora;
 }
@@ -124,8 +120,6 @@ async function juntarDevedores(topo: number, blocoInicial?: number): Promise<str
     const inicio = blocoInicial !== undefined ? Math.max(0, blocoInicial) : Math.max(0, topo - BLOCOS + 1);
     const faixas = faixasDeBlocos(inicio, topo, PEDACO);
     let falhas = 0;
-
-    // Dispara chamadas ao RPC em lotes paralelos
     const CONCORRENCIA = 5; 
 
     if (faixas.length > 10) {
@@ -133,7 +127,6 @@ async function juntarDevedores(topo: number, blocoInicial?: number): Promise<str
         const minutos = ((lotes * (PAUSA_MS + 700)) / 60_000).toFixed(1);
         log.info('Juntando histórico de devedores (Modo Turbo - Multithread).', {
             faixas: faixas.length,
-            janela: `${BLOCOS} blocos = ${((BLOCOS * 2) / 86400).toFixed(1)} dias`,
             estimativa: `~${minutos} minutos`,
             velocidade: `${CONCORRENCIA} chamadas em paralelo`
         });
@@ -163,18 +156,12 @@ async function juntarDevedores(topo: number, blocoInicial?: number): Promise<str
         if (faixas.length > 10 && (lidas % (CONCORRENCIA * 5) === 0 || lidas === faixas.length)) {
             log.info('Progresso da varredura acelerada.', {
                 lidas: `${lidas} de ${faixas.length}`,
-                devedoresAteAgora: vistos.size,
-                falhas,
+                devedoresAteAgora: vistos.size
             });
         }
-        
         if (i + CONCORRENCIA < faixas.length) {
             await dormir(PAUSA_MS);
         }
-    }
-    
-    if (falhas > 0) {
-        log.warn('Algumas faixas de blocos falharam.', { falharam: `${falhas} de ${faixas.length}` });
     }
     return [...vistos];
 }
@@ -240,12 +227,11 @@ async function montarAlvos(
 async function principal(): Promise<'parar' | void> {
     const poolDeVendaV1 = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
 
-    log.info(ENVIAR ? '*** MODO ENVIO (ALTA VELOCIDADE TOTAL) — GASTO DE GÁS REAL. ***' : '*** MODO MEDIÇÃO (ALTA VELOCIDADE TOTAL) — NENHUM GÁS GASTO. ***');
-    log.info('Caçador duplo em execução com Atualizações Incrementais (Sem Pausas).', {
+    log.info(ENVIAR ? '*** MODO ENVIO (NÍVEL MEV ELITE) — GASTO DE GÁS REAL. ***' : '*** MODO MEDIÇÃO (NÍVEL MEV ELITE) — NENHUM GÁS GASTO. ***');
+    log.info('Sincronização Ativa de Blocos Ligada. Zero pausas, Zero timers.', {
         rede: REDE.nome,
         contratoV1: CONTRATOS_ATIVOS[0].endereco,
-        contratoV2: CONTRATOS_ATIVOS[1].endereco,
-        modo: ENVIAR ? 'ENVIAR' : 'MEDIR',
+        contratoV2: CONTRATOS_ATIVOS[1].endereco
     });
 
     let carteira: Wallet | null = null;
@@ -305,133 +291,87 @@ async function principal(): Promise<'parar' | void> {
     });
     const precos = new Map<string, Decimal>();
 
-    // Varredura Inicial Profunda (Só acontece 1 vez ao iniciar o bot)
+    // Varredura Inicial Profunda
     let devedores = await juntarDevedores(topo);
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
 
     let ultimaColeta = Date.now();
-    let ultimoTopoLido = topo; 
+    let ultimoBlocoLido = topo; 
+    let ultimoBlocoColeta = topo;
     const falhasPorAlvo = new Map<string, number>();
     let enviados = 0;
 
-    log.info('Lista inicial pronta. Patrulhando todos os alvos sem pausas longas.', { devedores: devedores.length });
-
-    let naMira: string[] = [];
-    let menorQueda = new Decimal(100);
-    let ultimaRonda = 0;
+    log.info('Operação Elite Iniciada. Aguardando novos blocos na rede Base...', { alvosRegistados: devedores.length });
 
     for (;;) {
         try {
-            // ATUALIZAÇÃO INCREMENTAL: Lê apenas blocos novos a cada 37 minutos
+            // ATUALIZAÇÃO INCREMENTAL DE NOVOS DEVEDORES (Mantida em background)
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 const novoTopo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
-                if (novoTopo > ultimoTopoLido) {
-                    log.info('Buscando devedores novos rapidamente...', { blocosNovos: novoTopo - ultimoTopoLido });
-                    
-                    const novos = await juntarDevedores(novoTopo, ultimoTopoLido + 1);
+                if (novoTopo > ultimoBlocoColeta) {
+                    const novos = await juntarDevedores(novoTopo, ultimoBlocoColeta + 1);
                     const setDevedores = new Set([...devedores, ...novos]);
-                    
                     devedores = [...setDevedores].filter(d => !isDevedorIgnorado(d));
-                    ultimoTopoLido = novoTopo;
-                    log.info('Atualização incremental concluída.', { totalDevedoresNaLista: devedores.length });
+                    ultimoBlocoColeta = novoTopo;
                 }
                 ultimaColeta = Date.now();
             }
 
-            const ehRonda = Date.now() - ultimaRonda > MIN_RONDA * 60_000;
-            let acordar = ehRonda;
+            // O CORAÇÃO DO BOT MEV: Escuta de Blocos em Tempo Real (Polling Agressivo a cada 100ms)
+            const blocoAtualStr = await chamar<string>('eth_blockNumber', []);
+            const blocoAtual = Number.parseInt(blocoAtualStr, 16);
             
-            if (!ehRonda && naMira.length > 0) {
-                const agora = await lerEmLote(
-                    moedas.map((m) => ({
-                        alvo: oraculo,
-                        dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0'),
-                    })),
-                );
-                let maiorQueda = new Decimal(0);
-                moedas.forEach((m, i) => {
-                    const base = precos.get(m.toLowerCase());
-                    if (!agora[i] || !base || base.lessThanOrEqualTo(0)) return;
-                    try {
-                        const q = base.minus(new Decimal(BigInt(agora[i]!).toString())).dividedBy(base).mul(100);
-                        if (q.greaterThan(maiorQueda)) maiorQueda = q;
-                    } catch {}
-                });
-                
-                if (maiorQueda.greaterThanOrEqualTo(menorQueda)) {
-                    acordar = true;
-                    moedas.forEach((m, i) => {
-                        if (!agora[i]) return;
-                        try { precos.set(m.toLowerCase(), new Decimal(BigInt(agora[i]!).toString())); } catch {}
-                    });
+            // Se o bloco ainda é o mesmo que já lemos, dorme míseros 100ms e pergunta de novo
+            if (blocoAtual <= ultimoBlocoLido) {
+                await dormir(100); 
+                continue;
+            }
+            
+            ultimoBlocoLido = blocoAtual;
+            const msInicioBlock = Date.now();
+
+            // BLOCO NOVO CHEGOU! Puxa preços e todas as 3800+ contas simultaneamente via Multicall
+            const chamadasMistas: Array<{ alvo: string; dados: string }> = [];
+            
+            moedas.forEach((m) => chamadasMistas.push({ alvo: oraculo!, dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0') }));
+            devedores.forEach((d) => chamadasMistas.push({ alvo: REDE.pool, dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0') }));
+
+            const loteGigante = await lerEmLote(chamadasMistas);
+            
+            // Atualiza preços
+            for (let i = 0; i < moedas.length; i++) {
+                const dadoPreco = loteGigante[i];
+                if (dadoPreco) {
+                    try { precos.set(moedas[i].toLowerCase(), new Decimal(BigInt(dadoPreco).toString())); } catch {}
                 }
             }
-            if (!acordar) {
-                await dormir(SEG * 1000);
-                continue;
-            }
 
-            const olharAgora = ehRonda ? devedores : naMira;
-            if (olharAgora.length === 0) {
-                await dormir(SEG * 1000);
-                continue;
-            }
-
-            const contas = await lerEmLote(
-                olharAgora.map((d) => ({
-                    alvo: REDE.pool,
-                    dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
-                })),
-            );
-            
+            // Mapeia quem caiu no buraco
             const caidos: string[] = [];
-            const perto: string[] = [];
-            let menorVista = new Decimal(100);
-            
-            for (let i = 0; i < olharAgora.length; i += 1) {
-                if (!contas[i]) continue;
+            for (let i = 0; i < devedores.length; i++) {
+                const dadoConta = loteGigante[moedas.length + i];
+                if (!dadoConta) continue;
                 try {
-                    const queda = quedaAteLiquidar(decodificarContaDoUsuario(contas[i]!).saude);
-                    if (queda === null) continue;
-                    
-                    if (queda.isZero()) caidos.push(olharAgora[i]);
-                    else {
-                        if (queda.lessThan(menorVista)) menorVista = queda;
-                        if (queda.lessThanOrEqualTo(LIMIAR)) perto.push(olharAgora[i]);
+                    const contaInfo = decodificarContaDoUsuario(dadoConta);
+                    // Se o Health Factor for menor que 1 ether (10^18), está liquidável
+                    if (contaInfo.saude < 1000000000000000000n) {
+                        caidos.push(devedores[i]);
                     }
                 } catch {}
             }
 
-            if (menorVista.lessThan(100)) menorQueda = menorVista;
-
-            if (ehRonda) {
-                const respPreco = await lerEmLote(
-                    moedas.map((m) => ({
-                        alvo: oraculo,
-                        dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0'),
-                    })),
-                );
-                moedas.forEach((m, i) => {
-                    if (!respPreco[i]) return;
-                    try { precos.set(m.toLowerCase(), new Decimal(BigInt(respPreco[i]!).toString())); } catch {}
-                });
-
-                naMira = perto;
-                ultimaRonda = Date.now();
-
-                // O LOG DE VIDA DO BOT QUE ESTAVA FALTANDO!
-                log.info('RONDA COMPLETA (Radar Elite).', {
-                    olhados: olharAgora.length,
-                    naBorda: naMira.length,
-                    jaLiquidaveis: caidos.length,
-                    limiar: `${LIMIAR}% de queda`
+            const msFimBlock = Date.now();
+            
+            // LOG DE TELEMETRIA: Imprime a velocidade de varredura a cada 10 blocos (aprox. 20 segundos)
+            if (blocoAtual % 10 === 0) {
+                log.info(`[BLOCO ${blocoAtual}] Base de dados sincronizada na velocidade da luz.`, {
+                    alvosChecados: devedores.length,
+                    tempoDeResposta: `${msFimBlock - msInicioBlock}ms`,
+                    alvosCaidos: caidos.length
                 });
             }
 
-            if (caidos.length === 0) {
-                await dormir(SEG * 1000);
-                continue; 
-            }
+            if (caidos.length === 0) continue;
 
             const alvos = await montarAlvos(caidos, moedas, dataProvider, precos, casas);
             let nonceAtual = ENVIAR && carteira ? await carteira.getNonce() : 0;
@@ -463,7 +403,8 @@ async function principal(): Promise<'parar' | void> {
                         mensagem: 'mensagem' in r ? r.mensagem : undefined
                     });
 
-                    log.info(`ALVO CAÍDO (${contrato.nome}) — medição.`, {
+                    log.info(`[ALERTA DE FOGO] ALVO CAÍDO (${contrato.nome}) — medição executada.`, {
+                        bloco: blocoAtual,
                         devedor: alvo.devedor,
                         desfecho: leitura.desfecho,
                         lucroCru: leitura.lucroCru?.toString() ?? '-',
@@ -508,20 +449,20 @@ async function principal(): Promise<'parar' | void> {
                         
                         falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
                         
-                        log.info(`CAÇADA ENVIADA (${contrato.nome}) COMO FOGUETE!`, { 
+                        log.info(`[FOGUETE MEV] CAÇADA DISPARADA (${contrato.nome}) INSTANTANEAMENTE!`, { 
+                            bloco: blocoAtual,
                             devedor: alvo.devedor, 
                             hash: tx.hash 
                         });
                     } catch (e) {
                         falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
-                        log.warn(`Falha ao disparar (${contrato.nome}).`, { erro: String(e) });
+                        log.warn(`Falha ao disparar tiro de elite (${contrato.nome}).`, { erro: String(e) });
                     }
                 }
             }
         } catch (err) {
-            log.warn('A rodada tropeçou; sigo na próxima.', { erro: err instanceof Error ? err.message : String(err) });
+            log.warn('Tropeço rápido na rede, reiniciando milissegundo seguinte.', { erro: err instanceof Error ? err.message : String(err) });
         }
-        await dormir(SEG * 1000);
     }
 }
 
@@ -535,9 +476,9 @@ if (require.main === module && exigirAtivacao('cacarAoVivo')) {
                 }
                 log.warn('O laço terminou sem erro, o que não devia acontecer. Reiniciando.');
             } catch (e) {
-                log.warn('O caçador tropeçou; reiniciando em 30s.', { erro: (e as Error).message });
+                log.warn('O caçador tropeçou; reiniciando em 1 segundo.', { erro: (e as Error).message });
             }
-            await dormir(30_000);
+            await dormir(1000);
         }
     })();
 }
