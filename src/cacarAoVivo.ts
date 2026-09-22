@@ -408,8 +408,7 @@ async function principal(): Promise<'parar' | void> {
                     if (jaFalhou >= MAX_POR_ALVO) continue;
                     if (enviados >= MAX_ENVIOS) continue;
 
-                    // GESTÃO DINÂMICA DE GÁS MEV (GUERRA DE LANCES)
-                    const piso = (lucroCruValido * 80n) / 100n; // Exige reter no mínimo 80% do lucro total no contrato (Slippage)
+                    const piso = (lucroCruValido * 80n) / 100n;
                     
                     const envio = contrato.tipo === 'V1'
                         ? codificarCacaV1({
@@ -429,7 +428,6 @@ async function principal(): Promise<'parar' | void> {
                             lucroMinimo: piso,
                           });
                     
-                    // 1. Estima o limite de gás (adiciona 20% de folga para não reverter por falta de gás)
                     let limiteGas = 2000000n;
                     try {
                         const estimativa = await carteira.estimateGas({ to: contrato.endereco, data: envio });
@@ -438,22 +436,19 @@ async function principal(): Promise<'parar' | void> {
                         log.warn('Falha ao estimar gás, usando teto padrão de 2M.');
                     }
 
-                    // 2. Calcula o Bribe (Gorjeta) usando 40% do lucro estimado (se for WETH)
                     let gorjetaTotal = (lucroCruValido * 40n) / 100n;
                     let prioridadePorGas = gorjetaTotal / limiteGas;
 
-                    // 3. Define Limites de Segurança do Bribe (Mínimo de 0.1 Gwei e Máximo de 50 Gwei)
-                    // (Isso protege o bot caso o lucro retornado seja em USDC, que tem menos decimais)
                     const pisoGwei = 100000000n; 
                     const tetoGwei = 50000000000n; 
                     
                     if (prioridadePorGas < pisoGwei) prioridadePorGas = pisoGwei;
                     if (prioridadePorGas > tetoGwei) prioridadePorGas = tetoGwei;
 
-                    // 4. Calcula o Max Fee total dinâmico
+                    // CORREÇÃO: Uso de maxFeePerGas seguro do Ethers v6
                     const feeData = await (carteira.provider as JsonRpcProvider).getFeeData();
-                    const lastBaseFee = feeData.lastBaseFeePerGas ?? 10000000n;
-                    const maxFee = (lastBaseFee * 2n) + prioridadePorGas;
+                    const baseFeeRecomendado = feeData.maxFeePerGas ?? 20000000n;
+                    const maxFee = baseFeeRecomendado + prioridadePorGas;
 
                     enviados += 1;
                     try {
