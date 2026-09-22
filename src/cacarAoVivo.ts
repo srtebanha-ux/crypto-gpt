@@ -118,14 +118,14 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
     return fora;
 }
 
-// ATUALIZADO: Modo Turbo com concorrência para a varredura inicial
+// Modo Turbo com concorrência para a varredura inicial
 async function juntarDevedores(topo: number, blocoInicial?: number): Promise<string[]> {
     const vistos = new Set<string>();
     const inicio = blocoInicial !== undefined ? Math.max(0, blocoInicial) : Math.max(0, topo - BLOCOS + 1);
     const faixas = faixasDeBlocos(inicio, topo, PEDACO);
     let falhas = 0;
 
-    // Dispara chamadas ao RPC em lotes paralelos (acelera a leitura em 5x)
+    // Dispara chamadas ao RPC em lotes paralelos
     const CONCORRENCIA = 5; 
 
     if (faixas.length > 10) {
@@ -168,7 +168,6 @@ async function juntarDevedores(topo: number, blocoInicial?: number): Promise<str
             });
         }
         
-        // Pausa apenas 1 vez por lote para respeitar os limites gerais da rede
         if (i + CONCORRENCIA < faixas.length) {
             await dormir(PAUSA_MS);
         }
@@ -311,7 +310,7 @@ async function principal(): Promise<'parar' | void> {
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
 
     let ultimaColeta = Date.now();
-    let ultimoTopoLido = topo; // Guarda onde parámos para ler só o que é novo depois
+    let ultimoTopoLido = topo; 
     const falhasPorAlvo = new Map<string, number>();
     let enviados = 0;
 
@@ -419,6 +418,14 @@ async function principal(): Promise<'parar' | void> {
 
                 naMira = perto;
                 ultimaRonda = Date.now();
+
+                // O LOG DE VIDA DO BOT QUE ESTAVA FALTANDO!
+                log.info('RONDA COMPLETA (Radar Elite).', {
+                    olhados: olharAgora.length,
+                    naBorda: naMira.length,
+                    jaLiquidaveis: caidos.length,
+                    limiar: `${LIMIAR}% de queda`
+                });
             }
 
             if (caidos.length === 0) {
