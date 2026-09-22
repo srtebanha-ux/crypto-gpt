@@ -118,47 +118,62 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
     return fora;
 }
 
-// NOVO: Adicionado blocoInicial para suportar varredura incremental rápida
+// ATUALIZADO: Modo Turbo com concorrência para a varredura inicial
 async function juntarDevedores(topo: number, blocoInicial?: number): Promise<string[]> {
     const vistos = new Set<string>();
     const inicio = blocoInicial !== undefined ? Math.max(0, blocoInicial) : Math.max(0, topo - BLOCOS + 1);
     const faixas = faixasDeBlocos(inicio, topo, PEDACO);
     let falhas = 0;
 
+    // Dispara chamadas ao RPC em lotes paralelos (acelera a leitura em 5x)
+    const CONCORRENCIA = 5; 
+
     if (faixas.length > 10) {
-        const minutos = ((faixas.length * (PAUSA_MS + 700)) / 60_000).toFixed(0);
-        log.info('Juntando histórico de devedores — isto demora na primeira vez.', {
+        const lotes = Math.ceil(faixas.length / CONCORRENCIA);
+        const minutos = ((lotes * (PAUSA_MS + 700)) / 60_000).toFixed(1);
+        log.info('Juntando histórico de devedores (Modo Turbo - Multithread).', {
             faixas: faixas.length,
             janela: `${BLOCOS} blocos = ${((BLOCOS * 2) / 86400).toFixed(1)} dias`,
             estimativa: `~${minutos} minutos`,
+            velocidade: `${CONCORRENCIA} chamadas em paralelo`
         });
     }
 
     let lidas = 0;
-    for (const [a, b] of faixas) {
-        try {
-            const logs = await chamar<Array<{ topics: string[] }>>('eth_getLogs', [
-                {
-                    address: REDE.pool,
-                    fromBlock: `0x${a.toString(16)}`,
-                    toBlock: `0x${b.toString(16)}`,
-                    topics: [TOPIC_BORROW],
-                },
-            ]);
-            for (const d of devedoresDosEventos(logs)) vistos.add(d);
-        } catch {
-            falhas += 1;
-        }
-        lidas += 1;
-        if (lidas % 100 === 0 && faixas.length > 100) {
-            log.info('Progresso da varredura profunda.', {
+    for (let i = 0; i < faixas.length; i += CONCORRENCIA) {
+        const lote = faixas.slice(i, i + CONCORRENCIA);
+        
+        await Promise.all(lote.map(async ([a, b]) => {
+            try {
+                const logs = await chamar<Array<{ topics: string[] }>>('eth_getLogs', [
+                    {
+                        address: REDE.pool,
+                        fromBlock: `0x${a.toString(16)}`,
+                        toBlock: `0x${b.toString(16)}`,
+                        topics: [TOPIC_BORROW],
+                    },
+                ]);
+                for (const d of devedoresDosEventos(logs)) vistos.add(d);
+            } catch {
+                falhas += 1;
+            }
+        }));
+        
+        lidas += lote.length;
+        if (faixas.length > 10 && (lidas % (CONCORRENCIA * 5) === 0 || lidas === faixas.length)) {
+            log.info('Progresso da varredura acelerada.', {
                 lidas: `${lidas} de ${faixas.length}`,
                 devedoresAteAgora: vistos.size,
                 falhas,
             });
         }
-        await dormir(PAUSA_MS);
+        
+        // Pausa apenas 1 vez por lote para respeitar os limites gerais da rede
+        if (i + CONCORRENCIA < faixas.length) {
+            await dormir(PAUSA_MS);
+        }
     }
+    
     if (falhas > 0) {
         log.warn('Algumas faixas de blocos falharam.', { falharam: `${falhas} de ${faixas.length}` });
     }
