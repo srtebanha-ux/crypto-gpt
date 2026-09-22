@@ -114,7 +114,6 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
     return fora;
 }
 
-// Modo Turbo com concorrência para a varredura inicial
 async function juntarDevedores(topo: number, blocoInicial?: number): Promise<string[]> {
     const vistos = new Set<string>();
     const inicio = blocoInicial !== undefined ? Math.max(0, blocoInicial) : Math.max(0, topo - BLOCOS + 1);
@@ -227,8 +226,8 @@ async function montarAlvos(
 async function principal(): Promise<'parar' | void> {
     const poolDeVendaV1 = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
 
-    log.info(ENVIAR ? '*** MODO ENVIO (NÍVEL MEV ELITE) — GASTO DE GÁS REAL. ***' : '*** MODO MEDIÇÃO (NÍVEL MEV ELITE) — NENHUM GÁS GASTO. ***');
-    log.info('Sincronização Ativa de Blocos Ligada. Zero pausas, Zero timers.', {
+    log.info(ENVIAR ? '*** MODO ENVIO (MEV ELITE + GUERRA DE GÁS) — GASTO REAL. ***' : '*** MODO MEDIÇÃO (MEV ELITE + GUERRA DE GÁS) — NENHUM GÁS GASTO. ***');
+    log.info('Injeção Dinâmica de Bribe Ativada. Bot configurado para atropelar concorrência.', {
         rede: REDE.nome,
         contratoV1: CONTRATOS_ATIVOS[0].endereco,
         contratoV2: CONTRATOS_ATIVOS[1].endereco
@@ -291,7 +290,6 @@ async function principal(): Promise<'parar' | void> {
     });
     const precos = new Map<string, Decimal>();
 
-    // Varredura Inicial Profunda
     let devedores = await juntarDevedores(topo);
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
 
@@ -301,11 +299,10 @@ async function principal(): Promise<'parar' | void> {
     const falhasPorAlvo = new Map<string, number>();
     let enviados = 0;
 
-    log.info('Operação Elite Iniciada. Aguardando novos blocos na rede Base...', { alvosRegistados: devedores.length });
+    log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
 
     for (;;) {
         try {
-            // ATUALIZAÇÃO INCREMENTAL DE NOVOS DEVEDORES (Mantida em background)
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 const novoTopo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
                 if (novoTopo > ultimoBlocoColeta) {
@@ -317,11 +314,9 @@ async function principal(): Promise<'parar' | void> {
                 ultimaColeta = Date.now();
             }
 
-            // O CORAÇÃO DO BOT MEV: Escuta de Blocos em Tempo Real (Polling Agressivo a cada 100ms)
             const blocoAtualStr = await chamar<string>('eth_blockNumber', []);
             const blocoAtual = Number.parseInt(blocoAtualStr, 16);
             
-            // Se o bloco ainda é o mesmo que já lemos, dorme míseros 100ms e pergunta de novo
             if (blocoAtual <= ultimoBlocoLido) {
                 await dormir(100); 
                 continue;
@@ -330,15 +325,12 @@ async function principal(): Promise<'parar' | void> {
             ultimoBlocoLido = blocoAtual;
             const msInicioBlock = Date.now();
 
-            // BLOCO NOVO CHEGOU! Puxa preços e todas as contas simultaneamente via Multicall
             const chamadasMistas: Array<{ alvo: string; dados: string }> = [];
-            
             moedas.forEach((m) => chamadasMistas.push({ alvo: oraculo!, dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0') }));
             devedores.forEach((d) => chamadasMistas.push({ alvo: REDE.pool, dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0') }));
 
             const loteGigante = await lerEmLote(chamadasMistas);
             
-            // Atualiza preços
             for (let i = 0; i < moedas.length; i++) {
                 const dadoPreco = loteGigante[i];
                 if (dadoPreco) {
@@ -346,14 +338,12 @@ async function principal(): Promise<'parar' | void> {
                 }
             }
 
-            // Mapeia quem caiu no buraco
             const caidos: string[] = [];
             for (let i = 0; i < devedores.length; i++) {
                 const dadoConta = loteGigante[moedas.length + i];
                 if (!dadoConta) continue;
                 try {
                     const queda = quedaAteLiquidar(decodificarContaDoUsuario(dadoConta).saude);
-                    // Se a queda até liquidar for zero, o alvo está pronto para abate
                     if (queda !== null && queda.isZero()) {
                         caidos.push(devedores[i]);
                     }
@@ -362,9 +352,8 @@ async function principal(): Promise<'parar' | void> {
 
             const msFimBlock = Date.now();
             
-            // LOG DE TELEMETRIA: Imprime a velocidade de varredura a cada 10 blocos (aprox. 20 segundos)
             if (blocoAtual % 10 === 0) {
-                log.info(`[BLOCO ${blocoAtual}] Base de dados sincronizada na velocidade da luz.`, {
+                log.info(`[BLOCO ${blocoAtual}] Varredura Atômica Concluída.`, {
                     alvosChecados: devedores.length,
                     tempoDeResposta: `${msFimBlock - msInicioBlock}ms`,
                     alvosCaidos: caidos.length
@@ -403,15 +392,14 @@ async function principal(): Promise<'parar' | void> {
                         mensagem: 'mensagem' in r ? r.mensagem : undefined
                     });
 
-                    log.info(`[ALERTA DE FOGO] ALVO CAÍDO (${contrato.nome}) — medição executada.`, {
+                    log.info(`[ALERTA] Simulação executada para alvo caído (${contrato.nome}).`, {
                         bloco: blocoAtual,
                         devedor: alvo.devedor,
                         desfecho: leitura.desfecho,
                         lucroCru: leitura.lucroCru?.toString() ?? '-',
-                        erro: leitura.erro ?? '-',
                     });
 
-                    if (!ENVIAR || !carteira) continue;
+                    if (!ENVIAR || !carteira || !carteira.provider) continue;
                     if (leitura.desfecho !== 'mediu' || leitura.lucroCru === undefined || leitura.lucroCru === null || leitura.lucroCru === 0n) continue;
 
                     const lucroCruValido = leitura.lucroCru;
@@ -420,7 +408,9 @@ async function principal(): Promise<'parar' | void> {
                     if (jaFalhou >= MAX_POR_ALVO) continue;
                     if (enviados >= MAX_ENVIOS) continue;
 
-                    const piso = (lucroCruValido * 80n) / 100n;
+                    // GESTÃO DINÂMICA DE GÁS MEV (GUERRA DE LANCES)
+                    const piso = (lucroCruValido * 80n) / 100n; // Exige reter no mínimo 80% do lucro total no contrato (Slippage)
+                    
                     const envio = contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
@@ -439,20 +429,50 @@ async function principal(): Promise<'parar' | void> {
                             lucroMinimo: piso,
                           });
                     
+                    // 1. Estima o limite de gás (adiciona 20% de folga para não reverter por falta de gás)
+                    let limiteGas = 2000000n;
+                    try {
+                        const estimativa = await carteira.estimateGas({ to: contrato.endereco, data: envio });
+                        limiteGas = (estimativa * 120n) / 100n;
+                    } catch {
+                        log.warn('Falha ao estimar gás, usando teto padrão de 2M.');
+                    }
+
+                    // 2. Calcula o Bribe (Gorjeta) usando 40% do lucro estimado (se for WETH)
+                    let gorjetaTotal = (lucroCruValido * 40n) / 100n;
+                    let prioridadePorGas = gorjetaTotal / limiteGas;
+
+                    // 3. Define Limites de Segurança do Bribe (Mínimo de 0.1 Gwei e Máximo de 50 Gwei)
+                    // (Isso protege o bot caso o lucro retornado seja em USDC, que tem menos decimais)
+                    const pisoGwei = 100000000n; 
+                    const tetoGwei = 50000000000n; 
+                    
+                    if (prioridadePorGas < pisoGwei) prioridadePorGas = pisoGwei;
+                    if (prioridadePorGas > tetoGwei) prioridadePorGas = tetoGwei;
+
+                    // 4. Calcula o Max Fee total dinâmico
+                    const feeData = await (carteira.provider as JsonRpcProvider).getFeeData();
+                    const lastBaseFee = feeData.lastBaseFeePerGas ?? 10000000n;
+                    const maxFee = (lastBaseFee * 2n) + prioridadePorGas;
+
                     enviados += 1;
                     try {
                         const tx = await carteira.sendTransaction({ 
                             to: contrato.endereco, 
                             data: envio,
-                            nonce: nonceAtual++
+                            nonce: nonceAtual++,
+                            gasLimit: limiteGas,
+                            maxPriorityFeePerGas: prioridadePorGas,
+                            maxFeePerGas: maxFee
                         });
                         
                         falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
                         
-                        log.info(`[FOGUETE MEV] CAÇADA DISPARADA (${contrato.nome}) INSTANTANEAMENTE!`, { 
+                        log.info(`[FOGUETE MEV] TIRO DE ELITE DISPARADO! (${contrato.nome})`, { 
                             bloco: blocoAtual,
                             devedor: alvo.devedor, 
-                            hash: tx.hash 
+                            hash: tx.hash,
+                            gorjetaOfertadaGwei: (Number(prioridadePorGas) / 1e9).toFixed(3)
                         });
                     } catch (e) {
                         falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
