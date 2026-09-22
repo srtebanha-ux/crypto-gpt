@@ -330,7 +330,7 @@ async function principal(): Promise<'parar' | void> {
             ultimoBlocoLido = blocoAtual;
             const msInicioBlock = Date.now();
 
-            // BLOCO NOVO CHEGOU! Puxa preços e todas as 3800+ contas simultaneamente via Multicall
+            // BLOCO NOVO CHEGOU! Puxa preços e todas as contas simultaneamente via Multicall
             const chamadasMistas: Array<{ alvo: string; dados: string }> = [];
             
             moedas.forEach((m) => chamadasMistas.push({ alvo: oraculo!, dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0') }));
@@ -352,9 +352,9 @@ async function principal(): Promise<'parar' | void> {
                 const dadoConta = loteGigante[moedas.length + i];
                 if (!dadoConta) continue;
                 try {
-                    const contaInfo = decodificarContaDoUsuario(dadoConta);
-                    // Se o Health Factor for menor que 1 ether (10^18), está liquidável
-                    if (contaInfo.saude < 1000000000000000000n) {
+                    const queda = quedaAteLiquidar(decodificarContaDoUsuario(dadoConta).saude);
+                    // Se a queda até liquidar for zero, o alvo está pronto para abate
+                    if (queda !== null && queda.isZero()) {
                         caidos.push(devedores[i]);
                     }
                 } catch {}
