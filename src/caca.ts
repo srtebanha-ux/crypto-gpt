@@ -82,7 +82,8 @@ export function lerRespostaDaCaca(r: { ok: boolean; dados: string; mensagem?: st
 
 export function isDevedorIgnorado(devedor: string): boolean {
     const ignorados = new Set<string>([
-        // adicione aqui se houver algum devedor irrelevante conhecido
+        // Lista de devedores "zumbis" ou com posições poeira impossíveis de liquidar
+        '0xf20e421cf0b314d61177466d3c9c0cb5e1342ecb',
     ]);
     return ignorados.has(devedor.toLowerCase());
 }
