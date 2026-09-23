@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos } from './liquidacoes';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
-import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
+import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, decodificarAggregate3Rapido, partirEmPedacos } from './multicall';
 import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado } from './caca';
@@ -152,7 +152,10 @@ async function chamarCruComPaciencia(
 }
 
 /** Quantos multicalls voam juntos. O mesmo numero que a varredura ja usa. */
-const MULTICALLS_EM_PARALELO = Number(process.env.CACA_PARALELO ?? '5');
+// Igual ao tamanho do pool, e nao menos. Com 5 aqui e 12 conexoes abertas, o
+// bot estrangulava a si mesmo: a medicao deu 5.840ms de rede somados dentro de
+// 1.225ms de rede real — 4,8x de paralelismo, exatamente o 5 daqui.
+const MULTICALLS_EM_PARALELO = Number(process.env.CACA_PARALELO ?? String(CONEXOES_POR_SERVIDOR));
 
 /**
  * Le tudo em multicalls, varios ao mesmo tempo.
@@ -194,7 +197,7 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
                     ]);
                     msRede += Date.now() - t0;
                     const t1 = Date.now();
-                    const rs = decodificarAggregate3(bruto);
+                    const rs = decodificarAggregate3Rapido(bruto);
                     porPedaco[posicao] = pedaco.map((_, k) => (rs[k]?.ok ? rs[k].dados : null));
                     msDecode += Date.now() - t1;
                 } catch (e) {

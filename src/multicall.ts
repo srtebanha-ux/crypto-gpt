@@ -61,6 +61,53 @@ export interface RespostaMulti {
     dados: string;
 }
 
+/**
+ * O mesmo que `decodificarAggregate3`, fatiando o hexadecimal na mao.
+ *
+ * O ethers decodifica `tuple(bool,bytes)[]` de forma generica, e generico
+ * custa: medido no caçador, 841ms para 34 respostas de 250 leituras — 41% do
+ * tempo de varrer um bloco, e tempo de CPU, que trava o processo inteiro
+ * enquanto roda. Um bloco da Base dura 2.000ms.
+ *
+ * Aqui o formato e conhecido e fixo, entao da para andar direto pelas
+ * posicoes. O layout ABI de um array dinamico de tuplas com campo dinamico:
+ *
+ *   [0]        deslocamento ate o array (sempre 0x20 na resposta do aggregate3)
+ *   [base]     quantidade de itens
+ *   [base+1+i] deslocamento do item i, contado a partir de `base+1`
+ *   no item:   bool ok, depois o deslocamento dos bytes, contado do inicio do item
+ *   nos bytes: tamanho, depois o conteudo
+ *
+ * Existe ao lado do original de proposito: o teste compara os dois sobre a
+ * mesma resposta. Um decodificador rapido que discorda do lento nao e rapido,
+ * e errado — e erraria em silencio, devolvendo a saude de uma pessoa no lugar
+ * da de outra.
+ */
+export function decodificarAggregate3Rapido(dataHex: string): RespostaMulti[] {
+    const hex = dataHex.replace(/^0x/, '');
+    const palavra = (i: number) => hex.slice(i * 64, (i + 1) * 64);
+    const numero = (i: number) => Number(BigInt(`0x${palavra(i)}`));
+
+    // A resposta inteira e um unico valor dinamico: a primeira palavra aponta
+    // para onde o array comeca, em bytes.
+    const base = numero(0) / 32;
+    const quantos = numero(base);
+    const fora: RespostaMulti[] = new Array(quantos);
+
+    for (let i = 0; i < quantos; i += 1) {
+        // Deslocamento do item, em bytes, a partir da palavra seguinte ao
+        // tamanho do array.
+        const item = base + 1 + numero(base + 1 + i) / 32;
+        const ok = palavra(item).endsWith('1');
+        // Dentro do item: [0] ok, [1] deslocamento dos bytes a partir do item.
+        const bytes = item + numero(item + 1) / 32;
+        const tamanho = numero(bytes);
+        const inicio = (bytes + 1) * 64;
+        fora[i] = { ok, dados: `0x${hex.slice(inicio, inicio + tamanho * 2)}` };
+    }
+    return fora;
+}
+
 export function decodificarAggregate3(dataHex: string): RespostaMulti[] {
     const [lista] = coder.decode(['tuple(bool,bytes)[]'], dataHex) as unknown as [
         Array<[boolean, string]>,

@@ -7,6 +7,7 @@ import {
     SELETOR_AGGREGATE3,
     codificarAggregate3,
     decodificarAggregate3,
+    decodificarAggregate3Rapido,
     partirEmPedacos,
 } from './multicall';
 
@@ -101,4 +102,41 @@ test('o pedaço padrão caiu de 500 para 250, e a conta continua fechando', () =
     assert.equal(pedacos.flat().length, 8242, 'ninguém pode se perder na divisão');
     // Ainda rápido: dezenas de chamadas, não milhares.
     assert.ok(pedacos.length < 50, `${pedacos.length} chamadas é demais`);
+});
+
+test('o decodificador rápido concorda com o do ethers, item a item', () => {
+    // Um decodificador rápido que discorda do lento não é rápido, é errado —
+    // e erraria em silêncio, devolvendo a saúde de uma pessoa no lugar da de
+    // outra. Este teste é a única coisa que autoriza usar o rápido.
+    const casos: Array<Array<{ ok: boolean; dados: string }>> = [
+        [],
+        [{ ok: true, dados: '0x' }],
+        [{ ok: false, dados: '0xdeadbeef' }],
+        [
+            { ok: true, dados: '0x' + '11'.repeat(32) },
+            { ok: false, dados: '0x' },
+            { ok: true, dados: '0x' + 'ab'.repeat(96) },
+            { ok: true, dados: '0x' + 'cd'.repeat(7) },
+        ],
+    ];
+    for (const caso of casos) {
+        const bruto = AbiCoder.defaultAbiCoder().encode(
+            ['tuple(bool,bytes)[]'],
+            [caso.map((c) => [c.ok, c.dados])],
+        );
+        assert.deepEqual(decodificarAggregate3Rapido(bruto), decodificarAggregate3(bruto));
+        assert.deepEqual(decodificarAggregate3Rapido(bruto), caso);
+    }
+});
+
+test('o rápido aguenta uma resposta do tamanho que a varredura usa', () => {
+    const muitos = Array.from({ length: 250 }, (_, i) => ({
+        ok: i % 7 !== 0,
+        dados: '0x' + i.toString(16).padStart(64, '0'),
+    }));
+    const bruto = AbiCoder.defaultAbiCoder().encode(
+        ['tuple(bool,bytes)[]'],
+        [muitos.map((c) => [c.ok, c.dados])],
+    );
+    assert.deepEqual(decodificarAggregate3Rapido(bruto), muitos);
 });
