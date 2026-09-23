@@ -4,6 +4,7 @@ import { Wallet, JsonRpcProvider } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos } from './liquidacoes';
+import { abrirConexoes, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
@@ -182,10 +183,20 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
                     ]);
                     const rs = decodificarAggregate3(bruto);
                     porPedaco[posicao] = pedaco.map((_, k) => (rs[k]?.ok ? rs[k].dados : null));
-                } catch {
+                } catch (e) {
                     // Um pedaco que falha vira buracos, nao uma lista curta:
                     // lista curta desalinharia todas as posicoes seguintes.
+                    //
+                    // E precisa GRITAR. Sao ate 250 posicoes que somem de uma
+                    // vez, e sumir em silencio significa nao ver quem caiu
+                    // enquanto o log mostra uma varredura completa.
                     porPedaco[posicao] = pedaco.map(() => null);
+                    log.warn('Um pedaço da varredura não foi lido.', {
+                        posicoesPerdidas: pedaco.length,
+                        de: chamadas.length,
+                        erro: (e as Error).message.slice(0, 120),
+                        consequencia: 'quem estiver nessas posições não é visto neste bloco',
+                    });
                 }
             }),
         );
@@ -316,7 +327,11 @@ async function principal(): Promise<'parar' | void> {
     const poolDeVendaV1 = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
 
     log.info(ENVIAR ? '*** MODO ENVIO (MEV ELITE + GUERRA DE GÁS) — GASTO REAL. ***' : '*** MODO MEDIÇÃO (MEV ELITE + GUERRA DE GÁS) — NENHUM GÁS GASTO. ***');
+    // Sem isto o `Promise.all` e decorativo: o fetch do Node enfileira tudo
+    // numa conexao so, e o log diz "paralelo" enquanto a rede faz fila.
+    abrirConexoes();
     log.info('Injeção Dinâmica de Bribe Ativada. Bot configurado para atropelar concorrência.', {
+        conexoesSimultaneas: CONEXOES_POR_SERVIDOR,
         rede: REDE.nome,
         contratoV1: CONTRATOS_ATIVOS[0].endereco,
         contratoV2: CONTRATOS_ATIVOS[1].endereco
