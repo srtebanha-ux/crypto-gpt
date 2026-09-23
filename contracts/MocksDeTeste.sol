@@ -206,3 +206,31 @@ contract ParSolidlyFalso {
         r1 = saldo1 - out1;
     }
 }
+
+/** Duble de roteador Aerodrome: respeita amountOutMin, como o de verdade. */
+contract RoteadorAerodromeFalso {
+    struct Route { address from; address to; bool stable; address factory; }
+
+    /** Quanto ele devolve por unidade entregue, em decimos de milesimo. */
+    uint256 public taxaDeCambioBps = 10_000;
+
+    function definirCambio(uint256 bps) external { taxaDeCambioBps = bps; }
+
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        Route[] calldata routes,
+        address to,
+        uint256
+    ) external returns (uint256[] memory amounts) {
+        TokenFalso(routes[0].from).transferFrom(msg.sender, address(this), amountIn);
+        uint256 saida = (amountIn * taxaDeCambioBps) / 10_000;
+        // A checagem que um roteador de verdade faz, e que `amountOutMin = 0`
+        // desligava por completo.
+        require(saida >= amountOutMin, "Router: saida abaixo do minimo");
+        TokenFalso(routes[0].to).transfer(to, saida);
+        amounts = new uint256[](2);
+        amounts[0] = amountIn;
+        amounts[1] = saida;
+    }
+}
