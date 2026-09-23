@@ -167,22 +167,36 @@ const MULTICALLS_EM_PARALELO = Number(process.env.CACA_PARALELO ?? '5');
  * faria o bot ler a saude de uma pessoa achando que e de outra. Entao os
  * pedacos vao em ondas, e cada onda devolve seus resultados no lugar certo.
  */
+/** O ultimo relogio da varredura, para o log do bloco dizer onde o tempo foi. */
+export let ultimaMedicao = { total: 0, msRede: 0, msDecode: 0, pedacos: 0 };
+
 async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Promise<Array<string | null>> {
     const pedacos = partirEmPedacos(chamadas, CHAMADAS_POR_MULTICALL);
     const porPedaco: Array<Array<string | null>> = new Array(pedacos.length);
+    // Dois relogios separados. O pool de conexoes nao mudou nada (3.440ms ->
+    // 3.415ms), e "nao mudou nada" e uma pista: se o tempo fosse de rede,
+    // doze conexoes teriam mudado. Medir REDE e DECODIFICACAO em separado
+    // responde de uma vez, em vez de eu chutar um terceiro conserto.
+    let msRede = 0;
+    let msDecode = 0;
+    const inicioTotal = Date.now();
 
     for (let i = 0; i < pedacos.length; i += MULTICALLS_EM_PARALELO) {
         const onda = pedacos.slice(i, i + MULTICALLS_EM_PARALELO);
         await Promise.all(
             onda.map(async (pedaco, j) => {
                 const posicao = i + j;
+                const t0 = Date.now();
                 try {
                     const bruto = await chamar<string>('eth_call', [
                         { to: MULTICALL3, data: codificarAggregate3(pedaco) },
                         'latest',
                     ]);
+                    msRede += Date.now() - t0;
+                    const t1 = Date.now();
                     const rs = decodificarAggregate3(bruto);
                     porPedaco[posicao] = pedaco.map((_, k) => (rs[k]?.ok ? rs[k].dados : null));
+                    msDecode += Date.now() - t1;
                 } catch (e) {
                     // Um pedaco que falha vira buracos, nao uma lista curta:
                     // lista curta desalinharia todas as posicoes seguintes.
@@ -202,6 +216,11 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
         );
     }
 
+    const total = Date.now() - inicioTotal;
+    // Somados dao mais que o total quando as chamadas correm juntas — e isso
+    // mesmo e a resposta: se `msRede` somar muito acima do total, a rede esta
+    // paralela e o gargalo e outro.
+    ultimaMedicao = { total, msRede, msDecode, pedacos: pedacos.length };
     return porPedaco.flat();
 }
 
@@ -465,6 +484,9 @@ async function principal(): Promise<'parar' | void> {
                 log.info(`[BLOCO ${blocoAtual}] Varredura Atômica Concluída.`, {
                     alvosChecados: devedores.length,
                     tempoDeResposta: `${msFimBlock - msInicioBlock}ms`,
+                    ondeFoiOTempo:
+                        `rede ${ultimaMedicao.msRede}ms somados / decodificação ${ultimaMedicao.msDecode}ms ` +
+                        `em ${ultimaMedicao.pedacos} multicalls`,
                     alvosCaidos: caidos.length
                 });
             }
