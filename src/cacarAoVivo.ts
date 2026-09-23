@@ -61,13 +61,50 @@ export function maiorQuedaDesdeABase(base: Map<string, Decimal>, agora: Map<stri
  * tambem derrubam, e nenhum dos dois aparece no oraculo. Confiar so no gatilho
  * seria ficar cego para quem cai parado.
  */
-export function precisaVarrerTudo(
+export type Varredura = 'nenhuma' | 'quentes' | 'completa';
+
+/**
+ * Qual varredura este ciclo merece.
+ *
+ * A ordem importa, e o caso do meio e o que fecha o buraco: quem esta longe de
+ * cair NAO esta na lista quente, entao uma queda grande o bastante para
+ * alcancar os de fora tem que forcar a varredura completa. Sem isso um tombo
+ * de 30% no mercado seria respondido lendo so os que ja estavam por um fio.
+ */
+export function qualVarredura(
     maiorQueda: Decimal,
     menorQueda: Decimal,
-    blocosDesdeACompleta: number,
-    blocosEntreCompletas: number,
-): boolean {
-    return maiorQueda.greaterThanOrEqualTo(menorQueda) || blocosDesdeACompleta >= blocosEntreCompletas;
+    margemQuente: number,
+    msDesdeACompleta: number,
+    msEntreCompletas: number,
+): Varredura {
+    if (msDesdeACompleta >= msEntreCompletas) return 'completa';
+    if (maiorQueda.greaterThanOrEqualTo(margemQuente)) return 'completa';
+    if (maiorQueda.greaterThanOrEqualTo(menorQueda)) return 'quentes';
+    return 'nenhuma';
+}
+
+/**
+ * Quanto custa um mes deste desenho, em Unidades de Computacao da Alchemy.
+ *
+ * Existe porque "acho que cabe" ja nos custou dois dias de orcamento. O teto
+ * e um numero; o gasto tem que ser um numero tambem, conferivel por teste.
+ */
+export const CU_POR_CHAMADA = 26;
+export function custoMensalEmCUs(entrada: {
+    intervaloMs: number;
+    devedores: number;
+    quentes: number;
+    chamadasPorMulticall: number;
+    minutosEntreCompletas: number;
+    fracaoQueDisparaQuentes: number;
+}): number {
+    const ciclosNoMes = (30 * 24 * 60 * 60 * 1000) / entrada.intervaloMs;
+    const multicalls = (n: number) => Math.ceil(n / entrada.chamadasPorMulticall);
+    const precos = ciclosNoMes * CU_POR_CHAMADA;
+    const completas = ((30 * 24 * 60) / entrada.minutosEntreCompletas) * multicalls(entrada.devedores) * CU_POR_CHAMADA;
+    const quentes = ciclosNoMes * entrada.fracaoQueDisparaQuentes * multicalls(entrada.quentes) * CU_POR_CHAMADA;
+    return Math.round(precos + completas + quentes);
 }
 import { POOLS } from './contratos';
 
@@ -77,7 +114,9 @@ const SELETOR_DECIMALS = '0x313ce567';
 const SELETOR_ADDRESSES_PROVIDER = '0x0542975c';
 const SELETOR_GET_POOL_DATA_PROVIDER = '0xe860accb';
 const SELETOR_GET_PRICE_ORACLE = '0xfca513a8';
-const SELETOR_GET_ASSET_PRICE = '0xb3596f07'; 
+const SELETOR_GET_ASSET_PRICE = '0xb3596f07';
+/** Multicall3.getBlockNumber() — vem de carona no mesmo eth_call dos preços. */
+const SELETOR_BLOCO_DO_MULTICALL = '0x42cbb15c';
 
 const REDE_ESCOLHIDA = (process.env.CACA_REDE ?? 'base').toLowerCase();
 const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
@@ -196,16 +235,34 @@ async function chamarCruComPaciencia(
 // Igual ao tamanho do pool, e nao menos. Com 5 aqui e 12 conexoes abertas, o
 // bot estrangulava a si mesmo: a medicao deu 5.840ms de rede somados dentro de
 // 1.225ms de rede real — 4,8x de paralelismo, exatamente o 5 daqui.
-/**
- * De quantos em quantos blocos a varredura completa acontece de qualquer jeito.
- *
- * 30 blocos sao uns 60 segundos na Base. Preco nao e a unica coisa que derruba
- * uma posicao — juros correndo e emprestimo novo tambem — e nenhum dos dois
- * aparece no oraculo.
- */
-const BLOCOS_ENTRE_COMPLETAS = Number(process.env.CACA_BLOCOS_COMPLETA ?? '30');
-
 const MULTICALLS_EM_PARALELO = Number(process.env.CACA_PARALELO ?? String(CONEXOES_POR_SERVIDOR));
+
+/**
+ * De quanto em quanto tempo o bot acorda.
+ *
+ * O orçamento manda aqui. O teto da conta e de 20M CUs/mes, o que da 15,4 CUs
+ * por bloco da Base — menos que UM `eth_call`, que custa 26. Acordar todo
+ * bloco e impossivel por definicao, nao por desempenho.
+ *
+ * A 8 segundos sao 324 mil ciclos no mes: 8,4M CUs so de preco, e o resto
+ * cabe. O preco disso e ate 8 segundos de atraso para ver alguem cair — o que
+ * nao muda a chance real de ganhar. Quem leva 3.166 das 5.043 liquidacoes da
+ * Base nao e batido por milissegundos; o que sobra para os pequenos e a
+ * liquidacao grande que os grandes nao conseguem vender.
+ */
+const INTERVALO_MS = Number(process.env.CACA_INTERVALO_MS ?? '8000');
+
+/** De quanto em quanto tempo TODAS as posicoes sao relidas, custe o que custar. */
+const MINUTOS_ENTRE_COMPLETAS = Number(process.env.CACA_MINUTOS_COMPLETA ?? '60');
+
+/**
+ * Quem esta a menos disso de ser liquidado entra na lista quente.
+ *
+ * A varredura completa le 8.368 posicoes (34 multicalls, 884 CUs). A lista
+ * quente le algumas centenas (2 a 4 multicalls). A esmagadora maioria dos
+ * devedores dos ultimos 30 dias esta longe demais para cair na proxima hora.
+ */
+const MARGEM_QUENTE = Number(process.env.CACA_MARGEM_QUENTE ?? '25');
 
 /**
  * Le tudo em multicalls, varios ao mesmo tempo.
@@ -475,7 +532,10 @@ async function principal(): Promise<'parar' | void> {
     const precosDaBase = new Map<string, Decimal>();
     /** A menor distancia ate liquidar vista na ultima varredura: o gatilho. */
     let menorQueda = new Decimal(0);
+    /** Quando a ultima varredura completa aconteceu, em relogio e nao em bloco. */
     let ultimoCompleto = 0;
+    /** Os que estao perto de cair: a lista que o gatilho de preco relê. */
+    let quentes: string[] = [];
 
     let devedores = await juntarDevedores(topo);
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
@@ -489,6 +549,7 @@ async function principal(): Promise<'parar' | void> {
     log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
 
     for (;;) {
+        const inicioDoCiclo = Date.now();
         try {
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 const novoTopo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
@@ -501,83 +562,102 @@ async function principal(): Promise<'parar' | void> {
                 ultimaColeta = Date.now();
             }
 
-            const blocoAtualStr = await chamar<string>('eth_blockNumber', []);
-            const blocoAtual = Number.parseInt(blocoAtualStr, 16);
-            
-            if (blocoAtual <= ultimoBlocoLido) {
-                await dormir(100); 
-                continue;
-            }
-            
-            ultimoBlocoLido = blocoAtual;
-            const msInicioBlock = Date.now();
-
-            // PRIMEIRO os precos, que sao 15 leituras e cabem num multicall so.
-            // Varrer os 8.368 devedores custa 34 multicalls e 1,6 segundo — 83%
-            // de um bloco da Base — e na maioria dos blocos ninguem pode ter
-            // caido, porque ninguem cai sem o preco se mexer.
-            const chamadasDePreco = moedas.map((m) => ({
-                alvo: oraculo!,
-                dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0'),
-            }));
+            // UM eth_call por ciclo: o numero do bloco (de carona, no proprio
+            // Multicall3) e os 15 precos. 26 CUs. A varredura completa custa
+            // 884 e o orcamento do mes da 15,4 por bloco — por isso ela so
+            // acontece quando ha motivo, e nao a cada bloco.
+            const chamadasDePreco = [
+                { alvo: MULTICALL3, dados: SELETOR_BLOCO_DO_MULTICALL },
+                ...moedas.map((m) => ({
+                    alvo: oraculo!,
+                    dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0'),
+                })),
+            ];
             const respPrecos = await lerEmLote(chamadasDePreco);
 
+            let blocoAtual = ultimoBlocoLido;
+            try { if (respPrecos[0]) blocoAtual = Number(BigInt(respPrecos[0]!)); } catch {}
+            ultimoBlocoLido = blocoAtual;
+
             for (let i = 0; i < moedas.length; i++) {
-                if (!respPrecos[i]) continue;
+                const bruto = respPrecos[i + 1];
+                if (!bruto) continue;
                 try {
-                    precos.set(moedas[i].toLowerCase(), new Decimal(BigInt(respPrecos[i]!).toString()));
+                    precos.set(moedas[i].toLowerCase(), new Decimal(BigInt(bruto).toString()));
                 } catch {}
             }
 
             const maiorQueda = maiorQuedaDesdeABase(precosDaBase, precos);
-            if (!precisaVarrerTudo(maiorQueda, menorQueda, blocoAtual - ultimoCompleto, BLOCOS_ENTRE_COMPLETAS)) {
+            const varredura = qualVarredura(
+                maiorQueda,
+                menorQueda,
+                MARGEM_QUENTE,
+                Date.now() - ultimoCompleto,
+                MINUTOS_ENTRE_COMPLETAS * 60_000,
+            );
+
+            if (varredura === 'nenhuma') {
                 if (blocoAtual % 30 === 0) {
                     log.info(`[BLOCO ${blocoAtual}] Só preço — ninguém pode ter caído.`, {
                         maiorQuedaPct: `${maiorQueda.toFixed(4)}%`,
                         maisFragilA: `${menorQueda.toFixed(4)}%`,
-                        custou: `${Date.now() - msInicioBlock}ms`,
+                        naListaQuente: quentes.length,
+                        custou: `${Date.now() - inicioDoCiclo}ms`,
                     });
                 }
                 continue;
             }
-            ultimoCompleto = blocoAtual;
-            // A base anda junto com a varredura: a fragilidade lida agora vale
-            // a partir dos precos de agora.
-            precosDaBase.clear();
-            for (const [moeda, preco] of precos) precosDaBase.set(moeda, preco);
 
-            const chamadasContas = devedores.map((d) => ({
+            const aLer = varredura === 'completa' ? devedores : quentes;
+            if (aLer.length === 0) continue;
+            const loteGigante = await lerEmLote(aLer.map((d) => ({
                 alvo: REDE.pool,
                 dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
-            }));
-            const loteGigante = await lerEmLote(chamadasContas);
+            })));
 
             const caidos: string[] = [];
             let menorVista = new Decimal(100);
-            for (let i = 0; i < devedores.length; i++) {
+            const novosQuentes: string[] = [];
+            for (let i = 0; i < aLer.length; i++) {
                 const dadoConta = loteGigante[i];
                 if (!dadoConta) continue;
                 try {
                     const queda = quedaAteLiquidar(decodificarContaDoUsuario(dadoConta).saude);
                     if (queda === null) continue;
-                    if (queda.isZero()) caidos.push(devedores[i]);
+                    if (queda.isZero()) caidos.push(aLer[i]);
                     else if (queda.lessThan(menorVista)) menorVista = queda;
+                    if (queda.lessThanOrEqualTo(MARGEM_QUENTE)) novosQuentes.push(aLer[i]);
                 } catch {}
             }
             // Re-armar no que acabou de ser lido: sem isso o gatilho fica preso
-            // no valor da primeira varredura e dispara para sempre.
+            // no valor da primeira varredura e dispara para sempre. A base dos
+            // precos anda junto, pela mesma razao.
             if (menorVista.lessThan(100)) menorQueda = menorVista;
+            precosDaBase.clear();
+            for (const [moeda, preco] of precos) precosDaBase.set(moeda, preco);
 
-            const msFimBlock = Date.now();
-            
-            if (blocoAtual % 10 === 0) {
-                log.info(`[BLOCO ${blocoAtual}] Varredura Atômica Concluída.`, {
-                    alvosChecados: devedores.length,
-                    tempoDeResposta: `${msFimBlock - msInicioBlock}ms`,
+            // So a varredura completa pode REFAZER a lista quente: ela e a
+            // unica que olhou todo mundo. Uma varredura quente que reescrevesse
+            // a lista com o que ela mesma viu iria encolhendo a lista a cada
+            // passagem ate sobrar ninguem, e o bot ficaria cego sem avisar.
+            if (varredura === 'completa') {
+                quentes = novosQuentes;
+                ultimoCompleto = Date.now();
+                log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
+                    alvosChecados: aLer.length,
+                    naListaQuente: quentes.length,
+                    tempoDeResposta: `${Date.now() - inicioDoCiclo}ms`,
                     ondeFoiOTempo:
                         `rede ${ultimaMedicao.msRede}ms somados / decodificação ${ultimaMedicao.msDecode}ms ` +
                         `em ${ultimaMedicao.pedacos} multicalls`,
-                    alvosCaidos: caidos.length
+                    alvosCaidos: caidos.length,
+                });
+            } else {
+                log.info(`[BLOCO ${blocoAtual}] Preço mexeu — reli a lista quente.`, {
+                    quedaPct: `${maiorQueda.toFixed(4)}%`,
+                    alvosChecados: aLer.length,
+                    tempoDeResposta: `${Date.now() - inicioDoCiclo}ms`,
+                    alvosCaidos: caidos.length,
                 });
             }
 
@@ -699,6 +779,12 @@ async function principal(): Promise<'parar' | void> {
             }
         } catch (err) {
             log.warn('Tropeço rápido na rede, reiniciando milissegundo seguinte.', { erro: err instanceof Error ? err.message : String(err) });
+        } finally {
+            // O ritmo e do relogio, nao do bloco. Perguntar "que bloco e esse?"
+            // a cada 100ms custava 130M CUs/mes — mais que todo o resto junto,
+            // e mais de 6x o teto da conta.
+            const resta = INTERVALO_MS - (Date.now() - inicioDoCiclo);
+            if (resta > 0) await dormir(resta);
         }
     }
 }

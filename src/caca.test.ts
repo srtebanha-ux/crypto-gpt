@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO } from './caca';
 import { Decimal } from 'decimal.js';
-import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, precisaVarrerTudo } from './cacarAoVivo';
+import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs } from './cacarAoVivo';
 
 const coder = AbiCoder.defaultAbiCoder();
 const A = '0x1111111111111111111111111111111111111111';
@@ -109,6 +109,8 @@ test('pedaco que falha vira buracos, nao lista curta', () => {
 // O gatilho de preço: ler 15 preços por bloco em vez de 8.368 posições.
 // ---------------------------------------------------------------------------
 
+const HORA = 60 * 60 * 1000;
+
 test('preço parado não manda varrer nada', () => {
     const base = new Map([['0xaa', new Decimal(3000e8)], ['0xbb', new Decimal(1e8)]]);
     const agora = new Map([['0xaa', new Decimal(3000e8)], ['0xbb', new Decimal(1e8)]]);
@@ -139,19 +141,28 @@ test('a queda é medida contra a varredura, não contra o bloco anterior', () =>
     assert.ok(contraABase.greaterThan(0.39), `contra a base enxerga ${contraABase.toFixed(3)}%`);
     // Com a posição mais frágil a 0,037%, uma régua vê a queda e a outra não.
     const fragil = new Decimal(0.037);
-    assert.equal(precisaVarrerTudo(maiorSeFosseBlocoABloco, fragil, 0, 30), false);
-    assert.equal(precisaVarrerTudo(contraABase, fragil, 0, 30), true);
+    assert.equal(qualVarredura(maiorSeFosseBlocoABloco, fragil, 25, 0, HORA), 'nenhuma');
+    assert.equal(qualVarredura(contraABase, fragil, 25, 0, HORA), 'quentes');
 });
 
-test('queda que alcança a posição mais frágil manda varrer', () => {
-    assert.equal(precisaVarrerTudo(new Decimal(0.037), new Decimal(0.037), 0, 30), true);
-    assert.equal(precisaVarrerTudo(new Decimal(0.036), new Decimal(0.037), 0, 30), false);
+test('queda que alcança a posição mais frágil manda reler a lista quente', () => {
+    assert.equal(qualVarredura(new Decimal(0.037), new Decimal(0.037), 25, 0, HORA), 'quentes');
+    assert.equal(qualVarredura(new Decimal(0.036), new Decimal(0.037), 25, 0, HORA), 'nenhuma');
+});
+
+test('queda que passa da margem quente força a varredura COMPLETA', () => {
+    // O buraco que este teste fecha: quem está longe de cair não está na lista
+    // quente. Um tombo de 30% alcança gente de fora dela, e responder lendo só
+    // os que já estavam por um fio seria deixar passar justamente os que o
+    // tombo derrubou.
+    assert.equal(qualVarredura(new Decimal(30), new Decimal(0.037), 25, 0, HORA), 'completa');
+    assert.equal(qualVarredura(new Decimal(24), new Decimal(0.037), 25, 0, HORA), 'quentes');
 });
 
 test('a varredura completa acontece por tempo mesmo com preço parado', () => {
     // Juros correndo e empréstimo novo derrubam posição sem o oráculo mexer.
-    assert.equal(precisaVarrerTudo(new Decimal(0), new Decimal(5), 29, 30), false);
-    assert.equal(precisaVarrerTudo(new Decimal(0), new Decimal(5), 30, 30), true);
+    assert.equal(qualVarredura(new Decimal(0), new Decimal(5), 25, HORA - 1, HORA), 'nenhuma');
+    assert.equal(qualVarredura(new Decimal(0), new Decimal(5), 25, HORA, HORA), 'completa');
 });
 
 test('o gatilho não pode ficar preso ligado', () => {
@@ -161,7 +172,7 @@ test('o gatilho não pode ficar preso ligado', () => {
     const base = new Map(precos);
     for (let bloco = 1; bloco < 30; bloco++) {
         const maior = maiorQuedaDesdeABase(base, precos);
-        assert.equal(precisaVarrerTudo(maior, new Decimal(1), bloco, 30), false);
+        assert.equal(qualVarredura(maior, new Decimal(1), 25, bloco * 2000, HORA), 'nenhuma');
     }
 });
 
@@ -171,4 +182,46 @@ test('moeda sem preço na base não inventa queda', () => {
     const agora = new Map([['0xaa', new Decimal(3000e8)]]);
     assert.equal(maiorQuedaDesdeABase(new Map(), agora).toNumber(), 0);
     assert.equal(maiorQuedaDesdeABase(new Map([['0xaa', new Decimal(0)]]), agora).toNumber(), 0);
+});
+
+// O teto da conta é 20.000.000 CUs/mês. Não é opinião, é um número — então o
+// gasto também precisa ser um número, conferido por teste e não por estimativa.
+const TETO_DA_CONTA = 20_000_000;
+
+test('o desenho de hoje cabe no teto da conta', () => {
+    const gasto = custoMensalEmCUs({
+        intervaloMs: 8000,
+        devedores: 8368,
+        quentes: 500,
+        chamadasPorMulticall: 250,
+        minutosEntreCompletas: 60,
+        fracaoQueDisparaQuentes: 0.1,
+    });
+    assert.ok(gasto < TETO_DA_CONTA, `gastaria ${gasto.toLocaleString('pt-BR')} CUs/mês`);
+});
+
+test('ler todo bloco NÃO cabe, e é por isso que o relógio manda', () => {
+    // 2s por bloco na Base. Era esse o desenho antes desta mudança.
+    const todoBloco = custoMensalEmCUs({
+        intervaloMs: 2000,
+        devedores: 8368,
+        quentes: 500,
+        chamadasPorMulticall: 250,
+        minutosEntreCompletas: 60,
+        fracaoQueDisparaQuentes: 0.1,
+    });
+    assert.ok(todoBloco > TETO_DA_CONTA, `caberia com ${todoBloco} CUs/mês, e não devia`);
+});
+
+test('varrer os 8.368 a cada ciclo estoura o teto em muitas vezes', () => {
+    // O desenho original: varredura completa em todo bloco.
+    const semGatilho = custoMensalEmCUs({
+        intervaloMs: 2000,
+        devedores: 8368,
+        quentes: 8368,
+        chamadasPorMulticall: 250,
+        minutosEntreCompletas: 60,
+        fracaoQueDisparaQuentes: 1,
+    });
+    assert.ok(semGatilho > TETO_DA_CONTA * 20, `${semGatilho} CUs/mês`);
 });
