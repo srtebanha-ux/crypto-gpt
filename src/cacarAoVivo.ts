@@ -28,6 +28,47 @@ export const FATIA_COBRIVEL = 2n;
 export function quantoPedirEmprestado(dividaCrua: bigint): bigint {
     return dividaCrua / FATIA_COBRIVEL;
 }
+
+/**
+ * Quanto o preco caiu, em porcento, desde a ultima varredura completa.
+ *
+ * O ponto de comparacao e a varredura, nao o bloco anterior. Comparar com o
+ * bloco anterior parece certo e nao e: uma queda de 0,02% por bloco repetida
+ * vinte vezes e 0,4% de queda que nunca dispara nada, porque cada bloco
+ * isolado ficou abaixo do gatilho. A fragilidade que estamos comparando foi
+ * medida na varredura; a queda tem que ser contada do mesmo instante.
+ *
+ * So queda conta. Preco subindo nao derruba ninguem que esteja de pe.
+ */
+export function maiorQuedaDesdeABase(base: Map<string, Decimal>, agora: Map<string, Decimal>): Decimal {
+    let maior = new Decimal(0);
+    for (const [moeda, precoAgora] of agora) {
+        const precoBase = base.get(moeda);
+        if (!precoBase || precoBase.lessThanOrEqualTo(0)) continue;
+        const queda = precoBase.minus(precoAgora).dividedBy(precoBase).mul(100);
+        if (queda.greaterThan(maior)) maior = queda;
+    }
+    return maior;
+}
+
+/**
+ * A conta virada do avesso: se a posicao mais fragil esta a X% de cair, so uma
+ * queda de X% no preco pode abrir alguem. Abaixo disso, ler as 8.368 posicoes
+ * e gastar 1,6 segundo para reler os mesmos numeros.
+ *
+ * A varredura completa acontece assim mesmo de tempos em tempos porque preco
+ * nao e a unica coisa que move uma posicao: juros correndo e emprestimo novo
+ * tambem derrubam, e nenhum dos dois aparece no oraculo. Confiar so no gatilho
+ * seria ficar cego para quem cai parado.
+ */
+export function precisaVarrerTudo(
+    maiorQueda: Decimal,
+    menorQueda: Decimal,
+    blocosDesdeACompleta: number,
+    blocosEntreCompletas: number,
+): boolean {
+    return maiorQueda.greaterThanOrEqualTo(menorQueda) || blocosDesdeACompleta >= blocosEntreCompletas;
+}
 import { POOLS } from './contratos';
 
 const log = createLogger('caca');
@@ -155,6 +196,15 @@ async function chamarCruComPaciencia(
 // Igual ao tamanho do pool, e nao menos. Com 5 aqui e 12 conexoes abertas, o
 // bot estrangulava a si mesmo: a medicao deu 5.840ms de rede somados dentro de
 // 1.225ms de rede real — 4,8x de paralelismo, exatamente o 5 daqui.
+/**
+ * De quantos em quantos blocos a varredura completa acontece de qualquer jeito.
+ *
+ * 30 blocos sao uns 60 segundos na Base. Preco nao e a unica coisa que derruba
+ * uma posicao — juros correndo e emprestimo novo tambem — e nenhum dos dois
+ * aparece no oraculo.
+ */
+const BLOCOS_ENTRE_COMPLETAS = Number(process.env.CACA_BLOCOS_COMPLETA ?? '30');
+
 const MULTICALLS_EM_PARALELO = Number(process.env.CACA_PARALELO ?? String(CONEXOES_POR_SERVIDOR));
 
 /**
@@ -419,7 +469,13 @@ async function principal(): Promise<'parar' | void> {
             try { casas.set(m.toLowerCase(), Number(BigInt(respDec[i]!))); } catch {}
         }
     });
+    /** O preco mais recente de cada moeda, usado para valorar a garantia. */
     const precos = new Map<string, Decimal>();
+    /** O preco de cada moeda na ultima varredura completa: a regua do gatilho. */
+    const precosDaBase = new Map<string, Decimal>();
+    /** A menor distancia ate liquidar vista na ultima varredura: o gatilho. */
+    let menorQueda = new Decimal(0);
+    let ultimoCompleto = 0;
 
     let devedores = await juntarDevedores(topo);
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
@@ -456,30 +512,61 @@ async function principal(): Promise<'parar' | void> {
             ultimoBlocoLido = blocoAtual;
             const msInicioBlock = Date.now();
 
-            const chamadasMistas: Array<{ alvo: string; dados: string }> = [];
-            moedas.forEach((m) => chamadasMistas.push({ alvo: oraculo!, dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0') }));
-            devedores.forEach((d) => chamadasMistas.push({ alvo: REDE.pool, dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0') }));
+            // PRIMEIRO os precos, que sao 15 leituras e cabem num multicall so.
+            // Varrer os 8.368 devedores custa 34 multicalls e 1,6 segundo — 83%
+            // de um bloco da Base — e na maioria dos blocos ninguem pode ter
+            // caido, porque ninguem cai sem o preco se mexer.
+            const chamadasDePreco = moedas.map((m) => ({
+                alvo: oraculo!,
+                dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0'),
+            }));
+            const respPrecos = await lerEmLote(chamadasDePreco);
 
-            const loteGigante = await lerEmLote(chamadasMistas);
-            
             for (let i = 0; i < moedas.length; i++) {
-                const dadoPreco = loteGigante[i];
-                if (dadoPreco) {
-                    try { precos.set(moedas[i].toLowerCase(), new Decimal(BigInt(dadoPreco).toString())); } catch {}
-                }
+                if (!respPrecos[i]) continue;
+                try {
+                    precos.set(moedas[i].toLowerCase(), new Decimal(BigInt(respPrecos[i]!).toString()));
+                } catch {}
             }
 
+            const maiorQueda = maiorQuedaDesdeABase(precosDaBase, precos);
+            if (!precisaVarrerTudo(maiorQueda, menorQueda, blocoAtual - ultimoCompleto, BLOCOS_ENTRE_COMPLETAS)) {
+                if (blocoAtual % 30 === 0) {
+                    log.info(`[BLOCO ${blocoAtual}] Só preço — ninguém pode ter caído.`, {
+                        maiorQuedaPct: `${maiorQueda.toFixed(4)}%`,
+                        maisFragilA: `${menorQueda.toFixed(4)}%`,
+                        custou: `${Date.now() - msInicioBlock}ms`,
+                    });
+                }
+                continue;
+            }
+            ultimoCompleto = blocoAtual;
+            // A base anda junto com a varredura: a fragilidade lida agora vale
+            // a partir dos precos de agora.
+            precosDaBase.clear();
+            for (const [moeda, preco] of precos) precosDaBase.set(moeda, preco);
+
+            const chamadasContas = devedores.map((d) => ({
+                alvo: REDE.pool,
+                dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
+            }));
+            const loteGigante = await lerEmLote(chamadasContas);
+
             const caidos: string[] = [];
+            let menorVista = new Decimal(100);
             for (let i = 0; i < devedores.length; i++) {
-                const dadoConta = loteGigante[moedas.length + i];
+                const dadoConta = loteGigante[i];
                 if (!dadoConta) continue;
                 try {
                     const queda = quedaAteLiquidar(decodificarContaDoUsuario(dadoConta).saude);
-                    if (queda !== null && queda.isZero()) {
-                        caidos.push(devedores[i]);
-                    }
+                    if (queda === null) continue;
+                    if (queda.isZero()) caidos.push(devedores[i]);
+                    else if (queda.lessThan(menorVista)) menorVista = queda;
                 } catch {}
             }
+            // Re-armar no que acabou de ser lido: sem isso o gatilho fica preso
+            // no valor da primeira varredura e dispara para sempre.
+            if (menorVista.lessThan(100)) menorQueda = menorVista;
 
             const msFimBlock = Date.now();
             
