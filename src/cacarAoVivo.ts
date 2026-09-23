@@ -150,21 +150,48 @@ async function chamarCruComPaciencia(
     }
 }
 
+/** Quantos multicalls voam juntos. O mesmo numero que a varredura ja usa. */
+const MULTICALLS_EM_PARALELO = Number(process.env.CACA_PARALELO ?? '5');
+
+/**
+ * Le tudo em multicalls, varios ao mesmo tempo.
+ *
+ * Eram 17 chamadas em fila, uma esperando a outra, e isso custava 1,4 segundo
+ * por bloco — 70% de um bloco da Base, que dura 2 segundos. Sobrava pouco para
+ * decidir e quase nada para enviar, e numa liquidacao quem chega depois nao
+ * chega.
+ *
+ * A ORDEM importa e por isso nao e um `Promise.all` solto: quem chama indexa o
+ * resultado por posicao (os precos primeiro, os devedores depois), e embaralhar
+ * faria o bot ler a saude de uma pessoa achando que e de outra. Entao os
+ * pedacos vao em ondas, e cada onda devolve seus resultados no lugar certo.
+ */
 async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Promise<Array<string | null>> {
-    const fora: Array<string | null> = [];
-    for (const pedaco of partirEmPedacos(chamadas, CHAMADAS_POR_MULTICALL)) {
-        try {
-            const bruto = await chamar<string>('eth_call', [
-                { to: MULTICALL3, data: codificarAggregate3(pedaco) },
-                'latest',
-            ]);
-            const rs = decodificarAggregate3(bruto);
-            for (let i = 0; i < pedaco.length; i += 1) fora.push(rs[i]?.ok ? rs[i].dados : null);
-        } catch {
-            for (let i = 0; i < pedaco.length; i += 1) fora.push(null);
-        }
+    const pedacos = partirEmPedacos(chamadas, CHAMADAS_POR_MULTICALL);
+    const porPedaco: Array<Array<string | null>> = new Array(pedacos.length);
+
+    for (let i = 0; i < pedacos.length; i += MULTICALLS_EM_PARALELO) {
+        const onda = pedacos.slice(i, i + MULTICALLS_EM_PARALELO);
+        await Promise.all(
+            onda.map(async (pedaco, j) => {
+                const posicao = i + j;
+                try {
+                    const bruto = await chamar<string>('eth_call', [
+                        { to: MULTICALL3, data: codificarAggregate3(pedaco) },
+                        'latest',
+                    ]);
+                    const rs = decodificarAggregate3(bruto);
+                    porPedaco[posicao] = pedaco.map((_, k) => (rs[k]?.ok ? rs[k].dados : null));
+                } catch {
+                    // Um pedaco que falha vira buracos, nao uma lista curta:
+                    // lista curta desalinharia todas as posicoes seguintes.
+                    porPedaco[posicao] = pedaco.map(() => null);
+                }
+            }),
+        );
     }
-    return fora;
+
+    return porPedaco.flat();
 }
 
 async function juntarDevedores(topo: number, blocoInicial?: number): Promise<string[]> {

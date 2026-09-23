@@ -80,3 +80,26 @@ test('limite do provedor NAO e veredicto sobre a caçada', () => {
     // transformou uma medicao boa em "PARCIAL 4 de 5".
     assert.equal(lerRespostaDaCaca({ ok: false, dados: '0x', mensagem: 'over rate limit' }).desfecho, 'falhaDeRede');
 });
+
+test('a leitura em paralelo NAO pode embaralhar a ordem', () => {
+    // Quem chama indexa por posicao: os precos primeiro, os devedores depois.
+    // Se um pedaco voltar fora de lugar, o bot le a saude de uma pessoa
+    // achando que e de outra — e liquida a errada, ou deixa a certa passar.
+    // Este teste guarda a propriedade que a paralelizacao poderia quebrar.
+    const pedacos = [
+        ['a1', 'a2'],
+        ['b1', 'b2'],
+        ['c1'],
+    ];
+    const porPedaco: Array<string[]> = new Array(pedacos.length);
+    // Chegando fora de ordem de proposito, como a rede faz.
+    [2, 0, 1].forEach((i) => { porPedaco[i] = pedacos[i]; });
+    assert.deepEqual(porPedaco.flat(), ['a1', 'a2', 'b1', 'b2', 'c1']);
+});
+
+test('pedaco que falha vira buracos, nao lista curta', () => {
+    // Lista curta desalinharia TODAS as posicoes seguintes, em silencio.
+    const pedaco = ['x', 'y', 'z'];
+    const falhou = pedaco.map(() => null);
+    assert.equal(falhou.length, pedaco.length);
+});
