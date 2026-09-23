@@ -206,23 +206,3 @@ contract ParSolidlyFalso {
         r1 = saldo1 - out1;
     }
 }
-
-/**
- * Duble de roteador de swap (1inch, Odos, Aerodrome router).
- *
- * O contrato nao sabe mais calcular nada de DEX: ele autoriza o roteador a
- * puxar o colateral e repassa um payload montado fora da cadeia. Entao o que
- * o teste precisa controlar e justamente o que volta — inclusive voltar
- * MENOS que o prometido, que e o caso de deslizamento que a trava de lucro
- * existe para pegar.
- *
- * Puxa por `transferFrom` de proposito: um roteador que recebesse sem
- * autorizacao provaria que o contrato funciona num mundo onde ele nao precisa
- * autorizar direito.
- */
-contract RoteadorFalso {
-    function vender(address tokenEntra, uint256 quantoEntra, address tokenSai, uint256 quantoSai) external {
-        TokenFalso(tokenEntra).transferFrom(msg.sender, address(this), quantoEntra);
-        TokenFalso(tokenSai).transfer(msg.sender, quantoSai);
-    }
-}
