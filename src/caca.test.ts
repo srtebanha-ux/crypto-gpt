@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO } from './caca';
 import { Decimal } from 'decimal.js';
-import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs } from './cacarAoVivo';
+import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade } from './cacarAoVivo';
 
 const coder = AbiCoder.defaultAbiCoder();
 const A = '0x1111111111111111111111111111111111111111';
@@ -188,40 +188,69 @@ test('moeda sem preço na base não inventa queda', () => {
 // gasto também precisa ser um número, conferido por teste e não por estimativa.
 const TETO_DA_CONTA = 20_000_000;
 
+// Medido na conta dela em 2026-09-23, bloco 51696083, e não chutado:
+// 8.390 devedores, 1.166 deles a menos de 25% de cair.
+const MEDIDO = { devedores: 8390, quentes: 1166, chamadasPorMulticall: 250, minutosEntreCompletas: 60 };
+
 test('o desenho de hoje cabe no teto da conta', () => {
-    const gasto = custoMensalEmCUs({
-        intervaloMs: 8000,
-        devedores: 8368,
-        quentes: 500,
-        chamadasPorMulticall: 250,
-        minutosEntreCompletas: 60,
-        fracaoQueDisparaQuentes: 0.1,
-    });
+    // A brasa dispara em quase todo ciclo (a mais frágil estava a 0,037%, e
+    // preço anda isso o tempo todo), então ela NÃO pode custar chamada: viaja
+    // nas vagas que sobram no multicall dos preços. Aqui a lista quente é
+    // exercitada no pior caso plausível, 10% dos ciclos.
+    const gasto = custoMensalEmCUs({ ...MEDIDO, intervaloMs: 8000, fracaoQueDisparaQuentes: 0.1 });
     assert.ok(gasto < TETO_DA_CONTA, `gastaria ${gasto.toLocaleString('pt-BR')} CUs/mês`);
 });
 
-test('ler todo bloco NÃO cabe, e é por isso que o relógio manda', () => {
-    // 2s por bloco na Base. Era esse o desenho antes desta mudança.
-    const todoBloco = custoMensalEmCUs({
-        intervaloMs: 2000,
-        devedores: 8368,
-        quentes: 500,
-        chamadasPorMulticall: 250,
-        minutosEntreCompletas: 60,
-        fracaoQueDisparaQuentes: 0.1,
-    });
-    assert.ok(todoBloco > TETO_DA_CONTA, `caberia com ${todoBloco} CUs/mês, e não devia`);
+test('reler as 1.166 quentes em TODO ciclo estoura o teto', () => {
+    // O defeito que a medição de 1.166 denunciou: com o gatilho armado em
+    // 0,037% a lista quente seria relida quase sempre, e aí ela sozinha custa
+    // mais que a conta inteira. É por isso que a brasa existe.
+    const gasto = custoMensalEmCUs({ ...MEDIDO, intervaloMs: 8000, fracaoQueDisparaQuentes: 1 });
+    assert.ok(gasto > TETO_DA_CONTA, `caberia com ${gasto} CUs/mês, e não devia`);
 });
 
-test('varrer os 8.368 a cada ciclo estoura o teto em muitas vezes', () => {
-    // O desenho original: varredura completa em todo bloco.
+test('a brasa cabe nas vagas que sobram do multicall dos preços', () => {
+    // 250 chamadas por multicall, menos o bloco, menos os 15 preços.
+    const vagas = 250 - 15 - 1;
+    assert.equal(vagas, 234);
+    const medidos = Array.from({ length: 1166 }, (_, i) => ({
+        devedor: `0x${String(i).padStart(40, '0')}`,
+        queda: new Decimal(0.03 + i * 0.02),
+    }));
+    const c = repartirPorFragilidade(medidos, vagas, 25);
+    assert.equal(c.brasa.length, vagas);
+    // O gatilho passa a ser a margem do PRIMEIRO que ficou de fora — todos os
+    // mais frágeis que ele já são lidos a cada ciclo e não precisam de gatilho.
+    assert.equal(c.margemDaBrasa.toFixed(2), medidos[vagas].queda.toFixed(2));
+    assert.ok(c.margemDaBrasa.greaterThan(4), `gatilho em ${c.margemDaBrasa.toFixed(2)}%, longe dos 0,037%`);
+});
+
+test('a brasa sai ORDENADA POR FRAGILIDADE, não pela ordem que chegou', () => {
+    // O defeito mais repetido deste projeto: fatiar slice(0, N) de uma lista
+    // ordenada por outra coisa e publicar a amostra como se fosse ranking.
+    const medidos = [
+        { devedor: '0xA', queda: new Decimal(40) },
+        { devedor: '0xB', queda: new Decimal(0.5) },
+        { devedor: '0xC', queda: new Decimal(9) },
+        { devedor: '0xD', queda: new Decimal(2) },
+    ];
+    const c = repartirPorFragilidade(medidos, 2, 25);
+    assert.deepEqual(c.brasa, ['0xB', '0xD']);
+    assert.deepEqual(c.quentes, ['0xC']);       // 0xA está a 40%, fora da margem
+    assert.equal(c.margemDaBrasa.toNumber(), 9);
+});
+
+test('brasa que cobre todo mundo dentro da margem arma o gatilho na margem', () => {
+    const c = repartirPorFragilidade([{ devedor: '0xA', queda: new Decimal(3) }], 10, 25);
+    assert.deepEqual(c.brasa, ['0xA']);
+    assert.deepEqual(c.quentes, []);
+    assert.equal(c.margemDaBrasa.toNumber(), 25);
+});
+
+test('varrer os 8.390 a cada bloco estoura o teto em muitas vezes', () => {
+    // O desenho original: varredura completa em todo bloco de 2s.
     const semGatilho = custoMensalEmCUs({
-        intervaloMs: 2000,
-        devedores: 8368,
-        quentes: 8368,
-        chamadasPorMulticall: 250,
-        minutosEntreCompletas: 60,
-        fracaoQueDisparaQuentes: 1,
+        ...MEDIDO, intervaloMs: 2000, quentes: 8390, fracaoQueDisparaQuentes: 1,
     });
     assert.ok(semGatilho > TETO_DA_CONTA * 20, `${semGatilho} CUs/mês`);
 });

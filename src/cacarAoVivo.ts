@@ -10,6 +10,7 @@ import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAgg
 import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado } from './caca';
+import { POOLS } from './contratos';
 
 /**
  * Quanto pedir emprestado, em unidades cruas.
@@ -51,16 +52,52 @@ export function maiorQuedaDesdeABase(base: Map<string, Decimal>, agora: Map<stri
     return maior;
 }
 
+/** Uma posicao medida: quem e, e a que distancia de ser liquidada. */
+export interface Medida { devedor: string; queda: Decimal }
+
+/** As tres camadas, e a regua do gatilho que separa a primeira da segunda. */
+export interface Camadas { brasa: string[]; quentes: string[]; margemDaBrasa: Decimal }
+
 /**
- * A conta virada do avesso: se a posicao mais fragil esta a X% de cair, so uma
- * queda de X% no preco pode abrir alguem. Abaixo disso, ler as 8.368 posicoes
- * e gastar 1,6 segundo para reler os mesmos numeros.
+ * Reparte os devedores em brasa / quentes / resto, por fragilidade.
  *
- * A varredura completa acontece assim mesmo de tempos em tempos porque preco
- * nao e a unica coisa que move uma posicao: juros correndo e emprestimo novo
- * tambem derrubam, e nenhum dos dois aparece no oraculo. Confiar so no gatilho
- * seria ficar cego para quem cai parado.
+ * A brasa sao os mais frageis de todos, e ela existe por uma medicao: a
+ * posicao mais fragil da conta estava a 0,037% de cair. Preco de cripto anda
+ * 0,037% o tempo todo, entao um gatilho armado nesse valor dispara em quase
+ * todo ciclo — e reler 1.166 posicoes em todo ciclo custa 42M CUs/mes, o dobro
+ * do teto da conta.
+ *
+ * A saida nao e ler menos: e ler de graca. Um multicall cabe 250 chamadas e o
+ * ciclo usa 16 (o bloco e os 15 precos). As outras 234 vagas iam vazias no
+ * mesmo `eth_call`, que custa 26 CUs cheio ou vazio. A brasa viaja nelas.
+ *
+ * A regua do gatilho passa a ser a margem do PRIMEIRO que ficou de fora da
+ * brasa: todos os mais frageis que ele ja estao sendo lidos a cada ciclo, e
+ * nao precisam de gatilho nenhum.
+ *
+ * A ordenacao e explicita e por queda. Fatiar uma lista que veio ordenada por
+ * outra coisa — ordem de descoberta, atividade — e o defeito que este projeto
+ * ja encontrou umas quinze vezes: vira uma amostra com cara de ranking.
  */
+export function repartirPorFragilidade(
+    medidos: Medida[],
+    vagasNaBrasa: number,
+    margemQuente: number,
+): Camadas {
+    const ordenados = [...medidos].sort((a, b) => a.queda.comparedTo(b.queda));
+    const brasa = ordenados.slice(0, Math.max(0, vagasNaBrasa));
+    const resto = ordenados.slice(brasa.length);
+    const quentes = resto.filter((m) => m.queda.lessThanOrEqualTo(margemQuente));
+    // Se a brasa cobre todo mundo que esta dentro da margem, nao ha ninguem
+    // entre uma camada e outra: o proximo alvo do gatilho e a propria margem.
+    const margemDaBrasa = resto.length > 0 ? resto[0].queda : new Decimal(margemQuente);
+    return {
+        brasa: brasa.map((m) => m.devedor),
+        quentes: quentes.map((m) => m.devedor),
+        margemDaBrasa,
+    };
+}
+
 export type Varredura = 'nenhuma' | 'quentes' | 'completa';
 
 /**
@@ -101,13 +138,13 @@ export function custoMensalEmCUs(entrada: {
 }): number {
     const ciclosNoMes = (30 * 24 * 60 * 60 * 1000) / entrada.intervaloMs;
     const multicalls = (n: number) => Math.ceil(n / entrada.chamadasPorMulticall);
-    const precos = ciclosNoMes * CU_POR_CHAMADA;
+    // O ciclo e UM `eth_call`: bloco, precos e a brasa cabem todos nele. Um
+    // multicall custa o mesmo cheio ou vazio.
+    const ciclo = ciclosNoMes * CU_POR_CHAMADA;
     const completas = ((30 * 24 * 60) / entrada.minutosEntreCompletas) * multicalls(entrada.devedores) * CU_POR_CHAMADA;
     const quentes = ciclosNoMes * entrada.fracaoQueDisparaQuentes * multicalls(entrada.quentes) * CU_POR_CHAMADA;
-    return Math.round(precos + completas + quentes);
+    return Math.round(ciclo + completas + quentes);
 }
-import { POOLS } from './contratos';
-
 const log = createLogger('caca');
 
 const SELETOR_DECIMALS = '0x313ce567';
@@ -530,12 +567,16 @@ async function principal(): Promise<'parar' | void> {
     const precos = new Map<string, Decimal>();
     /** O preco de cada moeda na ultima varredura completa: a regua do gatilho. */
     const precosDaBase = new Map<string, Decimal>();
-    /** A menor distancia ate liquidar vista na ultima varredura: o gatilho. */
-    let menorQueda = new Decimal(0);
     /** Quando a ultima varredura completa aconteceu, em relogio e nao em bloco. */
     let ultimoCompleto = 0;
     /** Os que estao perto de cair: a lista que o gatilho de preco relê. */
     let quentes: string[] = [];
+    /** Os mais frageis de todos: viajam de graca no multicall dos precos. */
+    let brasa: string[] = [];
+    /** A margem do primeiro que ficou de fora da brasa: a regua do gatilho. */
+    let margemDaBrasa = new Decimal(0);
+    /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
+    const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 1);
 
     let devedores = await juntarDevedores(topo);
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
@@ -566,99 +607,121 @@ async function principal(): Promise<'parar' | void> {
             // Multicall3) e os 15 precos. 26 CUs. A varredura completa custa
             // 884 e o orcamento do mes da 15,4 por bloco — por isso ela so
             // acontece quando ha motivo, e nao a cada bloco.
-            const chamadasDePreco = [
+            const chamadasDoCiclo = [
                 { alvo: MULTICALL3, dados: SELETOR_BLOCO_DO_MULTICALL },
                 ...moedas.map((m) => ({
                     alvo: oraculo!,
                     dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0'),
                 })),
+                ...brasa.map((d) => ({
+                    alvo: REDE.pool,
+                    dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
+                })),
             ];
-            const respPrecos = await lerEmLote(chamadasDePreco);
+            const resp = await lerEmLote(chamadasDoCiclo);
 
             let blocoAtual = ultimoBlocoLido;
-            try { if (respPrecos[0]) blocoAtual = Number(BigInt(respPrecos[0]!)); } catch {}
+            try { if (resp[0]) blocoAtual = Number(BigInt(resp[0]!)); } catch {}
             ultimoBlocoLido = blocoAtual;
 
             for (let i = 0; i < moedas.length; i++) {
-                const bruto = respPrecos[i + 1];
+                const bruto = resp[i + 1];
                 if (!bruto) continue;
                 try {
                     precos.set(moedas[i].toLowerCase(), new Decimal(BigInt(bruto).toString()));
                 } catch {}
             }
 
+            // A brasa e conferida em TODO ciclo, sem gatilho nenhum: ela veio
+            // nas vagas que sobravam do mesmo `eth_call`.
+            const caidos: string[] = [];
+            const inicioDaBrasa = moedas.length + 1;
+            for (let i = 0; i < brasa.length; i++) {
+                const dadoConta = resp[inicioDaBrasa + i];
+                if (!dadoConta) continue;
+                try {
+                    const queda = quedaAteLiquidar(decodificarContaDoUsuario(dadoConta).saude);
+                    if (queda !== null && queda.isZero()) caidos.push(brasa[i]);
+                } catch {}
+            }
+
             const maiorQueda = maiorQuedaDesdeABase(precosDaBase, precos);
             const varredura = qualVarredura(
                 maiorQueda,
-                menorQueda,
+                margemDaBrasa,
                 MARGEM_QUENTE,
                 Date.now() - ultimoCompleto,
                 MINUTOS_ENTRE_COMPLETAS * 60_000,
             );
 
             if (varredura === 'nenhuma') {
-                if (blocoAtual % 30 === 0) {
-                    log.info(`[BLOCO ${blocoAtual}] Só preço — ninguém pode ter caído.`, {
+                if (blocoAtual % 150 === 0) {
+                    log.info(`[BLOCO ${blocoAtual}] Só a brasa — ninguém mais pode ter caído.`, {
+                        naBrasa: brasa.length,
                         maiorQuedaPct: `${maiorQueda.toFixed(4)}%`,
-                        maisFragilA: `${menorQueda.toFixed(4)}%`,
+                        gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
                         naListaQuente: quentes.length,
                         custou: `${Date.now() - inicioDoCiclo}ms`,
                     });
                 }
-                continue;
-            }
-
-            const aLer = varredura === 'completa' ? devedores : quentes;
-            if (aLer.length === 0) continue;
-            const loteGigante = await lerEmLote(aLer.map((d) => ({
-                alvo: REDE.pool,
-                dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
-            })));
-
-            const caidos: string[] = [];
-            let menorVista = new Decimal(100);
-            const novosQuentes: string[] = [];
-            for (let i = 0; i < aLer.length; i++) {
-                const dadoConta = loteGigante[i];
-                if (!dadoConta) continue;
-                try {
-                    const queda = quedaAteLiquidar(decodificarContaDoUsuario(dadoConta).saude);
-                    if (queda === null) continue;
-                    if (queda.isZero()) caidos.push(aLer[i]);
-                    else if (queda.lessThan(menorVista)) menorVista = queda;
-                    if (queda.lessThanOrEqualTo(MARGEM_QUENTE)) novosQuentes.push(aLer[i]);
-                } catch {}
-            }
-            // Re-armar no que acabou de ser lido: sem isso o gatilho fica preso
-            // no valor da primeira varredura e dispara para sempre. A base dos
-            // precos anda junto, pela mesma razao.
-            if (menorVista.lessThan(100)) menorQueda = menorVista;
-            precosDaBase.clear();
-            for (const [moeda, preco] of precos) precosDaBase.set(moeda, preco);
-
-            // So a varredura completa pode REFAZER a lista quente: ela e a
-            // unica que olhou todo mundo. Uma varredura quente que reescrevesse
-            // a lista com o que ela mesma viu iria encolhendo a lista a cada
-            // passagem ate sobrar ninguem, e o bot ficaria cego sem avisar.
-            if (varredura === 'completa') {
-                quentes = novosQuentes;
-                ultimoCompleto = Date.now();
-                log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
-                    alvosChecados: aLer.length,
-                    naListaQuente: quentes.length,
-                    tempoDeResposta: `${Date.now() - inicioDoCiclo}ms`,
-                    ondeFoiOTempo:
-                        `rede ${ultimaMedicao.msRede}ms somados / decodificação ${ultimaMedicao.msDecode}ms ` +
-                        `em ${ultimaMedicao.pedacos} multicalls`,
-                    alvosCaidos: caidos.length,
-                });
             } else {
-                log.info(`[BLOCO ${blocoAtual}] Preço mexeu — reli a lista quente.`, {
-                    quedaPct: `${maiorQueda.toFixed(4)}%`,
-                    alvosChecados: aLer.length,
-                    tempoDeResposta: `${Date.now() - inicioDoCiclo}ms`,
-                    alvosCaidos: caidos.length,
-                });
+                const aLer = varredura === 'completa' ? devedores : quentes;
+                if (aLer.length > 0) {
+                    const loteGigante = await lerEmLote(aLer.map((d) => ({
+                        alvo: REDE.pool,
+                        dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
+                    })));
+
+                    const medidos: Medida[] = [];
+                    for (let i = 0; i < aLer.length; i++) {
+                        const dadoConta = loteGigante[i];
+                        if (!dadoConta) continue;
+                        try {
+                            const queda = quedaAteLiquidar(decodificarContaDoUsuario(dadoConta).saude);
+                            if (queda === null) continue;
+                            if (queda.isZero()) { if (!caidos.includes(aLer[i])) caidos.push(aLer[i]); }
+                            else medidos.push({ devedor: aLer[i], queda });
+                        } catch {}
+                    }
+
+                    // A base dos precos anda junto com a leitura: a fragilidade
+                    // que acabou de ser medida vale a partir dos precos de
+                    // agora. Sem isso o gatilho fica preso e dispara para
+                    // sempre — defeito que ja apareceu aqui uma vez.
+                    precosDaBase.clear();
+                    for (const [moeda, preco] of precos) precosDaBase.set(moeda, preco);
+
+                    // So a varredura COMPLETA pode refazer as camadas: ela e a
+                    // unica que olhou todo mundo. Uma varredura quente que
+                    // reescrevesse as listas com o que ela mesma viu iria
+                    // encolhendo a cada passagem ate sobrar ninguem, e o bot
+                    // ficaria cego sem avisar.
+                    if (varredura === 'completa') {
+                        const camadas = repartirPorFragilidade(medidos, vagasNaBrasa, MARGEM_QUENTE);
+                        brasa = camadas.brasa;
+                        quentes = camadas.quentes;
+                        margemDaBrasa = camadas.margemDaBrasa;
+                        ultimoCompleto = Date.now();
+                        log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
+                            alvosChecados: aLer.length,
+                            naBrasa: brasa.length,
+                            naListaQuente: quentes.length,
+                            gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
+                            tempoDeResposta: `${Date.now() - inicioDoCiclo}ms`,
+                            ondeFoiOTempo:
+                                `rede ${ultimaMedicao.msRede}ms somados / decodificação ${ultimaMedicao.msDecode}ms ` +
+                                `em ${ultimaMedicao.pedacos} multicalls`,
+                            alvosCaidos: caidos.length,
+                        });
+                    } else {
+                        log.info(`[BLOCO ${blocoAtual}] Preço mexeu — reli a lista quente.`, {
+                            quedaPct: `${maiorQueda.toFixed(4)}%`,
+                            alvosChecados: aLer.length,
+                            tempoDeResposta: `${Date.now() - inicioDoCiclo}ms`,
+                            alvosCaidos: caidos.length,
+                        });
+                    }
+                }
             }
 
             if (caidos.length === 0) continue;
