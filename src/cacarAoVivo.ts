@@ -4,7 +4,7 @@ import { Wallet, JsonRpcProvider } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos } from './liquidacoes';
-import { abrirConexoes, CONEXOES_POR_SERVIDOR } from './conexoes';
+import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
@@ -95,7 +95,7 @@ class LocalNonceManager {
 }
 
 async function umaChamada<T>(metodo: string, params: unknown[]): Promise<T> {
-    const res = await fetch(rpc, {
+    const res = await buscar(rpc, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: metodo, params }),
@@ -124,7 +124,7 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4): Pro
 async function chamarCru(
     params: unknown[],
 ): Promise<{ ok: true; dados: string } | { ok: false; mensagem: string; dados?: string }> {
-    const res = await fetch(rpc, {
+    const res = await buscar(rpc, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'eth_call', params }),
