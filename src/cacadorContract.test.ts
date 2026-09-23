@@ -30,6 +30,8 @@ const DONO = `0x${'aa'.repeat(20)}`;
 const ESTRANHO = `0x${'bb'.repeat(20)}`;
 const POOL = `0x${'cc'.repeat(20)}`;
 const COFRE = `0x${'dd'.repeat(20)}`;
+/** O roteador de venda, imutavel como o cofre: a trava do swap cego. */
+const ROTEADOR = `0x${'ee'.repeat(20)}`;
 
 interface Instalado {
     chamar: (de: string, dados: string) => Promise<{ reverteu: boolean; retorno: string }>;
@@ -41,7 +43,7 @@ async function instalar(cofre = COFRE, pool = POOL): Promise<Instalado> {
     const { hexToBytes, bytesToHex, Address } = await import('@ethereumjs/util');
 
     const evm = await EVM.create();
-    const criacao = `0x${compilar().evm.bytecode.object}${palavra(pool)}${palavra(cofre)}`;
+    const criacao = `0x${compilar().evm.bytecode.object}${palavra(pool)}${palavra(cofre)}${palavra(ROTEADOR)}`;
     const deploy = await evm.runCall({
         data: hexToBytes(criacao),
         caller: new Address(hexToBytes(DONO)),
@@ -120,8 +122,10 @@ test('cofre zero é recusado na criação — não dá para subir sem destino', 
 test('só o dono dispara a caçada', async () => {
     const { chamar } = await instalar();
     const dados =
-        sel('cacar(address,address,address,uint256,address,uint256)') +
-        palavra(POOL) + palavra(POOL) + palavra(ESTRANHO) + palavra(1n) + palavra(POOL) + palavra(0n);
+        sel('cacar(address,address,address,uint256,bytes,uint256)') +
+        // O quinto campo virou `bytes`: no lugar do valor vai o deslocamento
+        // (0xc0 = seis palavras), e o conteudo vazio entra no fim.
+        palavra(POOL) + palavra(POOL) + palavra(ESTRANHO) + palavra(1n) + palavra(0xc0n) + palavra(0n) + palavra(0n);
 
     const deEstranho = await chamar(ESTRANHO, dados);
     assert.equal(deEstranho.reverteu, true, 'estranho não pode caçar');

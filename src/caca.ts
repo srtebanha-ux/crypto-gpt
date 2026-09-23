@@ -22,7 +22,7 @@ import { Decimal } from 'decimal.js';
 
 const coder = AbiCoder.defaultAbiCoder();
 
-export const ASSINATURA_CACAR = 'cacar(address,address,address,uint256,address,uint256)';
+export const ASSINATURA_CACAR = 'cacar(address,address,address,uint256,bytes,uint256)';
 export const SELETOR_CACAR = id(ASSINATURA_CACAR).slice(0, 10);
 
 /** Um piso que nenhum lucro alcança. Serve só para forçar a reversão que mede. */
@@ -33,7 +33,8 @@ export interface PedidoDeCaca {
     divida: string;
     devedor: string;
     quantoCobrir: bigint;
-    poolDeVenda: string;
+    /** Payload pronto para o roteador, montado fora da cadeia. '0x' quando nao ha troca. */
+    dadosSwap: string;
     lucroMinimo: bigint;
 }
 
@@ -42,8 +43,8 @@ export function codificarCaca(p: PedidoDeCaca): string {
         SELETOR_CACAR +
         coder
             .encode(
-                ['address', 'address', 'address', 'uint256', 'address', 'uint256'],
-                [p.garantia, p.divida, p.devedor, p.quantoCobrir, p.poolDeVenda, p.lucroMinimo],
+                ['address', 'address', 'address', 'uint256', 'bytes', 'uint256'],
+                [p.garantia, p.divida, p.devedor, p.quantoCobrir, p.dadosSwap, p.lucroMinimo],
             )
             .slice(2)
     );

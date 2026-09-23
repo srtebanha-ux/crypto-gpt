@@ -2,41 +2,47 @@
 pragma solidity ^0.8.20;
 
 /*
- * CacadorDeLiquidacoes - liquida uma posicao da Aave com dinheiro emprestado
- * da propria Aave, dentro de uma transacao so.
+ * Cacador de liquidacoes da Aave, com venda por roteador.
  *
- * O CICLO, em uma frase:
- * pega emprestada a divida -> paga a divida do devedor -> recebe a garantia com
- * agio -> vende a garantia -> devolve o emprestimo -> guarda a sobra.
+ * O ciclo inteiro cabe numa transacao: pega emprestado sem garantia, paga a
+ * divida de quem quebrou, leva o colateral com agio, vende o colateral,
+ * devolve o emprestimo, e o que sobra vai para o cofre. Se qualquer passo
+ * falhar, a rede desfaz tudo e o custo e so o gas.
  *
- * POR QUE A CARTEIRA NUNCA PRECISA TER O DINHEIRO:
- * Uma liquidacao de US$200 mil exige pagar US$200 mil. O flash loan resolve
- * isso: a Aave entrega o valor, este contrato o usa e devolve antes de a
- * transacao terminar. Se qualquer passo falhar, TUDO e desfeito e ninguem
- * deve nada. A perda maxima e o gas.
+ * POR QUE A VENDA MUDOU
  *
- * PARA ONDE VAI O LUCRO - e por que isso e imutavel:
- * `cofre` e gravado na criacao e nao tem funcao que o altere. A chave privada
- * deste contrato vive num servidor, e servidor e coisa que se invade. Se
- * alguem roubar a chave, o que consegue e queimar gas: nao consegue desviar o
- * lucro, porque o destino nao e parametro, e constante. Foi decisao dela,
- * registrada antes de existir dinheiro em jogo.
+ * A versao anterior vendia num pool so, e sabia calcular a taxa dele. Isso
+ * travou o teto em US$57 mil de divida: o melhor pool V2 da Base tem
+ * US$649 mil de profundidade, e vender US$134 mil ali empurra o preco 17%
+ * contra um agio de 5%. Medido, nao suposto.
  *
- * O QUE ESTE CONTRATO NAO FAZ:
- * Nao escolhe a vitima nem decide se vale a pena. Ele executa a liquidacao que
- * for passada. Achar a posicao, medir o bonus e decidir se o gas compensa e
- * trabalho do vigia, que roda fora da cadeia e nao paga gas para pensar.
+ * Agora o contrato NAO sabe calcular nada de DEX. Quem monta a rota e o bot,
+ * fora da cadeia, onde pode consultar um agregador que divide a venda entre
+ * varios pools e varias versoes. O contrato so repassa o payload pronto.
+ *
+ * E O QUE ISSO CUSTARIA DE SEGURANCA, SE NAO FOSSE TRAVADO
+ *
+ * Uma chamada de baixo nivel para um endereco escolhido por quem invoca e uma
+ * porta aberta: com a chave do bot roubada, o ladrao mandaria o contrato
+ * chamar qualquer contrato com qualquer instrucao, inclusive transferir os
+ * tokens para ele. Hoje uma chave roubada so queima gas, porque o cofre e
+ * imutavel — e essa propriedade foi construida de proposito.
+ *
+ * Por isso `roteador` e IMUTAVEL, fixado no deploy. A rota continua sendo
+ * calculada fora; so o DESTINO fica preso. Quem tem a chave escolhe o
+ * caminho, nunca para onde o dinheiro vai.
  */
 
 interface IERC20 {
-    function balanceOf(address account) external view returns (uint256);
-    function transfer(address to, uint256 amount) external returns (bool);
-    function approve(address spender, uint256 amount) external returns (bool);
+    function balanceOf(address conta) external view returns (uint256);
+    function transfer(address para, uint256 quantia) external returns (bool);
+    function approve(address gastador, uint256 quantia) external returns (bool);
+    function allowance(address dono, address gastador) external view returns (uint256);
 }
 
 interface IPoolAave {
     function flashLoanSimple(
-        address receiverAddress,
+        address receptor,
         address asset,
         uint256 amount,
         bytes calldata params,
@@ -52,66 +58,47 @@ interface IPoolAave {
     ) external;
 }
 
-interface IUniswapV2Pair {
-    function token0() external view returns (address);
-    function token1() external view returns (address);
-    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
-    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external;
-}
-
-/**
- * O pool que sabe responder sozinho quanto sai.
- *
- * Pools no estilo Solidly (Aerodrome e parentes) expoem esta funcao. Quem a
- * responde dispensa que este contrato calcule qualquer coisa: a taxa, seja ela
- * qual for, e a curva, seja produto constante ou a curva de par estavel, ja
- * estao embutidas na resposta.
- *
- * Isso importa porque a taxa aqui estava escrita a mao como 0,3%. Na Aerodrome
- * a taxa e configurada por pool, e um pool "stable" nem usa produto constante.
- * Calcular por fora com numero errado nao erra o lucro: erra a conta que o
- * proprio pool confere, e a troca reverte.
- */
-interface IPoolQueCalcula {
-    function getAmountOut(uint256 amountIn, address tokenIn) external view returns (uint256);
-}
-
 contract CacadorDeLiquidacoes {
+    /** Quem pode mandar cacar. Fixado no deploy: e quem publicou. */
     address public immutable dono;
+
+    /** A Aave desta rede: de onde vem o emprestimo e onde se liquida. */
     address public immutable pool;
 
     /**
-     * Para onde o lucro vai. Gravado na criacao, sem funcao que altere.
+     * Para onde o lucro vai. IMUTAVEL e sem funcao para trocar.
      *
-     * Nao e zelo excessivo: a carteira quente guarda so o gas justamente
-     * porque a chave dela fica exposta. Se o destino do lucro fosse
-     * parametro, quem roubasse a chave apontaria para si mesmo e o teto de
-     * seguranca nao existiria.
+     * E a defesa contra a chave do bot vazar: quem a roubar pode fazer o
+     * contrato cacar, mas o lucro cai aqui de qualquer jeito. Ele nao tem
+     * como redirecionar nada.
      */
     address public immutable cofre;
 
     /**
-     * Trava de reentrada e de autorizacao ao mesmo tempo.
+     * Para onde a venda do colateral e enviada. IMUTAVEL pelo mesmo motivo.
      *
-     * So vale diferente de zero DENTRO de uma cacada iniciada por este
-     * contrato. Sem ela, qualquer um chamaria `executeOperation` com dados
-     * inventados e moveria o que estivesse aqui dentro.
+     * Sem essa trava, `dadosSwap` viraria "execute qualquer coisa em qualquer
+     * lugar" — o oposto exato do que o cofre imutavel garante.
      */
+    address public immutable roteador;
+
+    /** Trava de reentrada e de autorizacao ao mesmo tempo. */
     bool private emCacada;
 
     error NaoAutorizado();
     error ChamadaInesperada();
     error LucroInsuficiente(uint256 obtido, uint256 exigido);
-    error PoolSemLiquidez();
-    error CofreInvalido();
+    error VendaFalhou(bytes motivo);
+    error EnderecoInvalido();
 
     event Cacada(address indexed devedor, address garantia, uint256 lucro);
 
-    constructor(address _pool, address _cofre) {
-        if (_cofre == address(0) || _pool == address(0)) revert CofreInvalido();
+    constructor(address _pool, address _cofre, address _roteador) {
+        if (_cofre == address(0) || _pool == address(0) || _roteador == address(0)) revert EnderecoInvalido();
         dono = msg.sender;
         pool = _pool;
         cofre = _cofre;
+        roteador = _roteador;
     }
 
     modifier apenasDono() {
@@ -120,19 +107,21 @@ contract CacadorDeLiquidacoes {
     }
 
     /**
-     * Saida de um swap Uniswap V2, com a taxa de 0,3% embutida.
+     * Autoriza zerando antes, porque alguns tokens exigem isso.
      *
-     * Reimplementada em vez de chamada do router: uma chamada externa a mais
-     * custa gas em aritmetica pura, e aqui o gas decide se sobra lucro.
+     * USDT e parentes revertem quando se troca uma autorizacao diferente de
+     * zero por outra diferente de zero. O caminho antigo dava `approve` duas
+     * vezes para a mesma pool na mesma transacao — na primeira moeda assim, a
+     * cacada inteira reverteria, e o log diria apenas "revertida".
+     *
+     * Zerar sempre custa um punhado de gas e vale o seguro: e barato demais
+     * para depender de saber quais moedas se comportam bem.
      */
-    function _saidaDoSwap(uint256 entrada, uint256 reservaEntrada, uint256 reservaSaida)
-        internal
-        pure
-        returns (uint256)
-    {
-        if (reservaEntrada == 0 || reservaSaida == 0) revert PoolSemLiquidez();
-        uint256 comTaxa = entrada * 997;
-        return (comTaxa * reservaSaida) / (reservaEntrada * 1000 + comTaxa);
+    function _autorizar(address token, address gastador, uint256 quantia) internal {
+        if (IERC20(token).allowance(address(this), gastador) != 0) {
+            IERC20(token).approve(gastador, 0);
+        }
+        IERC20(token).approve(gastador, quantia);
     }
 
     /**
@@ -142,9 +131,8 @@ contract CacadorDeLiquidacoes {
      * @param divida       token da divida que se PAGA (e que e emprestado)
      * @param devedor      quem quebrou
      * @param quantoCobrir quanto da divida cobrir, em unidades cruas
-     * @param poolDeVenda  pool V2 onde a garantia vira divida de volta;
-     *                     endereco zero quando garantia e divida sao o mesmo
-     *                     token e nao ha o que trocar
+     * @param dadosSwap    payload pronto para o roteador; vazio quando garantia
+     *                     e divida sao a mesma moeda e nao ha o que trocar
      * @param lucroMinimo  piso; abaixo disso a transacao reverte inteira
      */
     function cacar(
@@ -152,7 +140,7 @@ contract CacadorDeLiquidacoes {
         address divida,
         address devedor,
         uint256 quantoCobrir,
-        address poolDeVenda,
+        bytes calldata dadosSwap,
         uint256 lucroMinimo
     ) external apenasDono {
         emCacada = true;
@@ -160,65 +148,19 @@ contract CacadorDeLiquidacoes {
             address(this),
             divida,
             quantoCobrir,
-            abi.encode(garantia, devedor, poolDeVenda, lucroMinimo),
+            abi.encode(garantia, devedor, dadosSwap, lucroMinimo),
             0
         );
         emCacada = false;
     }
 
     /**
-     * Vende a garantia recebida e devolve quanto saiu de la.
+     * Chamado pela Aave com o dinheiro em maos, antes de exigir a volta.
      *
-     * Antes de calcular, PERGUNTA. Um pool no estilo Solidly responde
-     * `getAmountOut` e ja embute a taxa dele e a curva dele; um pool V2 nao
-     * tem essa funcao, e nao ter e um fato sobre o pool, nao um erro. Por isso
-     * a deteccao e uma chamada que pode falhar sem consequencia, e nao um
-     * parametro que quem chama poderia errar.
-     *
-     * A ordem importa: perguntar primeiro e cair na conta so quando ninguem
-     * responde deixa o caminho V2 - o unico que ja estava testado contra uma
-     * EVM de verdade - exatamente como estava.
-     *
-     * O motivo de existir: o melhor pool V2 da Base tem US$649 mil, e o melhor
-     * Aerodrome tem US$4,4 milhoes. Seis virgula oito vezes mais fundo e, na
-     * conta medida, US$300 de lucro maximo por cacada contra US$2.103.
-     */
-    function _venderGarantia(address garantia, address poolDeVenda, uint256 quanto)
-        internal
-        returns (uint256 recebido)
-    {
-        IUniswapV2Pair venda = IUniswapV2Pair(poolDeVenda);
-        bool ehToken0 = garantia == venda.token0();
-
-        (bool respondeu, bytes memory resposta) = poolDeVenda.staticcall(
-            abi.encodeWithSelector(IPoolQueCalcula.getAmountOut.selector, quanto, garantia)
-        );
-
-        if (respondeu && resposta.length == 32) {
-            recebido = abi.decode(resposta, (uint256));
-        } else {
-            (uint112 r0, uint112 r1, ) = venda.getReserves();
-            recebido = ehToken0
-                ? _saidaDoSwap(quanto, uint256(r0), uint256(r1))
-                : _saidaDoSwap(quanto, uint256(r1), uint256(r0));
-        }
-
-        // Zero sai de pool vazio e de resposta sem sentido. Seguir com zero
-        // entregaria a garantia e receberia nada - e o piso so confere depois.
-        if (recebido == 0) revert PoolSemLiquidez();
-
-        // O pool nao puxa fundos: quem entrega e o chamador.
-        IERC20(garantia).transfer(poolDeVenda, quanto);
-        if (ehToken0) {
-            venda.swap(0, recebido, address(this), new bytes(0));
-        } else {
-            venda.swap(recebido, 0, address(this), new bytes(0));
-        }
-    }
-
-    /**
-     * Chamado pela Aave com o dinheiro ja em maos, antes de exigir a volta.
-     * E aqui que a cacada inteira acontece.
+     * As tres guardas fazem trabalhos diferentes: a primeira impede que
+     * qualquer endereco invoque isto; a segunda impede que a Aave legitima,
+     * chamada por OUTRA pessoa, arraste este contrato para uma execucao que
+     * ele nao comecou; a terceira fecha a janela fora de uma cacada nossa.
      */
     function executeOperation(
         address ativo,
@@ -227,55 +169,50 @@ contract CacadorDeLiquidacoes {
         address iniciador,
         bytes calldata dados
     ) external returns (bool) {
-        // Tres guardas, e as tres fazem trabalho diferente. A primeira impede
-        // que qualquer endereco invoque isto. A segunda impede que a Aave
-        // legitima, chamada por OUTRA pessoa, arraste este contrato para uma
-        // execucao que ele nao comecou. A terceira fecha a janela fora de uma
-        // cacada nossa.
         if (msg.sender != pool) revert ChamadaInesperada();
         if (iniciador != address(this)) revert ChamadaInesperada();
         if (!emCacada) revert ChamadaInesperada();
 
-        (address garantia, address devedor, address poolDeVenda, uint256 lucroMinimo) =
-            abi.decode(dados, (address, address, address, uint256));
+        (address garantia, address devedor, bytes memory dadosSwap, uint256 lucroMinimo) =
+            abi.decode(dados, (address, address, bytes, uint256));
 
         // Pagar a divida do devedor e receber a garantia com agio.
-        IERC20(ativo).approve(pool, quantia);
+        _autorizar(ativo, pool, quantia);
         IPoolAave(pool).liquidationCall(garantia, ativo, devedor, quantia, false);
 
-        // `balanceOf` em vez do valor calculado fora da cadeia: a Aave pode ter
-        // cortado o valor coberto no limite dela, e agir sobre um numero que
-        // ficou velho e errar por conta propria dentro de uma transacao que
-        // ainda dava certo.
-        if (poolDeVenda != address(0)) {
-            _venderGarantia(garantia, poolDeVenda, IERC20(garantia).balanceOf(address(this)));
+        // Vender a garantia, quando ha o que vender. O contrato nao calcula
+        // nada: autoriza o roteador a puxar, e repassa o payload que o bot
+        // montou consultando o agregador fora da cadeia.
+        if (garantia != ativo && dadosSwap.length > 0) {
+            uint256 aVender = IERC20(garantia).balanceOf(address(this));
+            _autorizar(garantia, roteador, aVender);
+            (bool deu, bytes memory motivo) = roteador.call(dadosSwap);
+            if (!deu) revert VendaFalhou(motivo);
+            // Nao deixar autorizacao sobrando: o roteador so pode puxar
+            // durante esta transacao.
+            _autorizar(garantia, roteador, 0);
         }
 
+        // `balanceOf` em vez do valor calculado fora da cadeia: a Aave pode ter
+        // cortado o quanto cobrir, e o roteador pode ter devolvido mais ou
+        // menos que o previsto. O que vale e o que esta na mao.
         uint256 aDevolver = quantia + premio;
         uint256 emCaixa = IERC20(ativo).balanceOf(address(this));
-
-        // A GARANTIA DE SEGURANCA. Conferir aqui, dentro da transacao, e o que
-        // torna a estimativa do vigia irrelevante para o risco: ela pode estar
-        // errada, e o pior caso continua sendo o gas.
         uint256 lucro = emCaixa > aDevolver ? emCaixa - aDevolver : 0;
+
+        // A trava intocada: se a rota calculada fora sofreu deslizamento e o
+        // lucro ficou abaixo do piso, a transacao inteira se desfaz e o custo
+        // e so o gas.
         if (lucro < lucroMinimo) revert LucroInsuficiente(lucro, lucroMinimo);
 
-        // A Aave PUXA o que e dela; a este contrato cabe autorizar.
-        IERC20(ativo).approve(pool, aDevolver);
-
+        _autorizar(ativo, pool, aDevolver);
         if (lucro > 0) IERC20(ativo).transfer(cofre, lucro);
+
         emit Cacada(devedor, garantia, lucro);
         return true;
     }
 
-    /**
-     * Retirada de emergencia - para o cofre, nunca para quem chamou.
-     *
-     * Existe porque token pode sobrar aqui por caminho que ninguem previu, e
-     * dinheiro preso em contrato e dinheiro perdido. Mandar para o cofre e nao
-     * para `msg.sender` mantem a promessa: mesmo com a chave roubada, o que se
-     * consegue e mover o lucro para o destino certo.
-     */
+    /** Resgata token preso. Sempre para o cofre, nunca para quem chamou. */
     function resgatar(address token) external apenasDono {
         IERC20(token).transfer(cofre, IERC20(token).balanceOf(address(this)));
     }

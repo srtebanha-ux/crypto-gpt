@@ -28,20 +28,19 @@ test('o seletor sai do nome da função, não de cópia', () => {
     assert.equal(SELETOR_CACAR, id(ASSINATURA_CACAR).slice(0, 10));
 });
 
-test('a chamada codificada tem seletor mais seis palavras', () => {
+test('a chamada codificada leva os seis campos, com dadosSwap em bytes', () => {
     const dados = codificarCaca({
-        garantia: A, divida: B, devedor: C, quantoCobrir: 123n, poolDeVenda: D, lucroMinimo: 7n,
+        garantia: A, divida: B, devedor: C, quantoCobrir: 123n, dadosSwap: '0xabcd', lucroMinimo: 7n,
     });
     assert.equal(dados.slice(0, 10), SELETOR_CACAR);
-    assert.equal((dados.length - 10) / 64, 6);
     const [g, dv, de, q, pv, lm] = coder.decode(
-        ['address', 'address', 'address', 'uint256', 'address', 'uint256'],
+        ['address', 'address', 'address', 'uint256', 'bytes', 'uint256'],
         '0x' + dados.slice(10),
     );
     assert.equal(g, A);
     assert.equal(de, C);
     assert.equal(BigInt(q.toString()), 123n);
-    assert.equal(pv, D);
+    assert.equal(pv, '0xabcd');
     assert.equal(BigInt(lm.toString()), 7n);
     assert.equal(dv, B);
 });

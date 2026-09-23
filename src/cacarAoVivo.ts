@@ -33,7 +33,7 @@ import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAgg
 import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCaca, lerRespostaDaCaca, PISO_IMPOSSIVEL, lucroEmDolar } from './caca';
-import { cacadorDaRede, POOLS } from './contratos';
+import { cacadorDaRede } from './contratos';
 
 const log = createLogger('caca');
 
@@ -370,14 +370,19 @@ async function principal(): Promise<'parar' | void> {
         log.error('Nenhum caçador publicado nesta rede.', { rede: REDE_ESCOLHIDA });
         return 'parar';
     }
-    const poolDeVenda = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
+    // O contrato novo nao vende sozinho: ele repassa um payload que o bot
+    // monta consultando um agregador. Enquanto esse agregador nao estiver
+    // ligado, so da para cacar quando garantia e divida sao a MESMA moeda —
+    // o unico caso que dispensa troca. Dizer isso alto e melhor que cacar
+    // metade dos alvos em silencio.
+    const API_SWAP = process.env.CACA_SWAP_API ?? '';
 
     log.info(ENVIAR ? '*** MODO ENVIO — ESTE PROCESSO GASTA GÁS DE VERDADE. ***' : '*** MODO MEDIÇÃO — nada é enviado, nenhum gás é gasto. ***');
     log.info('Caçador ao vivo.', {
         rede: REDE.nome,
         contrato: cacador.endereco,
         cofre: cacador.cofre,
-        poolDeVenda,
+        agregadorDeRota: API_SWAP || 'NAO CONFIGURADO — so caça par de mesma moeda',
         vendeEm: cacador.vendeEm,
         modo: ENVIAR ? 'ENVIAR' : 'MEDIR',
         comoMede: 'piso impossível por eth_call: o contrato executa tudo e devolve o lucro dentro do erro',
@@ -656,12 +661,22 @@ async function principal(): Promise<'parar' | void> {
                 });
             }
             for (const alvo of alvos) {
+                const precisaTrocar = alvo.garantia.toLowerCase() !== alvo.divida.toLowerCase();
+                if (precisaTrocar && !API_SWAP) {
+                    log.warn('Alvo pulado: precisa trocar de moeda e não há agregador de rota.', {
+                        devedor: alvo.devedor,
+                        garantia: alvo.garantia,
+                        divida: alvo.divida,
+                        comoResolver: 'defina CACA_SWAP_API com o agregador que monta o payload do roteador',
+                    });
+                    continue;
+                }
                 const dados = codificarCaca({
                     garantia: alvo.garantia,
                     divida: alvo.divida,
                     devedor: alvo.devedor,
                     quantoCobrir: COBRIR_O_MAXIMO,
-                    poolDeVenda,
+                    dadosSwap: '0x',
                     lucroMinimo: PISO_IMPOSSIVEL,
                 });
                 const r = await chamarCruComPaciencia([{ from: cacador.dono, to: cacador.endereco, data: dados }, 'latest']);
@@ -726,7 +741,7 @@ async function principal(): Promise<'parar' | void> {
                     divida: alvo.divida,
                     devedor: alvo.devedor,
                     quantoCobrir: COBRIR_O_MAXIMO,
-                    poolDeVenda,
+                    dadosSwap: '0x',
                     lucroMinimo: piso,
                 });
                 enviados += 1;
