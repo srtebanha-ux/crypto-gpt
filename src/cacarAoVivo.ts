@@ -293,6 +293,19 @@ const INTERVALO_MS = Number(process.env.CACA_INTERVALO_MS ?? '8000');
 const MINUTOS_ENTRE_COMPLETAS = Number(process.env.CACA_MINUTOS_COMPLETA ?? '60');
 
 /**
+ * De quanto em quanto tempo o sinal de vida aparece no log.
+ *
+ * Era `blocoAtual % 150 === 0`, escrito quando o laco acordava a cada bloco.
+ * Com o laco no relogio de 8s o bot so ve 1 bloco a cada 4, e mdc(4,150) = 2:
+ * ele enxerga blocos de uma paridade so. Caindo na paridade errada, NENHUM
+ * bloco visto seria multiplo de 150 e o sinal de vida sumiria para sempre, sem
+ * erro nenhum — e um log mudo e indistinguivel de um bot morto.
+ *
+ * Relogio nao tem paridade.
+ */
+const MS_ENTRE_SINAIS_DE_VIDA = Number(process.env.CACA_MS_SINAL ?? '300000');
+
+/**
  * Quem esta a menos disso de ser liquidado entra na lista quente.
  *
  * A varredura completa le 8.368 posicoes (34 multicalls, 884 CUs). A lista
@@ -575,6 +588,7 @@ async function principal(): Promise<'parar' | void> {
     let brasa: string[] = [];
     /** A margem do primeiro que ficou de fora da brasa: a regua do gatilho. */
     let margemDaBrasa = new Decimal(0);
+    let ultimoSinalDeVida = 0;
     /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
     const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 1);
 
@@ -655,7 +669,8 @@ async function principal(): Promise<'parar' | void> {
             );
 
             if (varredura === 'nenhuma') {
-                if (blocoAtual % 150 === 0) {
+                if (Date.now() - ultimoSinalDeVida >= MS_ENTRE_SINAIS_DE_VIDA) {
+                    ultimoSinalDeVida = Date.now();
                     log.info(`[BLOCO ${blocoAtual}] Só a brasa — ninguém mais pode ter caído.`, {
                         naBrasa: brasa.length,
                         maiorQuedaPct: `${maiorQueda.toFixed(4)}%`,
