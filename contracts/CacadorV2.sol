@@ -233,3 +233,33 @@ contract CacadorV2 {
         IERC20(token).transfer(cofre, IERC20(token).balanceOf(address(this)));
     }
 }
+
+/**
+ * O que se implanta na Base. Mesmo codigo, nenhum campo para preencher.
+ *
+ * O `CacadorV2` acima recebe os quatro enderecos como argumento, e precisa
+ * receber: e assim que os testes o implantam contra uma Aave e um router de
+ * mentira para provar que o lucro sai para o cofre e nao para o dono. Sem
+ * argumento nao ha como testar; com argumento ha quatro campos para colar na
+ * mao, e quatro chances de trocar a ordem, colar o router no lugar do factory
+ * ou cortar um endereco no meio — o Remix implanta sem reclamar de nenhuma
+ * dessas.
+ *
+ * Este envelope resolve os dois: herda o codigo inteiro e ja chega com os
+ * enderecos da Base dentro. Endereco que nao se digita nao se erra.
+ *
+ * Os quatro foram provados um contra o outro em 2026-09-24. A prova esta em
+ * src/contratos.ts (AERODROME), e um teste la exige que este arquivo e aquele
+ * nunca discordem:
+ *
+ *   o pool 0xcdac0d…  respondeu factory()        = 0x420DD381…
+ *   o router 0xcF77a3Ba… respondeu defaultFactory() = 0x420DD381…
+ */
+contract CacadorV2Base is CacadorV2 {
+    address private constant AAVE_POOL = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
+    address private constant AERODROME_ROUTER = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
+    address private constant AERODROME_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+    address private constant COFRE = 0x3dffA934170bdD491724747Be2c4F56E3f1512A7;
+
+    constructor() CacadorV2(AAVE_POOL, AERODROME_ROUTER, AERODROME_FACTORY, COFRE) {}
+}

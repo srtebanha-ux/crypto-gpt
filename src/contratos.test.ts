@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getAddress } from 'ethers';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { REDES } from './liquidacoes';
 import { CACADORES, POOLS, cacadorDaRede, AVISO_ENDERECO_REPETIDO_NA_ARBITRUM, AERODROME, AERODROME_POOL_E_ESTAVEL, AERODROME_POOL_NOME } from './contratos';
 
 test('todo endereco guardado e um endereco valido de verdade', () => {
@@ -79,4 +82,43 @@ test('o pool da Aerodrome e volatil, e o nome dele prova isso', () => {
     assert.equal(AERODROME_POOL_E_ESTAVEL, false);
     assert.ok(AERODROME_POOL_NOME.startsWith('Volatile AMM'));
     assert.ok(AERODROME_POOL_NOME.includes(POOLS.aerodrome.par));
+});
+
+test('os enderecos cravados no .sol sao os MESMOS que estao provados aqui', () => {
+    // O contrato nao pede mais os enderecos como argumento: eles estao dentro
+    // do .sol. Isso tira quatro campos da mao de quem implanta — e quatro
+    // chances de trocar a ordem ou cortar um endereco no meio — mas cria um
+    // jeito novo de errar: os dois arquivos discordarem em silencio, com o
+    // TypeScript medindo um pool e o contrato vendendo em outro.
+    //
+    // Este teste e a unica coisa entre esses dois arquivos e essa divergencia.
+    const sol = readFileSync(join(__dirname, '..', 'contracts', 'CacadorV2.sol'), 'utf8');
+    const constante = (nome: string): string => {
+        const m = sol.match(new RegExp(`address private constant ${nome} = (0x[0-9a-fA-F]{40});`));
+        assert.ok(m, `constante ${nome} nao encontrada em CacadorV2.sol`);
+        return m![1];
+    };
+    assert.equal(constante('AERODROME_ROUTER'), AERODROME.router.endereco);
+    assert.equal(constante('AERODROME_FACTORY'), AERODROME.factory.endereco);
+    assert.equal(constante('COFRE'), CACADORES[0].cofre);
+    assert.equal(constante('AAVE_POOL'), getAddress(REDES.base.pool));
+});
+
+test('o cofre cravado no .sol NAO e a carteira quente', () => {
+    // O defeito do contrato 0xd87AeE…, que esta rodando agora: ele manda o
+    // lucro para o dono. O dono e a conta_bot, cuja chave mora no Railway.
+    // Um ganho la vira dinheiro dormindo onde a chave dorme.
+    const sol = readFileSync(join(__dirname, '..', 'contracts', 'CacadorV2.sol'), 'utf8');
+    const cofre = sol.match(/address private constant COFRE = (0x[0-9a-fA-F]{40});/)![1];
+    for (const c of CACADORES) {
+        assert.notEqual(cofre.toLowerCase(), c.dono.toLowerCase());
+    }
+});
+
+test('o contrato que se implanta nao pede argumento nenhum', () => {
+    // Se alguem reintroduzir argumentos, o passo a passo de implantacao muda e
+    // a garantia acima (endereco que nao se digita nao se erra) morre junto.
+    const sol = readFileSync(join(__dirname, '..', 'contracts', 'CacadorV2.sol'), 'utf8');
+    assert.match(sol, /contract CacadorV2Base is CacadorV2 \{/);
+    assert.match(sol, /constructor\(\) CacadorV2\(AAVE_POOL, AERODROME_ROUTER, AERODROME_FACTORY, COFRE\)/);
 });
