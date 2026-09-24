@@ -14,7 +14,7 @@
 // justamente onde um erro de copia moraria.
 import { Decimal } from 'decimal.js';
 
-export type FamiliaDeVenda = 'v2' | 'v2+solidly';
+export type FamiliaDeVenda = 'v2' | 'v2+solidly' | 'aerodrome';
 
 export interface CacadorPublicado {
     endereco: string;
@@ -25,7 +25,15 @@ export interface CacadorPublicado {
     dono: string;
     /** Em que familia de pool ele sabe vender. */
     vendeEm: FamiliaDeVenda;
-    blocoDoDeploy: number;
+    /**
+     * O bloco em que nasceu, quando se sabe. `null` quer dizer "ainda nao li
+     * da rede" — e nao um palpite. Chutar um numero de bloco a partir do
+     * horario seria inventar procedencia, que e o oposto do que este arquivo
+     * existe para fazer.
+     */
+    blocoDoDeploy: number | null;
+    /** A transacao que o criou. Identifica o deploy sozinha, sem o bloco. */
+    txDoDeploy?: string;
     /** Como se sabe que os campos acima sao esses. */
     conferidoPor: string;
 }
@@ -38,6 +46,20 @@ export interface CacadorPublicado {
  * mostre algum problema que os testes nao pegaram.
  */
 export const CACADORES: CacadorPublicado[] = [
+    {
+        endereco: '0xb91c634fb23934ED178b5116fCbFbF195B127F32',
+        rede: 'base',
+        cofre: '0x3dffA934170bdD491724747Be2c4F56E3f1512A7',
+        dono: '0x3D310384d674532f5D41cF2D43B03001F3515AE8',
+        vendeEm: 'aerodrome',
+        blocoDoDeploy: null,
+        txDoDeploy: '0x8c3785828260e6f862f07cd3a011a6f74526ad7b3acd207409816b643e080690',
+        conferidoPor:
+            'o proprio bot perguntou ao contrato na Base em 2026-09-24: cofre() devolveu ' +
+            '0x3dffA934...1512A7 e dono() devolveu 0x3D310384...15AE8, com cofre != dono. ' +
+            'A conferencia roda sozinha a cada boot, em julgarCofre(), e contrato reprovado ' +
+            'nao caca com dinheiro real',
+    },
     {
         endereco: '0x9066b0ba6783322FEdE3BF5cd520C0f3A9AF3C78',
         rede: 'base',

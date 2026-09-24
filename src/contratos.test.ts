@@ -122,3 +122,22 @@ test('o contrato que se implanta nao pede argumento nenhum', () => {
     assert.match(sol, /contract CacadorV2Base is CacadorV2 \{/);
     assert.match(sol, /constructor\(\) CacadorV2\(AAVE_POOL, AERODROME_ROUTER, AERODROME_FACTORY, COFRE\)/);
 });
+
+test('todo caçador registrado sabe de onde veio', () => {
+    // Procedência vazia é o que este arquivo existe para impedir. Bloco ou
+    // transação: pelo menos um dos dois, nunca nenhum.
+    for (const c of CACADORES) {
+        const temBloco = typeof c.blocoDoDeploy === 'number' && c.blocoDoDeploy > 0;
+        const temTx = typeof c.txDoDeploy === 'string' && /^0x[0-9a-fA-F]{64}$/.test(c.txDoDeploy);
+        assert.ok(temBloco || temTx, `${c.endereco} sem bloco nem transação de origem`);
+    }
+});
+
+test('o caçador da Aerodrome está registrado e paga no cofre', () => {
+    const novo = CACADORES.find((c) => c.vendeEm === 'aerodrome');
+    assert.ok(novo, 'nenhum caçador registrado vende na Aerodrome');
+    assert.equal(novo!.endereco, '0xb91c634fb23934ED178b5116fCbFbF195B127F32');
+    assert.notEqual(novo!.cofre.toLowerCase(), novo!.dono.toLowerCase());
+    // A prova tem que citar quem respondeu, não quem lembrou.
+    assert.ok(novo!.conferidoPor.includes('cofre()'));
+});
