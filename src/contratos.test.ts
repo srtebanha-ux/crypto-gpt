@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getAddress } from 'ethers';
-import { CACADORES, POOLS, cacadorDaRede, AVISO_ENDERECO_REPETIDO_NA_ARBITRUM } from './contratos';
+import { CACADORES, POOLS, cacadorDaRede, AVISO_ENDERECO_REPETIDO_NA_ARBITRUM, AERODROME, AERODROME_POOL_E_ESTAVEL, AERODROME_POOL_NOME } from './contratos';
 
 test('todo endereco guardado e um endereco valido de verdade', () => {
     // getAddress reprova checksum errado, que e como um caractere trocado numa
@@ -48,4 +48,35 @@ test('o pool da Aerodrome e mesmo o mais fundo — e por muito', () => {
     const vezes = POOLS.aerodrome.profundidadeUsd.dividedBy(POOLS.uniswapV2.profundidadeUsd);
     assert.ok(vezes.greaterThan(6), `esperava mais de 6x, deu ${vezes.toFixed(1)}x`);
     assert.equal(POOLS.aerodrome.familia, 'solidly');
+});
+
+test('os enderecos da Aerodrome passam no checksum', () => {
+    for (const [papel, e] of Object.entries(AERODROME)) {
+        assert.equal(getAddress(e.endereco), e.endereco, `${papel} com checksum errado`);
+    }
+});
+
+test('router e factory da Aerodrome sao contratos diferentes', () => {
+    assert.notEqual(
+        AERODROME.router.endereco.toLowerCase(),
+        AERODROME.factory.endereco.toLowerCase(),
+    );
+});
+
+test('cada endereco da Aerodrome carrega COMO foi provado', () => {
+    // Endereco sem prova junto e endereco suposto. Este teste impede que
+    // alguem acrescente um "de memoria" mais tarde.
+    for (const [papel, e] of Object.entries(AERODROME)) {
+        assert.ok(e.provadoPor.length > 20, `${papel} sem prova escrita`);
+        assert.match(e.provadoEm, /^\d{4}-\d{2}-\d{2}$/, `${papel} sem data da prova`);
+    }
+});
+
+test('o pool da Aerodrome e volatil, e o nome dele prova isso', () => {
+    // "Volatile AMM - " e montado pelo contrato a partir da flag `stable`.
+    // Se um dia o nome vier "Stable AMM - ", a constante aqui esta errada e o
+    // cacador estaria mandando a curva errada na venda.
+    assert.equal(AERODROME_POOL_E_ESTAVEL, false);
+    assert.ok(AERODROME_POOL_NOME.startsWith('Volatile AMM'));
+    assert.ok(AERODROME_POOL_NOME.includes(POOLS.aerodrome.par));
 });

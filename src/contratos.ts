@@ -114,3 +114,55 @@ export const POOLS: Record<string, PoolMedido> = {
         medidoEm: '2026-09-19',
     },
 };
+
+/**
+ * Os enderecos da Aerodrome na Base, provados um contra o outro.
+ *
+ * Sao os argumentos 2 e 3 do construtor do CacadorV2. Nenhum deles veio de
+ * lista, documentacao ou memoria: a prova e um circulo fechado que so bate se
+ * os tres forem os certos.
+ *
+ *   1. O pool 0xcdac0d… (o WETH/USDC de US$4,4 milhoes que a gente mediu)
+ *      respondeu `factory()` = 0x420DD381…
+ *   2. O router 0xcF77a3Ba… respondeu `defaultFactory()` = 0x420DD381…
+ *   3. Os dois apontam para o MESMO factory, e o basescan mostra o router
+ *      criado pelo "Aerodrome: Deployer".
+ *
+ * Se algum dia esses enderecos mudarem, o jeito de refazer a prova e esse
+ * mesmo: perguntar ao pool quem e o factory dele, e perguntar ao router se ele
+ * conhece o mesmo factory. Endereco que so aparece num dos dois lados nao esta
+ * provado, esta suposto.
+ */
+export interface EnderecoProvado {
+    endereco: string;
+    /** Como se sabe que e esse, em uma frase conferivel. */
+    provadoPor: string;
+    provadoEm: string;
+}
+
+export const AERODROME: Record<'router' | 'factory', EnderecoProvado> = {
+    router: {
+        endereco: '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43',
+        provadoPor: 'defaultFactory() devolveu o mesmo factory que o pool 0xcdac0d… aponta',
+        provadoEm: '2026-09-24',
+    },
+    factory: {
+        endereco: '0x420DD381b31aEf6683db6B902084cB0FFECe40Da',
+        provadoPor: 'factory() lido do proprio pool 0xcdac0d…, e confirmado pelo router',
+        provadoEm: '2026-09-24',
+    },
+};
+
+/**
+ * O pool da Aerodrome e VOLATIL, nao estavel.
+ *
+ * O contrato le `name()` = "Volatile AMM - WETH/USDC". Esse texto nao e um
+ * rotulo solto: no codigo da Aerodrome ele e montado a partir da propria flag
+ * `stable` — pool volatil vira "Volatile AMM - ", estavel vira "Stable AMM - ".
+ * Entao e o contrato afirmando `stable == false`, e nao alguem descrevendo.
+ *
+ * Importa porque o cacador manda `isStablePool` na chamada. Mandar `true` num
+ * pool volatil usa a curva errada e a venda sai a preco errado.
+ */
+export const AERODROME_POOL_E_ESTAVEL = false;
+export const AERODROME_POOL_NOME = 'Volatile AMM - WETH/USDC';
