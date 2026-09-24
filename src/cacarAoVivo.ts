@@ -9,7 +9,7 @@ import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodifica
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, decodificarAggregate3Rapido, partirEmPedacos } from './multicall';
 import { codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
-import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado } from './caca';
+import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
 
 /**
@@ -565,6 +565,41 @@ async function principal(): Promise<'parar' | void> {
     
     if (!dataProvider || !oraculo) return 'parar';
 
+    // ---- Conferir o cofre de cada caçador, antes de qualquer caçada. ----
+    //
+    // Conferir isso na mão, uma vez, numa tela, não é conferir: é lembrar.
+    // O contrato 0xd87AeE… rodou dias mandando lucro para o dono — a carteira
+    // quente cuja chave mora no Railway — e ninguém viu, porque ele nunca
+    // ganhou nada. Aqui acontece sozinho, todo boot, para todo contrato.
+    const contratos: typeof CONTRATOS_ATIVOS = [];
+    for (const c of CONTRATOS_ATIVOS) {
+        let cofre: string | null = null;
+        let dono: string | null = null;
+        try {
+            cofre = enderecoDaResposta(await chamar<string>('eth_call', [{ to: c.endereco, data: SELETOR_COFRE }, 'latest']));
+            dono = enderecoDaResposta(await chamar<string>('eth_call', [{ to: c.endereco, data: SELETOR_DONO }, 'latest']));
+        } catch (e) {
+            log.warn(`Não consegui ler o cofre de ${c.nome}.`, { erro: (e as Error).message });
+        }
+        const laudo = julgarCofre({ cofre, dono });
+        const linha = { contrato: c.nome, endereco: c.endereco, cofre: cofre ?? '—', dono: dono ?? '—', porque: laudo.porque };
+        if (podeCacarComDinheiroReal(laudo)) {
+            log.info(`[COFRE OK] ${c.nome} paga no cofre certo.`, linha);
+            contratos.push(c);
+        } else if (ENVIAR) {
+            log.error(`[COFRE ${laudo.veredicto.toUpperCase()}] ${c.nome} NÃO vai caçar com dinheiro real.`, linha);
+        } else {
+            // Sem ENVIAR nada é gasto, então medir um contrato suspeito é útil
+            // — desde que o log diga, em toda ronda, que ele não pagaria certo.
+            log.warn(`[COFRE ${laudo.veredicto.toUpperCase()}] ${c.nome} entra só para medição.`, linha);
+            contratos.push(c);
+        }
+    }
+    if (contratos.length === 0) {
+        log.error('Nenhum caçador passou na conferência do cofre. Não vou caçar no escuro.', { cofreEsperado: COFRE_ESPERADO });
+        return 'parar';
+    }
+
     const moedas = decodificarListaDeEnderecos(
         await chamar<string>('eth_call', [{ to: REDE.pool, data: SELETOR_GET_RESERVES_LIST }, 'latest']),
     );
@@ -744,7 +779,7 @@ async function principal(): Promise<'parar' | void> {
             const alvos = await montarAlvos(caidos, moedas, dataProvider, precos, casas);
 
             for (const alvo of alvos) {
-                for (const contrato of CONTRATOS_ATIVOS) {
+                for (const contrato of contratos) {
                     const dados = contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,

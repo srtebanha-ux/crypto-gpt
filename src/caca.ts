@@ -107,3 +107,62 @@ export function isDevedorIgnorado(devedor: string): boolean {
     ]);
     return ignorados.has(devedor.toLowerCase());
 }
+
+// ---------------------------------------------------------------------------
+// Conferir o cofre de um caçador ANTES de mandar ele caçar.
+// ---------------------------------------------------------------------------
+
+export const SELETOR_COFRE = id('cofre()').slice(0, 10);
+export const SELETOR_DONO = id('dono()').slice(0, 10);
+
+/**
+ * Para onde o lucro TEM que ir.
+ *
+ * Imutável no contrato: não existe função para trocar. É o que faz uma chave
+ * roubada do Railway poder queimar gás, mas nunca redirecionar dinheiro.
+ */
+export const COFRE_ESPERADO = '0x3dffA934170bdD491724747Be2c4F56E3f1512A7';
+
+export type VeredictoDoCofre = 'aprovado' | 'reprovado' | 'inconclusivo';
+
+export interface LaudoDoCofre {
+    veredicto: VeredictoDoCofre;
+    /** Em português, o que foi encontrado. Vai para o log e para o humano. */
+    porque: string;
+}
+
+/**
+ * Julga um caçador publicado pelo que ELE responde, não pelo que a gente acha.
+ *
+ * Existe porque conferir isso na mão, uma vez, numa tela, não é conferir: é
+ * lembrar. O contrato 0xd87AeE… rodou dias mandando lucro para o dono — a
+ * carteira quente cuja chave mora no Railway — e ninguém viu, porque ele nunca
+ * ganhou nada. A checagem só vale se acontecer sozinha, todo boot.
+ *
+ * `null` nunca vira aprovação. Chamada que falhou, endereço sem código, e
+ * resposta que não é endereço: tudo isso e INCONCLUSIVO, e inconclusivo não
+ * caça com dinheiro real. Aprovar no escuro e o defeito que este projeto mais
+ * encontrou.
+ */
+export function julgarCofre(
+    lido: { cofre: string | null; dono: string | null },
+    cofreEsperado: string = COFRE_ESPERADO,
+): LaudoDoCofre {
+    if (lido.cofre === null) {
+        return { veredicto: 'inconclusivo', porque: 'não consegui ler cofre() — pode não ser um contrato, ou a rede falhou' };
+    }
+    const cofre = lido.cofre.toLowerCase();
+    const esperado = cofreEsperado.toLowerCase();
+    if (lido.dono !== null && cofre === lido.dono.toLowerCase()) {
+        return { veredicto: 'reprovado', porque: `o cofre é o PRÓPRIO DONO (${lido.dono}) — o lucro cairia na carteira quente` };
+    }
+    if (cofre !== esperado) {
+        return { veredicto: 'reprovado', porque: `cofre() devolveu ${lido.cofre}, e o esperado é ${cofreEsperado}` };
+    }
+    return { veredicto: 'aprovado', porque: `cofre() = ${cofreEsperado}` };
+}
+
+/** Só 'aprovado' pode gastar dinheiro. Inconclusivo NÃO é permissão. */
+export function podeCacarComDinheiroReal(laudo: LaudoDoCofre): boolean {
+    return laudo.veredicto === 'aprovado';
+}

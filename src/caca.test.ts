@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
-import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO } from './caca';
+import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
 import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade } from './cacarAoVivo';
 
@@ -253,4 +253,54 @@ test('varrer os 8.390 a cada bloco estoura o teto em muitas vezes', () => {
         ...MEDIDO, intervaloMs: 2000, quentes: 8390, fracaoQueDisparaQuentes: 1,
     });
     assert.ok(semGatilho > TETO_DA_CONTA * 20, `${semGatilho} CUs/mês`);
+});
+
+// ---------------------------------------------------------------------------
+// A conferência do cofre, que agora acontece sozinha a cada boot.
+// ---------------------------------------------------------------------------
+
+const COFRE = '0x3dffA934170bdD491724747Be2c4F56E3f1512A7';
+const CONTA_BOT = '0x3D310384d674532f5D41cF2D43B03001F3515AE8';
+
+test('cofre certo aprova', () => {
+    const l = julgarCofre({ cofre: COFRE, dono: CONTA_BOT });
+    assert.equal(l.veredicto, 'aprovado');
+    assert.ok(podeCacarComDinheiroReal(l));
+});
+
+test('cofre diferente do esperado REPROVA', () => {
+    const l = julgarCofre({ cofre: A, dono: CONTA_BOT });
+    assert.equal(l.veredicto, 'reprovado');
+    assert.ok(l.porque.includes(A));
+    assert.ok(!podeCacarComDinheiroReal(l));
+});
+
+test('cofre igual ao dono REPROVA, e diz exatamente por quê', () => {
+    // O defeito do 0xd87AeE…, que rodou dias sem ninguém ver.
+    const l = julgarCofre({ cofre: CONTA_BOT, dono: CONTA_BOT });
+    assert.equal(l.veredicto, 'reprovado');
+    assert.ok(l.porque.toLowerCase().includes('carteira quente'));
+});
+
+test('não conseguir ler NÃO é aprovação', () => {
+    // Endereço errado, contrato inexistente, rede caída — tudo cai aqui, e
+    // nada disso pode virar permissão para gastar dinheiro.
+    const l = julgarCofre({ cofre: null, dono: null });
+    assert.equal(l.veredicto, 'inconclusivo');
+    assert.ok(!podeCacarComDinheiroReal(l));
+});
+
+test('dono ilegível não impede aprovar um cofre correto', () => {
+    // A checagem cofre==dono é um extra. Se dono() não respondeu, o cofre
+    // certo ainda é o cofre certo.
+    assert.equal(julgarCofre({ cofre: COFRE, dono: null }).veredicto, 'aprovado');
+});
+
+test('a comparação ignora maiúsculas do checksum', () => {
+    assert.equal(julgarCofre({ cofre: COFRE.toLowerCase(), dono: CONTA_BOT }).veredicto, 'aprovado');
+});
+
+test('os seletores de cofre() e dono() sao os que o contrato publica', () => {
+    assert.equal(SELETOR_COFRE, '0x8fb8a14a');
+    assert.equal(SELETOR_DONO, '0x70514bea');
 });
