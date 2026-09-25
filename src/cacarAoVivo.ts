@@ -5,7 +5,7 @@ import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
-import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
+import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
@@ -742,6 +742,33 @@ async function principal(): Promise<'parar' | void> {
     let perdasSeguidas = 0;
     const fracaoBase = Number(process.env.CACA_FRACAO_GORJETA ?? '0.4');
 
+    /**
+     * Alvos montados ANTES do oraculo escrever.
+     *
+     * A Aave nao deixa liquidar antes de o preco on-chain mudar, entao ver
+     * antes nao adianta para arrematar antes. Mas adianta para chegar pronto:
+     * montar o alvo custa uma ida a rede, e essa ida pode acontecer enquanto o
+     * mercado ainda esta caindo. Quando o bloco chega, so resta mandar.
+     */
+    const alvosArmados = new Map<string, Alvo>();
+    let armadoEm = 0;
+    const QUANTOS_ARMAR = Number(process.env.CACA_QUANTOS_ARMAR ?? '8');
+    const VALIDADE_ARMADO_MS = Number(process.env.CACA_VALIDADE_ARMADO_MS ?? '5000');
+
+    async function armar(): Promise<void> {
+        const quem = quemArmar(brasa, QUANTOS_ARMAR);
+        if (quem.length === 0) return;
+        try {
+            const prontos = await montarAlvos(quem, moedas, dataProvider!, precos, casas);
+            alvosArmados.clear();
+            for (const a of prontos) alvosArmados.set(a.devedor.toLowerCase(), a);
+            armadoEm = Date.now();
+        } catch {
+            // Armar e vantagem, nao obrigacao: se falhar, o caminho normal
+            // monta o alvo na hora como sempre fez.
+        }
+    }
+
     // Ser AVISADO do bloco novo em vez de perguntar. Perguntar a cada 200ms
     // significa que um bloco nascido logo depois da pergunta so e visto na
     // seguinte — e nessa corrida isso e a diferenca entre entrar no bloco N+1
@@ -882,6 +909,8 @@ async function principal(): Promise<'parar' | void> {
         const queda = quedaDoMercado(doMercado, doOraculo);
         quedaDoMercadoAgora = queda;
         const nova = posturaPorMargem(queda, menorMargem, DESVIO_DE_ESCRITA);
+        // Armar enquanto o preco cai, nao depois que o bloco chega.
+        if (valeArmar(nova, Date.now() - armadoEm, VALIDADE_ARMADO_MS)) void armar();
         const ficouUrgente = ritmoDaPostura(nova, INTERVALO_MS) < ritmoDaPostura(postura, INTERVALO_MS);
         postura = nova;
         if (postura !== posturaAnterior) {
@@ -973,6 +1002,7 @@ async function principal(): Promise<'parar' | void> {
                         // Sem isto, "mercado calmo" e "Binance morta" dao o
                         // mesmo log — e sao coisas opostas.
                         tiros: comoEstaIndo(tiros),
+                        armados: alvosArmados.size,
                         avisoDeBloco: ouvinte === null ? 'desligado' : (ouvinte.vivo ? `ligado (último ${ouvinte.ultimoBloco})` : 'CAIU — perguntando'),
                         mercado: mercadoAgora() === null
                             ? 'SEM COTAÇÃO — ritmo fixo'
@@ -1047,7 +1077,21 @@ async function principal(): Promise<'parar' | void> {
 
             if (caidos.length === 0) continue;
 
-            const alvos = await montarAlvos(caidos, moedas, dataProvider, precos, casas);
+            // Quem ja estava armado nao precisa de ida a rede nenhuma agora.
+            const jaArmados = caidos
+                .map((d) => alvosArmados.get(d.toLowerCase()))
+                .filter((a): a is Alvo => a !== undefined);
+            const faltando = caidos.filter((d) => !alvosArmados.has(d.toLowerCase()));
+            const alvos = faltando.length === 0
+                ? jaArmados
+                : [...jaArmados, ...await montarAlvos(faltando, moedas, dataProvider, precos, casas)];
+            if (jaArmados.length > 0) {
+                log.info('[PRONTO] Cheguei com o alvo já montado.', {
+                    jaArmados: jaArmados.length,
+                    tiveQueMontarAgora: faltando.length,
+                    armadoHa: `${Date.now() - armadoEm}ms`,
+                });
+            }
 
             for (const alvo of alvos) {
                 for (const contrato of contratos) {

@@ -223,3 +223,39 @@ export async function dormirDeOlho(
     }
     return false;
 }
+
+/**
+ * Quem armar enquanto o oraculo ainda nao escreveu.
+ *
+ * A regra da Aave nao deixa liquidar antes de o preco on-chain mudar: a
+ * posicao continua saudavel pela conta dela, e a transacao reverte. Ver antes
+ * nao adianta para ARREMATAR antes.
+ *
+ * Mas adianta para CHEGAR PRONTO. Montar o alvo (qual garantia, qual divida,
+ * quanto cobrir) custa uma ida a rede, e essa ida pode acontecer enquanto o
+ * mercado ainda esta caindo. Quando o bloco chega, so resta assinar e mandar.
+ *
+ * Arma-se poucos, e os mais frageis: a lista esta ordenada por fragilidade, e
+ * quem cai quando o oraculo escreve sao os primeiros dela. Armar duzentos
+ * gastaria leitura a toa toda vez que o mercado balancasse.
+ */
+export function quemArmar(brasaOrdenada: string[], quantos: number): string[] {
+    if (quantos <= 0) return [];
+    return brasaOrdenada.slice(0, quantos);
+}
+
+/**
+ * Se vale a pena armar agora.
+ *
+ * Armar custa uma leitura. Fazer isso a cada balanco do mercado gastaria mais
+ * do que economiza, entao so se arma quando o feed esta perto de escrever — e
+ * so se o que ja esta armado nao serve mais.
+ */
+export function valeArmar(
+    postura: Postura,
+    armadoHaMs: number,
+    validadeMs: number,
+): boolean {
+    if (postura === 'dormindo') return false;
+    return armadoHaMs >= validadeMs;
+}

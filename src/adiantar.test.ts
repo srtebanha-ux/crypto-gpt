@@ -191,3 +191,37 @@ test('sono zero ou negativo não dorme nem olha', async () => {
     await dormirDeOlho(0, 1000, async () => { chamou += 1; return false; }, async () => { chamou += 1; });
     assert.equal(chamou, 0);
 });
+
+// ---------------------------------------------------------------------------
+// Chegar pronto: a Aave não deixa arrematar antes, mas deixa chegar armado.
+// ---------------------------------------------------------------------------
+import { quemArmar, valeArmar } from './adiantar';
+
+test('arma os mais frágeis, que são os primeiros da lista ordenada', () => {
+    const brasa = ['0xa', '0xb', '0xc', '0xd'];
+    assert.deepEqual(quemArmar(brasa, 2), ['0xa', '0xb']);
+});
+
+test('armar zero ou menos não arma ninguém', () => {
+    assert.deepEqual(quemArmar(['0xa'], 0), []);
+    assert.deepEqual(quemArmar(['0xa'], -1), []);
+});
+
+test('pedir mais do que existe não quebra', () => {
+    assert.deepEqual(quemArmar(['0xa'], 99), ['0xa']);
+});
+
+test('dormindo NÃO arma: seria leitura a toa a cada balanço do mercado', () => {
+    assert.equal(valeArmar('dormindo', 999_999, 5000), false);
+});
+
+test('arma quando o feed está perto de escrever e o que tem já envelheceu', () => {
+    assert.equal(valeArmar('atento', 6000, 5000), true);
+    assert.equal(valeArmar('dedo no gatilho', 6000, 5000), true);
+});
+
+test('não rearma o que ainda está fresco', () => {
+    // Rearmar a cada ciclo do gatilho (200ms) gastaria uma leitura por ciclo
+    // justamente no momento mais caro.
+    assert.equal(valeArmar('dedo no gatilho', 100, 5000), false);
+});
