@@ -141,3 +141,53 @@ test('o estado caro se limita sozinho', () => {
     assert.equal(posturaPorMargem(D(0.49), D(0.01)), 'atento');
     assert.equal(posturaPorMargem(D(0.50), D(0.01)), 'dedo no gatilho');
 });
+
+// ---------------------------------------------------------------------------
+// Dormir de olho aberto: olhar o mercado custa zero, ler a blockchain não.
+// ---------------------------------------------------------------------------
+import { dormirDeOlho } from './adiantar';
+
+test('dorme em fatias e olha entre elas', async () => {
+    const dormiu: number[] = [];
+    let olhadas = 0;
+    const acordouCedo = await dormirDeOlho(
+        8000, 1000,
+        async () => { olhadas += 1; return false; },
+        async (ms) => { dormiu.push(ms); },
+    );
+    assert.equal(acordouCedo, false);
+    assert.equal(dormiu.reduce((a, b) => a + b, 0), 8000, 'o sono total tem que ser o pedido');
+    assert.equal(dormiu.length, 8);
+    // Olha entre as fatias, não depois da última — olhar e já sair é desperdício.
+    assert.equal(olhadas, 7);
+});
+
+test('acorda na hora quando o mercado muda no meio do sono', async () => {
+    // O ponto inteiro: sem isto, uma queda no segundo 1 só seria vista no
+    // segundo 8, e a liquidação já teria ido embora.
+    const dormiu: number[] = [];
+    let olhadas = 0;
+    const acordouCedo = await dormirDeOlho(
+        8000, 1000,
+        async () => { olhadas += 1; return olhadas >= 2; },
+        async (ms) => { dormiu.push(ms); },
+    );
+    assert.equal(acordouCedo, true);
+    assert.equal(dormiu.reduce((a, b) => a + b, 0), 2000, 'acordou no segundo 2, não no 8');
+});
+
+test('sono curto não vira olhadas desnecessárias', async () => {
+    // Com o dedo no gatilho o sono é de 200ms: fatiar isso só gastaria
+    // chamadas à Binance sem ganhar reação nenhuma.
+    let olhadas = 0;
+    const dormiu: number[] = [];
+    await dormirDeOlho(200, 1000, async () => { olhadas += 1; return false; }, async (ms) => { dormiu.push(ms); });
+    assert.equal(olhadas, 0);
+    assert.deepEqual(dormiu, [200]);
+});
+
+test('sono zero ou negativo não dorme nem olha', async () => {
+    let chamou = 0;
+    await dormirDeOlho(0, 1000, async () => { chamou += 1; return false; }, async () => { chamou += 1; });
+    assert.equal(chamou, 0);
+});

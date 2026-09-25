@@ -5,7 +5,7 @@ import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
-import { posturaPorMargem, ritmoDaPostura, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
+import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
@@ -308,6 +308,19 @@ const INTERVALO_MS = Number(process.env.CACA_INTERVALO_MS ?? '8000');
  * (gasta um pouco de CU); errar para MAIS faz perder a janela inteira.
  */
 const DESVIO_DE_ESCRITA = new Decimal(process.env.CACA_DESVIO_FEED ?? DESVIO_TIPICO_PCT.toString());
+
+/**
+ * De quanto em quanto tempo o bot olha o MERCADO enquanto dorme.
+ *
+ * Nao e o mesmo que o ciclo. Ler a blockchain e caro e precisa ser raro; olhar
+ * o preco nao passa pela blockchain e custa zero — entao nao ha razao para as
+ * duas frequencias serem iguais. Eram, e isso anulava boa parte da vantagem:
+ * dormindo 8 segundos, o preco podia cair, o feed escrever e a liquidacao
+ * sumir antes do bot piscar.
+ *
+ * 1 segundo deixa o peso na API publica da Binance folgado.
+ */
+const OLHAR_MERCADO_MS = Number(process.env.CACA_OLHAR_MERCADO_MS ?? '1000');
 
 /** De quanto em quanto tempo TODAS as posicoes sao relidas, custe o que custar. */
 const MINUTOS_ENTRE_COMPLETAS = Number(process.env.CACA_MINUTOS_COMPLETA ?? '60');
@@ -712,6 +725,8 @@ async function principal(): Promise<'parar' | void> {
      * "[POSTURA]" fica igual a um mercado calmo, e sao coisas opostas.
      */
     let quedaDoMercadoAgora: Decimal | null = null;
+    /** Acessor: o TypeScript nao enxerga atribuicao feita dentro de closure. */
+    const mercadoAgora = (): Decimal | null => quedaDoMercadoAgora;
     let avisouMercadoMudo = false;
     /** O que aconteceu com cada tiro depois de sair. */
     let tiros = placarVazio();
@@ -812,6 +827,50 @@ async function principal(): Promise<'parar' | void> {
         });
     }
 
+    /**
+     * Olha o mercado e atualiza a postura. Devolve `true` se ficou mais
+     * urgente que estava — que e quando vale acordar antes da hora.
+     */
+    async function olharMercado(): Promise<boolean> {
+        if (paresDaBinance.length === 0) return false;
+        const doMercado = await cotacoesDaBinance(paresDaBinance);
+        if (doMercado.size === 0) {
+            quedaDoMercadoAgora = null;
+            if (!avisouMercadoMudo) {
+                avisouMercadoMudo = true;
+                log.warn('MERCADO MUDO: a Binance não respondeu. Volto ao ritmo fixo e perco a vantagem de antecipar.', {
+                    pares: paresDaBinance,
+                    oQueIssoCusta: 'sem isto o bot só descobre quem caiu depois que o oráculo escreve',
+                });
+            }
+            return false;
+        }
+        if (avisouMercadoMudo) {
+            avisouMercadoMudo = false;
+            log.info('Mercado voltou a responder.');
+        }
+        const doOraculo = new Map<string, Decimal>();
+        for (const [token, par] of parPorToken) {
+            const p = precos.get(token);
+            if (p && !doOraculo.has(par)) doOraculo.set(par, p.dividedBy(1e8));
+        }
+        const queda = quedaDoMercado(doMercado, doOraculo);
+        quedaDoMercadoAgora = queda;
+        const nova = posturaPorMargem(queda, menorMargem, DESVIO_DE_ESCRITA);
+        const ficouUrgente = ritmoDaPostura(nova, INTERVALO_MS) < ritmoDaPostura(postura, INTERVALO_MS);
+        postura = nova;
+        if (postura !== posturaAnterior) {
+            log.info(`[POSTURA] ${posturaAnterior} → ${postura}`, {
+                mercadoCaiu: `${queda.toFixed(4)}%`,
+                feedEscreveEm: `${DESVIO_DE_ESCRITA.toFixed(2)}%`,
+                maisFragilA: menorMargem === null ? '—' : `${menorMargem.toFixed(4)}%`,
+                proximaLeituraEm: `${ritmoDaPostura(postura, INTERVALO_MS)}ms`,
+            });
+            posturaAnterior = postura;
+        }
+        return ficouUrgente;
+    }
+
     for (;;) {
         const inicioDoCiclo = Date.now();
         try {
@@ -889,9 +948,9 @@ async function principal(): Promise<'parar' | void> {
                         // Sem isto, "mercado calmo" e "Binance morta" dao o
                         // mesmo log — e sao coisas opostas.
                         tiros: comoEstaIndo(tiros),
-                        mercado: quedaDoMercadoAgora === null
+                        mercado: mercadoAgora() === null
                             ? 'SEM COTAÇÃO — ritmo fixo'
-                            : `${quedaDoMercadoAgora.toFixed(4)}% abaixo do oráculo (${postura})`,
+                            : `${mercadoAgora()!.toFixed(4)}% abaixo do oráculo (${postura})`,
                         oraculoJaCaiuPct: `${maiorQueda.toFixed(4)}%`,
                         gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
                         naListaQuente: quentes.length,
@@ -1115,53 +1174,14 @@ async function principal(): Promise<'parar' | void> {
         } catch (err) {
             log.warn('Tropeço rápido na rede, reiniciando milissegundo seguinte.', { erro: err instanceof Error ? err.message : String(err) });
         } finally {
-            // O ritmo e do relogio, nao do bloco. Perguntar "que bloco e esse?"
-            // a cada 100ms custava 130M CUs/mes — mais que todo o resto junto,
-            // e mais de 6x o teto da conta.
-            //
-            // Mas o relogio nao anda sempre igual: quem manda no passo e o
-            // MERCADO, que custa zero em CU porque nao passa pela blockchain.
-            // Enquanto ele esta calmo o bot dorme barato; quando ele cai o
-            // bastante para o feed escrever E derrubar alguem, o bot corre.
-            let ritmo = INTERVALO_MS;
-            if (paresDaBinance.length > 0) {
-                const doMercado = await cotacoesDaBinance(paresDaBinance);
-                if (doMercado.size === 0) {
-                    quedaDoMercadoAgora = null;
-                    if (!avisouMercadoMudo) {
-                        avisouMercadoMudo = true;
-                        log.warn('MERCADO MUDO: a Binance não respondeu. Volto ao ritmo fixo e perco a vantagem de antecipar.', {
-                            pares: paresDaBinance,
-                            oQueIssoCusta: 'sem isto o bot só descobre quem caiu depois que o oráculo escreve',
-                        });
-                    }
-                } else {
-                    if (avisouMercadoMudo) {
-                        avisouMercadoMudo = false;
-                        log.info('Mercado voltou a responder.');
-                    }
-                    const doOraculo = new Map<string, Decimal>();
-                    for (const [token, par] of parPorToken) {
-                        const p = precos.get(token);
-                        if (p && !doOraculo.has(par)) doOraculo.set(par, p.dividedBy(1e8));
-                    }
-                    const queda = quedaDoMercado(doMercado, doOraculo);
-                    quedaDoMercadoAgora = queda;
-                    postura = posturaPorMargem(queda, menorMargem, DESVIO_DE_ESCRITA);
-                    ritmo = ritmoDaPostura(postura, INTERVALO_MS);
-                    if (postura !== posturaAnterior) {
-                        log.info(`[POSTURA] ${posturaAnterior} → ${postura}`, {
-                            mercadoCaiu: `${queda.toFixed(4)}%`,
-                            feedEscreveEm: `${DESVIO_DE_ESCRITA.toFixed(2)}%`,
-                            maisFragilA: menorMargem === null ? '—' : `${menorMargem.toFixed(4)}%`,
-                            proximaLeituraEm: `${ritmo}ms`,
-                        });
-                        posturaAnterior = postura;
-                    }
-                }
-            }
+            // Ler a blockchain e caro e precisa ser raro. Olhar o mercado
+            // custa zero. Por isso as duas frequencias sao separadas: o ciclo
+            // dorme o que a postura mandar, mas de olho aberto — e se o
+            // mercado ficar urgente no meio do sono, acorda na hora.
+            await olharMercado();
+            const ritmo = ritmoDaPostura(postura, INTERVALO_MS);
             const resta = ritmo - (Date.now() - inicioDoCiclo);
-            if (resta > 0) await dormir(resta);
+            if (resta > 0) await dormirDeOlho(resta, OLHAR_MERCADO_MS, olharMercado, async (ms) => { await dormir(ms); });
         }
     }
 }

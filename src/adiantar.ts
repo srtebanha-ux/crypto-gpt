@@ -183,3 +183,43 @@ export function posturaPorMargem(
     if (quedaDoMercadoPct.greaterThanOrEqualTo(desvioDeEscrita.mul(0.6))) return 'atento';
     return 'dormindo';
 }
+
+/**
+ * Dormir de olho aberto.
+ *
+ * Conserta um gargalo que anulava boa parte da vantagem de olhar o mercado: a
+ * checagem acontecia uma vez por ciclo, e o ciclo dorme 8 segundos quando o
+ * mercado esta calmo. Ou seja, o preco podia cair, o feed escrever, a
+ * liquidacao aparecer e sumir — tudo antes do bot piscar.
+ *
+ * E e um desperdicio gritante, porque olhar o mercado custa ZERO: nao passa
+ * pela blockchain. O que precisa ser raro e ler a BLOCKCHAIN; olhar o preco
+ * pode ser o tempo todo.
+ *
+ * Entao o sono vira fatias, e entre uma fatia e outra o bot olha. Se o mercado
+ * mudar de postura no meio, ele acorda na hora em vez de esperar o resto.
+ *
+ * Devolve `true` se acordou cedo (algo mudou), `false` se dormiu tudo.
+ */
+export async function dormirDeOlho(
+    totalMs: number,
+    fatiaMs: number,
+    olhar: () => Promise<boolean>,
+    dormir: (ms: number) => Promise<void>,
+): Promise<boolean> {
+    if (totalMs <= 0) return false;
+    // Fatia maior que o sono inteiro nao justifica olhar: dorme e pronto.
+    if (fatiaMs <= 0 || fatiaMs >= totalMs) {
+        await dormir(totalMs);
+        return false;
+    }
+    let restante = totalMs;
+    while (restante > 0) {
+        const agora = Math.min(fatiaMs, restante);
+        await dormir(agora);
+        restante -= agora;
+        if (restante <= 0) break;
+        if (await olhar()) return true;
+    }
+    return false;
+}
