@@ -667,6 +667,23 @@ async function principal(): Promise<'parar' | void> {
     /** Ate onde ja se contou quem foi liquidado sem a gente. */
     let ultimoBlocoPerdidas = topo;
     /**
+     * O acumulado desde que o bot subiu.
+     *
+     * Sem isto cada hora reporta zero e some, e "zero nesta hora" nao ensina
+     * nada: a taxa historica e de ~1,17 liquidacoes por hora, entao uma hora
+     * em branco tem 30% de chance de acontecer sozinha. O que responde a
+     * pergunta e o acumulado — quantas passaram em seis horas, em um dia — e
+     * essa conta se perde se cada linha so olhar para a propria janela.
+     */
+    const desdeOBoot = {
+        emMs: Date.now(),
+        blocos: 0,
+        aconteceram: 0,
+        valiamAPena: 0,
+        lucro: new Decimal(0),
+        porCobertura: { brasa: 0, quente: 0, 'na lista': 0, 'nem sabia': 0 } as Record<string, number>,
+    };
+    /**
      * O preco do ETH em dolar, do oraculo. E a unica unidade em que o lucro de
      * uma divida em USDC e o de uma em WETH sao comparaveis.
      */
@@ -761,13 +778,27 @@ async function principal(): Promise<'parar' | void> {
         }
 
         const placar = montarPlacar(perdidas);
+        desdeOBoot.blocos += ate - de + 1;
+        desdeOBoot.aconteceram += placar.total;
+        desdeOBoot.valiamAPena += placar.valiam.length;
+        desdeOBoot.lucro = desdeOBoot.lucro.plus(placar.somaDoLucroPerdido);
+        for (const [balde, n] of Object.entries(placar.porCobertura)) desdeOBoot.porCobertura[balde] += n;
+
+        const horas = (Date.now() - desdeOBoot.emMs) / 3_600_000;
         log.info('[PLACAR] Liquidações que aconteceram sem mim.', {
             janela: `blocos ${de}–${ate}`,
             aconteceram: placar.total,
-            comCotacao: placar.comCotacao,
             valiamAPena: placar.valiam.length,
-            lucroQuePassou: `US$ ${placar.somaDoLucroPerdido.toFixed(2)}`,
-            ondeEuEstava: placar.porCobertura,
+            // O acumulado e o que responde a pergunta. Uma hora em branco tem
+            // 30% de chance sozinha; seis horas em branco ja dizem outra coisa.
+            desdeOBoot: {
+                horas: horas.toFixed(1),
+                aconteceram: desdeOBoot.aconteceram,
+                porHora: horas > 0 ? (desdeOBoot.aconteceram / horas).toFixed(2) : '—',
+                valiamAPena: desdeOBoot.valiamAPena,
+                lucroQuePassou: `US$ ${desdeOBoot.lucro.toFixed(2)}`,
+                ondeEuEstava: desdeOBoot.porCobertura,
+            },
             oQueIssoQuerDizer: oQueIssoQuerDizer(placar),
             asTresMaiores: placar.valiam.slice(0, 3).map((x) => ({
                 divida: x.dividaUsd === null ? 'sem cotação' : `US$ ${x.dividaUsd.toFixed(0)}`,
