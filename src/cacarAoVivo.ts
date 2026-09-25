@@ -7,6 +7,7 @@ import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeE
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, ritmoDaPostura, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee } from './prontidao';
+import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
@@ -712,6 +713,8 @@ async function principal(): Promise<'parar' | void> {
      */
     let quedaDoMercadoAgora: Decimal | null = null;
     let avisouMercadoMudo = false;
+    /** O que aconteceu com cada tiro depois de sair. */
+    let tiros = placarVazio();
     let posturaAnterior: Postura = 'dormindo';
     /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
     const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 2);
@@ -885,6 +888,7 @@ async function principal(): Promise<'parar' | void> {
                         naBrasa: brasa.length,
                         // Sem isto, "mercado calmo" e "Binance morta" dao o
                         // mesmo log — e sao coisas opostas.
+                        tiros: comoEstaIndo(tiros),
                         mercado: quedaDoMercadoAgora === null
                             ? 'SEM COTAÇÃO — ritmo fixo'
                             : `${quedaDoMercadoAgora.toFixed(4)}% abaixo do oráculo (${postura})`,
@@ -1057,14 +1061,50 @@ async function principal(): Promise<'parar' | void> {
                         
                         falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
                         
-                        log.info(`[FOGUETE MEV] TIRO DE ELITE DISPARADO! (${contrato.nome})`, { 
+                        log.info(`[TIRO SAIU] (${contrato.nome}) — ainda NÃO é acerto.`, {
                             bloco: blocoAtual,
                             devedor: alvo.devedor, 
                             hash: tx.hash,
                             gorjetaOfertadaGwei: (Number(prioridadePorGas) / 1e9).toFixed(3),
                             lucroEstimadoUsd: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
-                            doCicloAoTiro: `${msDoTiro}ms`
+                            doCicloAoTiro: `${msDoTiro}ms`,
+                            verNaBlockchain: `https://basescan.org/tx/${tx.hash}`,
                         });
+
+                        // Acompanhar ate o fim, SEM travar a cacada. Numa
+                        // corrida o desfecho mais provavel e reverter: outro
+                        // chegou antes e a posicao ja nao esta liquidavel
+                        // quando a nossa entra. Sem olhar o recibo, acerto e
+                        // erro dao exatamente o mesmo log.
+                        const hashDoTiro = tx.hash;
+                        const devedorDoTiro = alvo.devedor;
+                        const lucroDoTiro = lucroUsd;
+                        void (async () => {
+                            let desfecho: ReturnType<typeof lerRecibo>;
+                            try {
+                                desfecho = lerRecibo(await tx.wait(1, 120_000));
+                            } catch {
+                                desfecho = 'sumiu';
+                            }
+                            tiros = contarTiro(tiros, desfecho, lucroDoTiro);
+                            const dados = {
+                                devedor: devedorDoTiro,
+                                hash: hashDoTiro,
+                                lucro: lucroDoTiro === null ? 'sem cotação' : `US$ ${lucroDoTiro.toFixed(2)}`,
+                                placar: comoEstaIndo(tiros),
+                                verNaBlockchain: `https://basescan.org/tx/${hashDoTiro}`,
+                            };
+                            if (desfecho === 'acertou') {
+                                log.info('*** ACERTOU! O dinheiro foi para o cofre. ***', {
+                                    ...dados,
+                                    cofre: `https://basescan.org/address/${COFRE_ESPERADO}`,
+                                });
+                            } else if (desfecho === 'reverteu') {
+                                log.warn('[ERROU] A transação reverteu — quase sempre porque outro liquidou antes.', dados);
+                            } else {
+                                log.warn('[SUMIU] A transação não foi minerada em 2 minutos.', dados);
+                            }
+                        })();
                     } catch (e) {
                         nonceManager.rollback();
                         falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
