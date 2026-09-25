@@ -6,6 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, ritmoDaPostura, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee } from './prontidao';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
@@ -665,12 +666,27 @@ async function principal(): Promise<'parar' | void> {
     let ultimoSinalDeVida = 0;
     /** Ate onde ja se contou quem foi liquidado sem a gente. */
     let ultimoBlocoPerdidas = topo;
+    /**
+     * O preco do ETH em dolar, do oraculo. E a unica unidade em que o lucro de
+     * uma divida em USDC e o de uma em WETH sao comparaveis.
+     */
+    function precoDoEth(): Decimal | null {
+        for (const [token, par] of parPorToken) {
+            if (par !== 'ETHUSDT') continue;
+            const p = precos.get(token);
+            if (p && p.greaterThan(0)) return p.dividedBy(1e8);
+        }
+        return null;
+    }
+
     /** A menor margem de todas, da ultima varredura: quem cai primeiro. */
     let menorMargem: Decimal | null = null;
     let postura: Postura = 'dormindo';
+    /** O preco base do bloco, de carona no ciclo. Evita uma ida a rede na hora. */
+    let baseFeeAtual: bigint | null = null;
     let posturaAnterior: Postura = 'dormindo';
     /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
-    const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 1);
+    const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 2);
 
     let devedores = await juntarDevedores(topo);
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
@@ -771,6 +787,9 @@ async function principal(): Promise<'parar' | void> {
             // acontece quando ha motivo, e nao a cada bloco.
             const chamadasDoCiclo = [
                 { alvo: MULTICALL3, dados: SELETOR_BLOCO_DO_MULTICALL },
+                // De graca no mesmo eth_call: evita um getFeeData justamente no
+                // instante em que centenas de milissegundos custam a liquidacao.
+                { alvo: MULTICALL3, dados: SELETOR_BASEFEE },
                 ...moedas.map((m) => ({
                     alvo: oraculo!,
                     dados: SELETOR_GET_ASSET_PRICE + m.replace(/^0x/, '').padStart(64, '0'),
@@ -785,9 +804,10 @@ async function principal(): Promise<'parar' | void> {
             let blocoAtual = ultimoBlocoLido;
             try { if (resp[0]) blocoAtual = Number(BigInt(resp[0]!)); } catch {}
             ultimoBlocoLido = blocoAtual;
+            baseFeeAtual = lerBasefee(resp[1]) ?? baseFeeAtual;
 
             for (let i = 0; i < moedas.length; i++) {
-                const bruto = resp[i + 1];
+                const bruto = resp[i + 2];
                 if (!bruto) continue;
                 try {
                     precos.set(moedas[i].toLowerCase(), new Decimal(BigInt(bruto).toString()));
@@ -797,7 +817,7 @@ async function principal(): Promise<'parar' | void> {
             // A brasa e conferida em TODO ciclo, sem gatilho nenhum: ela veio
             // nas vagas que sobravam do mesmo `eth_call`.
             const caidos: string[] = [];
-            const inicioDaBrasa = moedas.length + 1;
+            const inicioDaBrasa = moedas.length + 2;
             for (let i = 0; i < brasa.length; i++) {
                 const dadoConta = resp[inicioDaBrasa + i];
                 if (!dadoConta) continue;
@@ -956,28 +976,26 @@ async function principal(): Promise<'parar' | void> {
                             lucroMinimo: piso,
                           });
                 
-                    let limiteGas = 2000000n;
-                    try {
-                        const estimativa = await carteira.estimateGas({ to: contrato.endereco, data: envio });
-                        limiteGas = (estimativa * 120n) / 100n;
-                    } catch {
-                        log.warn('Falha ao estimar gás, usando teto padrão de 2M.');
-                    }
-
-                    let gorjetaTotal = (lucroCruValido * 40n) / 100n;
-                    let prioridadePorGas = gorjetaTotal / limiteGas;
-
-                    const pisoGwei = 100000000n; 
-                    const tetoGwei = 50000000000n; 
-                    
-                    if (prioridadePorGas < pisoGwei) prioridadePorGas = pisoGwei;
-                    if (prioridadePorGas > tetoGwei) prioridadePorGas = tetoGwei;
-
-                    const feeData = await (carteira.provider as JsonRpcProvider).getFeeData();
-                    const baseFeeRecomendado = feeData.maxFeePerGas ?? 20000000n;
-                    const maxFee = baseFeeRecomendado + prioridadePorGas;
+                    // Nada de `estimateGas` nem `getFeeData` aqui. As duas sao
+                    // idas a rede no unico instante em que centenas de
+                    // milissegundos custam a liquidacao — e nenhuma e
+                    // necessaria: gas nao usado volta, e o preco base ja veio
+                    // de carona no multicall do ciclo.
+                    const limiteGas = LIMITE_DE_GAS;
+                    const lucroUsd = emDolar(
+                        lucroCruValido,
+                        casas.get(alvo.divida.toLowerCase()),
+                        precos.get(alvo.divida.toLowerCase()),
+                    );
+                    const prioridadePorGas = gorjetaPorGas({
+                        lucroUsd: lucroUsd ?? new Decimal(0),
+                        precoDoEthUsd: precoDoEth() ?? new Decimal(0),
+                        limiteGas,
+                    });
+                    const maxFee = tetoPorGas(baseFeeAtual ?? 20_000_000n, prioridadePorGas);
 
                     const nonceAtual = await nonceManager.getNextNonce();
+                    const msDoTiro = Date.now() - inicioDoCiclo;
                     enviados += 1;
 
                     try {
@@ -996,7 +1014,9 @@ async function principal(): Promise<'parar' | void> {
                             bloco: blocoAtual,
                             devedor: alvo.devedor, 
                             hash: tx.hash,
-                            gorjetaOfertadaGwei: (Number(prioridadePorGas) / 1e9).toFixed(3)
+                            gorjetaOfertadaGwei: (Number(prioridadePorGas) / 1e9).toFixed(3),
+                            lucroEstimadoUsd: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
+                            doCicloAoTiro: `${msDoTiro}ms`
                         });
                     } catch (e) {
                         nonceManager.rollback();
