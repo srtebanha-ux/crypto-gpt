@@ -3,7 +3,8 @@ import { Decimal } from 'decimal.js';
 import { Wallet, JsonRpcProvider } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
-import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos } from './liquidacoes';
+import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
+import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, decodificarAggregate3Rapido, partirEmPedacos } from './multicall';
@@ -624,6 +625,8 @@ async function principal(): Promise<'parar' | void> {
     /** A margem do primeiro que ficou de fora da brasa: a regua do gatilho. */
     let margemDaBrasa = new Decimal(0);
     let ultimoSinalDeVida = 0;
+    /** Ate onde ja se contou quem foi liquidado sem a gente. */
+    let ultimoBlocoPerdidas = topo;
     /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
     const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 1);
 
@@ -637,6 +640,74 @@ async function principal(): Promise<'parar' | void> {
     let enviados = 0;
 
     log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
+
+    /**
+     * Quem foi liquidado desde a ultima contagem — e se a gente estava olhando.
+     *
+     * `alvosCaidos: 0` nao distingue "nao teve liquidacao" de "teve varias e
+     * voce nao viu". As duas dao zero, e o conserto de cada uma e oposto: uma
+     * pede paciencia, a outra pede mudar o desenho. Um `eth_getLogs` por hora
+     * (75 CUs, 0,2% do orcamento) separa as duas.
+     */
+    async function contarAsQuePassaram(ate: number): Promise<void> {
+        if (ate <= ultimoBlocoPerdidas) return;
+        const de = ultimoBlocoPerdidas + 1;
+        let logs: Array<{ address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string }>;
+        try {
+            logs = await chamar('eth_getLogs', [{
+                address: REDE.pool,
+                fromBlock: `0x${de.toString(16)}`,
+                toBlock: `0x${ate.toString(16)}`,
+                topics: [TOPIC_LIQUIDATION_CALL],
+            }]);
+        } catch (e) {
+            // Falhar aqui nao pode parar a cacada: isto e placar, nao motor.
+            log.warn('Não consegui contar as liquidações que passaram.', { erro: (e as Error).message });
+            return;
+        }
+        ultimoBlocoPerdidas = ate;
+
+        const naBrasa = new Set(brasa.map((d) => d.toLowerCase()));
+        const naQuente = new Set(quentes.map((d) => d.toLowerCase()));
+        const naLista = new Set(devedores.map((d) => d.toLowerCase()));
+
+        const perdidas: Perdida[] = [];
+        for (const cru of logs) {
+            try {
+                const l = decodificarLiquidacao(cru);
+                const dividaUsd = emDolar(
+                    l.dividaCrua,
+                    casas.get(l.ativoDaDivida.toLowerCase()),
+                    precos.get(l.ativoDaDivida.toLowerCase()),
+                );
+                perdidas.push({
+                    devedor: l.devedor,
+                    bloco: l.bloco,
+                    liquidante: l.liquidante,
+                    dividaUsd,
+                    lucroUsd: dividaUsd === null ? null : lucroEstimado(dividaUsd),
+                    cobertura: ondeEuEstava(l.devedor, naBrasa, naQuente, naLista),
+                });
+            } catch { /* log estranho nao derruba o placar */ }
+        }
+
+        const placar = montarPlacar(perdidas);
+        log.info('[PLACAR] Liquidações que aconteceram sem mim.', {
+            janela: `blocos ${de}–${ate}`,
+            aconteceram: placar.total,
+            comCotacao: placar.comCotacao,
+            valiamAPena: placar.valiam.length,
+            lucroQuePassou: `US$ ${placar.somaDoLucroPerdido.toFixed(2)}`,
+            ondeEuEstava: placar.porCobertura,
+            oQueIssoQuerDizer: oQueIssoQuerDizer(placar),
+            asTresMaiores: placar.valiam.slice(0, 3).map((x) => ({
+                divida: x.dividaUsd === null ? 'sem cotação' : `US$ ${x.dividaUsd.toFixed(0)}`,
+                lucro: `US$ ${x.lucroUsd!.toFixed(2)}`,
+                euEstava: x.cobertura,
+                levouQuem: x.liquidante,
+            })),
+        });
+    }
 
     for (;;) {
         const inicioDoCiclo = Date.now();
@@ -752,6 +823,7 @@ async function principal(): Promise<'parar' | void> {
                         quentes = camadas.quentes;
                         margemDaBrasa = camadas.margemDaBrasa;
                         ultimoCompleto = Date.now();
+                        await contarAsQuePassaram(blocoAtual);
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
                             alvosChecados: aLer.length,
                             naBrasa: brasa.length,
