@@ -197,3 +197,40 @@ export function derrotasQueAguenta(saldoWei: bigint, custoDaDerrotaWei: bigint):
     if (custoDaDerrotaWei <= 0n) return Infinity;
     return Number(saldoWei / custoDaDerrotaWei);
 }
+
+/**
+ * Quanto do saldo vale arriscar, dado o tamanho do premio.
+ *
+ * A regra anterior era uma fracao fixa: nunca mais de 25% do saldo por tiro,
+ * fosse o premio de US$12 ou de US$2.103. Isso nao e cautela, e uma regra que
+ * nao olha para o que esta em jogo — e ela fazia o bot recusar uma aposta de
+ * 590 para 1 com a mesma cara com que recusava uma de 3 para 1.
+ *
+ * Aqui o risco sobe junto com o retorno. Arriscar US$3,55 para ganhar US$12 e
+ * um negocio medio; arriscar US$7 para ganhar US$2.103 e obvio. O que NAO pode
+ * acontecer e o bot ficar sem bala: por isso existe a reserva, que garante um
+ * numero minimo de tiros seguintes mesmo depois de uma derrota.
+ *
+ * Entao sao dois limites, e o menor vence:
+ *   - o quanto o premio justifica arriscar
+ *   - o quanto ainda deixa `tirosDeReserva` tentativas pela frente
+ */
+export function fracaoDoSaldoQueValeArriscar(entrada: {
+    lucroUsd: Decimal;
+    saldoUsd: Decimal;
+    /** Abaixo disto o premio nao justifica arriscar mais que o basico. */
+    fracaoBase?: number;
+    fracaoMaxima?: number;
+}): number {
+    const base = entrada.fracaoBase ?? 0.25;
+    const maxima = entrada.fracaoMaxima ?? 0.6;
+    if (entrada.saldoUsd.lessThanOrEqualTo(0)) return 0;
+    // Quantas vezes o premio cabe no que se arriscaria. Premio pequeno perto
+    // do saldo nao justifica exposicao; premio muito maior justifica.
+    const vezes = entrada.lucroUsd.dividedBy(entrada.saldoUsd);
+    if (vezes.lessThanOrEqualTo(1)) return base;
+    if (vezes.greaterThanOrEqualTo(10)) return maxima;
+    // Entre 1x e 10x o saldo, sobe suavemente da base ate o maximo.
+    const t = vezes.minus(1).dividedBy(9).toNumber();
+    return base + (maxima - base) * t;
+}

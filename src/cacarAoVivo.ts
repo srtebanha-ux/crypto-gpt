@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
@@ -752,6 +752,8 @@ async function principal(): Promise<'parar' | void> {
     let saldoDeGasWei = 0n;
     let saldoLidoEm = 0;
     const FRACAO_DO_SALDO_POR_TIRO = Number(process.env.CACA_RISCO_POR_TIRO ?? '0.25');
+    /** O teto do risco quando o premio e muito maior que o saldo. */
+    const FRACAO_MAXIMA_DO_SALDO = Number(process.env.CACA_RISCO_MAXIMO ?? '0.6');
     const fracaoBase = Number(process.env.CACA_FRACAO_GORJETA ?? '0.4');
 
     /**
@@ -1198,13 +1200,23 @@ async function principal(): Promise<'parar' | void> {
                         } catch { /* seguir com o ultimo saldo conhecido */ }
                     }
 
-                    // O limite do lance nao pode ser so economico ("quanto do
-                    // lucro vale pagar"): tem que ser de sobrevivencia tambem.
+                    // Quanto arriscar depende do PREMIO. Uma fracao fixa fazia
+                    // o bot recusar uma aposta de 590 para 1 com a mesma cara
+                    // com que recusava uma de 3 para 1.
+                    const saldoUsd = new Decimal(saldoDeGasWei.toString())
+                        .dividedBy(1e18)
+                        .mul(precoDoEth() ?? new Decimal(0));
+                    const risco = fracaoDoSaldoQueValeArriscar({
+                        lucroUsd: lucroUsd ?? new Decimal(0),
+                        saldoUsd,
+                        fracaoBase: FRACAO_DO_SALDO_POR_TIRO,
+                        fracaoMaxima: FRACAO_MAXIMA_DO_SALDO,
+                    });
                     const prioridadePorGas = gorjetaQueCabeNoSaldo({
                         gorjetaDesejadaWei: desejada,
                         saldoWei: saldoDeGasWei,
                         baseFeeWei: base,
-                        fracaoMaximaDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
+                        fracaoMaximaDoSaldo: risco,
                     });
                     const custoSePerder = custoDeUmaDerrota(prioridadePorGas, base);
                     const aguenta = derrotasQueAguenta(saldoDeGasWei, custoSePerder);
@@ -1252,6 +1264,7 @@ async function principal(): Promise<'parar' | void> {
                             lance: `${(fracao * 100).toFixed(0)}% do lucro (${perdasSeguidas} derrotas seguidas)`,
                             sobrariaParaMim: lucroUsd === null ? 'sem cotação' : `US$ ${sobraDepoisDaGorjeta(lucroUsd, fracao).toFixed(2)}`,
                             seEuPerderCusta: `${new Decimal(custoSePerder.toString()).dividedBy(1e18).toFixed(6)} ETH (aguento mais ${aguenta})`,
+                            arrisquei: `${(risco * 100).toFixed(0)}% do gás, porque o prêmio é ${lucroUsd === null ? '?' : lucroUsd.dividedBy(saldoUsd.greaterThan(0) ? saldoUsd : new Decimal(1)).toFixed(1)}x o saldo`,
                             verNaBlockchain: `https://basescan.org/tx/${tx.hash}`,
                         });
 

@@ -152,3 +152,40 @@ test('o freio conta derrotas, que é o número que decide', () => {
     assert.equal(derrotasQueAguenta(saldo, custoDeUmaDerrota(13_300_000_000n, 1_000_000n)), 2);
     assert.ok(derrotasQueAguenta(saldo, custoDeUmaDerrota(910_000_000n, 1_000_000n)) > 30);
 });
+
+// ---------------------------------------------------------------------------
+// Risco proporcional ao prêmio: 25% fixo recusava 590 para 1.
+// ---------------------------------------------------------------------------
+import { fracaoDoSaldoQueValeArriscar } from './prontidao';
+
+const SALDO = D(14.19);
+
+test('prêmio pequeno perto do saldo fica na fração base', () => {
+    assert.equal(fracaoDoSaldoQueValeArriscar({ lucroUsd: D(12), saldoUsd: SALDO }), 0.25);
+});
+
+test('prêmio muito maior que o saldo justifica arriscar mais', () => {
+    // Era isto que a regra fixa recusava: uma aposta de 590 para 1 tratada
+    // igual a uma de 3 para 1.
+    const baleia = fracaoDoSaldoQueValeArriscar({ lucroUsd: D(2103), saldoUsd: SALDO });
+    assert.equal(baleia, 0.6);
+    assert.ok(baleia > fracaoDoSaldoQueValeArriscar({ lucroUsd: D(12), saldoUsd: SALDO }));
+});
+
+test('entre os extremos, sobe sem degrau', () => {
+    const p88 = fracaoDoSaldoQueValeArriscar({ lucroUsd: D(88), saldoUsd: SALDO });
+    const p300 = fracaoDoSaldoQueValeArriscar({ lucroUsd: D(300), saldoUsd: SALDO });
+    assert.ok(p88 > 0.25 && p88 < 0.6, `deu ${p88}`);
+    assert.ok(p300 > p88, 'prêmio maior, risco maior');
+});
+
+test('nunca arrisca o saldo inteiro, por maior que seja o prêmio', () => {
+    // Ficar sem gás não perde uma liquidação: perde todas as seguintes.
+    const f = fracaoDoSaldoQueValeArriscar({ lucroUsd: D(1_000_000), saldoUsd: SALDO });
+    assert.ok(f <= 0.6, `deu ${f}`);
+    assert.ok(f < 1);
+});
+
+test('sem saldo não arrisca nada', () => {
+    assert.equal(fracaoDoSaldoQueValeArriscar({ lucroUsd: D(2103), saldoUsd: D(0) }), 0);
+});
