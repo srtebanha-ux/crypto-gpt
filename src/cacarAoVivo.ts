@@ -8,6 +8,7 @@ import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, 
 import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
+import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
@@ -725,11 +726,26 @@ async function principal(): Promise<'parar' | void> {
      * "[POSTURA]" fica igual a um mercado calmo, e sao coisas opostas.
      */
     let quedaDoMercadoAgora: Decimal | null = null;
-    /** Acessor: o TypeScript nao enxerga atribuicao feita dentro de closure. */
+    /** Acessores: o TypeScript nao enxerga atribuicao feita dentro de closure. */
     const mercadoAgora = (): Decimal | null => quedaDoMercadoAgora;
+    const posturaAgora = (): Postura => postura;
     let avisouMercadoMudo = false;
     /** O que aconteceu com cada tiro depois de sair. */
     let tiros = placarVazio();
+
+    // Ser AVISADO do bloco novo em vez de perguntar. Perguntar a cada 200ms
+    // significa que um bloco nascido logo depois da pergunta so e visto na
+    // seguinte — e nessa corrida isso e a diferenca entre entrar no bloco N+1
+    // e no N+2. Se a conexao nao abrir ou cair, o bot volta a perguntar.
+    const urlDeBlocos = wsDoHttp(rpc);
+    const ouvinte = urlDeBlocos
+        ? new OuvinteDeBlocos(urlDeBlocos, (aviso) => log.warn(`[BLOCOS] ${aviso}`))
+        : null;
+    ouvinte?.abrir();
+    log.info('Aviso de bloco novo por WebSocket.', {
+        ligado: ouvinte !== null,
+        porQue: ouvinte === null ? 'não consegui derivar o endereço wss do RPC; sigo perguntando' : 'reajo quando o bloco nasce, não quando eu pergunto',
+    });
     let posturaAnterior: Postura = 'dormindo';
     /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
     const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 2);
@@ -948,9 +964,10 @@ async function principal(): Promise<'parar' | void> {
                         // Sem isto, "mercado calmo" e "Binance morta" dao o
                         // mesmo log — e sao coisas opostas.
                         tiros: comoEstaIndo(tiros),
+                        avisoDeBloco: ouvinte === null ? 'desligado' : (ouvinte.vivo ? `ligado (último ${ouvinte.ultimoBloco})` : 'CAIU — perguntando'),
                         mercado: mercadoAgora() === null
                             ? 'SEM COTAÇÃO — ritmo fixo'
-                            : `${mercadoAgora()!.toFixed(4)}% abaixo do oráculo (${postura})`,
+                            : `${mercadoAgora()!.toFixed(4)}% abaixo do oráculo (${posturaAgora()})`,
                         oraculoJaCaiuPct: `${maiorQueda.toFixed(4)}%`,
                         gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
                         naListaQuente: quentes.length,
@@ -1179,9 +1196,25 @@ async function principal(): Promise<'parar' | void> {
             // dorme o que a postura mandar, mas de olho aberto — e se o
             // mercado ficar urgente no meio do sono, acorda na hora.
             await olharMercado();
-            const ritmo = ritmoDaPostura(postura, INTERVALO_MS);
+            const ritmo = ritmoDaPostura(posturaAgora(), INTERVALO_MS);
             const resta = ritmo - (Date.now() - inicioDoCiclo);
-            if (resta > 0) await dormirDeOlho(resta, OLHAR_MERCADO_MS, olharMercado, async (ms) => { await dormir(ms); });
+            if (resta > 0) {
+                if (posturaAgora() === 'dedo no gatilho' && ouvinte?.vivo) {
+                    // Com o dedo no gatilho, quem acorda o bot e o BLOCO, nao o
+                    // relogio: o aviso chega no instante em que ele nasce. O
+                    // tempo maximo existe para nunca ficar preso esperando um
+                    // aviso que nao vem — WebSocket mudo e indistinguivel de
+                    // rede parada, e ficar pendurado seria pior que perguntar.
+                    await esperarBlocoOuTempo(
+                        (aoBloco) => ouvinte.assinar(aoBloco),
+                        Math.max(resta, 2500),
+                        (fn, ms) => setTimeout(fn, ms),
+                        (id) => clearTimeout(id as NodeJS.Timeout),
+                    );
+                } else {
+                    await dormirDeOlho(resta, OLHAR_MERCADO_MS, olharMercado, async (ms) => { await dormir(ms); });
+                }
+            }
         }
     }
 }
