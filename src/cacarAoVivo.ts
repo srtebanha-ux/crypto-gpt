@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
@@ -740,6 +740,18 @@ async function principal(): Promise<'parar' | void> {
      * lance esta baixo, e a resposta certa e subir — nao reescrever o bot.
      */
     let perdasSeguidas = 0;
+    /**
+     * O gas que resta, em wei. Lido de tempos em tempos, nao a cada tiro.
+     *
+     * Precisa existir porque a gorjeta e paga mesmo quando a transacao
+     * reverte: um lance de 80% sobre um lucro de US$300 custa US$18 numa
+     * derrota, e a carteira tem US$14. Um bot sem gas nao perde uma
+     * liquidacao — perde todas as seguintes, e em silencio, porque parar de
+     * conseguir enviar nao levanta erro nenhum.
+     */
+    let saldoDeGasWei = 0n;
+    let saldoLidoEm = 0;
+    const FRACAO_DO_SALDO_POR_TIRO = Number(process.env.CACA_RISCO_POR_TIRO ?? '0.25');
     const fracaoBase = Number(process.env.CACA_FRACAO_GORJETA ?? '0.4');
 
     /**
@@ -1003,6 +1015,7 @@ async function principal(): Promise<'parar' | void> {
                         // mesmo log — e sao coisas opostas.
                         tiros: comoEstaIndo(tiros),
                         armados: alvosArmados.size,
+                        gas: saldoLidoEm === 0 ? 'ainda não li' : `${new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6)} ETH`,
                         avisoDeBloco: ouvinte === null ? 'desligado' : (ouvinte.vivo ? `ligado (último ${ouvinte.ultimoBloco})` : 'CAIU — perguntando'),
                         mercado: mercadoAgora() === null
                             ? 'SEM COTAÇÃO — ritmo fixo'
@@ -1168,13 +1181,50 @@ async function principal(): Promise<'parar' | void> {
                         precos.get(alvo.divida.toLowerCase()),
                     );
                     const fracao = fracaoAdaptativa({ base: fracaoBase, perdasSeguidas });
-                    const prioridadePorGas = gorjetaPorGas({
+                    const desejada = gorjetaPorGas({
                         lucroUsd: lucroUsd ?? new Decimal(0),
                         precoDoEthUsd: precoDoEth() ?? new Decimal(0),
                         limiteGas,
                         fracaoDoLucro: fracao,
                     });
-                    const maxFee = tetoPorGas(baseFeeAtual ?? 20_000_000n, prioridadePorGas);
+                    const base = baseFeeAtual ?? 20_000_000n;
+
+                    // O saldo e lido no maximo uma vez por minuto: e uma ida a
+                    // rede, e no caminho quente ela custaria a liquidacao.
+                    if (Date.now() - saldoLidoEm > 60_000) {
+                        try {
+                            saldoDeGasWei = await (carteira.provider as JsonRpcProvider).getBalance(donoCarteira!);
+                            saldoLidoEm = Date.now();
+                        } catch { /* seguir com o ultimo saldo conhecido */ }
+                    }
+
+                    // O limite do lance nao pode ser so economico ("quanto do
+                    // lucro vale pagar"): tem que ser de sobrevivencia tambem.
+                    const prioridadePorGas = gorjetaQueCabeNoSaldo({
+                        gorjetaDesejadaWei: desejada,
+                        saldoWei: saldoDeGasWei,
+                        baseFeeWei: base,
+                        fracaoMaximaDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
+                    });
+                    const custoSePerder = custoDeUmaDerrota(prioridadePorGas, base);
+                    const aguenta = derrotasQueAguenta(saldoDeGasWei, custoSePerder);
+
+                    if (prioridadePorGas === 0n || aguenta < 1) {
+                        log.error('SEM GÁS PARA ATIRAR. Não disparo: ficar sem gás perde todas as próximas, não só esta.', {
+                            devedor: alvo.devedor,
+                            saldoEth: new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6),
+                            oQueFazer: `mandar ETH do cofre 0x3dffA934...1512A7 para a conta_bot ${donoCarteira}`,
+                        });
+                        continue;
+                    }
+                    if (prioridadePorGas < desejada) {
+                        log.warn('Lance cortado pelo saldo: ofereço menos do que o lucro justificaria.', {
+                            queria: `${(Number(desejada) / 1e9).toFixed(2)} gwei`,
+                            ofereco: `${(Number(prioridadePorGas) / 1e9).toFixed(2)} gwei`,
+                            aguentaDerrotas: aguenta,
+                        });
+                    }
+                    const maxFee = tetoPorGas(base, prioridadePorGas);
 
                     const nonceAtual = await nonceManager.getNextNonce();
                     const msDoTiro = Date.now() - inicioDoCiclo;
@@ -1201,6 +1251,7 @@ async function principal(): Promise<'parar' | void> {
                             doCicloAoTiro: `${msDoTiro}ms`,
                             lance: `${(fracao * 100).toFixed(0)}% do lucro (${perdasSeguidas} derrotas seguidas)`,
                             sobrariaParaMim: lucroUsd === null ? 'sem cotação' : `US$ ${sobraDepoisDaGorjeta(lucroUsd, fracao).toFixed(2)}`,
+                            seEuPerderCusta: `${new Decimal(custoSePerder.toString()).dividedBy(1e18).toFixed(6)} ETH (aguento mais ${aguenta})`,
                             verNaBlockchain: `https://basescan.org/tx/${tx.hash}`,
                         });
 

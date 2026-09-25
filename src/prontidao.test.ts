@@ -109,3 +109,46 @@ test('a gorjeta maior aparece de verdade no preço por gás', () => {
     const brava = gorjetaPorGas({ lucroUsd: D(88), precoDoEthUsd: ETH, fracaoDoLucro: 0.8 });
     assert.equal(brava, calma * 2n);
 });
+
+// ---------------------------------------------------------------------------
+// O freio de sobrevivência: um bot sem gás não perde uma liquidação, perde
+// todas as seguintes — e em silêncio.
+// ---------------------------------------------------------------------------
+import { custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, GAS_DE_UMA_REVERSAO } from './prontidao';
+
+const wei = (eth: number) => BigInt(new Decimal(eth).mul(1e18).toFixed(0));
+
+test('derrota também custa: a gorjeta é paga mesmo perdendo', () => {
+    // Isto quase passou batido. Prioridade se paga pelo gás consumido, dê a
+    // transação certo ou não.
+    const custo = custoDeUmaDerrota(13_300_000_000n, 1_000_000n);
+    assert.ok(custo > 0n);
+    // 13,3 gwei × 150k de gás ≈ 0,002 ETH ≈ US$5,28 a US$2646.
+    assert.equal(custo / GAS_DE_UMA_REVERSAO, 13_301_000_000n);
+});
+
+test('o lance é limitado pelo que a carteira aguenta, não só pelo lucro', () => {
+    // US$14,19 em ETH a US$2646,93.
+    const saldo = wei(14.19 / 2646.93);
+    const desejada = 45_340_000_000n; // 80% de um lucro de US$300
+    const cabe = gorjetaQueCabeNoSaldo({ gorjetaDesejadaWei: desejada, saldoWei: saldo, baseFeeWei: 1_000_000n });
+    assert.ok(cabe < desejada, 'tem que cortar: essa gorjeta custava mais que a carteira inteira');
+    // E o que sobrou aguenta pelo menos quatro derrotas (25% do saldo cada).
+    assert.ok(derrotasQueAguenta(saldo, custoDeUmaDerrota(cabe, 1_000_000n)) >= 4);
+});
+
+test('gorjeta modesta passa inteira quando cabe', () => {
+    const saldo = wei(1);
+    const desejada = 6_650_000_000n;
+    assert.equal(gorjetaQueCabeNoSaldo({ gorjetaDesejadaWei: desejada, saldoWei: saldo, baseFeeWei: 1_000_000n }), desejada);
+});
+
+test('carteira vazia não oferece gorjeta nenhuma', () => {
+    assert.equal(gorjetaQueCabeNoSaldo({ gorjetaDesejadaWei: 10n ** 12n, saldoWei: 0n, baseFeeWei: 0n }), 0n);
+});
+
+test('o freio conta derrotas, que é o número que decide', () => {
+    const saldo = wei(0.00536); // ~US$14,19
+    assert.equal(derrotasQueAguenta(saldo, custoDeUmaDerrota(13_300_000_000n, 1_000_000n)), 2);
+    assert.ok(derrotasQueAguenta(saldo, custoDeUmaDerrota(910_000_000n, 1_000_000n)) > 30);
+});

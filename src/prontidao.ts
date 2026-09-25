@@ -142,3 +142,58 @@ export function fracaoAdaptativa(entrada: {
 export function sobraDepoisDaGorjeta(lucroUsd: Decimal, fracao: number): Decimal {
     return lucroUsd.mul(1 - fracao);
 }
+
+/**
+ * Quanto gas uma liquidacao consome quando REVERTE.
+ *
+ * A Aave recusa cedo, mas nao de graca: o emprestimo relampago abre, a
+ * verificacao de saude falha e tudo desfaz — e o gas gasto ate ali e cobrado.
+ * Estimativa conservadora; errar para mais aqui so deixa o freio mais seguro.
+ */
+export const GAS_DE_UMA_REVERSAO = 150_000n;
+
+/**
+ * O que UMA derrota custa, em wei.
+ *
+ * Gorjeta e cobrada mesmo perdendo: prioridade se paga pelo gas consumido,
+ * tenha a transacao dado certo ou nao. Foi isso que quase passou batido — o
+ * lance adaptativo sobe ate 80% do lucro, e com lucro de US$300 isso vira uma
+ * derrota de US$18 numa carteira que tem US$14.
+ */
+export function custoDeUmaDerrota(
+    gorjetaPorGasWei: bigint,
+    baseFeeWei: bigint,
+    gasDaReversao: bigint = GAS_DE_UMA_REVERSAO,
+): bigint {
+    return (gorjetaPorGasWei + baseFeeWei) * gasDaReversao;
+}
+
+/**
+ * A maior gorjeta que cabe no saldo, sem apostar a carteira numa tacada.
+ *
+ * Existe porque o limite do lance nao pode ser so economico ("quanto do lucro
+ * vale pagar"), tem que ser tambem de sobrevivencia ("quanto eu aguento
+ * perder"). Um bot sem gas nao perde uma liquidacao: perde TODAS as seguintes,
+ * e em silencio, porque parar de conseguir enviar nao levanta erro nenhum.
+ */
+export function gorjetaQueCabeNoSaldo(entrada: {
+    gorjetaDesejadaWei: bigint;
+    saldoWei: bigint;
+    baseFeeWei: bigint;
+    fracaoMaximaDoSaldo?: number;
+    gasDaReversao?: bigint;
+}): bigint {
+    const fracao = entrada.fracaoMaximaDoSaldo ?? 0.25;
+    const gas = entrada.gasDaReversao ?? GAS_DE_UMA_REVERSAO;
+    if (entrada.saldoWei <= 0n) return 0n;
+    const tetoDoRisco = (entrada.saldoWei * BigInt(Math.round(fracao * 10_000))) / 10_000n;
+    const porGasQueCabe = tetoDoRisco / gas;
+    const semOBase = porGasQueCabe > entrada.baseFeeWei ? porGasQueCabe - entrada.baseFeeWei : 0n;
+    return entrada.gorjetaDesejadaWei < semOBase ? entrada.gorjetaDesejadaWei : semOBase;
+}
+
+/** Quantas derrotas seguidas o saldo aguenta neste lance. */
+export function derrotasQueAguenta(saldoWei: bigint, custoDaDerrotaWei: bigint): number {
+    if (custoDaDerrotaWei <= 0n) return Infinity;
+    return Number(saldoWei / custoDaDerrotaWei);
+}
