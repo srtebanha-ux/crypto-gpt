@@ -6,16 +6,28 @@ import { simboloDaBinance, lerSymbol, lerCotacoes, quedaDoMercado } from './prec
 
 const D = (n: number | string) => new Decimal(n);
 
-test('os tokens que seguem ETH caem juntos', () => {
-    for (const s of ['WETH', 'weth', 'cbETH', 'wstETH', 'weETH']) {
+test('só os que valem o MESMO que ETH seguem ETHUSDT', () => {
+    for (const s of ['WETH', 'weth', 'ETH']) {
         assert.equal(simboloDaBinance(s), 'ETHUSDT', s);
     }
 });
 
-test('os tokens que seguem BTC caem juntos', () => {
-    for (const s of ['cbBTC', 'WBTC', 'tBTC']) {
+test('token que rende juros NÃO segue o par, mesmo acompanhando o ETH', () => {
+    // wstETH, cbETH e weETH valem MAIS que um ETH, e a diferença cresce com o
+    // tempo. Comparar o preço deles com ETHUSDT daria uma "queda" permanente
+    // de uns 17%, e o bot ficaria preso em 'dedo no gatilho' para sempre,
+    // lendo a blockchain a 200ms sem motivo nenhum.
+    for (const s of ['cbETH', 'wstETH', 'weETH']) {
+        assert.equal(simboloDaBinance(s), null, s);
+    }
+});
+
+test('só os que valem o MESMO que BTC seguem BTCUSDT', () => {
+    for (const s of ['cbBTC', 'WBTC', 'BTC']) {
         assert.equal(simboloDaBinance(s), 'BTCUSDT', s);
     }
+    // tBTC sai pelo mesmo motivo: não é um-para-um o tempo todo.
+    assert.equal(simboloDaBinance('tBTC'), null);
 });
 
 test('stablecoin NÃO é acompanhada, e isso é resposta e não falha', () => {

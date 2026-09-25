@@ -27,8 +27,13 @@ export const SELETOR_SYMBOL = '0x95d89b41';
  */
 export function simboloDaBinance(simboloDoToken: string): string | null {
     const s = simboloDoToken.trim().toUpperCase();
-    if (s === 'WETH' || s === 'ETH' || s === 'CBETH' || s === 'WSTETH' || s === 'WEETH') return 'ETHUSDT';
-    if (s === 'CBBTC' || s === 'WBTC' || s === 'BTC' || s === 'TBTC') return 'BTCUSDT';
+    // So os que valem o MESMO que a moeda do par. wstETH, cbETH e weETH
+    // rendem juros e valem MAIS que um ETH — comparar o preco deles com
+    // ETHUSDT daria uma "queda" permanente de uns 17%, e o bot ficaria preso
+    // em 'dedo no gatilho' para sempre, lendo a blockchain a 200ms sem motivo.
+    // Seguir o preco deles exige a taxa de conversao, que a gente nao le.
+    if (s === 'WETH' || s === 'ETH') return 'ETHUSDT';
+    if (s === 'CBBTC' || s === 'WBTC' || s === 'BTC') return 'BTCUSDT';
     return null;
 }
 

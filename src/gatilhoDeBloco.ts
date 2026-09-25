@@ -71,15 +71,22 @@ export function esperarBlocoOuTempo(
 ): Promise<'bloco' | 'tempo'> {
     return new Promise((resolve) => {
         let pronto = false;
+        // `relogio` e `desassinar` sao declarados ANTES de `terminar` usar:
+        // `assinar` pode chamar de volta na hora, e ai `terminar` rodaria com
+        // as duas ainda na zona morta — a Promise rejeitava e derrubava o
+        // caçador, porque a chamada vive num `finally`, fora do try.
+        let relogio: unknown = null;
+        let desassinar: (() => void) | null = null;
         const terminar = (como: 'bloco' | 'tempo') => {
             if (pronto) return;
             pronto = true;
-            cancelar(relogio);
-            desassinar();
+            if (relogio !== null) cancelar(relogio);
+            desassinar?.();
             resolve(como);
         };
-        const desassinar = assinar(() => terminar('bloco'));
-        const relogio = agendar(() => terminar('tempo'), tempoMaximoMs);
+        desassinar = assinar(() => terminar('bloco'));
+        if (pronto) return;
+        relogio = agendar(() => terminar('tempo'), tempoMaximoMs);
     });
 }
 
@@ -120,8 +127,13 @@ export class OuvinteDeBlocos {
                     try { f(bloco); } catch { /* um ouvinte ruim nao cala os outros */ }
                 }
             });
+            // 'close' e 'error' chegam os DOIS na mesma falha. Sem esta
+            // trava, uma queda gerava dois avisos e tres sockets, e a
+            // contagem dobrava a cada rodada — o backoff virava enfeite.
+            let jaCaiu = false;
             const cair = () => {
-                if (!this.vivo && this.ws !== ws) return;
+                if (jaCaiu || this.ws !== ws) return;
+                jaCaiu = true;
                 this.vivo = false;
                 this.aoAviso?.('conexão de blocos caiu; volto a perguntar enquanto reconecto');
                 this.reconectar();

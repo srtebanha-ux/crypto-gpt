@@ -26,6 +26,16 @@ export const SELETOR_BASEFEE = '0x3e64a696';
  */
 export const LIMITE_DE_GAS = 2_000_000n;
 
+/**
+ * O gas que uma cacada REALMENTE usa.
+ *
+ * Diferente do teto. A gorjeta e dividida por este numero, nao pelo limite:
+ * dividir pelo teto de 2M quando a transacao usa ~700k faz o lance efetivo
+ * virar 14% do lucro quando o log diz 40% — o bot pagaria menos do que decidiu
+ * pagar, e perderia leiloes achando que estava competindo.
+ */
+export const GAS_TIPICO_DE_UMA_CACADA = 700_000n;
+
 /** Nunca ofereca menos que isso, ou a transacao pode nem ser considerada. */
 export const PISO_DA_GORJETA_WEI = 100_000_000n; // 0,1 gwei
 /** Nem mais que isso, ou um lucro mal medido vira um gasto absurdo. */
@@ -54,12 +64,13 @@ export const FRACAO_DO_LUCRO = 0.4;
 export function gorjetaPorGas(entrada: {
     lucroUsd: Decimal;
     precoDoEthUsd: Decimal;
+    /** O gas que a cacada USA — nao o teto que se manda. */
     limiteGas?: bigint;
     fracaoDoLucro?: number;
     pisoWei?: bigint;
     tetoWei?: bigint;
 }): bigint {
-    const limite = entrada.limiteGas ?? LIMITE_DE_GAS;
+    const limite = entrada.limiteGas ?? GAS_TIPICO_DE_UMA_CACADA;
     const piso = entrada.pisoWei ?? PISO_DA_GORJETA_WEI;
     const teto = entrada.tetoWei ?? TETO_DA_GORJETA_WEI;
     if (entrada.precoDoEthUsd.lessThanOrEqualTo(0) || limite <= 0n) return piso;
@@ -233,4 +244,32 @@ export function fracaoDoSaldoQueValeArriscar(entrada: {
     // Entre 1x e 10x o saldo, sobe suavemente da base ate o maximo.
     const t = vezes.minus(1).dividedBy(9).toNumber();
     return base + (maxima - base) * t;
+}
+
+/**
+ * O que o NO exige adiantado para aceitar a transacao.
+ *
+ * Nao e o que ela vai custar: e `gasLimit × maxFeePerGas`, cobrado no ato e
+ * devolvido depois. Ignorar isso foi o defeito mais caro desta revisao — com o
+ * teto de 2M e uma gorjeta boa, o adiantado passava de tres vezes o saldo
+ * inteiro, e toda caçada morria em `insufficient funds` com o log culpando a
+ * rede. O bot pareceria sem alvo, tendo alvo e tendo gas.
+ */
+export function adiantadoExigido(limiteGas: bigint, maxFeeWei: bigint): bigint {
+    return limiteGas * maxFeeWei;
+}
+
+/**
+ * O maior `maxFeePerGas` que o saldo aceita adiantar, deixando uma folga.
+ *
+ * Devolve 0 quando nem o basico cabe — e 0 aqui significa "nao da para atirar",
+ * nao "atire de graca".
+ */
+export function maxFeeQueOSaldoAdianta(
+    saldoWei: bigint,
+    limiteGas: bigint,
+    folga = 0.9,
+): bigint {
+    if (saldoWei <= 0n || limiteGas <= 0n) return 0n;
+    return ((saldoWei * BigInt(Math.round(folga * 10_000))) / 10_000n) / limiteGas;
 }

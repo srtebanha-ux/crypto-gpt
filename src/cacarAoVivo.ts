@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
@@ -751,6 +751,7 @@ async function principal(): Promise<'parar' | void> {
      */
     let saldoDeGasWei = 0n;
     let saldoLidoEm = 0;
+    let saldoJaLido = false;
     const FRACAO_DO_SALDO_POR_TIRO = Number(process.env.CACA_RISCO_POR_TIRO ?? '0.25');
     /** O teto do risco quando o premio e muito maior que o saldo. */
     const FRACAO_MAXIMA_DO_SALDO = Number(process.env.CACA_RISCO_MAXIMO ?? '0.6');
@@ -766,20 +767,30 @@ async function principal(): Promise<'parar' | void> {
      */
     const alvosArmados = new Map<string, Alvo>();
     let armadoEm = 0;
+    /** Impede armar em cima de armar: `void armar()` nao espera o anterior. */
+    let armando = false;
     const QUANTOS_ARMAR = Number(process.env.CACA_QUANTOS_ARMAR ?? '8');
     const VALIDADE_ARMADO_MS = Number(process.env.CACA_VALIDADE_ARMADO_MS ?? '5000');
 
     async function armar(): Promise<void> {
+        if (armando) return;
         const quem = quemArmar(brasa, QUANTOS_ARMAR);
         if (quem.length === 0) return;
+        armando = true;
         try {
             const prontos = await montarAlvos(quem, moedas, dataProvider!, precos, casas);
             alvosArmados.clear();
             for (const a of prontos) alvosArmados.set(a.devedor.toLowerCase(), a);
             armadoEm = Date.now();
         } catch {
+            // Marcar mesmo na falha: sem isto, `montarAlvos` falhando faria
+            // armar() repetir a cada segundo em vez de a cada cinco — 67M
+            // CUs/mes contra um teto de 20M, em silencio.
+            armadoEm = Date.now();
             // Armar e vantagem, nao obrigacao: se falhar, o caminho normal
             // monta o alvo na hora como sempre fez.
+        } finally {
+            armando = false;
         }
     }
 
@@ -1061,13 +1072,18 @@ async function principal(): Promise<'parar' | void> {
                     // encolhendo a cada passagem ate sobrar ninguem, e o bot
                     // ficaria cego sem avisar.
                     if (varredura === 'completa') {
+                        // ANTES de trocar as camadas: quem foi liquidado teve a
+                        // saude restaurada e sai da brasa na proxima reparticao.
+                        // Contando depois, o balde 'brasa' ficaria vazio sempre
+                        // e o diagnostico apontaria 'cobertura' quando o
+                        // problema era velocidade.
+                        await contarAsQuePassaram(blocoAtual);
                         const camadas = repartirPorFragilidade(medidos, vagasNaBrasa, MARGEM_QUENTE);
                         brasa = camadas.brasa;
                         quentes = camadas.quentes;
                         margemDaBrasa = camadas.margemDaBrasa;
                         menorMargem = camadas.menorMargem;
                         ultimoCompleto = Date.now();
-                        await contarAsQuePassaram(blocoAtual);
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
                             alvosChecados: aLer.length,
                             naBrasa: brasa.length,
@@ -1186,7 +1202,7 @@ async function principal(): Promise<'parar' | void> {
                     const desejada = gorjetaPorGas({
                         lucroUsd: lucroUsd ?? new Decimal(0),
                         precoDoEthUsd: precoDoEth() ?? new Decimal(0),
-                        limiteGas,
+                        limiteGas: GAS_TIPICO_DE_UMA_CACADA,
                         fracaoDoLucro: fracao,
                     });
                     const base = baseFeeAtual ?? 20_000_000n;
@@ -1197,22 +1213,42 @@ async function principal(): Promise<'parar' | void> {
                         try {
                             saldoDeGasWei = await (carteira.provider as JsonRpcProvider).getBalance(donoCarteira!);
                             saldoLidoEm = Date.now();
+                            saldoJaLido = true;
                         } catch { /* seguir com o ultimo saldo conhecido */ }
+                    }
+
+                    if (!saldoJaLido) {
+                        // Nunca conseguiu ler o saldo. Chamar isso de "sem gás"
+                        // seria inventar: nao se sabe. E atirar no escuro pode
+                        // gastar o que nao existe.
+                        log.error('NÃO SEI QUANTO TENHO DE GÁS — não consegui ler o saldo. Não atiro no escuro.', {
+                            devedor: alvo.devedor,
+                            carteira: donoCarteira,
+                        });
+                        continue;
                     }
 
                     // Quanto arriscar depende do PREMIO. Uma fracao fixa fazia
                     // o bot recusar uma aposta de 590 para 1 com a mesma cara
                     // com que recusava uma de 3 para 1.
-                    const saldoUsd = new Decimal(saldoDeGasWei.toString())
-                        .dividedBy(1e18)
-                        .mul(precoDoEth() ?? new Decimal(0));
-                    const risco = fracaoDoSaldoQueValeArriscar({
-                        lucroUsd: lucroUsd ?? new Decimal(0),
-                        saldoUsd,
-                        fracaoBase: FRACAO_DO_SALDO_POR_TIRO,
-                        fracaoMaxima: FRACAO_MAXIMA_DO_SALDO,
-                    });
-                    const prioridadePorGas = gorjetaQueCabeNoSaldo({
+                    // Sem o preco do ETH nao da para comparar premio com
+                    // saldo — mas isso NAO pode virar risco zero. Zero aqui
+                    // caia em "SEM GAS PARA ATIRAR", e o bot recusaria o tiro
+                    // culpando o gas, tendo gas: diagnostico errado com cara
+                    // de certeza. Sem cotacao, o certo e o risco basico.
+                    const ethUsd = precoDoEth();
+                    const saldoUsd = ethUsd === null
+                        ? null
+                        : new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).mul(ethUsd);
+                    const risco = saldoUsd === null || lucroUsd === null
+                        ? FRACAO_DO_SALDO_POR_TIRO
+                        : fracaoDoSaldoQueValeArriscar({
+                            lucroUsd,
+                            saldoUsd,
+                            fracaoBase: FRACAO_DO_SALDO_POR_TIRO,
+                            fracaoMaxima: FRACAO_MAXIMA_DO_SALDO,
+                        });
+                    let prioridadePorGas = gorjetaQueCabeNoSaldo({
                         gorjetaDesejadaWei: desejada,
                         saldoWei: saldoDeGasWei,
                         baseFeeWei: base,
@@ -1222,11 +1258,22 @@ async function principal(): Promise<'parar' | void> {
                     const aguenta = derrotasQueAguenta(saldoDeGasWei, custoSePerder);
 
                     if (prioridadePorGas === 0n || aguenta < 1) {
-                        log.error('SEM GÁS PARA ATIRAR. Não disparo: ficar sem gás perde todas as próximas, não só esta.', {
-                            devedor: alvo.devedor,
-                            saldoEth: new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6),
-                            oQueFazer: `mandar ETH do cofre 0x3dffA934...1512A7 para a conta_bot ${donoCarteira}`,
-                        });
+                        const semSaldo = saldoDeGasWei === 0n;
+                        log.error(
+                            semSaldo
+                                ? 'SEM GÁS PARA ATIRAR. Não disparo: ficar sem gás perde todas as próximas, não só esta.'
+                                : 'NÃO DISPAREI, e não é falta de gás — o lance calculado deu zero. Isto é defeito meu, não do mercado.',
+                            {
+                                devedor: alvo.devedor,
+                                saldoEth: new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6),
+                                precoDoEth: ethUsd === null ? 'SEM COTAÇÃO' : `US$ ${ethUsd.toFixed(2)}`,
+                                lucroEstimado: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
+                                riscoUsado: `${(risco * 100).toFixed(0)}%`,
+                                oQueFazer: semSaldo
+                                    ? `mandar ETH do cofre 0x3dffA934...1512A7 para a conta_bot ${donoCarteira}`
+                                    : 'me mandar esta linha inteira',
+                            },
+                        );
                         continue;
                     }
                     if (prioridadePorGas < desejada) {
@@ -1236,7 +1283,26 @@ async function principal(): Promise<'parar' | void> {
                             aguentaDerrotas: aguenta,
                         });
                     }
-                    const maxFee = tetoPorGas(base, prioridadePorGas);
+                    // O no cobra `gasLimit × maxFeePerGas` ADIANTADO, pelo teto
+                    // e nao pelo gas usado, e devolve o resto depois. Ignorar
+                    // isso fazia toda cacada morrer em `insufficient funds`
+                    // com o log culpando a rede: o bot pareceria sem alvo,
+                    // tendo alvo e tendo gas.
+                    let maxFee = tetoPorGas(base, prioridadePorGas);
+                    const adiantavel = maxFeeQueOSaldoAdianta(saldoDeGasWei, limiteGas);
+                    if (adiantavel <= base) {
+                        log.error('O GÁS ADIANTADO NÃO CABE NO SALDO. Não disparo.', {
+                            devedor: alvo.devedor,
+                            saldoEth: new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6),
+                            precisariaAdiantar: new Decimal(adiantadoExigido(limiteGas, maxFee).toString()).dividedBy(1e18).toFixed(6),
+                            oQueFazer: `mandar ETH do cofre 0x3dffA934...1512A7 para a conta_bot ${donoCarteira}`,
+                        });
+                        continue;
+                    }
+                    if (maxFee > adiantavel) {
+                        maxFee = adiantavel;
+                        if (prioridadePorGas > maxFee - base) prioridadePorGas = maxFee - base;
+                    }
 
                     const nonceAtual = await nonceManager.getNextNonce();
                     const msDoTiro = Date.now() - inicioDoCiclo;
@@ -1264,7 +1330,9 @@ async function principal(): Promise<'parar' | void> {
                             lance: `${(fracao * 100).toFixed(0)}% do lucro (${perdasSeguidas} derrotas seguidas)`,
                             sobrariaParaMim: lucroUsd === null ? 'sem cotação' : `US$ ${sobraDepoisDaGorjeta(lucroUsd, fracao).toFixed(2)}`,
                             seEuPerderCusta: `${new Decimal(custoSePerder.toString()).dividedBy(1e18).toFixed(6)} ETH (aguento mais ${aguenta})`,
-                            arrisquei: `${(risco * 100).toFixed(0)}% do gás, porque o prêmio é ${lucroUsd === null ? '?' : lucroUsd.dividedBy(saldoUsd.greaterThan(0) ? saldoUsd : new Decimal(1)).toFixed(1)}x o saldo`,
+                            arrisquei: saldoUsd === null || lucroUsd === null || saldoUsd.lessThanOrEqualTo(0)
+                                ? `${(risco * 100).toFixed(0)}% do gás (risco básico: sem cotação para comparar)`
+                                : `${(risco * 100).toFixed(0)}% do gás, porque o prêmio é ${lucroUsd.dividedBy(saldoUsd).toFixed(1)}x o saldo`,
                             verNaBlockchain: `https://basescan.org/tx/${tx.hash}`,
                         });
 
@@ -1280,8 +1348,16 @@ async function principal(): Promise<'parar' | void> {
                             let desfecho: ReturnType<typeof lerRecibo>;
                             try {
                                 desfecho = lerRecibo(await tx.wait(1, 120_000));
-                            } catch {
-                                desfecho = 'sumiu';
+                            } catch (e) {
+                                // O ethers REJEITA quando `status === 0`, e o
+                                // recibo vem dentro do erro. Sem isto, todo
+                                // tiro revertido era contado como "sumiu" e o
+                                // placar dizia "não foi minerada" sobre uma
+                                // transação minerada — matando justamente a
+                                // medicao que separa perder por pouco de nao
+                                // achar alvo.
+                                const recibo = (e as { receipt?: { status?: number | null } })?.receipt;
+                                desfecho = recibo ? lerRecibo(recibo) : 'sumiu';
                             }
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro);
                             // Perder sobe o lance; ganhar devolve ele para a

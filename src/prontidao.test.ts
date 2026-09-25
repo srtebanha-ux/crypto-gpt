@@ -21,8 +21,11 @@ test('o MESMO lucro em dólar dá a MESMA gorjeta, seja USDC ou WETH a dívida',
     // nenhuma razão econômica — só pelo número de casas decimais do token.
     const gorjeta = gorjetaPorGas({ lucroUsd: D(88), precoDoEthUsd: ETH });
     assert.equal(gorjeta, gorjetaPorGas({ lucroUsd: D(88), precoDoEthUsd: ETH }));
-    // E o valor é econômico: 40% de US$88 = US$35,20, divididos por 2M de gás.
-    const esperado = D(88).dividedBy(ETH).mul(0.4).mul(1e18).dividedBy(2_000_000);
+    // E o valor é econômico: 40% de US$88 = US$35,20, divididos pelo gás que a
+    // caçada USA — não pelo teto que se manda. Dividir pelo teto de 2M quando
+    // ela usa ~700k faria o lance efetivo virar 14% do lucro enquanto o log
+    // dizia 40%: o bot pagaria menos do que decidiu pagar.
+    const esperado = D(88).dividedBy(ETH).mul(0.4).mul(1e18).dividedBy(700_000);
     assert.equal(gorjeta, BigInt(esperado.toFixed(0)));
 });
 
@@ -156,7 +159,7 @@ test('o freio conta derrotas, que é o número que decide', () => {
 // ---------------------------------------------------------------------------
 // Risco proporcional ao prêmio: 25% fixo recusava 590 para 1.
 // ---------------------------------------------------------------------------
-import { fracaoDoSaldoQueValeArriscar } from './prontidao';
+import { fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta } from './prontidao';
 
 const SALDO = D(14.19);
 
@@ -188,4 +191,43 @@ test('nunca arrisca o saldo inteiro, por maior que seja o prêmio', () => {
 
 test('sem saldo não arrisca nada', () => {
     assert.equal(fracaoDoSaldoQueValeArriscar({ lucroUsd: D(2103), saldoUsd: D(0) }), 0);
+});
+
+test('sem cotação do ETH, o risco cai no BÁSICO e não em zero', () => {
+    // O defeito que este teste guarda: risco zero fazia gorjetaQueCabeNoSaldo
+    // devolver 0, que caía em "SEM GÁS PARA ATIRAR" — o bot recusava o tiro
+    // culpando o gás, tendo gás. Diagnóstico errado com cara de certeza.
+    const comRiscoZero = gorjetaQueCabeNoSaldo({
+        gorjetaDesejadaWei: 6_650_000_000n,
+        saldoWei: wei(1),
+        baseFeeWei: 1_000_000n,
+        fracaoMaximaDoSaldo: 0,
+    });
+    assert.equal(comRiscoZero, 0n, 'risco zero realmente zera o lance — por isso não pode ser o padrão');
+
+    const comRiscoBasico = gorjetaQueCabeNoSaldo({
+        gorjetaDesejadaWei: 6_650_000_000n,
+        saldoWei: wei(1),
+        baseFeeWei: 1_000_000n,
+        fracaoMaximaDoSaldo: 0.25,
+    });
+    assert.ok(comRiscoBasico > 0n, 'com o risco básico o tiro sai');
+});
+
+test('o nó exige o gás ADIANTADO pelo teto, não pelo que a caçada usa', () => {
+    // O defeito mais caro da revisão. Com o teto de 2M e uma gorjeta boa, o
+    // adiantado passava de três vezes o saldo inteiro, e toda caçada morria em
+    // `insufficient funds` — com o log culpando a rede. O bot pareceria sem
+    // alvo, tendo alvo e tendo gás.
+    const saldo = wei(14.19 / 2646.93);
+    const maxFee = 20_000_000_000n; // 20 gwei
+    assert.ok(adiantadoExigido(LIMITE_DE_GAS, maxFee) > saldo, 'é isso que quebrava');
+
+    const cabe = maxFeeQueOSaldoAdianta(saldo, LIMITE_DE_GAS);
+    assert.ok(adiantadoExigido(LIMITE_DE_GAS, cabe) <= saldo, 'com o teto certo, cabe');
+    assert.ok(cabe > 0n);
+});
+
+test('saldo zerado não adianta nada, e zero aqui quer dizer NÃO ATIRE', () => {
+    assert.equal(maxFeeQueOSaldoAdianta(0n, LIMITE_DE_GAS), 0n);
 });

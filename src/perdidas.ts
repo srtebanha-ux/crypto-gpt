@@ -146,7 +146,15 @@ export function oQueIssoQuerDizer(placar: PlacarDasPerdidas): string {
         return 'Nenhuma liquidação na sua faixa de lucro. Não foi velocidade nem cobertura: não teve.';
     }
     const c = placar.porCobertura;
-    const maior = (Object.keys(c) as Cobertura[]).reduce((a, b) => (c[b] > c[a] ? b : a));
+    const ordenados = (Object.keys(c) as Cobertura[]).filter((k) => c[k] > 0).sort((a, b) => c[b] - c[a]);
+    // Empate nao pode eleger um balde: com pouquissimas liquidacoes por hora o
+    // empate e o caso COMUM, e o desempate alfabetico caia sempre em 'brasa',
+    // que aponta para o conserto mais caro (encurtar o ciclo). Dizer "nao da
+    // para saber ainda" e a resposta honesta.
+    if (ordenados.length > 1 && c[ordenados[0]] === c[ordenados[1]]) {
+        return `Empate entre ${ordenados.filter((k) => c[k] === c[ordenados[0]]).join(' e ')}: poucos dados para dizer o que consertar.`;
+    }
+    const maior = ordenados[0];
     switch (maior) {
         case 'brasa':
             return 'O bot ESTAVA olhando essas pessoas a cada ciclo e perdeu assim mesmo. É velocidade: outro chegou antes. Encurtar o ciclo é o que mudaria.';
