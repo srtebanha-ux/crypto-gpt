@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
@@ -732,6 +732,15 @@ async function principal(): Promise<'parar' | void> {
     let avisouMercadoMudo = false;
     /** O que aconteceu com cada tiro depois de sair. */
     let tiros = placarVazio();
+    /**
+     * Quantas vezes seguidas o bot perdeu a corrida.
+     *
+     * Numa disputa em que todos chegam no mesmo bloco, quem ganha nao e o mais
+     * rapido: e quem paga mais. Perder seguidas vezes e a informacao de que o
+     * lance esta baixo, e a resposta certa e subir — nao reescrever o bot.
+     */
+    let perdasSeguidas = 0;
+    const fracaoBase = Number(process.env.CACA_FRACAO_GORJETA ?? '0.4');
 
     // Ser AVISADO do bloco novo em vez de perguntar. Perguntar a cada 200ms
     // significa que um bloco nascido logo depois da pergunta so e visto na
@@ -1114,10 +1123,12 @@ async function principal(): Promise<'parar' | void> {
                         casas.get(alvo.divida.toLowerCase()),
                         precos.get(alvo.divida.toLowerCase()),
                     );
+                    const fracao = fracaoAdaptativa({ base: fracaoBase, perdasSeguidas });
                     const prioridadePorGas = gorjetaPorGas({
                         lucroUsd: lucroUsd ?? new Decimal(0),
                         precoDoEthUsd: precoDoEth() ?? new Decimal(0),
                         limiteGas,
+                        fracaoDoLucro: fracao,
                     });
                     const maxFee = tetoPorGas(baseFeeAtual ?? 20_000_000n, prioridadePorGas);
 
@@ -1144,6 +1155,8 @@ async function principal(): Promise<'parar' | void> {
                             gorjetaOfertadaGwei: (Number(prioridadePorGas) / 1e9).toFixed(3),
                             lucroEstimadoUsd: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
                             doCicloAoTiro: `${msDoTiro}ms`,
+                            lance: `${(fracao * 100).toFixed(0)}% do lucro (${perdasSeguidas} derrotas seguidas)`,
+                            sobrariaParaMim: lucroUsd === null ? 'sem cotação' : `US$ ${sobraDepoisDaGorjeta(lucroUsd, fracao).toFixed(2)}`,
                             verNaBlockchain: `https://basescan.org/tx/${tx.hash}`,
                         });
 
@@ -1163,6 +1176,10 @@ async function principal(): Promise<'parar' | void> {
                                 desfecho = 'sumiu';
                             }
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro);
+                            // Perder sobe o lance; ganhar devolve ele para a
+                            // base. Assim o bot nao paga caro para sempre por
+                            // uma sequencia ruim que ja passou.
+                            perdasSeguidas = desfecho === 'acertou' ? 0 : perdasSeguidas + 1;
                             const dados = {
                                 devedor: devedorDoTiro,
                                 hash: hashDoTiro,
@@ -1176,7 +1193,13 @@ async function principal(): Promise<'parar' | void> {
                                     cofre: `https://basescan.org/address/${COFRE_ESPERADO}`,
                                 });
                             } else if (desfecho === 'reverteu') {
-                                log.warn('[ERROU] A transação reverteu — quase sempre porque outro liquidou antes.', dados);
+                                log.warn('[ERROU] A transação reverteu — quase sempre porque outro liquidou antes.', {
+                                    ...dados,
+                                    proximoLance: `${(fracaoAdaptativa({ base: fracaoBase, perdasSeguidas }) * 100).toFixed(0)}% do lucro`,
+                                    oQueIssoQuerDizer: perdasSeguidas >= 3
+                                        ? 'perdendo seguidas vezes: ou o lance ainda está baixo, ou o outro entra no bloco ANTES (aí é outro desenho)'
+                                        : 'subo o lance no próximo',
+                                });
                             } else {
                                 log.warn('[SUMIU] A transação não foi minerada em 2 minutos.', dados);
                             }

@@ -101,3 +101,44 @@ export function lerBasefee(hex: string | null): bigint | null {
         return null;
     }
 }
+
+/**
+ * Quanto do lucro virar gorjeta, depois de perder seguidas vezes.
+ *
+ * Existe porque numa corrida onde todos chegam no mesmo bloco, quem ganha nao
+ * e o mais rapido: e quem paga mais. A transacao com mais gorjeta entra
+ * primeiro, e a segunda reverte porque a posicao ja nao esta liquidavel.
+ *
+ * Entao perder repetidamente nao pede codigo mais rapido — pede lance maior. E
+ * ganhar de volta nao pede lance alto para sempre: quando comeca a acertar, o
+ * bot desce de novo e guarda a diferenca.
+ *
+ * O teto e o que separa disputar de se entregar. Acima dele, ganhar a
+ * liquidacao custa quase tudo que ela rende, e o certo e deixar passar.
+ */
+export const TETO_DA_FRACAO = 0.8;
+export const PASSO_DA_FRACAO = 0.1;
+
+export function fracaoAdaptativa(entrada: {
+    base?: number;
+    perdasSeguidas: number;
+    teto?: number;
+    passo?: number;
+}): number {
+    const base = entrada.base ?? FRACAO_DO_LUCRO;
+    const teto = entrada.teto ?? TETO_DA_FRACAO;
+    const passo = entrada.passo ?? PASSO_DA_FRACAO;
+    if (entrada.perdasSeguidas <= 0) return base;
+    return Math.min(teto, base + entrada.perdasSeguidas * passo);
+}
+
+/**
+ * O que sobra para voce depois de pagar a gorjeta, em dolar.
+ *
+ * Serve para a decisao nao virar "quanto eu aguento pagar" e sim "quanto eu
+ * ainda ganho se pagar". Ganhar 100% de um lucro de US$17 e melhor que ganhar
+ * 0% de um lucro de US$88 — mas so ate o ponto em que sobra alguma coisa.
+ */
+export function sobraDepoisDaGorjeta(lucroUsd: Decimal, fracao: number): Decimal {
+    return lucroUsd.mul(1 - fracao);
+}

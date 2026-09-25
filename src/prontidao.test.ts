@@ -69,3 +69,43 @@ test('o limite de gás é generoso de propósito', () => {
     // rede no pior momento possível.
     assert.ok(LIMITE_DE_GAS >= 2_000_000n);
 });
+
+// ---------------------------------------------------------------------------
+// O leilão: numa corrida onde todos chegam no mesmo bloco, ganha quem paga.
+// ---------------------------------------------------------------------------
+import { fracaoAdaptativa, sobraDepoisDaGorjeta, TETO_DA_FRACAO } from './prontidao';
+
+test('sem perder, o lance fica na base', () => {
+    assert.equal(fracaoAdaptativa({ perdasSeguidas: 0 }), 0.4);
+});
+
+test('cada derrota seguida aumenta o lance', () => {
+    // Perder repetidamente não pede código mais rápido, pede lance maior.
+    assert.ok(fracaoAdaptativa({ perdasSeguidas: 1 }) > fracaoAdaptativa({ perdasSeguidas: 0 }));
+    assert.ok(fracaoAdaptativa({ perdasSeguidas: 3 }) > fracaoAdaptativa({ perdasSeguidas: 1 }));
+});
+
+test('o lance tem teto: acima dele, ganhar custa quase tudo que rende', () => {
+    assert.equal(fracaoAdaptativa({ perdasSeguidas: 99 }), TETO_DA_FRACAO);
+    assert.ok(TETO_DA_FRACAO < 1, 'pagar o lucro inteiro é se entregar, não disputar');
+});
+
+test('ganhar faz o lance voltar para a base', () => {
+    // O contador zera no acerto, então o bot não paga caro para sempre por
+    // uma sequência ruim que já passou.
+    assert.equal(fracaoAdaptativa({ perdasSeguidas: 0 }), 0.4);
+});
+
+test('mesmo no teto ainda sobra dinheiro', () => {
+    // A conta que justifica subir: ganhar 100% de US$17 é melhor que ganhar
+    // 0% de US$88.
+    const sobra = sobraDepoisDaGorjeta(D(88), TETO_DA_FRACAO);
+    assert.ok(sobra.greaterThan(0), `sobraria ${sobra.toFixed(2)}`);
+    assert.equal(sobra.toFixed(2), '17.60');
+});
+
+test('a gorjeta maior aparece de verdade no preço por gás', () => {
+    const calma = gorjetaPorGas({ lucroUsd: D(88), precoDoEthUsd: ETH, fracaoDoLucro: 0.4 });
+    const brava = gorjetaPorGas({ lucroUsd: D(88), precoDoEthUsd: ETH, fracaoDoLucro: 0.8 });
+    assert.equal(brava, calma * 2n);
+});
