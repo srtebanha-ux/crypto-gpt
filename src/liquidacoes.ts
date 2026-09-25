@@ -14,27 +14,26 @@
 // o valor emprestado por flash loan. Capital próprio vira gás, não limite.
 //
 // Nada aqui envia transação, assina, ou precisa de chave privada. É leitura.
+import { id } from 'ethers';
 import { Decimal } from 'decimal.js';
 import { decodeAddressWord, decodeUintWord, fromRawUnits, stripHexPrefix } from './evmAbi';
 
+/** A assinatura do evento que o Aave V3 emite ao liquidar. */
+export const ASSINATURA_LIQUIDATION_CALL =
+    'LiquidationCall(address,address,address,uint256,uint256,address,bool)';
+
 /**
- * Assinatura do evento que o Aave V3 emite ao liquidar:
+ * O tópico do evento, CALCULADO e não decorado.
  *
- *   LiquidationCall(address,address,address,uint256,uint256,address,bool)
+ * Isto era uma constante escrita à mão, com um comentário admitindo que era
+ * palpite: quem escreveu não tinha como calcular keccak nem alcançar a rede.
+ * O palpite estava certo — foi conferido depois, dígito por dígito — mas um
+ * tópico errado aqui não daria erro nenhum: daria ZERO liquidações, para
+ * sempre, e o bot pareceria estar vigiando um mercado vazio.
  *
- * O valor é o keccak-256 dessa string, e ele está AQUI COMO PALPITE: o
- * ambiente onde este código foi escrito não alcança a rede (403 no proxy) e a
- * pasta não tem keccak — os seletores em evmAbi.ts são constantes pelo mesmo
- * motivo. Conferir exigiria uma chamada que eu não posso fazer.
- *
- * Por isso o leitor tem MODO DESCOBERTA: sem tópico configurado, ele busca os
- * eventos do contrato sem filtro nenhum e devolve quantos de cada tipo
- * apareceram. A primeira rodada real vira a verificação que eu não consegui
- * fazer — e se este palpite estiver errado, o log mostra o certo em vez de
- * devolver zero em silêncio.
+ * Calcular custa uma linha e tira a sorte da equação.
  */
-export const TOPIC_LIQUIDATION_CALL =
-    '0xe413a321e8681d831f4dbccbca790d2952b56f977908e45be37335533e005286';
+export const TOPIC_LIQUIDATION_CALL = id(ASSINATURA_LIQUIDATION_CALL);
 
 export interface LogCru {
     address: string;

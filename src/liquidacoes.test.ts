@@ -1,3 +1,4 @@
+import { id } from 'ethers';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
@@ -30,8 +31,7 @@ import {
     resumirHistorico,
     valorEmDolares,
     type LogCru,
-    type Token,
-} from './liquidacoes';
+    type Token, TOPIC_LIQUIDATION_CALL, ASSINATURA_LIQUIDATION_CALL} from './liquidacoes';
 
 /** Uma palavra de 32 bytes, como o ABI codifica. */
 function palavra(v: bigint | string): string {
@@ -798,4 +798,15 @@ test('as redes baratas nascem sem tabela, mas com RPC para sondar', () => {
         assert.ok(REDES[nome], `${nome} não existe em REDES`);
         assert.ok((RPCS_PARA_TENTAR[nome] ?? []).length > 0, `${nome} sem RPC`);
     }
+});
+
+test('o tópico da LiquidationCall é o keccak da assinatura, não um número decorado', () => {
+    // Era uma constante escrita à mão, com um comentário admitindo ser
+    // palpite. O palpite estava certo — mas um tópico errado aqui não daria
+    // erro: daria ZERO liquidações, para sempre, e o bot pareceria estar
+    // vigiando um mercado vazio. Este teste guarda o valor que rodou em
+    // produção e achou 5.043 liquidações na Base.
+    assert.equal(ASSINATURA_LIQUIDATION_CALL, 'LiquidationCall(address,address,address,uint256,uint256,address,bool)');
+    assert.equal(TOPIC_LIQUIDATION_CALL, id(ASSINATURA_LIQUIDATION_CALL));
+    assert.equal(TOPIC_LIQUIDATION_CALL, '0xe413a321e8681d831f4dbccbca790d2952b56f977908e45be37335533e005286');
 });
