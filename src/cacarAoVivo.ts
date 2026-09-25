@@ -5,6 +5,8 @@ import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
+import { posturaPorMargem, ritmoDaPostura, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
+import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, decodificarAggregate3Rapido, partirEmPedacos } from './multicall';
@@ -57,7 +59,13 @@ export function maiorQuedaDesdeABase(base: Map<string, Decimal>, agora: Map<stri
 export interface Medida { devedor: string; queda: Decimal }
 
 /** As tres camadas, e a regua do gatilho que separa a primeira da segunda. */
-export interface Camadas { brasa: string[]; quentes: string[]; margemDaBrasa: Decimal }
+export interface Camadas {
+    brasa: string[];
+    quentes: string[];
+    margemDaBrasa: Decimal;
+    /** A menor distancia ate liquidar de TODAS: quem cai primeiro no mundo. */
+    menorMargem: Decimal | null;
+}
 
 /**
  * Reparte os devedores em brasa / quentes / resto, por fragilidade.
@@ -96,6 +104,7 @@ export function repartirPorFragilidade(
         brasa: brasa.map((m) => m.devedor),
         quentes: quentes.map((m) => m.devedor),
         margemDaBrasa,
+        menorMargem: ordenados.length > 0 ? ordenados[0].queda : null,
     };
 }
 
@@ -289,6 +298,14 @@ const MULTICALLS_EM_PARALELO = Number(process.env.CACA_PARALELO ?? String(CONEXO
  * liquidacao grande que os grandes nao conseguem vender.
  */
 const INTERVALO_MS = Number(process.env.CACA_INTERVALO_MS ?? '8000');
+
+/**
+ * De quanto o mercado precisa se afastar para o feed Chainlink escrever.
+ *
+ * Varia por feed e pode mudar sem aviso. Errar para MENOS faz acordar cedo
+ * (gasta um pouco de CU); errar para MAIS faz perder a janela inteira.
+ */
+const DESVIO_DE_ESCRITA = new Decimal(process.env.CACA_DESVIO_FEED ?? DESVIO_TIPICO_PCT.toString());
 
 /** De quanto em quanto tempo TODAS as posicoes sao relidas, custe o que custar. */
 const MINUTOS_ENTRE_COMPLETAS = Number(process.env.CACA_MINUTOS_COMPLETA ?? '60');
@@ -606,6 +623,27 @@ async function principal(): Promise<'parar' | void> {
     );
 
     const casas = new Map<string, number>();
+    // Qual par da Binance cada moeda segue. O simbolo vem da propria
+    // blockchain: lista de enderecos decorada envelhece em silencio.
+    const parPorToken = new Map<string, string>();
+    try {
+        const respSym = await lerEmLote(moedas.map((m) => ({ alvo: m, dados: SELETOR_SYMBOL })));
+        for (let i = 0; i < moedas.length; i++) {
+            const sim = respSym[i] ? lerSymbol(respSym[i]!) : null;
+            const par = sim ? simboloDaBinance(sim) : null;
+            if (par) parPorToken.set(moedas[i].toLowerCase(), par);
+        }
+    } catch (e) {
+        log.warn('Não consegui ler os símbolos das moedas; sigo sem preço de mercado.', { erro: (e as Error).message });
+    }
+    const paresDaBinance = [...new Set(parPorToken.values())];
+    log.info('Olho no mercado, fora da blockchain (custo zero em CU).', {
+        pares: paresDaBinance,
+        moedasAcompanhadas: parPorToken.size,
+        deMoedas: moedas.length,
+        limiarDoFeed: `${DESVIO_DE_ESCRITA.toFixed(2)}%`,
+    });
+
     const respDec = await lerEmLote(moedas.map((m) => ({ alvo: m, dados: SELETOR_DECIMALS })));
     moedas.forEach((m, i) => {
         if (respDec[i]) {
@@ -627,6 +665,10 @@ async function principal(): Promise<'parar' | void> {
     let ultimoSinalDeVida = 0;
     /** Ate onde ja se contou quem foi liquidado sem a gente. */
     let ultimoBlocoPerdidas = topo;
+    /** A menor margem de todas, da ultima varredura: quem cai primeiro. */
+    let menorMargem: Decimal | null = null;
+    let postura: Postura = 'dormindo';
+    let posturaAnterior: Postura = 'dormindo';
     /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
     const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 1);
 
@@ -822,6 +864,7 @@ async function principal(): Promise<'parar' | void> {
                         brasa = camadas.brasa;
                         quentes = camadas.quentes;
                         margemDaBrasa = camadas.margemDaBrasa;
+                        menorMargem = camadas.menorMargem;
                         ultimoCompleto = Date.now();
                         await contarAsQuePassaram(blocoAtual);
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
@@ -968,7 +1011,35 @@ async function principal(): Promise<'parar' | void> {
             // O ritmo e do relogio, nao do bloco. Perguntar "que bloco e esse?"
             // a cada 100ms custava 130M CUs/mes — mais que todo o resto junto,
             // e mais de 6x o teto da conta.
-            const resta = INTERVALO_MS - (Date.now() - inicioDoCiclo);
+            //
+            // Mas o relogio nao anda sempre igual: quem manda no passo e o
+            // MERCADO, que custa zero em CU porque nao passa pela blockchain.
+            // Enquanto ele esta calmo o bot dorme barato; quando ele cai o
+            // bastante para o feed escrever E derrubar alguem, o bot corre.
+            let ritmo = INTERVALO_MS;
+            if (paresDaBinance.length > 0) {
+                const doMercado = await cotacoesDaBinance(paresDaBinance);
+                if (doMercado.size > 0) {
+                    const doOraculo = new Map<string, Decimal>();
+                    for (const [token, par] of parPorToken) {
+                        const p = precos.get(token);
+                        if (p && !doOraculo.has(par)) doOraculo.set(par, p.dividedBy(1e8));
+                    }
+                    const queda = quedaDoMercado(doMercado, doOraculo);
+                    postura = posturaPorMargem(queda, menorMargem, DESVIO_DE_ESCRITA);
+                    ritmo = ritmoDaPostura(postura, INTERVALO_MS);
+                    if (postura !== posturaAnterior) {
+                        log.info(`[POSTURA] ${posturaAnterior} → ${postura}`, {
+                            mercadoCaiu: `${queda.toFixed(4)}%`,
+                            feedEscreveEm: `${DESVIO_DE_ESCRITA.toFixed(2)}%`,
+                            maisFragilA: menorMargem === null ? '—' : `${menorMargem.toFixed(4)}%`,
+                            proximaLeituraEm: `${ritmo}ms`,
+                        });
+                        posturaAnterior = postura;
+                    }
+                }
+            }
+            const resta = ritmo - (Date.now() - inicioDoCiclo);
             if (resta > 0) await dormir(resta);
         }
     }

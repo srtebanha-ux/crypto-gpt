@@ -101,3 +101,43 @@ test('ficar com o dedo no gatilho o DIA INTEIRO não caberia', () => {
     });
     assert.ok(sempre > 38_095_238, `daria ${sempre} CU/mês`);
 });
+
+// ---------------------------------------------------------------------------
+// A regra corrigida: o feed precisa ESCREVER, e a escrita precisa DERRUBAR.
+// ---------------------------------------------------------------------------
+import { posturaPorMargem } from './adiantar';
+
+test('queda pequena NÃO vira dedo no gatilho, mesmo derrubando alguém no papel', () => {
+    // O erro que esta função existe para corrigir. Alguém a 0,04% de cair, o
+    // mercado cai 0,1% — mas 0,1% não faz o feed escrever, então o preço
+    // on-chain não se move e ninguém fica liquidável. Correr a 200ms aqui
+    // gastaria CU para nada.
+    assert.equal(posturaPorMargem(D(0.1), D(0.04)), 'dormindo');
+});
+
+test('queda que faz o feed escrever E derruba alguém = dedo no gatilho', () => {
+    assert.equal(posturaPorMargem(D(0.6), D(0.04)), 'dedo no gatilho');
+});
+
+test('queda que faz o feed escrever mas não derruba ninguém = atento', () => {
+    // O feed vai escrever, mas o mais frágil está a 3% e a queda é de 0,6%.
+    assert.equal(posturaPorMargem(D(0.6), D(3)), 'atento');
+});
+
+test('chegando perto do limiar já aperta o passo', () => {
+    assert.equal(posturaPorMargem(D(0.35), D(0.04)), 'atento');
+    assert.equal(posturaPorMargem(D(0.2), D(0.04)), 'dormindo');
+});
+
+test('sem ninguém na brasa nunca vira dedo no gatilho', () => {
+    // Correr sem alvo é só gastar.
+    assert.equal(posturaPorMargem(D(5), null), 'atento');
+});
+
+test('o estado caro se limita sozinho', () => {
+    // Enquanto o desvio não chega ao limiar, não se corre. Quando chega, o
+    // feed escreve em segundos e a corrida acaba. É isso que impede o ritmo
+    // de 200ms de virar o ritmo do dia inteiro.
+    assert.equal(posturaPorMargem(D(0.49), D(0.01)), 'atento');
+    assert.equal(posturaPorMargem(D(0.50), D(0.01)), 'dedo no gatilho');
+});

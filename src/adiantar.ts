@@ -148,3 +148,38 @@ export function custoDaVigiliaEmCUs(entrada: {
         (entrada.minutosNoGatilhoPorDia * 60) * 5 * entrada.cuPorLeitura;
     return Math.round(porDia * 30);
 }
+
+/**
+ * A postura, decidida por PORCENTAGEM de queda — que e o que se sabe de fato.
+ *
+ * Corrige um erro do desenho anterior. Eu tinha escrito que uma queda de 0,1%
+ * no mercado ja derruba quem esta a 0,04% de cair. Nao derruba: se o feed so
+ * escreve na blockchain quando o desvio passa do limiar, uma queda de 0,1%
+ * NAO move o preco on-chain, e sem o preco on-chain mover ninguem fica
+ * liquidavel. O bot correria a 200ms para nada, e pagaria por isso.
+ *
+ * Sao duas condicoes, e as duas precisam valer:
+ *
+ *   1. o mercado caiu o bastante para o feed ESCREVER  (>= desvioDeEscrita)
+ *   2. essa queda derruba alguem                        (>= menorMargem)
+ *
+ * A primeira condicao tambem e o que segura o custo: enquanto o desvio nao
+ * chega no limiar, correr nao adianta; quando chega, o feed escreve em
+ * segundos e a corrida acaba sozinha. O estado caro se limita sozinho.
+ */
+export function posturaPorMargem(
+    quedaDoMercadoPct: Decimal,
+    menorMargemPct: Decimal | null,
+    desvioDeEscrita: Decimal = DESVIO_TIPICO_PCT,
+): Postura {
+    if (
+        menorMargemPct !== null &&
+        quedaDoMercadoPct.greaterThanOrEqualTo(desvioDeEscrita) &&
+        quedaDoMercadoPct.greaterThanOrEqualTo(menorMargemPct)
+    ) {
+        return 'dedo no gatilho';
+    }
+    // Chegando perto do limiar: vale apertar o passo sem ainda gastar o caro.
+    if (quedaDoMercadoPct.greaterThanOrEqualTo(desvioDeEscrita.mul(0.6))) return 'atento';
+    return 'dormindo';
+}
