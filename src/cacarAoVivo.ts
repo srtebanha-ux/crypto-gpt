@@ -684,6 +684,17 @@ async function principal(): Promise<'parar' | void> {
     let postura: Postura = 'dormindo';
     /** O preco base do bloco, de carona no ciclo. Evita uma ida a rede na hora. */
     let baseFeeAtual: bigint | null = null;
+    /**
+     * O que o mercado respondeu da ultima vez. `null` quer dizer que a Binance
+     * nao respondeu — e isso precisa APARECER.
+     *
+     * Sem este estado o recurso inteiro morre em silencio: `cotacoesDaBinance`
+     * devolve mapa vazio quando falha, o laco nao faz nada com mapa vazio, e o
+     * bot volta ao ritmo fixo parecendo saudavel. Um log que nunca diz
+     * "[POSTURA]" fica igual a um mercado calmo, e sao coisas opostas.
+     */
+    let quedaDoMercadoAgora: Decimal | null = null;
+    let avisouMercadoMudo = false;
     let posturaAnterior: Postura = 'dormindo';
     /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
     const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 2);
@@ -841,7 +852,12 @@ async function principal(): Promise<'parar' | void> {
                     ultimoSinalDeVida = Date.now();
                     log.info(`[BLOCO ${blocoAtual}] Só a brasa — ninguém mais pode ter caído.`, {
                         naBrasa: brasa.length,
-                        maiorQuedaPct: `${maiorQueda.toFixed(4)}%`,
+                        // Sem isto, "mercado calmo" e "Binance morta" dao o
+                        // mesmo log — e sao coisas opostas.
+                        mercado: quedaDoMercadoAgora === null
+                            ? 'SEM COTAÇÃO — ritmo fixo'
+                            : `${quedaDoMercadoAgora.toFixed(4)}% abaixo do oráculo (${postura})`,
+                        oraculoJaCaiuPct: `${maiorQueda.toFixed(4)}%`,
                         gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
                         naListaQuente: quentes.length,
                         custou: `${Date.now() - inicioDoCiclo}ms`,
@@ -1039,13 +1055,27 @@ async function principal(): Promise<'parar' | void> {
             let ritmo = INTERVALO_MS;
             if (paresDaBinance.length > 0) {
                 const doMercado = await cotacoesDaBinance(paresDaBinance);
-                if (doMercado.size > 0) {
+                if (doMercado.size === 0) {
+                    quedaDoMercadoAgora = null;
+                    if (!avisouMercadoMudo) {
+                        avisouMercadoMudo = true;
+                        log.warn('MERCADO MUDO: a Binance não respondeu. Volto ao ritmo fixo e perco a vantagem de antecipar.', {
+                            pares: paresDaBinance,
+                            oQueIssoCusta: 'sem isto o bot só descobre quem caiu depois que o oráculo escreve',
+                        });
+                    }
+                } else {
+                    if (avisouMercadoMudo) {
+                        avisouMercadoMudo = false;
+                        log.info('Mercado voltou a responder.');
+                    }
                     const doOraculo = new Map<string, Decimal>();
                     for (const [token, par] of parPorToken) {
                         const p = precos.get(token);
                         if (p && !doOraculo.has(par)) doOraculo.set(par, p.dividedBy(1e8));
                     }
                     const queda = quedaDoMercado(doMercado, doOraculo);
+                    quedaDoMercadoAgora = queda;
                     postura = posturaPorMargem(queda, menorMargem, DESVIO_DE_ESCRITA);
                     ritmo = ritmoDaPostura(postura, INTERVALO_MS);
                     if (postura !== posturaAnterior) {
