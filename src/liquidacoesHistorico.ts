@@ -1,0 +1,800 @@
+// Arquivo: src/liquidacoesHistorico.ts
+//
+// Lê o histórico de liquidações já acontecidas e responde, sem gastar um
+// centavo, se vale construir um caçador de liquidações.
+//
+// NÃO envia transação, não assina nada, não precisa de chave privada. Só
+// `eth_getLogs` contra um RPC de leitura.
+//
+// Três perguntas, nesta ordem de importância:
+//
+//   1. Existem liquidações GRANDES? Se nenhuma passa de US$50 mil, a ideia
+//      morre aqui, hoje, de graça.
+//   2. QUANTOS endereços diferentes capturaram? Trezentas divididas por três
+//      robôs é lugar tomado; trezentas por duzentos endereços é lugar que
+//      sobra. Esta linha vale mais que o total.
+//   3. De que tamanho? O bônus é fração da dívida alheia, então o tamanho da
+//      dívida é o tamanho do prêmio.
+//
+// MODO DESCOBERTA: a assinatura do evento em liquidacoes.ts é um palpite —
+// quem escreveu não alcançava a rede nem tinha keccak à mão. Sem
+// LIQUIDACOES_TOPIC0 definido, este programa busca TODOS os eventos do
+// contrato e mostra quais existem, com contagem. A primeira rodada real vira
+// a verificação que não deu para fazer antes; o tópico certo aparece no log
+// em vez de o programa devolver zero em silêncio.
+import { Decimal } from 'decimal.js';
+import { createLogger } from './logger';
+import { exigirAtivacao } from './ativacao';
+import {
+    TOPIC_LIQUIDATION_CALL,
+    contarPorTopico,
+    ehLimiteDeFaixa,
+    REDES,
+    gorjetaWei,
+    FAIXAS_USD,
+    RPCS_PARA_TENTAR,
+    SELETOR_GET_RESERVES_LIST,
+    SELETOR_SYMBOL,
+    SELETOR_DECIMALS,
+    classificarToken,
+    decodificarListaDeEnderecos,
+    decodificarTexto,
+    type Token,
+    TAMANHOS_PARA_SONDAR,
+    escolherMelhorRpc,
+    minutosEstimados,
+    type Sonda,
+    aglomeracao,
+    bonusDeLiquidacao,
+    chamadaDeConfiguracao,
+    janelaDeOportunidade,
+    lucroBruto,
+    lerDisputaPorPiso,
+    repartirOBolo,
+    lerPosicao,
+    multiploDaBase,
+    decodificarLiquidacao,
+    faixasDeBlocos,
+    resumirHistorico,
+    type Liquidacao,
+    type LogCru,
+} from './liquidacoes';
+
+const log = createLogger('liquidacoes');
+
+/**
+ * Rede escolhida por NOME, com endereço, contrato e tempo de bloco juntos.
+ *
+ * Antes eram três variáveis que tinham de concordar entre si, e errar uma
+ * produzia número de aparência certa: com o tempo de bloco da Base aplicado
+ * ao Ethereum, o relatório anunciou "~30 dias" para 180 e dividiu todo
+ * "por dia" por seis. Um nome só não tem como discordar de si mesmo.
+ *
+ * As variáveis individuais continuam valendo e têm prioridade, para ajustar
+ * um campo sem abandonar o resto do preset.
+ */
+const REDE_ESCOLHIDA = (process.env.LIQUIDACOES_REDE ?? 'base').toLowerCase();
+const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
+const RPC = process.env.LIQUIDACOES_RPC_URL ?? REDE.rpc;
+/** Aave V3 Pool na Base. Variável porque eu não pude conferir o endereço. */
+const POOL = (process.env.LIQUIDACOES_POOL ?? REDE.pool).toLowerCase();
+/** Vazio = modo descoberta. Ver o comentário no topo. */
+const TOPIC0 = process.env.LIQUIDACOES_TOPIC0 ?? '';
+const BLOCOS = Number(process.env.LIQUIDACOES_BLOCOS ?? String(REDE.blocos180d));
+const PEDACO = Number(process.env.LIQUIDACOES_PEDACO ?? '2000');
+const PAUSA_MS = Number(process.env.LIQUIDACOES_PAUSA_MS ?? '120');
+const TIMEOUT_MS = Number(process.env.LIQUIDACOES_TIMEOUT_MS ?? '20000');
+/**
+ * Segundos por bloco, para converter janela de blocos em DIAS.
+ *
+ * Estava fixo em 2 (o da Base) e por isso o relatório anunciou "~30,0 dias"
+ * para 1.296.000 blocos do Ethereum, que são 180. Um número de aparência certa
+ * dividindo todos os "por dia" por seis.
+ */
+const SEG_POR_BLOCO = Number(process.env.LIQUIDACOES_SEG_POR_BLOCO ?? String(REDE.segPorBloco));
+
+/**
+ * Preço do ETH em dólares, informado à mão — e por que NÃO é buscado sozinho.
+ *
+ * Sem ele, 31% das liquidações da Base somem do relatório porque a dívida está
+ * em WETH/cbETH, e o veredicto fica suspenso: a maior de todas pode estar
+ * escondida aí. Com ele, elas voltam — mas com um preço de HOJE aplicado a
+ * eventos de até seis meses atrás, o que é aproximado e está longe de exato.
+ *
+ * Deixar em branco continua sendo a opção correta quando o que se quer é um
+ * número em que dá para confiar. Preencher é para responder "a maior está
+ * escondida entre as não cotadas?" — e a resposta vem rotulada de aproximada.
+ */
+const PRECO_ETH = process.env.LIQUIDACOES_PRECO_ETH
+    ? new Decimal(process.env.LIQUIDACOES_PRECO_ETH)
+    : null;
+
+let rpcId = 0;
+/** Trocado pela sondagem quando o RPC escolhido à mão não serve. */
+let rpcEmUso = RPC;
+/** Idem para o tamanho do pedaço: quem manda é o que a sondagem aguentou. */
+let pedacoEmUso = PEDACO;
+
+async function chamarEm<T>(rpc: string, metodo: string, params: unknown[]): Promise<T> {
+    const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: metodo, params }),
+        // Sem isto uma conexão pendurada trava a varredura inteira em silêncio
+        // — o mesmo defeito que já custou uma amostra no motor de scalping.
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`RPC HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const body = (await res.json()) as { result?: T; error?: { message: string } };
+    if (body.error) throw new Error(`RPC: ${body.error.message}`);
+    if (body.result === undefined) throw new Error('RPC devolveu resposta sem resultado');
+    return body.result;
+}
+
+const chamar = <T>(metodo: string, params: unknown[]): Promise<T> =>
+    chamarEm<T>(rpcEmUso, metodo, params);
+
+const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Descobre qual RPC serve, e com que tamanho de pedaço, ANTES de varrer.
+ *
+ * A rodada da Ethereum morreu com 648 falhas de 649 e um erro que falava de
+ * limite de faixa em pedaços que estavam dentro do limite. Eu não consigo
+ * testar RPC daqui — a caixa onde eu rodo não alcança blockchain — então
+ * escolher um na mão era chutar, e o chute custou uma rodada inteira.
+ *
+ * A sondagem testa LONGE do topo de propósito. Perto do topo quase todo
+ * provedor responde, inclusive os que não guardam histórico, e foi exatamente
+ * isso que fez um pedaço passar e 648 falharem: o primeiro estava recente.
+ */
+async function sondar(topo: number): Promise<boolean> {
+    const candidatos = [RPC, ...(RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [])].filter(
+        (v, i, a) => a.indexOf(v) === i,
+    );
+    // Fundo da janela: é lá que o histórico precisa existir.
+    const fundo = Math.max(1, topo - BLOCOS + 1000);
+    const sondas: Sonda[] = [];
+
+    for (const rpc of candidatos) {
+        let maior = 0;
+        let erro: string | undefined;
+        for (const tam of TAMANHOS_PARA_SONDAR) {
+            try {
+                await chamarEm<unknown[]>(rpc, 'eth_getLogs', [
+                    {
+                        address: POOL,
+                        fromBlock: `0x${fundo.toString(16)}`,
+                        toBlock: `0x${(fundo + tam - 1).toString(16)}`,
+                        ...(TOPIC0 === '' ? {} : { topics: [TOPIC0] }),
+                    },
+                ]);
+                maior = tam;
+            } catch (err) {
+                erro = err instanceof Error ? err.message : String(err);
+                break;
+            }
+            await dormir(PAUSA_MS);
+        }
+        sondas.push({ rpc, maiorFaixa: maior, erro });
+    }
+
+    log.info('SONDAGEM DE RPC — qual serve e com que pedaço.', {
+        testadoEm: `bloco ${fundo} (o fundo da janela, onde o histórico precisa existir)`,
+        resultado: sondas
+            .map(
+                (s) =>
+                    `${s.rpc.replace(/\/v2\/.*$/, '/v2/***')}: ${
+                        s.maiorFaixa > 0 ? `até ${s.maiorFaixa} blocos` : `NÃO SERVE (${(s.erro ?? '').slice(0, 60)})`
+                    }`,
+            )
+            .join(' | '),
+    });
+
+    const melhor = escolherMelhorRpc(sondas);
+    if (melhor === null) {
+        log.error('NENHUM RPC SERVE para esta rede. A varredura não vai medir nada.', {
+            oQueFazer:
+                'defina LIQUIDACOES_RPC_URL com um provedor que tenha histórico ' +
+                '(plano grátis costuma só enxergar bloco recente)',
+        });
+        return false;
+    }
+
+    rpcEmUso = melhor.rpc;
+    pedacoEmUso = Math.min(PEDACO, melhor.maiorFaixa);
+    const minutos = minutosEstimados(BLOCOS, pedacoEmUso, PAUSA_MS / 1000 + 0.3);
+    log.info('RPC escolhido pela sondagem.', {
+        rpc: melhor.rpc.replace(/\/v2\/.*$/, '/v2/***'),
+        pedaco: pedacoEmUso,
+        estimativa:
+            minutos > 90
+                ? `~${(minutos / 60).toFixed(1)} HORAS — longo demais; considere reduzir LIQUIDACOES_BLOCOS`
+                : `~${minutos.toFixed(0)} minutos`,
+    });
+    return true;
+}
+
+/**
+ * O endereço do pool é mesmo um pool da Aave?
+ *
+ * Os endereços das redes baratas eu escrevi de memória. Um errado produziria
+ * uma varredura perfeita de zero eventos — e "zero liquidações grandes" é uma
+ * conclusão, não um defeito, para quem lê o relatório depois. Conferir custa
+ * duas chamadas e transforma o meu palpite em algo que o programa checa.
+ */
+async function verificarPool(): Promise<boolean> {
+    try {
+        const codigo = await chamar<string>('eth_getCode', [POOL, 'latest']);
+        if (!codigo || codigo === '0x') {
+            log.error('NÃO HÁ CONTRATO NENHUM neste endereço. A varredura acharia zero e pareceria resposta.', {
+                rede: REDE.nome,
+                endereco: POOL,
+                oQueFazer: 'confira o endereço do Pool da Aave V3 desta rede e use LIQUIDACOES_POOL',
+            });
+            return false;
+        }
+        const lista = decodificarListaDeEnderecos(
+            await chamar<string>('eth_call', [{ to: POOL, data: SELETOR_GET_RESERVES_LIST }, 'latest']),
+        );
+        if (lista.length === 0) {
+            log.error('Há contrato aqui, mas ele não responde como pool da Aave.', {
+                rede: REDE.nome,
+                endereco: POOL,
+                oQueFazer: 'o endereço existe mas é outra coisa; confira o Pool da Aave V3 desta rede',
+            });
+            return false;
+        }
+        log.info('Pool confirmado.', { rede: REDE.nome, endereco: POOL, ativosNoPool: lista.length });
+        return true;
+    } catch (err) {
+        log.error('Não deu para confirmar o pool; não vou varrer às cegas.', {
+            erro: err instanceof Error ? err.message : String(err),
+        });
+        return false;
+    }
+}
+
+/**
+ * Pergunta ao pool quais moedas ele tem, em vez de eu escrever a tabela.
+ *
+ * Eu escrevi `TOKENS_BASE` de cabeça e isso matou a rodada da Ethereum — o
+ * mesmo USDC tem endereço diferente em cada rede. Consertei escrevendo mais
+ * cinco tabelas de cabeça, que é a mesma aposta cinco vezes.
+ *
+ * Cai para a tabela à mão se a descoberta não funcionar, e o relatório diz
+ * qual das duas veio, para ninguém confundir "descoberto" com "chutado".
+ */
+async function descobrirMoedas(): Promise<Record<string, Token>> {
+    const aMao = REDE.tokens ?? {};
+    try {
+        const enderecos = decodificarListaDeEnderecos(
+            await chamar<string>('eth_call', [{ to: POOL, data: SELETOR_GET_RESERVES_LIST }, 'latest']),
+        );
+        const descobertas: Record<string, Token> = {};
+        const falhas: string[] = [];
+
+        for (const e of enderecos) {
+            // Em SÉRIE, não em Promise.all. Disparar dois pedidos por token
+            // fez o provedor público recusar 14 de 15 — e como eu tinha escrito
+            // um catch mudo, o relatório disse "1 moeda" sem dizer por quê.
+            try {
+                // 429 = "devagar". Treze de quinze moedas morreram assim mesmo
+                // já indo em série: a pausa de 120ms é curta para o servidor
+                // público. Espera crescente resolve, e custa uns segundos UMA
+                // vez no arranque.
+                const comPaciencia = async (dados: string): Promise<string> => {
+                    let espera = 400;
+                    for (let tentativa = 0; ; tentativa += 1) {
+                        try {
+                            return await chamar<string>('eth_call', [{ to: e, data: dados }, 'latest']);
+                        } catch (err) {
+                            const msg = err instanceof Error ? err.message : String(err);
+                            if (tentativa >= 3 || !msg.includes('429')) throw err;
+                            await dormir(espera);
+                            espera *= 3;
+                        }
+                    }
+                };
+                const sim = await comPaciencia(SELETOR_SYMBOL);
+                await dormir(PAUSA_MS);
+                const dec = await comPaciencia(SELETOR_DECIMALS);
+                const simbolo = decodificarTexto(sim).trim();
+                const decimais = Number(BigInt(dec === '0x' ? '0x0' : dec));
+                if (simbolo === '') falhas.push(`${e.slice(0, 10)}: símbolo ilegível`);
+                else if (decimais === 0 || decimais > 36) falhas.push(`${e.slice(0, 10)}: decimais=${decimais}`);
+                else descobertas[e] = classificarToken(simbolo, decimais);
+            } catch (err) {
+                falhas.push(`${e.slice(0, 10)}: ${(err instanceof Error ? err.message : String(err)).slice(0, 50)}`);
+            }
+            await dormir(PAUSA_MS);
+        }
+
+        // UNIÃO, não substituição. A tabela à mão pode estar incompleta, mas o
+        // que ela tem foi conferido; a descoberta acrescenta o que falta. Trocar
+        // uma pela outra fez este relatório perder o USDC, que é onde está a
+        // maior parte das dívidas — regressão que eu causei tentando melhorar.
+        const tabela = { ...aMao, ...descobertas };
+        const cotaveis = Object.values(tabela).filter((t) => t.estavel || t.emEth).length;
+
+        log.info('MOEDAS — o que eu sei cotar nesta rede.', {
+            noPool: enderecos.length,
+            descobertas: Object.keys(descobertas).length,
+            daTabelaAMao: Object.keys(aMao).length,
+            usando: Object.keys(tabela).length,
+            seiCotar: `${cotaveis} de ${Object.keys(tabela).length}`,
+            lista: Object.values(tabela)
+                .map((t) => `${t.simbolo}${t.estavel ? '=$' : t.emEth ? '=ETH' : '=?'}`)
+                .join(' '),
+        });
+
+        if (falhas.length > 0) {
+            log.warn('Moedas que o pool tem e eu NÃO consegui ler.', {
+                quantas: `${falhas.length} de ${enderecos.length}`,
+                porQue: falhas.slice(0, 6).join(' | '),
+                consequencia:
+                    'as dívidas nessas moedas caem em "sem cotação" e o veredicto pode ficar suspenso',
+            });
+        }
+        return tabela;
+    } catch (err) {
+        log.warn('Descoberta falhou inteira; usando só a tabela escrita à mão.', {
+            erro: err instanceof Error ? err.message : String(err),
+            moedasNaReserva: Object.keys(aMao).length,
+        });
+        return aMao;
+    }
+}
+
+async function principal(): Promise<void> {
+    log.info('*** MODO LEITURA — nenhuma transação é enviada por este processo. ***');
+
+    const topoHex = await chamar<string>('eth_blockNumber', []);
+    const topo = Number.parseInt(topoHex, 16);
+    // Escrevi o aviso e deixei a varredura começar assim mesmo: ela moeu 30
+    // pedaços e produziu um relatório inteiro de zeros depois de já saber que
+    // não ia medir nada. Avisar e seguir é pior que não avisar — dá ao ruído
+    // a aparência de resultado.
+    if (!(await verificarPool())) return;
+    const moedas = await descobrirMoedas();
+    if (!(await sondar(topo))) {
+        log.info('Varredura cancelada antes de começar: nenhum RPC serve.', {
+            rede: REDE.nome,
+            paraTentarOutro: 'defina LIQUIDACOES_RPC_URL e reimplante',
+        });
+        return;
+    }
+    const inicio = Math.max(0, topo - BLOCOS);
+    const faixas = faixasDeBlocos(inicio, topo, pedacoEmUso);
+
+    log.info('Varredura de liquidações iniciada.', {
+        rede: REDE.nome,
+        rpc: rpcEmUso.replace(/\/v2\/.*$/, '/v2/***'),
+        contrato: POOL,
+        blocos: `${inicio} → ${topo} (${BLOCOS})`,
+        pedacos: faixas.length,
+        modo: TOPIC0 === '' ? 'DESCOBERTA (sem filtro de evento)' : `filtrando ${TOPIC0}`,
+        palpiteDoTopico: TOPIC_LIQUIDATION_CALL,
+    });
+
+    const todos: LogCru[] = [];
+    const liquidacoes: Liquidacao[] = [];
+    let indecifraveis = 0;
+    let pedacosComErro = 0;
+
+    // Fila em vez de laço fixo: quando o provedor recusa a faixa por tamanho, o
+    // pedaço é PARTIDO AO MEIO e os dois metades voltam para a fila. Isso
+    // encontra sozinho o teto de qualquer provedor — o da Alchemy grátis é de
+    // 10 blocos, outros aceitam milhares — em vez de exigir que alguém acerte
+    // LIQUIDACOES_PEDACO na mão antes de saber qual é.
+    const fila: Array<[number, number]> = [...faixas];
+    let menorQueCoube = PEDACO;
+    let partidas = 0;
+    let lidos = 0;
+
+    while (fila.length > 0) {
+        const [de, ate] = fila.shift() as [number, number];
+        const filtro: Record<string, unknown> = {
+            address: POOL,
+            fromBlock: `0x${de.toString(16)}`,
+            toBlock: `0x${ate.toString(16)}`,
+        };
+        if (TOPIC0 !== '') filtro.topics = [TOPIC0];
+
+        try {
+            const logs = await chamar<LogCru[]>('eth_getLogs', [filtro]);
+            todos.push(...logs);
+            lidos += 1;
+            menorQueCoube = Math.min(menorQueCoube, ate - de + 1);
+            if (TOPIC0 !== '') {
+                for (const l of logs) {
+                    try {
+                        liquidacoes.push(decodificarLiquidacao(l));
+                    } catch {
+                        indecifraveis += 1;
+                    }
+                }
+            }
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (ehLimiteDeFaixa(msg) && ate > de) {
+                const meio = Math.floor((de + ate) / 2);
+                fila.unshift([meio + 1, ate]);
+                fila.unshift([de, meio]);
+                partidas += 1;
+                if (partidas === 1) {
+                    log.info('Faixa grande demais para este provedor; partindo ao meio.', {
+                        primeiraRecusa: msg.slice(0, 160),
+                    });
+                }
+                continue;
+            }
+            pedacosComErro += 1;
+            // Trinta falhas seguidas sem UMA leitura boa não é azar, é o
+            // provedor não servindo. Insistir mais 600 vezes só enche o log de
+            // linhas iguais na hora em que ela está tentando ler o resultado.
+            if (lidos === 0 && pedacosComErro >= 30) {
+                log.error('DESISTINDO: 30 pedaços seguidos falharam e nenhum funcionou.', {
+                    erro: msg.slice(0, 160),
+                    oQueFazer: 'veja a linha SONDAGEM DE RPC acima — nenhum provedor serviu para esta rede',
+                });
+                break;
+            }
+            log.warn('Pedaço falhou; seguindo.', { faixa: `${de}-${ate}`, erro: msg.slice(0, 160) });
+        }
+
+        if (lidos > 0 && lidos % 200 === 0) {
+            log.info('Progresso.', {
+                lidos,
+                naFila: fila.length,
+                eventos: todos.length,
+                falhas: pedacosComErro,
+                menorPedacoQuePrecisou: menorQueCoube,
+            });
+        }
+        await dormir(PAUSA_MS);
+    }
+
+    log.info('Varredura terminada.', {
+        pedacosLidos: lidos,
+        partidasPorLimite: partidas,
+        menorPedacoQuePrecisou: menorQueCoube,
+        falhas: pedacosComErro,
+        eventos: todos.length,
+    });
+
+    if (TOPIC0 === '') {
+        const porTopico = contarPorTopico(todos);
+        log.info('DESCOBERTA: eventos que este contrato emite.', {
+            eventosLidos: todos.length,
+            pedacosComErro,
+            tiposEncontrados: porTopico.length,
+            // Se um destes for o palpite lá de cima, o palpite estava certo.
+            ranking: porTopico.slice(0, 12).map((t) => `${t.topico} x${t.quantos}`).join(' | '),
+            // Duas causas diferentes para o mesmo zero, e confundi-las já
+            // mandou procurar defeito no lugar errado: se NENHUMA leitura deu
+            // certo, o endereço não foi testado — só o provedor respondeu.
+            oQueFazer:
+                todos.length > 0
+                    ? 'defina LIQUIDACOES_TOPIC0 com o tópico das liquidações e rode de novo'
+                    : pedacosComErro > 0
+                      ? 'NENHUMA leitura teve sucesso. O endereço NÃO foi testado — o problema está no provedor de RPC. Veja o erro acima.'
+                      : 'Leituras funcionaram e o contrato não emitiu nada no período: endereço provavelmente errado. Confira LIQUIDACOES_POOL.',
+            confereComOPalpite: TOPIC_LIQUIDATION_CALL,
+        });
+        return;
+    }
+
+    const r = resumirHistorico(liquidacoes, moedas, PRECO_ETH);
+    const dias = (BLOCOS * SEG_POR_BLOCO) / 86400;
+
+    log.info('HISTÓRICO DE LIQUIDAÇÕES.', {
+        periodo: `~${dias.toFixed(1)} dias (${BLOCOS} blocos)`,
+        total: r.total,
+        semCotacao: r.semCotacao,
+        indecifraveis,
+        pedacosComErro,
+        acimaDe: Object.entries(r.porFaixa)
+            .map(([faixa, n]) => `$${Number(faixa).toLocaleString('en-US')}: ${n}`)
+            .join(' | '),
+        maior: r.maior ? `$${r.maior.toFixed(0)}` : '—',
+        porDia: (r.total / Math.max(dias, 1)).toFixed(1),
+        // A linha que decide. Ver o comentário em resumirHistorico.
+        liquidantesDistintos: r.liquidantesDistintos,
+        concentracao:
+            r.total > 0
+                ? `os 5 maiores pegaram ${(
+                      (r.maioresLiquidantes.reduce((s, m) => s + m.quantas, 0) / r.total) * 100
+                  ).toFixed(0)}%`
+                : '—',
+        maioresLiquidantes: r.maioresLiquidantes.map((m) => `${m.endereco} x${m.quantas}`).join(' | '),
+    });
+
+    // As maiores UMA A UMA, com quem levou cada uma. Ver o comentário em
+    // ResumoDoHistorico: o ranking por contagem não separa "cata migalha" de
+    // "leva tudo", e são conclusões opostas.
+    const donos = new Set(r.maioresLiquidacoes.map((m) => m.liquidante));
+    log.info('AS MAIORES, UMA A UMA — quem levou cada uma.', {
+        quantasOlhadas: r.maioresLiquidacoes.length,
+        enderecosDiferentes: donos.size,
+        leitura:
+            r.maioresLiquidacoes.length === 0
+                ? 'nenhuma com valor conhecido'
+                : donos.size === 1
+                  ? 'UM endereço levou TODAS as maiores: o lugar está tomado nas grandes.'
+                  : donos.size >= r.maioresLiquidacoes.length * 0.6
+                    ? 'Bem espalhadas entre endereços diferentes: as grandes NÃO são de um dono só.'
+                    : 'Espalhamento parcial — alguns endereços repetem nas grandes.',
+        lista: r.maioresLiquidacoes
+            .map((m) => `$${m.usd.toFixed(0)} -> ${m.liquidante.slice(0, 10)} (bloco ${m.bloco})`)
+            .join(' | '),
+    });
+
+    const grandes = r.porFaixa[50_000] ?? 0;
+    const tentados = lidos + pedacosComErro;
+    const furo = tentados > 0 ? pedacosComErro / tentados : 1;
+    const semPreco = r.total > 0 ? r.semCotacao / r.total : 0;
+
+    // O veredicto se RECUSA a concluir quando a amostra não sustenta conclusão.
+    //
+    // Escrito depois de ele anunciar "a ideia morre aqui" duas vezes em vinte
+    // minutos: uma com 645 de 649 pedaços falhando, outra com 25% das
+    // liquidações em tokens sem cotação. Nos dois casos a frase estava
+    // gramaticalmente perfeita e factualmente vazia — ele lia `grandes === 0`
+    // sem olhar se tinha lido alguma coisa.
+    //
+    // Matar uma ideia é uma decisão cara; ela merece o mesmo cuidado que
+    // aprovar uma.
+    let leitura: string;
+    if (furo > 0.05) {
+        leitura =
+            `VEREDICTO SUSPENSO: ${pedacosComErro} de ${tentados} pedaços falharam ` +
+            `(${(furo * 100).toFixed(0)}%). Esta amostra não mede nada — conserte o RPC e rode de novo.`;
+    } else if (semPreco > 0.9) {
+        leitura =
+            `VEREDICTO IMPOSSÍVEL: ${(semPreco * 100).toFixed(0)}% sem cotação. ` +
+            `Isso não é falta de dado, é a tabela de moedas não sendo a desta rede — ` +
+            `o mesmo USDC tem endereço diferente em cada uma. Não conclua nada desta rodada.`;
+    } else if (semPreco > 0.2) {
+        leitura =
+            `VEREDICTO SUSPENSO: ${(semPreco * 100).toFixed(0)}% das liquidações são em tokens que eu não sei ` +
+            `cotar, então o tamanho delas é invisível. A maior pode estar entre elas.`;
+    } else if (dias < 14) {
+        leitura =
+            `VEREDICTO FRACO: ${dias.toFixed(1)} dias é janela curta demais para evento raro. ` +
+            `Liquidação gorda acontece em dia de pânico; aumente LIQUIDACOES_BLOCOS antes de decidir.`;
+    } else if (grandes === 0) {
+        leitura = 'NENHUMA liquidação grande numa amostra limpa e longa. A ideia morre aqui, e custou zero.';
+    } else if (r.liquidantesDistintos <= 5) {
+        leitura = 'Existem liquidações grandes, mas pouquíssimos endereços pegam todas: lugar tomado.';
+    } else {
+        leitura = 'Existem liquidações grandes E muitos endereços diferentes capturam. Vale o próximo passo.';
+    }
+
+    // CORRIDA OU LEILÃO — a pergunta que decide se dá para competir.
+    //
+    // Cada vencedor pagou um preço por gás, e o bloco tinha uma taxa base
+    // obrigatória. A razão entre os dois separa as duas formas de disputa, que
+    // pedem estratégias opostas: em corrida quem chega primeiro leva e dar
+    // lance não adianta; em leilão quem aceita lucro menor pode pagar mais e
+    // ganhar. Ver `lerDisputaPorPiso` e `lerPosicao` em liquidacoes.ts.
+    //
+    // São ~2 chamadas por transação, num punhado de transações. Barato.
+    const multiplos: Decimal[] = [];
+    const custos: Decimal[] = [];
+    const posicoes: Decimal[] = [];
+    const gorjetas: string[] = [];
+    const ondeCairam: string[] = [];
+    for (const m of r.maioresLiquidacoes.slice(0, 8)) {
+        try {
+            const rec = await chamar<{
+                gasUsed: string;
+                effectiveGasPrice: string;
+                blockNumber: string;
+                transactionIndex: string;
+            }>('eth_getTransactionReceipt', [m.transacao]);
+            const bloco = await chamar<{ baseFeePerGas?: string; transactions?: string[] }>(
+                'eth_getBlockByNumber',
+                [rec.blockNumber, false],
+            );
+
+            // A posição no bloco é medida ANTES do gás e independente dele: na
+            // Base o preço do gás não compra prioridade, então ele pode ser
+            // mudo por construção. A ordem de chegada não é.
+            const totalNoBloco = bloco.transactions?.length ?? 0;
+            if (totalNoBloco > 0 && rec.transactionIndex !== undefined) {
+                const indice = Number.parseInt(rec.transactionIndex, 16);
+                posicoes.push(new Decimal(indice).dividedBy(totalNoBloco));
+                ondeCairam.push(`$${m.usd.toFixed(0)}: transação ${indice + 1} de ${totalNoBloco}`);
+            }
+
+            if (!bloco.baseFeePerGas) continue;
+            const efetivoWei = new Decimal(Number.parseInt(rec.effectiveGasPrice, 16));
+            const baseWei = new Decimal(Number.parseInt(bloco.baseFeePerGas, 16));
+            const gasUsado = new Decimal(Number.parseInt(rec.gasUsed, 16));
+            const mult = multiploDaBase({ efetivoWei, baseWei });
+            if (mult === null) continue;
+            multiplos.push(mult);
+            // O custo TOTAL, não a gorjeta: é isto que sai do bolso dela a
+            // cada tentativa, e é o número que decide em qual rede R$247
+            // compram tentativas suficientes para acertar uma.
+            custos.push(efetivoWei.mul(gasUsado).dividedBy(1e18));
+            gorjetas.push(
+                `$${m.usd.toFixed(0)}: ${mult.toFixed(1)}x a base, gorjeta ${gorjetaWei({ efetivoWei, baseWei, gasUsado })
+                    .dividedBy(1e18)
+                    .toFixed(6)} ETH`,
+            );
+        } catch (err) {
+            log.warn('Não deu para ler a taxa desta transação.', {
+                transacao: m.transacao,
+                erro: err instanceof Error ? err.message : String(err),
+            });
+        }
+        await dormir(PAUSA_MS);
+    }
+
+    const ordenados = [...multiplos].sort((a, b) => a.comparedTo(b));
+    const mediano = ordenados.length > 0 ? ordenados[Math.floor(ordenados.length / 2)] : null;
+    log.info('CORRIDA OU LEILÃO — o que os vencedores pagaram.', {
+        transacoesLidas: multiplos.length,
+        // A mediana fica no relatório porque a primeira medição mostrou que ela
+        // ENGANA, e apagá-la esconderia isso. A leitura vem de `lerDisputaPorPiso`.
+        multiploMediano: mediano ? `${mediano.toFixed(1)}x a taxa base (a mediana engana — ver leitura)` : '—',
+        leitura: lerDisputaPorPiso(multiplos),
+        detalhe: gorjetas.join(' | '),
+    });
+
+    // CUSTO POR TENTATIVA — a pergunta dela: onde o gás é mais barato?
+    if (custos.length > 0) {
+        const ordenadosCusto = [...custos].sort((a, b) => a.comparedTo(b));
+        const custoTipico = ordenadosCusto[Math.floor(ordenadosCusto.length / 2)];
+        const ehEth = REDE.moedaNativa === 'ETH';
+        const emReais =
+            ehEth && PRECO_ETH ? custoTipico.mul(PRECO_ETH).mul(5.5) : null;
+        log.info('CUSTO POR TENTATIVA — quanto custa jogar nesta rede.', {
+            moeda: REDE.moedaNativa,
+            tipico: `${custoTipico.toFixed(6)} ${REDE.moedaNativa}`,
+            maisBarata: `${ordenadosCusto[0].toFixed(6)} ${REDE.moedaNativa}`,
+            maisCara: `${ordenadosCusto[ordenadosCusto.length - 1].toFixed(6)} ${REDE.moedaNativa}`,
+            emReais: emReais
+                ? `~R$ ${emReais.toFixed(2)} por tentativa vencedora (a US$${PRECO_ETH!.toFixed(0)}/ETH e R$5,50/US$)`
+                : `informe o preço do ${REDE.moedaNativa} para ver em reais`,
+            // Uma tentativa PERDIDA custa menos: ela reverte cedo em vez de
+            // executar tudo. Quanto menos, ainda não medi — e dizer um número
+            // aqui seria inventar.
+            observacao: 'este é o custo de uma vitória; uma tentativa perdida custa menos, quanto eu ainda não medi',
+        });
+    }
+
+    log.info('ONDE NO BLOCO — se dá para chegar lá.', {
+        transacoesLidas: posicoes.length,
+        leitura: lerPosicao(posicoes),
+        detalhe: ondeCairam.join(' | '),
+    });
+
+    // SOZINHA OU NO MONTE — de graça, os blocos já estão na mão.
+    const agl = aglomeracao(liquidacoes, r.maioresLiquidacoes);
+    log.info('SOZINHA OU NO MONTE — por que sobrou para quem levou.', {
+        leitura: agl.leitura,
+        detalhe: agl.detalhe.join(' | '),
+    });
+
+    // ONDE ESTÁ O DINHEIRO — a contagem não responde isso, e eu estava
+    // respondendo assim mesmo.
+    const bolo = repartirOBolo(r);
+    log.info('ONDE ESTÁ O DINHEIRO — migalhas ou poucas grandes?', {
+        somaTotal: `$${r.somaCotada.toFixed(0)}`,
+        // `toFixed(0)` imprimiu "$0" e isso pareceu defeito, mas era a resposta:
+        // mais da metade das liquidações é poeira de menos de um dólar. O
+        // arredondamento é que escondia o fato, transformando "a típica é
+        // minúscula" em "o número quebrou".
+        liquidacaoTipica:
+            r.medianaCotada === null
+                ? '—'
+                : r.medianaCotada.lessThan(1)
+                  ? `menos de $1 — mais da metade é poeira (${r.medianaCotada.toFixed(4)})`
+                  : `$${r.medianaCotada.toFixed(2)} (mediana)`,
+        // Só a faixa dos 50k estava somada, e faltando as outras não dava para
+        // ver que o dinheiro não está nem nas grandes nem na poeira: está no MEIO.
+        porFaixa: FAIXAS_USD.map(
+            (f) => `>$${f / 1000}k: $${(r.somaAcimaDe[f] ?? new Decimal(0)).toFixed(0)}`,
+        ).join(' | '),
+        leitura: bolo.leitura,
+    });
+
+    // A JANELA — de graça, e é ela que decide se dá para competir.
+    const j = janelaDeOportunidade(liquidacoes, SEG_POR_BLOCO);
+    log.info('A JANELA — quanto tempo a porta fica aberta.', {
+        paresMedidos: j.pares,
+        tipica: j.medianaBlocos === null ? '—' : `${j.medianaBlocos} blocos (~${j.medianaSegundos}s)`,
+        porFaixa: Object.entries(j.porFaixa)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join(' | '),
+        leitura: j.leitura,
+    });
+
+    // QUANTO SOBRA — o bônus lido do contrato, não chutado por mim.
+    //
+    // Uma chamada por moeda de garantia distinta, num punhado delas. A dívida
+    // NÃO é o lucro: o lucro é o ágio por cima dela.
+    const bonusPorAtivo = new Map<string, Decimal | null>();
+    const lucros: string[] = [];
+    let somaLucro = new Decimal(0);
+    for (const m of r.maioresLiquidacoes) {
+        const chave = m.garantia.toLowerCase();
+        if (!bonusPorAtivo.has(chave)) {
+            try {
+                const bruto = await chamar<string>('eth_call', [
+                    { to: POOL, data: chamadaDeConfiguracao(chave) },
+                    'latest',
+                ]);
+                bonusPorAtivo.set(chave, bonusDeLiquidacao(bruto));
+            } catch (err) {
+                bonusPorAtivo.set(chave, null);
+                log.warn('Não deu para ler a configuração desta garantia.', {
+                    ativo: chave,
+                    erro: err instanceof Error ? err.message : String(err),
+                });
+            }
+            await dormir(PAUSA_MS);
+        }
+        const bonus = bonusPorAtivo.get(chave) ?? null;
+        if (bonus === null) {
+            lucros.push(`$${m.usd.toFixed(0)}: bônus desconhecido`);
+            continue;
+        }
+        const lucro = lucroBruto(m.usd, bonus);
+        somaLucro = somaLucro.plus(lucro);
+        lucros.push(`$${m.usd.toFixed(0)} de dívida -> $${lucro.toFixed(0)} de lucro (bônus ${bonus.mul(100).toFixed(2)}%)`);
+    }
+    log.info('QUANTO SOBRA — o bônus lido do contrato, não chutado.', {
+        // O câmbio vem de fora porque inventar cotação foi erro meu antes.
+        somaDasDez: `$${somaLucro.toFixed(0)}`,
+        detalhe: lucros.join(' | '),
+    });
+
+    log.info('VEREDICTO PRELIMINAR.', {
+        acimaDe50k: grandes,
+        porDia: (grandes / Math.max(dias, 1)).toFixed(2),
+        pedacosQueFalharam: `${pedacosComErro} de ${tentados}`,
+        semCotacao: PRECO_ETH
+            ? `${r.semCotacao} de ${r.total} (WETH/cbETH convertidos por APROXIMAÇÃO, a US$${PRECO_ETH.toFixed(0)}/ETH que você informou)`
+            : `${r.semCotacao} de ${r.total}`,
+        leitura,
+        proximoPasso:
+            'medir quantos BLOCOS cada posição ficou liquidável antes de alguém pegar — é isso que diz se dá tempo de chegar.',
+    });
+}
+
+// Ponto de entrada: fica desligado até ATIVAR_LIQUIDACOESHISTORICO=1.
+if (require.main === module && exigirAtivacao('liquidacoesHistorico')) {
+    /**
+     * Fica vivo e ocioso ao terminar — com sucesso OU com erro.
+     *
+     * Este programa roda uma vez e acaba, e sair tem dois efeitos ruins no
+     * Railway, os dois vistos hoje:
+     *
+     *   1. Sair com erro vira LAÇO. Quando o RPC devolveu 525, o processo saiu,
+     *      o Railway religou, falhou de novo — várias vezes por segundo,
+     *      queimando recurso e enterrando a mensagem útil no meio do ruído.
+     *   2. Sair com SUCESSO pinta o serviço de "CRASHED" na interface, porque
+     *      o Railway espera que serviço fique de pé. Um relatório que deu certo
+     *      parecia falha.
+     *
+     * O `ativacao.ts` já dizia isto num comentário escrito dias antes, e este
+     * arquivo não seguiu. Manter vivo custa o contêiner que o Railway cobraria
+     * de qualquer jeito, e o relatório continua legível no log.
+     */
+    const ficarQuieto = () => {
+        log.info('Terminado. O processo fica ocioso para não reiniciar em laço.', {
+            paraRodarDeNovo: 'reimplante o serviço, ou mude uma variável',
+            paraDesligar: 'apague ATIVAR_LIQUIDACOESHISTORICO',
+        });
+        setInterval(() => {}, 1 << 30);
+    };
+    principal()
+        .catch((err) => {
+            log.error('Varredura falhou.', { erro: err instanceof Error ? err.message : String(err) });
+        })
+        .finally(ficarQuieto);
+}

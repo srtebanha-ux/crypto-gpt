@@ -1,0 +1,661 @@
+// Arquivo: src/binanceExchangeProvider.test.ts
+//
+// Testes de unidade puros: nenhuma chamada de rede real acontece aqui.
+// `fetch` é substituído por um stub local por teste, e `connect()` (que
+// abriria WebSocket real) nunca é chamado — os filtros de símbolo são
+// injetados diretamente para exercitar `executeOrder` isoladamente.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { Decimal } from 'decimal.js';
+import { BinanceExchangeProvider, efeitoColateralDaOrdem, parseDepthLevels } from './binanceExchangeProvider';
+
+Decimal.set({ precision: 20, rounding: Decimal.ROUND_DOWN });
+
+function jsonResponse(status: number, body: unknown): Response {
+    return {
+        ok: status >= 200 && status < 300,
+        status,
+        statusText: 'test-status',
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+    } as unknown as Response;
+}
+
+/** Seeda diretamente os mapas dinâmicos par<->símbolo (normalmente montados por discoverTrianglesAndFilters em connect()). */
+function seedSymbolMapping(provider: BinanceExchangeProvider, pair: string, binanceSymbol: string): void {
+    const p = provider as unknown as { pairToBinanceSymbol: Map<string, string>; binanceSymbolToPair: Map<string, string> };
+    p.pairToBinanceSymbol.set(pair, binanceSymbol);
+    p.binanceSymbolToPair.set(binanceSymbol, pair);
+}
+
+/** Provider com o mapeamento par<->símbolo dos testes de executeOrder já seedado, sem passar por connect() (sem rede real). */
+function newProvider(): BinanceExchangeProvider {
+    const provider = new BinanceExchangeProvider({ apiKey: 'test-key', apiSecret: 'test-secret', live: false });
+    seedSymbolMapping(provider, 'BTC/USDT', 'BTCUSDT');
+    seedSymbolMapping(provider, 'ETH/USDT', 'ETHUSDT');
+    return provider;
+}
+
+function seedFilters(
+    provider: BinanceExchangeProvider,
+    symbol: string,
+    filters: { stepSize: string; minQty: string; minNotional: string; tickSize?: string }
+): void {
+    (provider as unknown as { symbolFilters: Map<string, unknown> }).symbolFilters.set(symbol, {
+        stepSize: new Decimal(filters.stepSize),
+        minQty: new Decimal(filters.minQty),
+        minNotional: new Decimal(filters.minNotional),
+        tickSize: new Decimal(filters.tickSize ?? '0.01'),
+    });
+}
+
+async function withFetchStub<T>(impl: (url: string, init?: unknown) => Promise<Response>, fn: () => Promise<T>): Promise<T> {
+    const original = globalThis.fetch;
+    globalThis.fetch = impl as typeof fetch;
+    try {
+        return await fn();
+    } finally {
+        globalThis.fetch = original;
+    }
+}
+
+test('BUY: netProceeds desconta a comissão cobrada no ativo-base recebido', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.000001', minQty: '0.00001', minNotional: '10' });
+
+    const result = await withFetchStub(
+        async () =>
+            jsonResponse(200, {
+                orderId: 1,
+                status: 'FILLED',
+                executedQty: '0.001000',
+                cummulativeQuoteQty: '60.01',
+                transactTime: 1700000000000,
+                fills: [{ commission: '0.000001', commissionAsset: 'BTC' }],
+            }),
+        () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'), new Decimal('60010'))
+    );
+
+    assert.equal(result.status, 'FILLED');
+    assert.equal(result.executedQty.toString(), '0.001');
+    assert.equal(result.netProceeds.toString(), '0.000999'); // 0.001 - 0.000001
+    assert.equal(result.feePaidAsset, 'BTC');
+    assert.equal(result.feePaid.toString(), '0.000001');
+});
+
+test('SELL: netProceeds desconta a comissão cobrada no ativo-cotação recebido', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'ETHUSDT', { stepSize: '0.0001', minQty: '0.001', minNotional: '10' });
+
+    const result = await withFetchStub(
+        async () =>
+            jsonResponse(200, {
+                orderId: 2,
+                status: 'FILLED',
+                executedQty: '0.0166',
+                cummulativeQuoteQty: '50.63',
+                fills: [{ commission: '0.05063', commissionAsset: 'USDT' }],
+            }),
+        () => provider.executeOrder('ETH/USDT', 'SELL', 'MARKET', new Decimal('0.0166'), new Decimal('3050'))
+    );
+
+    assert.equal(result.netProceeds.toString(), '50.57937'); // 50.63 - 0.05063
+    assert.equal(result.feePaidAsset, 'USDT');
+});
+
+test('comissão paga em outro ativo (ex.: desconto BNB) não reduz netProceeds', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.000001', minQty: '0.00001', minNotional: '10' });
+
+    const result = await withFetchStub(
+        async () =>
+            jsonResponse(200, {
+                orderId: 5,
+                status: 'FILLED',
+                executedQty: '0.001',
+                cummulativeQuoteQty: '60.01',
+                fills: [{ commission: '0.002', commissionAsset: 'BNB' }],
+            }),
+        () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'), new Decimal('60010'))
+    );
+
+    assert.equal(result.netProceeds.toString(), '0.001');
+    assert.equal(result.feePaidAsset, 'BNB');
+    assert.equal(result.feePaid.toString(), '0.002');
+});
+
+test('rejeita a ordem antes de chamar a rede quando a quantidade fica abaixo do minQty', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.000001', minQty: '0.01', minNotional: '10' });
+
+    let fetchCalls = 0;
+    await assert.rejects(
+        () =>
+            withFetchStub(
+                async () => {
+                    fetchCalls += 1;
+                    return jsonResponse(200, {});
+                },
+                () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.0001'), new Decimal('60010'))
+            ),
+        /abaixo do minQty/
+    );
+    assert.equal(fetchCalls, 0);
+});
+
+test('rejeita a ordem antes de chamar a rede quando o notional estimado fica abaixo do minNotional', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.000001', minQty: '0.00001', minNotional: '100' });
+
+    let fetchCalls = 0;
+    await assert.rejects(
+        () =>
+            withFetchStub(
+                async () => {
+                    fetchCalls += 1;
+                    return jsonResponse(200, {});
+                },
+                () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'), new Decimal('60010'))
+            ),
+        /abaixo do minNotional/
+    );
+    assert.equal(fetchCalls, 0);
+});
+
+test('arredonda a quantidade para baixo conforme o stepSize antes de enviar', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.001', minQty: '0.001', minNotional: '1' });
+
+    let sentQuantity: string | null = null;
+    await withFetchStub(
+        async (url) => {
+            sentQuantity = new URL(url).searchParams.get('quantity');
+            return jsonResponse(200, { orderId: 3, status: 'FILLED', executedQty: sentQuantity, cummulativeQuoteQty: '0', fills: [] });
+        },
+        () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.0019'), new Decimal('60010'))
+    );
+
+    assert.equal(sentQuantity, '0.001'); // 0.0019 truncado para o múltiplo de stepSize (0.001)
+});
+
+test('LIMIT envia timeInForce=FOK (Fill-Or-Kill) — nunca fill parcial nas pernas de entrada', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.000001', minQty: '0.00001', minNotional: '1' });
+
+    let sentTimeInForce: string | null = null;
+    await withFetchStub(
+        async (url) => {
+            sentTimeInForce = new URL(url).searchParams.get('timeInForce');
+            return jsonResponse(200, { orderId: 6, status: 'FILLED', executedQty: '0.001', cummulativeQuoteQty: '60.01', fills: [] });
+        },
+        () => provider.executeOrder('BTC/USDT', 'BUY', 'LIMIT', new Decimal('0.001'), new Decimal('60010'))
+    );
+
+    assert.equal(sentTimeInForce, 'FOK');
+});
+
+test('lança erro quando a ordem FOK não é preenchida (liquidez insuficiente no preço-limite)', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.000001', minQty: '0.00001', minNotional: '1' });
+
+    await assert.rejects(
+        () =>
+            withFetchStub(
+                async () => jsonResponse(200, { orderId: 4, status: 'EXPIRED', executedQty: '0', cummulativeQuoteQty: '0', fills: [] }),
+                () => provider.executeOrder('BTC/USDT', 'BUY', 'LIMIT', new Decimal('0.001'), new Decimal('60010'))
+            ),
+        /não preenchida/
+    );
+});
+
+test('lança erro claro quando a corretora rejeita a ordem (HTTP não-ok)', async () => {
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.000001', minQty: '0.00001', minNotional: '1' });
+
+    await assert.rejects(
+        () =>
+            withFetchStub(
+                async () => jsonResponse(400, { msg: 'Insufficient balance.', code: -2010 }),
+                () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'), new Decimal('60010'))
+            ),
+        /Insufficient balance/
+    );
+});
+
+test('parseDepthLevels converte pares [preço, qty] crus e descarta entradas inválidas', () => {
+    const levels = parseDepthLevels([
+        ['60010.5', '0.5'],
+        ['60011.0', '1.2'],
+        ['60012.0', '0'], // qty zero — descartado (remoção de nível em streams de diff)
+        ['bad', '1'], // preço não numérico — descartado, não deve derrubar o parsing dos demais níveis
+    ]);
+    assert.equal(levels.length, 2);
+    assert.equal(levels[0].price.toString(), '60010.5');
+    assert.equal(levels[0].qty.toString(), '0.5');
+});
+
+test('parseDepthLevels retorna [] para entradas malformadas ou payload não-array', () => {
+    assert.deepEqual(parseDepthLevels(undefined), []);
+    assert.deepEqual(parseDepthLevels(null), []);
+    assert.deepEqual(parseDepthLevels('not-an-array'), []);
+    assert.deepEqual(parseDepthLevels([['100']]), []); // par incompleto
+});
+
+test('getOrderBookSnapshot retorna undefined antes de qualquer mensagem de profundidade, e o snapshot depois', () => {
+    const provider = newProvider();
+    assert.equal(provider.getOrderBookSnapshot('BTC/USDT'), undefined);
+
+    // Simula a chegada de uma mensagem de profundidade sem abrir um WS real.
+    (provider as unknown as { handleDepthUpdate: (stream: string, data: unknown) => void }).handleDepthUpdate('btcusdt@depth5@100ms', {
+        bids: [['60000', '1.5']],
+        asks: [['60010', '2.0']],
+    });
+
+    const snapshot = provider.getOrderBookSnapshot('BTC/USDT');
+    assert.ok(snapshot);
+    assert.equal(snapshot!.bids[0].price.toString(), '60000');
+    assert.equal(snapshot!.asks[0].price.toString(), '60010');
+    assert.equal(provider.getOrderBookSnapshot('ETH/BTC'), undefined);
+});
+
+test('discoverTrianglesAndFilters descobre triângulos reais e monta os mapas de símbolo/filtros dinamicamente a partir do exchangeInfo', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false, intermediateBases: ['BTC'] });
+
+    await withFetchStub(
+        async () =>
+            jsonResponse(200, {
+                symbols: [
+                    {
+                        symbol: 'BTCUSDT',
+                        baseAsset: 'BTC',
+                        quoteAsset: 'USDT',
+                        status: 'TRADING',
+                        filters: [
+                            { filterType: 'LOT_SIZE', stepSize: '0.00001', minQty: '0.00001' },
+                            { filterType: 'MIN_NOTIONAL', minNotional: '10' },
+                        ],
+                    },
+                    {
+                        symbol: 'ETHBTC',
+                        baseAsset: 'ETH',
+                        quoteAsset: 'BTC',
+                        status: 'TRADING',
+                        filters: [{ filterType: 'LOT_SIZE', stepSize: '0.0001', minQty: '0.0001' }],
+                    },
+                    {
+                        symbol: 'ETHUSDT',
+                        baseAsset: 'ETH',
+                        quoteAsset: 'USDT',
+                        status: 'TRADING',
+                        filters: [{ filterType: 'LOT_SIZE', stepSize: '0.0001', minQty: '0.0001' }],
+                    },
+                    // WIF/BTC não está listado -> WIFUSDT não deve formar triângulo.
+                    { symbol: 'WIFUSDT', baseAsset: 'WIF', quoteAsset: 'USDT', status: 'TRADING', filters: [] },
+                    // Não está em TRADING -> deve ser ignorado inteiramente.
+                    { symbol: 'DOGEBUSD', baseAsset: 'DOGE', quoteAsset: 'BUSD', status: 'BREAK', filters: [] },
+                ],
+            }),
+        () => (provider as unknown as { discoverTrianglesAndFilters: () => Promise<void> }).discoverTrianglesAndFilters()
+    );
+
+    const triangles = provider.getDiscoveredTriangles();
+    assert.equal(triangles.length, 1);
+    assert.deepEqual(triangles[0], { id: 'USDT-BTC-ETH', leg1: 'BTC/USDT', leg2: 'ETH/BTC', leg3: 'ETH/USDT' });
+
+    const filters = (provider as unknown as { symbolFilters: Map<string, { minNotional: Decimal }> }).symbolFilters;
+    assert.equal(filters.get('BTCUSDT')?.minNotional.toString(), '10');
+    assert.equal(filters.get('ETHBTC')?.minNotional.toString(), '0', 'sem filtro MIN_NOTIONAL informado, cai no padrão 0');
+
+    // A ordem passa a poder ser executada usando o par descoberto dinamicamente.
+    const mapping = provider as unknown as { pairToBinanceSymbol: Map<string, string> };
+    assert.equal(mapping.pairToBinanceSymbol.get('ETH/BTC'), 'ETHBTC');
+});
+
+test('discoverTrianglesAndFilters lança erro claro quando nenhum triângulo real é encontrado para as bases configuradas', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false, intermediateBases: ['BNB'] });
+
+    await assert.rejects(
+        () =>
+            withFetchStub(
+                async () =>
+                    jsonResponse(200, { symbols: [{ symbol: 'ETHUSDT', baseAsset: 'ETH', quoteAsset: 'USDT', status: 'TRADING', filters: [] }] }),
+                () => (provider as unknown as { discoverTrianglesAndFilters: () => Promise<void> }).discoverTrianglesAndFilters()
+            ),
+        /Nenhum triângulo/
+    );
+});
+
+// ---------------------------------------------------------------------------
+// ensureSymbolFilters / connectForSymbols — caminho do motor DIRECIONAL.
+//
+// O motor direcional opera uma lista explícita de ativos (XRP, TIA, INJ...)
+// que não têm nada a ver com triângulos de arbitragem. Antes disso ele
+// dependia de `connect()`, que só registra símbolos vistos em algum triângulo
+// USDT->base->alt->USDT: um ativo sem par contra BTC/ETH/BNB/FDUSD nunca
+// entrava no mapa, e `executeOrder` lançava "Símbolo desconhecido" no
+// primeiro sinal de compra REAL — não no boot.
+// ---------------------------------------------------------------------------
+
+/** exchangeInfo mínimo com um alt SEM nenhum par intermediário (não forma triângulo). */
+function exchangeInfoComAltSolto(): unknown {
+    return {
+        symbols: [
+            {
+                symbol: 'XRPUSDT',
+                baseAsset: 'XRP',
+                quoteAsset: 'USDT',
+                status: 'TRADING',
+                filters: [
+                    { filterType: 'LOT_SIZE', stepSize: '0.1', minQty: '0.1' },
+                    { filterType: 'NOTIONAL', minNotional: '5' },
+                ],
+            },
+            {
+                symbol: 'TIAUSDT',
+                baseAsset: 'TIA',
+                quoteAsset: 'USDT',
+                status: 'TRADING',
+                filters: [
+                    { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+                    { filterType: 'NOTIONAL', minNotional: '20' },
+                ],
+            },
+            // Deslistado: precisa ser tratado como inexistente.
+            { symbol: 'LUNAUSDT', baseAsset: 'LUNA', quoteAsset: 'USDT', status: 'BREAK', filters: [] },
+        ],
+    };
+}
+
+test('ensureSymbolFilters registra ativos que não formam nenhum triângulo, viabilizando a ordem direcional', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () => provider.ensureSymbolFilters(['XRP/USDT', 'TIA/USDT'])
+    );
+
+    // Nenhum triângulo foi descoberto — e mesmo assim os pares são operáveis.
+    assert.equal(provider.getDiscoveredTriangles().length, 0);
+    const mapping = provider as unknown as { pairToBinanceSymbol: Map<string, string> };
+    assert.equal(mapping.pairToBinanceSymbol.get('XRP/USDT'), 'XRPUSDT');
+    assert.equal(mapping.pairToBinanceSymbol.get('TIA/USDT'), 'TIAUSDT');
+});
+
+test('ensureSymbolFilters expõe o minNotional REAL de cada símbolo, que difere entre ativos', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () => provider.ensureSymbolFilters(['XRP/USDT', 'TIA/USDT'])
+    );
+
+    // O ponto do teste: os mínimos NÃO são iguais. Dimensionar os dois pelo
+    // mesmo número configurado faria a corretora recusar todas as ordens de TIA.
+    assert.equal(provider.getSymbolMinNotional('XRP/USDT')?.toString(), '5');
+    assert.equal(provider.getSymbolMinNotional('TIA/USDT')?.toString(), '20');
+    assert.equal(provider.getSymbolMinNotional('DOGE/USDT'), undefined, 'par não carregado não inventa mínimo');
+});
+
+test('ensureSymbolFilters falha no boot nomeando TODOS os pares que a Binance não lista em TRADING', async () => {
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        async () => {
+            await assert.rejects(
+                () => provider.ensureSymbolFilters(['XRP/USDT', 'LUNA/USDT', 'FAKE/USDT']),
+                (err: Error) => {
+                    // Os dois problemas de uma vez: descobrir um por reinício
+                    // seria uma sequência de falhas em vez de um diagnóstico.
+                    assert.match(err.message, /LUNA\/USDT/);
+                    assert.match(err.message, /FAKE\/USDT/);
+                    assert.doesNotMatch(err.message, /XRP\/USDT/, 'o par válido não deve ser acusado');
+                    return true;
+                }
+            );
+            // Falha parcial não deixa lixo: o par bom foi registrado, os ruins não.
+            assert.equal(provider.getSymbolMinNotional('LUNA/USDT'), undefined);
+        }
+    );
+});
+
+test('ensureSymbolFilters compõe com o que já estava carregado em vez de limpar os mapas', async () => {
+    const provider = newProvider(); // já tem BTC/USDT e ETH/USDT seedados
+
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () => provider.ensureSymbolFilters(['XRP/USDT'])
+    );
+
+    const mapping = provider as unknown as { pairToBinanceSymbol: Map<string, string> };
+    assert.equal(mapping.pairToBinanceSymbol.get('XRP/USDT'), 'XRPUSDT');
+    assert.equal(mapping.pairToBinanceSymbol.get('BTC/USDT'), 'BTCUSDT', 'o que já existia continua operável');
+});
+
+test('ensureSymbolFilters tolerante deixa as moedas válidas operando quando uma foi deslistada', async () => {
+    // Moeda pequena é deslistada com frequência. Se uma delas derrubasse o
+    // boot, as outras trinta e nove parariam junto — e o motor 24/7 existe
+    // justamente para não parar.
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+
+    const usaveis = await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () => provider.ensureSymbolFilters(['XRP/USDT', 'LUNA/USDT', 'TIA/USDT'], { ignorarDesconhecidos: true })
+    );
+
+    assert.deepEqual(usaveis, ['XRP/USDT', 'TIA/USDT'], 'devolve só o que dá para operar');
+    assert.equal(provider.getSymbolMinNotional('LUNA/USDT'), undefined, 'a deslistada não vira par operável');
+});
+
+test('ensureSymbolFilters falha mesmo tolerante quando NENHUM par é utilizável', async () => {
+    // Tolerância não pode virar um motor vivo que nunca compra.
+    const provider = new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', live: false });
+    await withFetchStub(
+        async () => jsonResponse(200, exchangeInfoComAltSolto()),
+        () =>
+            assert.rejects(
+                () => provider.ensureSymbolFilters(['LUNA/USDT', 'FAKE/USDT'], { ignorarDesconhecidos: true }),
+                /Nenhum dos pares/
+            )
+    );
+});
+
+// ---------------------------------------------------------------------------
+// Modo margem
+//
+// Margem compartilha com o spot os pares, os filtros e a assinatura — só mudam
+// o endpoint e dois parâmetros. Mas são exatamente esses dois parâmetros que
+// separam "alavancado" de "à vista com outro endereço": sem sideEffectType a
+// ordem usaria só o saldo próprio, a alavancagem configurada não apareceria em
+// lugar nenhum, e NADA daria erro.
+// ---------------------------------------------------------------------------
+
+function newMarginProvider(): BinanceExchangeProvider {
+    const provider = new BinanceExchangeProvider({
+        apiKey: 'k',
+        apiSecret: 's',
+        live: true,
+        mode: 'margin',
+    });
+    seedSymbolMapping(provider, 'BTC/USDT', 'BTCUSDT');
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.00001', minQty: '0.00001', minNotional: '5' });
+    return provider;
+}
+
+test('em margem a COMPRA pede empréstimo e a VENDA devolve, pelo endpoint de margem', async () => {
+    const provider = newMarginProvider();
+    const urls: string[] = [];
+
+    await withFetchStub(
+        async (url) => {
+            urls.push(url);
+            return jsonResponse(200, {
+                orderId: 1,
+                status: 'FILLED',
+                executedQty: '0.001',
+                cummulativeQuoteQty: '60.01',
+                transactTime: Date.now(),
+                fills: [],
+            });
+        },
+        async () => {
+            await provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'));
+            await provider.executeOrder('BTC/USDT', 'SELL', 'MARKET', new Decimal('0.001'));
+        }
+    );
+
+    assert.equal(urls.length, 2);
+    for (const url of urls) {
+        assert.ok(url.includes('/sapi/v1/margin/order'), `ordem deve ir pelo endpoint de margem: ${url}`);
+        // Cruzada, não isolada: com capital pequeno e vários ativos, a isolada
+        // fragmentaria o colateral em pedaços grandes demais para operar.
+        assert.ok(url.includes('isIsolated=FALSE'));
+    }
+    assert.ok(urls[0].includes('sideEffectType=MARGIN_BUY'), 'a compra tem que EMPRESTAR');
+    assert.ok(urls[1].includes('sideEffectType=AUTO_REPAY'), 'a venda tem que DEVOLVER o emprestado');
+});
+
+test('em spot a ordem NÃO ganha parâmetros de margem', async () => {
+    // O modo padrão não pode virar alavancado por acidente.
+    const provider = newProvider();
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.00001', minQty: '0.00001', minNotional: '5' });
+    let urlUsada = '';
+
+    await withFetchStub(
+        async (url) => {
+            urlUsada = url;
+            return jsonResponse(200, {
+                orderId: 1,
+                status: 'FILLED',
+                executedQty: '0.001',
+                cummulativeQuoteQty: '60.01',
+                transactTime: Date.now(),
+                fills: [],
+            });
+        },
+        () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'))
+    );
+
+    assert.ok(urlUsada.includes('/api/v3/order'));
+    assert.ok(!urlUsada.includes('sideEffectType'), 'spot não empresta');
+    assert.ok(!urlUsada.includes('isIsolated'));
+});
+
+test('o saldo vem da carteira do MODO — Spot e Margem são carteiras separadas', async () => {
+    // Ler a carteira errada devolve zero com a conta cheia, ou pior: o motor
+    // acha ter caixa e leva recusa em toda ordem. Aconteceu de verdade neste
+    // projeto, com o dinheiro parado em Earn e o Spot zerado.
+    const margem = newMarginProvider();
+    const saldoMargem = await withFetchStub(
+        async (url) => {
+            assert.ok(url.includes('/sapi/v1/margin/account'), 'modo margem lê a conta de margem');
+            return jsonResponse(200, { userAssets: [{ asset: 'USDT', free: '20.39' }] });
+        },
+        () => margem.fetchAvailableBalance('USDT')
+    );
+    assert.equal(saldoMargem.toString(), '20.39');
+
+    const spot = newProvider();
+    const saldoSpot = await withFetchStub(
+        async (url) => {
+            assert.ok(url.includes('/api/v3/account'), 'modo spot lê a conta spot');
+            return jsonResponse(200, { balances: [{ asset: 'USDT', free: '0' }] });
+        },
+        () => spot.fetchAvailableBalance('USDT')
+    );
+    assert.equal(saldoSpot.toString(), '0');
+});
+
+test('margem no testnet falha na construção, não na primeira ordem', async () => {
+    // O testnet spot não tem endpoints de margem: deixar passar daria 404 já
+    // com sinal válido na mão, que é tarde demais para descobrir.
+    assert.throws(
+        () => new BinanceExchangeProvider({ apiKey: 'k', apiSecret: 's', mode: 'margin' }),
+        /exige live: true/
+    );
+});
+
+test('fetchMarginAccount lê o nível de margem e recusa ser chamado em modo spot', async () => {
+    const margem = newMarginProvider();
+    const conta = await withFetchStub(
+        async () => jsonResponse(200, { marginLevel: '999', totalNetAssetOfBtc: '0.0002' }),
+        () => margem.fetchMarginAccount()
+    );
+    assert.equal(conta.marginLevel.toString(), '999');
+
+    await assert.rejects(() => newProvider().fetchMarginAccount(), /só existe em mode/);
+});
+
+test('margem SEM empréstimo usa NO_SIDE_EFFECT — opera o saldo próprio da carteira de margem', async () => {
+    // Visto em produção: com a conta sem limite de empréstimo liberado, pedir
+    // MARGIN_BUY fez a Binance recusar TODAS as ordens (-3006), e dez sinais
+    // válidos viraram dez recusas. Sem alavancagem não há o que emprestar, e
+    // insistir no empréstimo trava a operação por um motivo que nada tem a ver
+    // com a estratégia.
+    const provider = new BinanceExchangeProvider({
+        apiKey: 'k',
+        apiSecret: 's',
+        live: true,
+        mode: 'margin',
+        marginAutoBorrow: false,
+    });
+    seedSymbolMapping(provider, 'BTC/USDT', 'BTCUSDT');
+    seedFilters(provider, 'BTCUSDT', { stepSize: '0.00001', minQty: '0.00001', minNotional: '5' });
+
+    let urlUsada = '';
+    await withFetchStub(
+        async (url) => {
+            urlUsada = url;
+            return jsonResponse(200, {
+                orderId: 1,
+                status: 'FILLED',
+                executedQty: '0.001',
+                cummulativeQuoteQty: '60.01',
+                transactTime: Date.now(),
+                fills: [],
+            });
+        },
+        () => provider.executeOrder('BTC/USDT', 'BUY', 'MARKET', new Decimal('0.001'))
+    );
+
+    assert.ok(urlUsada.includes('/sapi/v1/margin/order'), 'continua na carteira de margem');
+    assert.ok(urlUsada.includes('sideEffectType=NO_SIDE_EFFECT'));
+    assert.ok(!urlUsada.includes('MARGIN_BUY'));
+});
+
+// ---------------------------------------------------------------------------
+// sideEffectType: o rótulo da ordem, que derruba a ordem sozinho
+// ---------------------------------------------------------------------------
+
+test('sem empréstimo nesta ordem, a COMPRA vai sem pedir emprestado', () => {
+    // O defeito que isto fecha: o motor dimensionou sem alavancagem (porque a
+    // capacidade estava zerada) e mesmo assim mandava MARGIN_BUY. A Binance
+    // não reduz a ordem — recusa inteira com -3006, ainda que o saldo próprio
+    // bastasse. Nove ativos com sinal válido morreram assim em produção.
+    assert.equal(
+        efeitoColateralDaOrdem({ autoBorrow: true, side: 'BUY', comEmprestimo: false }),
+        'NO_SIDE_EFFECT',
+    );
+});
+
+test('a VENDA devolve o emprestado mesmo num ciclo sem alavancagem', () => {
+    // A assimetria que importa: tomar emprestado é opcional, devolver não é.
+    // Fechar a posição sem AUTO_REPAY deixaria a dívida viva, pagando juros
+    // por hora sem nenhuma posição do outro lado.
+    assert.equal(
+        efeitoColateralDaOrdem({ autoBorrow: true, side: 'SELL', comEmprestimo: false }),
+        'AUTO_REPAY',
+    );
+});
+
+test('com empréstimo, a compra é alavancada de verdade', () => {
+    assert.equal(
+        efeitoColateralDaOrdem({ autoBorrow: true, side: 'BUY', comEmprestimo: true }),
+        'MARGIN_BUY',
+    );
+});
+
+test('conta sem alavancagem nunca toca no colateral, em nenhum dos lados', () => {
+    assert.equal(efeitoColateralDaOrdem({ autoBorrow: false, side: 'BUY', comEmprestimo: true }), 'NO_SIDE_EFFECT');
+    assert.equal(efeitoColateralDaOrdem({ autoBorrow: false, side: 'SELL', comEmprestimo: true }), 'NO_SIDE_EFFECT');
+});
