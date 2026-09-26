@@ -821,6 +821,58 @@ async function principal(): Promise<'parar' | void> {
     let enviados = 0;
 
     log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
+    void quandoFoiAUltimaLiquidacao(topo);
+
+    /**
+     * Ha quanto tempo alguem foi liquidado na Base, seja por quem for.
+     *
+     * Existe porque "aconteceram: 0" hora apos hora nao distingue duas coisas
+     * que pedem decisoes opostas: mercado calmo (e esperar) e faixa que secou
+     * (e mudar de estrategia). A conta de 66 liquidacoes por mes foi medida em
+     * setembro; se a ultima foi ha duas semanas, ela envelheceu.
+     *
+     * Roda em segundo plano, uma vez por boot, uns 3.000 CUs — 0,03% do teto.
+     */
+    async function quandoFoiAUltimaLiquidacao(topo: number): Promise<void> {
+        const PASSO = PEDACO * 5;      // ~5,5 horas de blocos por consulta
+        const ATE_ONDE_OLHAR = 40;     // ~9 dias para tras
+        for (let i = 0; i < ATE_ONDE_OLHAR; i += 1) {
+            const ate = topo - i * PASSO;
+            const de = Math.max(0, ate - PASSO + 1);
+            if (ate <= 0) break;
+            try {
+                const logs = await chamar<Array<{ blockNumber: string; transactionHash: string }>>('eth_getLogs', [{
+                    address: REDE.pool,
+                    fromBlock: `0x${de.toString(16)}`,
+                    toBlock: `0x${ate.toString(16)}`,
+                    topics: [TOPIC_LIQUIDATION_CALL],
+                }]);
+                if (logs.length > 0) {
+                    const ultimo = logs[logs.length - 1];
+                    const bloco = Number.parseInt(ultimo.blockNumber, 16);
+                    const horas = ((topo - bloco) * 2) / 3600;
+                    log.info('[MERCADO] A última liquidação na Aave da Base foi:', {
+                        haQuantoTempo: horas < 1 ? `${Math.round(horas * 60)} minutos` : `${horas.toFixed(1)} horas`,
+                        bloco,
+                        transacao: `https://basescan.org/tx/${ultimo.transactionHash}`,
+                        nessaJanela: `${logs.length} liquidações em ~5,5 horas`,
+                        oQueIssoQuerDizer: horas < 24
+                            ? 'o mercado ainda liquida: esperar é a resposta certa'
+                            : 'faz mais de um dia — a faixa esfriou, e a conta de 66/mês envelheceu',
+                    });
+                    return;
+                }
+            } catch {
+                // Uma janela que falha nao invalida a busca: segue para tras.
+            }
+            await dormir(200);
+        }
+        const dias = ((ATE_ONDE_OLHAR * PASSO * 2) / 86400).toFixed(1);
+        log.warn('[MERCADO] NENHUMA liquidação encontrada para trás.', {
+            olheiPara: `${dias} dias`,
+            oQueIssoQuerDizer: 'não é o bot dormindo: é a Aave da Base sem liquidar ninguém há mais de uma semana. A estratégia das migalhas precisa ser revista.',
+        });
+    }
 
     /**
      * Quem foi liquidado desde a ultima contagem — e se a gente estava olhando.

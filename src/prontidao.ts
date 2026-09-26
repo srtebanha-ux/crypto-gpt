@@ -19,12 +19,21 @@ export const SELETOR_BASEFEE = '0x3e64a696';
 /**
  * O teto de gas que se manda, sem estimar.
  *
- * Gas nao usado volta para a carteira: um teto generoso nao custa nada. Um
- * teto apertado custa a transacao inteira, que morre sem gas depois de pagar.
- * Entao estimar aqui e trocar dinheiro nenhum por uma ida a rede no pior
- * momento possivel.
+ * "Gas nao usado volta, entao um teto generoso nao custa nada" — era o que eu
+ * achava, e esta ERRADO quando a carteira e pequena. O no congela
+ * `gasLimit × maxFeePerGas` ADIANTADO, pelo teto e nao pelo consumo. Com 2M
+ * de teto e US$14 de saldo, o maior lance possivel cai para 2,41 gwei: dois
+ * tercos do poder de lance ficam presos garantindo gas que nunca sera usado.
+ *
+ * O ensaio da cadeia inteira mostrou isso — numa liquidacao de US$150 mil ela
+ * ofereceria 2,41 gwei querendo oferecer 50. Nenhum teste de funcao pegaria,
+ * porque cada peca estava certa sozinha.
+ *
+ * 1,2M da 71% de folga sobre os ~700k que uma cacada usa, e quase DOBRA o
+ * lance possivel. Apertado demais seria pior: morrer sem gas custa a
+ * transacao inteira, depois de pagar.
  */
-export const LIMITE_DE_GAS = 2_000_000n;
+export const LIMITE_DE_GAS = BigInt(process.env.CACA_LIMITE_GAS ?? '1200000');
 
 /**
  * O gas que uma cacada REALMENTE usa.

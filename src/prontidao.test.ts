@@ -66,11 +66,16 @@ test('basefee ilegível vira null, nunca um chute', () => {
     assert.equal(lerBasefee('0x' + (12345n).toString(16)), 12345n);
 });
 
-test('o limite de gás é generoso de propósito', () => {
-    // Gás não usado volta. Teto apertado custa a transação inteira, que morre
-    // sem gás DEPOIS de pagar. Estimar é trocar dinheiro nenhum por uma ida à
-    // rede no pior momento possível.
-    assert.ok(LIMITE_DE_GAS >= 2_000_000n);
+test('o limite de gás é folgado, mas não a ponto de estrangular o lance', () => {
+    // Eu tinha escrito aqui que "gás não usado volta, então teto generoso é de
+    // graça". É verdade só para quem tem carteira grande. O nó congela
+    // gasLimit × maxFeePerGas ADIANTADO, pelo teto e não pelo consumo — então
+    // num saldo pequeno cada unidade de teto a mais é lance a menos.
+    //
+    // Dois lados, e os dois custam: apertado demais mata a transação sem gás
+    // depois de pagar; largo demais prende o dinheiro do lance.
+    assert.ok(LIMITE_DE_GAS > 700_000n, 'tem que sobrar folga sobre o que a caçada usa');
+    assert.ok(LIMITE_DE_GAS < 2_000_000n, 'mas sem congelar adiantado à toa');
 });
 
 // ---------------------------------------------------------------------------
@@ -230,4 +235,17 @@ test('o nó exige o gás ADIANTADO pelo teto, não pelo que a caçada usa', () =
 
 test('saldo zerado não adianta nada, e zero aqui quer dizer NÃO ATIRE', () => {
     assert.equal(maxFeeQueOSaldoAdianta(0n, LIMITE_DE_GAS), 0n);
+});
+
+test('o teto de gás não pode estrangular o lance', () => {
+    // Descoberto pelo ensaio da cadeia inteira: com 2M de teto e US$14 de
+    // saldo, o maior lance possível caía para 2,41 gwei — dois terços do poder
+    // de lance presos garantindo gás que nunca seria usado. Nenhum teste de
+    // função pegava, porque cada peça estava certa sozinha.
+    const saldo = wei(14.19 / 2646.93);
+    const com2M = maxFeeQueOSaldoAdianta(saldo, 2_000_000n);
+    const comOAtual = maxFeeQueOSaldoAdianta(saldo, LIMITE_DE_GAS);
+    assert.ok(comOAtual > com2M, 'o teto atual tem que permitir lance maior que 2M permitia');
+    assert.ok(LIMITE_DE_GAS >= 1_000_000n, 'folga sobre os ~700k que a caçada usa');
+    assert.ok(LIMITE_DE_GAS < 2_000_000n, 'mas sem congelar adiantado à toa');
 });
