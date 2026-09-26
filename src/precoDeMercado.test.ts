@@ -96,3 +96,35 @@ test('a maior queda entre os pares é que manda', () => {
 test('par sem preço no oráculo é ignorado, não assumido', () => {
     assert.equal(quedaDoMercado(new Map([['ETHUSDT', D(1)]]), new Map()).toNumber(), 0);
 });
+
+// ---------------------------------------------------------------------------
+// Uma fonte só era ponto único de falha para a parte mais valiosa do desenho.
+// ---------------------------------------------------------------------------
+import { lerCoinbase, lerKraken, EQUIVALENTES } from './precoDeMercado';
+
+test('lê a cotação da Coinbase', () => {
+    assert.equal(lerCoinbase({ price: '2646.93' })!.toFixed(2), '2646.93');
+});
+
+test('lê a cotação da Kraken, que vem aninhada', () => {
+    assert.equal(lerKraken({ result: { XETHZUSD: { c: ['2646.93', '1.0'] } } })!.toFixed(2), '2646.93');
+});
+
+test('resposta de erro de qualquer casa vira null, nunca zero', () => {
+    // Zero seria "o ETH vale nada", e o bot leria isso como todo mundo caído.
+    assert.equal(lerCoinbase({ message: 'NotFound' }), null);
+    assert.equal(lerCoinbase(null), null);
+    assert.equal(lerKraken({ error: ['EQuery:Unknown asset pair'], result: {} }), null);
+    assert.equal(lerKraken({ result: { X: { c: ['0'] } } }), null);
+    assert.equal(lerKraken(null), null);
+});
+
+test('cada par da Binance tem equivalente nas duas outras casas', () => {
+    // O BTC na Kraken chama XBTUSD, não BTCUSD — errar isso daria "par
+    // inválido" e o plano B seria tão mudo quanto o plano A.
+    for (const par of ['ETHUSDT', 'BTCUSDT']) {
+        assert.ok(EQUIVALENTES[par], par);
+        assert.ok(EQUIVALENTES[par].coinbase.includes('-'), 'Coinbase usa ETH-USD');
+    }
+    assert.equal(EQUIVALENTES.BTCUSDT.kraken, 'XBTUSD');
+});

@@ -111,3 +111,92 @@ export async function cotacoesDaBinance(pares: string[], timeoutMs = 2000): Prom
         return new Map();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Quando a Binance nao responde.
+// ---------------------------------------------------------------------------
+//
+// Ela bloqueia IP de nuvem, e o Railway e nuvem. O log denunciou isso no
+// primeiro boot — "MERCADO MUDO" — e sem preco de mercado o bot perde a
+// vantagem inteira de antecipar o oraculo e volta ao ritmo fixo.
+//
+// Uma fonte so era ponto unico de falha para a parte mais valiosa do desenho.
+// Agora sao tres, e a primeira que responder ganha.
+
+/** Le a cotacao unica da Coinbase: { price: "2646.93" }. */
+export function lerCoinbase(corpo: unknown): Decimal | null {
+    const p = (corpo as { price?: string })?.price;
+    if (typeof p !== 'string') return null;
+    try {
+        const d = new Decimal(p);
+        return d.greaterThan(0) ? d : null;
+    } catch { return null; }
+}
+
+/** Le a cotacao da Kraken: { result: { XETHZUSD: { c: ["2646.93", ...] } } }. */
+export function lerKraken(corpo: unknown): Decimal | null {
+    const r = (corpo as { result?: Record<string, { c?: string[] }> })?.result;
+    if (!r) return null;
+    for (const par of Object.values(r)) {
+        const v = par?.c?.[0];
+        if (typeof v !== 'string') continue;
+        try {
+            const d = new Decimal(v);
+            if (d.greaterThan(0)) return d;
+        } catch { /* proxima */ }
+    }
+    return null;
+}
+
+/** De que produto de cada casa vem o preco de um par da Binance. */
+export const EQUIVALENTES: Record<string, { coinbase: string; kraken: string }> = {
+    ETHUSDT: { coinbase: 'ETH-USD', kraken: 'ETHUSD' },
+    BTCUSDT: { coinbase: 'BTC-USD', kraken: 'XBTUSD' },
+};
+
+export const COINBASE = process.env.CACA_COINBASE_REST ?? 'https://api.exchange.coinbase.com';
+export const KRAKEN = process.env.CACA_KRAKEN_REST ?? 'https://api.kraken.com';
+
+/**
+ * As cotacoes, de onde der.
+ *
+ * Tenta a Binance (uma chamada para todos os pares), e so cai para as outras
+ * se ela nao responder. Coinbase e Kraken pedem uma chamada por par, entao sao
+ * o plano B de proposito — e mesmo assim custam zero em Unidades de
+ * Computacao, porque nada disso passa pela blockchain.
+ *
+ * Devolve tambem de ONDE veio, para o log poder dizer. Fonte silenciosa que
+ * troca sozinha e a mesma armadilha de sempre: funciona e ninguem sabe como.
+ */
+export async function cotacoesDeQualquerFonte(
+    pares: string[],
+    timeoutMs = 2000,
+): Promise<{ precos: Map<string, Decimal>; fonte: string }> {
+    const daBinance = await cotacoesDaBinance(pares, timeoutMs);
+    if (daBinance.size > 0) return { precos: daBinance, fonte: 'binance' };
+
+    for (const [nome, buscarUm] of [
+        ['coinbase', async (par: string) => {
+            const eq = EQUIVALENTES[par]?.coinbase;
+            if (!eq) return null;
+            const r = await buscar(`${COINBASE}/products/${eq}/ticker`, { signal: AbortSignal.timeout(timeoutMs) });
+            return lerCoinbase(await r.json());
+        }],
+        ['kraken', async (par: string) => {
+            const eq = EQUIVALENTES[par]?.kraken;
+            if (!eq) return null;
+            const r = await buscar(`${KRAKEN}/0/public/Ticker?pair=${eq}`, { signal: AbortSignal.timeout(timeoutMs) });
+            return lerKraken(await r.json());
+        }],
+    ] as const) {
+        const fora = new Map<string, Decimal>();
+        for (const par of pares) {
+            try {
+                const p = await buscarUm(par);
+                if (p) fora.set(par, p);
+            } catch { /* proxima casa */ }
+        }
+        if (fora.size > 0) return { precos: fora, fonte: nome };
+    }
+    return { precos: new Map(), fonte: 'nenhuma' };
+}

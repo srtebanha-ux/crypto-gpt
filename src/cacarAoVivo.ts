@@ -9,7 +9,7 @@ import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, D
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
-import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDaBinance, quedaDoMercado } from './precoDeMercado';
+import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDeQualquerFonte, quedaDoMercado } from './precoDeMercado';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, decodificarAggregate3Rapido, partirEmPedacos } from './multicall';
@@ -730,6 +730,7 @@ async function principal(): Promise<'parar' | void> {
     const mercadoAgora = (): Decimal | null => quedaDoMercadoAgora;
     const posturaAgora = (): Postura => postura;
     let avisouMercadoMudo = false;
+    let fonteDoPreco = 'nenhuma';
     /** O que aconteceu com cada tiro depois de sair. */
     let tiros = placarVazio();
     /**
@@ -962,12 +963,20 @@ async function principal(): Promise<'parar' | void> {
      */
     async function olharMercado(): Promise<boolean> {
         if (paresDaBinance.length === 0) return false;
-        const doMercado = await cotacoesDaBinance(paresDaBinance);
+        const { precos: doMercado, fonte } = await cotacoesDeQualquerFonte(paresDaBinance);
+        if (fonte !== fonteDoPreco && doMercado.size > 0) {
+            // Fonte que troca sozinha em silencio e a armadilha de sempre:
+            // funciona, e ninguem sabe como.
+            log.info(`[MERCADO] Lendo preço da ${fonte}.`, { antes: fonteDoPreco, pares: paresDaBinance });
+            fonteDoPreco = fonte;
+        }
         if (doMercado.size === 0) {
             quedaDoMercadoAgora = null;
             if (!avisouMercadoMudo) {
                 avisouMercadoMudo = true;
-                log.warn('MERCADO MUDO: a Binance não respondeu. Volto ao ritmo fixo e perco a vantagem de antecipar.', {
+                fonteDoPreco = 'nenhuma';
+                log.warn('MERCADO MUDO: nenhuma das três casas respondeu. Volto ao ritmo fixo e perco a vantagem de antecipar.', {
+                    tentei: 'binance, coinbase, kraken',
                     pares: paresDaBinance,
                     oQueIssoCusta: 'sem isto o bot só descobre quem caiu depois que o oráculo escreve',
                 });
@@ -1084,7 +1093,7 @@ async function principal(): Promise<'parar' | void> {
                         avisoDeBloco: ouvinte === null ? 'desligado' : (ouvinte.vivo ? `ligado (último ${ouvinte.ultimoBloco})` : 'CAIU — perguntando'),
                         mercado: mercadoAgora() === null
                             ? 'SEM COTAÇÃO — ritmo fixo'
-                            : `${mercadoAgora()!.toFixed(4)}% abaixo do oráculo (${posturaAgora()})`,
+                            : `${mercadoAgora()!.toFixed(4)}% abaixo do oráculo (${posturaAgora()}, via ${fonteDoPreco})`,
                         oraculoJaCaiuPct: `${maiorQueda.toFixed(4)}%`,
                         gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
                         naListaQuente: quentes.length,
