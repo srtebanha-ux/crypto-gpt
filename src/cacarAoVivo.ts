@@ -200,26 +200,51 @@ class LocalNonceManager {
         this.address = address;
     }
 
+    private sincronizadoEm = 0;
+    /** De quanto em quanto tempo a rede e consultada de novo, sem falha. */
+    private readonly validadeMs = Number(process.env.CACA_NONCE_VALIDADE_MS ?? '120000');
+
+    /**
+     * A REDE e a verdade — para cima E para baixo.
+     *
+     * Antes so adotava quando o numero da rede era MAIOR. Isso deixava um jeito
+     * de o bot morrer em silencio para sempre: se uma transacao fosse despejada
+     * do mempool, o contador local ficava a frente, `sync()` nunca abaixava, e
+     * toda transacao seguinte saia com nonce furado. Elas ficam na fila para
+     * sempre, todo recibo vira 'sumiu', e o bot nunca mais liquida sem levantar
+     * um unico erro.
+     */
     public async sync(): Promise<number> {
-        const networkNonce = await this.provider.getTransactionCount(this.address, "pending");
-        if (this.currentNonce === null || networkNonce > this.currentNonce) {
-            this.currentNonce = networkNonce;
-        }
+        this.currentNonce = await this.provider.getTransactionCount(this.address, 'pending');
+        this.sincronizadoEm = Date.now();
         return this.currentNonce;
     }
 
     public async getNextNonce(): Promise<number> {
-        if (this.currentNonce === null) {
+        // Reperguntar de tempos em tempos custa uma chamada e impede que uma
+        // dessincronizacao vire permanente.
+        if (this.currentNonce === null || Date.now() - this.sincronizadoEm > this.validadeMs) {
             await this.sync();
-        } else {
-            this.currentNonce++;
         }
-        return this.currentNonce!;
+        const meu = this.currentNonce!;
+        this.currentNonce = meu + 1;
+        return meu;
     }
 
-    public rollback() {
-        if (this.currentNonce !== null && this.currentNonce > 0) {
-            this.currentNonce--;
+    /**
+     * Depois de uma falha, quem decide e a rede.
+     *
+     * Era um decremento cego. Mas a transacao pode ter CHEGADO ao mempool e a
+     * resposta ter estourado o tempo — ai decrementar faz o bot reusar um nonce
+     * ja gasto, levar 'replacement underpriced', decrementar de novo, e ficar
+     * preso naquele numero para sempre.
+     */
+    public async aposFalhar(): Promise<void> {
+        try {
+            await this.sync();
+        } catch {
+            // Nem a rede respondeu: esquece o que sabia e repergunta no proximo.
+            this.currentNonce = null;
         }
     }
 }
@@ -536,7 +561,19 @@ async function montarAlvos(
     return fora;
 }
 
+/** O que precisa ser desligado quando `principal()` termina, de que jeito for. */
+const processoEncerrando: Array<() => void> = [];
+function desligarTudo(): void {
+    while (processoEncerrando.length > 0) {
+        try { processoEncerrando.pop()!(); } catch { /* desligar nao pode falhar */ }
+    }
+}
+
 async function principal(): Promise<'parar' | void> {
+    // O laco externo recria principal() a cada tropeco. Sem isto, cada
+    // reinicio abandonava um WebSocket vivo com cadeia de reconexao eterna:
+    // em meses, um socket e um relogio a mais por tropeco de rede.
+    desligarTudo();
     const poolDeVendaV1 = (process.env.CACA_POOL ?? POOLS.aerodrome.endereco).toLowerCase();
 
     log.info(ENVIAR ? '*** MODO ENVIO (MEV ELITE + GUERRA DE GÁS) — GASTO REAL. ***' : '*** MODO MEDIÇÃO (MEV ELITE + GUERRA DE GÁS) — NENHUM GÁS GASTO. ***');
@@ -554,6 +591,26 @@ async function principal(): Promise<'parar' | void> {
     let donoCarteira: string | null = null;
     let nonceManager: LocalNonceManager | null = null;
 
+    const rpcs = process.env.CACA_RPC_URL ? [process.env.CACA_RPC_URL] : (RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [REDE.rpc]);
+    let topo = 0;
+    for (const c of rpcs) {
+        try {
+            rpc = c;
+            topo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
+            break;
+        } catch { /* próximo */ }
+    }
+    if (!topo) return;
+
+    // A carteira nasce DEPOIS de saber qual RPC responde.
+    //
+    // Antes era o contrario, e dava dois jeitos de morrer. Se o primeiro RPC
+    // estivesse fora, `sync()` rejeitava, a excecao subia, o laco externo
+    // dormia 1s e reiniciava — para sempre, sem NUNCA chegar no failover, que
+    // ficava depois do ponto que estourava. E no caso sutil o sync passava e o
+    // resto do bot migrava para outro RPC: dai `chamar()` lia de um no vivo
+    // enquanto getBalance e sendTransaction falavam com um no morto. O bot
+    // media tudo certo e nao enviava nada.
     if (ENVIAR) {
         const chave = process.env.CACA_CHAVE_PRIVADA;
         if (!chave) {
@@ -568,16 +625,6 @@ async function principal(): Promise<'parar' | void> {
         log.info('Carteira carregada com Nonce Manager atômico.', { endereco: donoCarteira });
     }
 
-    const rpcs = process.env.CACA_RPC_URL ? [process.env.CACA_RPC_URL] : (RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [REDE.rpc]);
-    let topo = 0;
-    for (const c of rpcs) {
-        try {
-            rpc = c;
-            topo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
-            break;
-        } catch { /* próximo */ }
-    }
-    if (!topo) return;
 
     let dataProvider: string | null = null;
     let oraculo: string | null = null;
@@ -606,6 +653,7 @@ async function principal(): Promise<'parar' | void> {
     // quente cuja chave mora no Railway — e ninguém viu, porque ele nunca
     // ganhou nada. Aqui acontece sozinho, todo boot, para todo contrato.
     const contratos: typeof CONTRATOS_ATIVOS = [];
+    const laudos: Array<{ veredicto: string }> = [];
     for (const c of CONTRATOS_ATIVOS) {
         let cofre: string | null = null;
         let dono: string | null = null;
@@ -616,6 +664,7 @@ async function principal(): Promise<'parar' | void> {
             log.warn(`Não consegui ler o cofre de ${c.nome}.`, { erro: (e as Error).message });
         }
         const laudo = julgarCofre({ cofre, dono });
+        laudos.push(laudo);
         const linha = { contrato: c.nome, endereco: c.endereco, cofre: cofre ?? '—', dono: dono ?? '—', porque: laudo.porque };
         if (podeCacarComDinheiroReal(laudo)) {
             log.info(`[COFRE OK] ${c.nome} paga no cofre certo.`, linha);
@@ -630,6 +679,17 @@ async function principal(): Promise<'parar' | void> {
         }
     }
     if (contratos.length === 0) {
+        // 'parar' encerra o laco externo PARA SEMPRE. Isso so pode acontecer
+        // quando o problema e mesmo de configuracao: um cofre que respondeu, e
+        // respondeu errado. Se ninguem respondeu, foi a rede — e rede volta.
+        // Antes, dois segundos de RPC fora no boot paravam o bot de vez com
+        // uma mensagem mandando o humano procurar no lugar errado.
+        if (!laudos.some((l) => l.veredicto !== 'inconclusivo')) {
+            log.warn('Não consegui LER o cofre de nenhum caçador. Isso é rede, não configuração — tento de novo.', {
+                cofreEsperado: COFRE_ESPERADO,
+            });
+            return;
+        }
         log.error('Nenhum caçador passou na conferência do cofre. Não vou caçar no escuro.', { cofreEsperado: COFRE_ESPERADO });
         return 'parar';
     }
@@ -742,6 +802,18 @@ async function principal(): Promise<'parar' | void> {
      */
     let perdasSeguidas = 0;
     /**
+     * Quantas derrotas seguidas antes de PARAR de gastar.
+     *
+     * Nao existia nenhum. O lance cravava em 80% a partir da quarta derrota e
+     * ficava la para sempre; somado a um nonce furado (que faz todo recibo
+     * virar 'sumiu'), o bot ofereceria 80% do lucro em TODO tiro,
+     * indefinidamente, drenando a carteira com o log dizendo "subo o lance no
+     * proximo". Subir o lance e resposta para perder a corrida; nao e resposta
+     * para estar quebrado.
+     */
+    const DERROTAS_ATE_PARAR = Number(process.env.CACA_DERROTAS_ATE_PARAR ?? '8');
+    let disjuntorAberto = false;
+    /**
      * O gas que resta, em wei. Lido de tempos em tempos, nao a cada tiro.
      *
      * Precisa existir porque a gorjeta e paga mesmo quando a transacao
@@ -768,6 +840,8 @@ async function principal(): Promise<'parar' | void> {
      */
     const alvosArmados = new Map<string, Alvo>();
     let armadoEm = 0;
+    /** Quando a ULTIMA tentativa aconteceu, deu certo ou nao. Freia repeticao. */
+    let tentouArmarEm = 0;
     /** Impede armar em cima de armar: `void armar()` nao espera o anterior. */
     let armando = false;
     const QUANTOS_ARMAR = Number(process.env.CACA_QUANTOS_ARMAR ?? '8');
@@ -783,13 +857,19 @@ async function principal(): Promise<'parar' | void> {
             alvosArmados.clear();
             for (const a of prontos) alvosArmados.set(a.devedor.toLowerCase(), a);
             armadoEm = Date.now();
+            tentouArmarEm = armadoEm;
         } catch {
-            // Marcar mesmo na falha: sem isto, `montarAlvos` falhando faria
-            // armar() repetir a cada segundo em vez de a cada cinco — 67M
-            // CUs/mes contra um teto de 20M, em silencio.
-            armadoEm = Date.now();
             // Armar e vantagem, nao obrigacao: se falhar, o caminho normal
             // monta o alvo na hora como sempre fez.
+            //
+            // Mas o mapa velho NAO pode sobreviver: mantê-lo faria o bot usar
+            // dividas obsoletas, e `armadoEm` intacto faria o log dizer
+            // `armadoHa: ~0ms` sobre um retrato de horas atras.
+            alvosArmados.clear();
+            // A hora da TENTATIVA e marcada assim mesmo, senao armar() repete
+            // a cada segundo em vez de a cada cinco — 67M CUs/mes num teto
+            // de 20M, em silencio.
+            tentouArmarEm = Date.now();
         } finally {
             armando = false;
         }
@@ -804,6 +884,7 @@ async function principal(): Promise<'parar' | void> {
         ? new OuvinteDeBlocos(urlDeBlocos, (aviso) => log.warn(`[BLOCOS] ${aviso}`))
         : null;
     ouvinte?.abrir();
+    processoEncerrando.push(() => ouvinte?.fechar());
     log.info('Aviso de bloco novo por WebSocket.', {
         ligado: ouvinte !== null,
         porQue: ouvinte === null ? 'não consegui derivar o endereço wss do RPC; sigo perguntando' : 'reajo quando o bloco nasce, não quando eu pergunto',
@@ -814,12 +895,41 @@ async function principal(): Promise<'parar' | void> {
 
     let devedores = await juntarDevedores(topo);
     devedores = devedores.filter(d => !isDevedorIgnorado(d));
+    /**
+     * Em que bloco cada devedor entrou na lista.
+     *
+     * Existe para a lista poder ESQUECER. Sem isto ela so cresce, e a
+     * varredura completa de hora em hora relê um conjunto cada vez maior —
+     * custo e memoria subindo sozinhos durante meses de execucao.
+     */
+    const vistoEm = new Map<string, number>();
+    for (const d of devedores) vistoEm.set(d.toLowerCase(), topo);
 
     let ultimaColeta = Date.now();
     let ultimoBlocoLido = topo; 
     let ultimoBlocoColeta = topo;
-    const falhasPorAlvo = new Map<string, number>();
+    /**
+     * Quantas vezes cada alvo ja foi tentado, e QUANDO.
+     *
+     * Era so um contador que nunca zerava nem expirava — e que era
+     * incrementado tambem no SUCESSO. A Aave so deixa cobrir 50% da divida,
+     * entao o mesmo devedor e liquidavel varias vezes: tres cacadas BEM
+     * SUCEDIDAS no mesmo endereco o bloqueavam para sempre, sem log. O bot ia
+     * se auto-paralisando, um devedor lucrativo por vez.
+     */
+    const falhasPorAlvo = new Map<string, { quantas: number; em: number }>();
+    const ESQUECER_FALHA_MS = Number(process.env.CACA_ESQUECER_FALHA_MS ?? '3600000');
+    /**
+     * Teto de envios por JANELA, nao pela vida do processo.
+     *
+     * Era vitalicio e sem log: 25 envios que nunca chegaram a nada — nonce
+     * furado, RPC morto — esgotavam a cota e o bot nunca mais mandava uma
+     * transacao, continuando a escrever que estava cacando. Uma vez em meses,
+     * e valia para sempre.
+     */
+    const JANELA_DE_ENVIOS_MS = Number(process.env.CACA_JANELA_ENVIOS_MS ?? '3600000');
     let enviados = 0;
+    let janelaComecouEm = Date.now();
 
     log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
     void quandoFoiAUltimaLiquidacao(topo);
@@ -996,7 +1106,7 @@ async function principal(): Promise<'parar' | void> {
         quedaDoMercadoAgora = queda;
         const nova = posturaPorMargem(queda, menorMargem, DESVIO_DE_ESCRITA);
         // Armar enquanto o preco cai, nao depois que o bloco chega.
-        if (valeArmar(nova, Date.now() - armadoEm, VALIDADE_ARMADO_MS)) void armar();
+        if (valeArmar(nova, Date.now() - tentouArmarEm, VALIDADE_ARMADO_MS)) void armar();
         const ficouUrgente = ritmoDaPostura(nova, INTERVALO_MS) < ritmoDaPostura(postura, INTERVALO_MS);
         postura = nova;
         if (postura !== posturaAnterior) {
@@ -1018,8 +1128,30 @@ async function principal(): Promise<'parar' | void> {
                 const novoTopo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
                 if (novoTopo > ultimoBlocoColeta) {
                     const novos = await juntarDevedores(novoTopo, ultimoBlocoColeta + 1);
-                    const setDevedores = new Set([...devedores, ...novos]);
-                    devedores = [...setDevedores].filter(d => !isDevedorIgnorado(d));
+                    // Juntar sem nunca esquecer fazia a lista virar o historico
+                    // acumulado desde o boot: em meses a varredura completa
+                    // releria um conjunto que so cresce, e o custo horario
+                    // junto. A janela de 30 dias so limitava a PRIMEIRA coleta.
+                    //
+                    // Refazer a varredura inteira a cada coleta consertaria o
+                    // vazamento criando um maior: 648 consultas a cada 37
+                    // minutos sao 57M CUs/mes num teto de 20M. Entao a lista
+                    // anota QUANDO cada um entrou, e esquece quem saiu da
+                    // janela — uma conta local, sem nenhuma chamada a mais.
+                    for (const d of novos) vistoEm.set(d.toLowerCase(), novoTopo);
+                    const maisVelhoAceito = novoTopo - BLOCOS;
+                    for (const [d, bloco] of vistoEm) {
+                        if (bloco < maisVelhoAceito) vistoEm.delete(d);
+                    }
+                    const antes = devedores.length;
+                    devedores = [...vistoEm.keys()].filter((d) => !isDevedorIgnorado(d));
+                    if (devedores.length !== antes) {
+                        log.info('Lista de devedores atualizada.', {
+                            antes, agora: devedores.length,
+                            entraram: novos.length,
+                            janela: `${BLOCOS} blocos (~${Math.round((BLOCOS * 2) / 86400)} dias)`,
+                        });
+                    }
                     ultimoBlocoColeta = novoTopo;
                 }
                 ultimaColeta = Date.now();
@@ -1170,10 +1302,19 @@ async function principal(): Promise<'parar' | void> {
             if (caidos.length === 0) continue;
 
             // Quem ja estava armado nao precisa de ida a rede nenhuma agora.
-            const jaArmados = caidos
-                .map((d) => alvosArmados.get(d.toLowerCase()))
-                .filter((a): a is Alvo => a !== undefined);
-            const faltando = caidos.filter((d) => !alvosArmados.has(d.toLowerCase()));
+            // Alvo armado tem PRAZO, e a validade so era conferida na hora de
+            // REarmar — nunca na hora de usar. `dividaCrua` velha dimensiona o
+            // emprestimo errado: divida que cresceu com juros faz o bot
+            // sub-emprestar e deixar agio na mesa dizendo ACERTOU; divida que
+            // ja foi parcialmente liquidada faz o pedido passar dos 50%
+            // cobriveis, e a Aave reverte com o gas pago.
+            const armadoValido = Date.now() - armadoEm <= VALIDADE_ARMADO_MS;
+            const jaArmados = armadoValido
+                ? caidos.map((d) => alvosArmados.get(d.toLowerCase())).filter((a): a is Alvo => a !== undefined)
+                : [];
+            const faltando = armadoValido
+                ? caidos.filter((d) => !alvosArmados.has(d.toLowerCase()))
+                : caidos;
             const alvos = faltando.length === 0
                 ? jaArmados
                 : [...jaArmados, ...await montarAlvos(faltando, moedas, dataProvider, precos, casas)];
@@ -1186,6 +1327,17 @@ async function principal(): Promise<'parar' | void> {
             }
 
             for (const alvo of alvos) {
+                // Duas fases, e a separacao existe por um motivo caro: o laco
+                // antigo ENVIAVA dentro dele, uma transacao por contrato no
+                // MESMO alvo. Nonces consecutivos da mesma carteira sao
+                // minerados em ordem, entao a segunda so entra depois da
+                // primeira ter liquidado — e ai a posicao ja nao e liquidavel.
+                // Reversao garantida, gas pago, e o placar contava como
+                // derrota, subindo a gorjeta como se um concorrente tivesse
+                // ganhado.
+                //
+                // Fase 1: medir todos (eth_call custa CU, nao gas).
+                const medicoes: Array<{ contrato: typeof contratos[number]; lucroCru: bigint }> = [];
                 for (const contrato of contratos) {
                     const dados = contrato.tipo === 'V1'
                         ? codificarCacaV1({
@@ -1219,14 +1371,49 @@ async function principal(): Promise<'parar' | void> {
                         lucroCru: leitura.lucroCru?.toString() ?? '-',
                     });
 
-                    if (!ENVIAR || !carteira || !carteira.provider || !nonceManager) continue;
-                    if (leitura.desfecho !== 'mediu' || leitura.lucroCru === undefined || leitura.lucroCru === null || leitura.lucroCru === 0n) continue;
+                    if (leitura.desfecho === 'mediu' && leitura.lucroCru) {
+                        medicoes.push({ contrato, lucroCru: leitura.lucroCru });
+                    }
+                }
 
-                    const lucroCruValido = leitura.lucroCru;
+                // Fase 2: UM tiro, no contrato que mediu o maior lucro.
+                if (!ENVIAR || !carteira || !carteira.provider || !nonceManager) continue;
+                if (medicoes.length === 0) continue;
+                medicoes.sort((a, b) => (b.lucroCru > a.lucroCru ? 1 : b.lucroCru < a.lucroCru ? -1 : 0));
+                const escolhida = medicoes[0];
+                const contrato = escolhida.contrato;
+                const lucroCruValido = escolhida.lucroCru;
+                if (medicoes.length > 1) {
+                    log.info('[ESCOLHA] Dois contratos mediram; atiro só no melhor.', {
+                        devedor: alvo.devedor,
+                        escolhido: contrato.nome,
+                        lucros: medicoes.map((m) => `${m.contrato.nome}: ${m.lucroCru}`),
+                        porque: 'dois tiros no mesmo alvo = o segundo reverte com o gás pago',
+                    });
+                }
+                {
                     const chaveAlvo = `${alvo.devedor}-${contrato.tipo}`;
-                    const jaFalhou = falhasPorAlvo.get(chaveAlvo) ?? 0;
-                    if (jaFalhou >= MAX_POR_ALVO) continue;
-                    if (enviados >= MAX_ENVIOS) continue;
+                    const registro = falhasPorAlvo.get(chaveAlvo);
+                    if (registro && Date.now() - registro.em > ESQUECER_FALHA_MS) falhasPorAlvo.delete(chaveAlvo);
+                    const jaFalhou = falhasPorAlvo.get(chaveAlvo)?.quantas ?? 0;
+                    if (jaFalhou >= MAX_POR_ALVO) {
+                        log.info('[PULEI] Este alvo já falhou demais na última hora.', {
+                            devedor: alvo.devedor, tentativas: jaFalhou, voltaEm: `${Math.round(ESQUECER_FALHA_MS / 60000)}min`,
+                        });
+                        continue;
+                    }
+                    if (Date.now() - janelaComecouEm > JANELA_DE_ENVIOS_MS) {
+                        if (enviados > 0) log.info('[COTA] Janela de envios renovada.', { naJanelaAnterior: enviados });
+                        enviados = 0;
+                        janelaComecouEm = Date.now();
+                    }
+                    if (enviados >= MAX_ENVIOS) {
+                        log.warn('[COTA] Teto de envios da janela atingido — não atiro até renovar.', {
+                            enviados, tetoPorJanela: MAX_ENVIOS,
+                            renovaEm: `${Math.round((JANELA_DE_ENVIOS_MS - (Date.now() - janelaComecouEm)) / 60000)}min`,
+                        });
+                        continue;
+                    }
 
                     const piso = (lucroCruValido * 80n) / 100n;
                     
@@ -1320,6 +1507,9 @@ async function principal(): Promise<'parar' | void> {
                     // encolhia, e ninguem iria atras.
                     const custoDoTiro = custoDoTiroUsd(prioridadePorGas, base, precoDoEth() ?? new Decimal(0));
                     const veredicto = valeATentativa(lucroUsd, custoDoTiro, Number(process.env.CACA_MARGEM_MINIMA ?? '2'));
+                    if (disjuntorAberto) {
+                        continue;
+                    }
                     if (!veredicto.vale) {
                         log.info('[PEQUENO DEMAIS] Não atirei.', {
                             devedor: alvo.devedor,
@@ -1392,8 +1582,6 @@ async function principal(): Promise<'parar' | void> {
                             maxFeePerGas: maxFee
                         });
                         
-                        falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
-                        
                         log.info(`[TIRO SAIU] (${contrato.nome}) — ainda NÃO é acerto.`, {
                             bloco: blocoAtual,
                             devedor: alvo.devedor, 
@@ -1415,7 +1603,16 @@ async function principal(): Promise<'parar' | void> {
                         // chegou antes e a posicao ja nao esta liquidavel
                         // quando a nossa entra. Sem olhar o recibo, acerto e
                         // erro dao exatamente o mesmo log.
+                        // Abater o que acabou de ser comprometido. Sem isto,
+                        // varios tiros no mesmo minuto dimensionavam o risco
+                        // contra o saldo de ANTES de gastar: tres tiros
+                        // arriscando 60% do MESMO dinheiro, e os ultimos
+                        // morrendo em `insufficient funds`.
+                        const comprometido = adiantadoExigido(limiteGas, maxFee);
+                        saldoDeGasWei = saldoDeGasWei > comprometido ? saldoDeGasWei - comprometido : 0n;
+
                         const hashDoTiro = tx.hash;
+                        const chaveDoTiro = chaveAlvo;
                         const devedorDoTiro = alvo.devedor;
                         const lucroDoTiro = lucroUsd;
                         void (async () => {
@@ -1430,14 +1627,42 @@ async function principal(): Promise<'parar' | void> {
                                 // transação minerada — matando justamente a
                                 // medicao que separa perder por pouco de nao
                                 // achar alvo.
-                                const recibo = (e as { receipt?: { status?: number | null } })?.receipt;
-                                desfecho = recibo ? lerRecibo(recibo) : 'sumiu';
+                                const erro = e as { code?: string; receipt?: { status?: number | null; hash?: string } };
+                                // TRANSACTION_REPLACED traz o recibo da
+                                // transacao SUBSTITUTA. Ler o `status: 1` dela
+                                // como acerto faria o bot somar um lucro que
+                                // nao e dele, zerar as derrotas e escrever "O
+                                // dinheiro foi para o cofre" sobre uma cacada
+                                // que nao aconteceu.
+                                if (erro?.code === 'TRANSACTION_REPLACED') {
+                                    desfecho = 'sumiu';
+                                } else {
+                                    desfecho = erro?.receipt ? lerRecibo(erro.receipt) : 'sumiu';
+                                }
                             }
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro);
                             // Perder sobe o lance; ganhar devolve ele para a
                             // base. Assim o bot nao paga caro para sempre por
                             // uma sequencia ruim que ja passou.
                             perdasSeguidas = desfecho === 'acertou' ? 0 : perdasSeguidas + 1;
+                            if (desfecho !== 'acertou') {
+                                const r = falhasPorAlvo.get(chaveDoTiro);
+                                falhasPorAlvo.set(chaveDoTiro, { quantas: (r?.quantas ?? 0) + 1, em: Date.now() });
+                            } else {
+                                falhasPorAlvo.delete(chaveDoTiro);
+                            }
+                            if (desfecho === 'acertou' && disjuntorAberto) {
+                                disjuntorAberto = false;
+                                log.info('[DISJUNTOR] Religado: um tiro acertou.');
+                            }
+                            if (!disjuntorAberto && perdasSeguidas >= DERROTAS_ATE_PARAR) {
+                                disjuntorAberto = true;
+                                log.error(`[DISJUNTOR] ${perdasSeguidas} derrotas seguidas — PAREI de atirar.`, {
+                                    oQueIssoQuerDizer: 'perder tanto seguido não é perder a corrida: é alguma coisa quebrada (nonce, RPC, contrato, ou o lucro medido não existe)',
+                                    oQueFazer: 'me mandar as últimas linhas [ERROU]/[SUMIU]. Continuo medindo e contando, sem gastar.',
+                                    gastoAteAqui: `${tiros.disparados} tiros`,
+                                });
+                            }
                             const dados = {
                                 devedor: devedorDoTiro,
                                 hash: hashDoTiro,
@@ -1463,8 +1688,8 @@ async function principal(): Promise<'parar' | void> {
                             }
                         })();
                     } catch (e) {
-                        nonceManager.rollback();
-                        falhasPorAlvo.set(chaveAlvo, jaFalhou + 1);
+                        await nonceManager.aposFalhar();
+                        falhasPorAlvo.set(chaveAlvo, { quantas: jaFalhou + 1, em: Date.now() });
                         log.warn(`Falha ao disparar tiro de elite (${contrato.nome}).`, { erro: String(e) });
                     }
                 }
@@ -1479,22 +1704,35 @@ async function principal(): Promise<'parar' | void> {
             await olharMercado();
             const ritmo = ritmoDaPostura(posturaAgora(), INTERVALO_MS);
             const resta = ritmo - (Date.now() - inicioDoCiclo);
-            if (resta > 0) {
-                if (posturaAgora() === 'dedo no gatilho' && ouvinte?.vivo) {
+            // Com o dedo no gatilho o ciclo quase sempre passa dos 200ms — a
+            // ida ao mercado sozinha leva mais que isso. Condicionar a espera a
+            // `resta > 0` fazia o galho do WebSocket ser codigo morto
+            // exatamente no unico estado para o qual foi construido, e o laco
+            // voltava sem espera nenhuma: ~3 ciclos/s, centenas de milhares de
+            // CU numa tarde de mercado ruim.
+            if (posturaAgora() === 'dedo no gatilho') {
+                if (ouvinte?.vivo) {
                     // Com o dedo no gatilho, quem acorda o bot e o BLOCO, nao o
                     // relogio: o aviso chega no instante em que ele nasce. O
                     // tempo maximo existe para nunca ficar preso esperando um
                     // aviso que nao vem — WebSocket mudo e indistinguivel de
                     // rede parada, e ficar pendurado seria pior que perguntar.
+                    // Quem acorda o bot aqui e o BLOCO, no instante em que
+                    // nasce. O tempo maximo existe so para nunca ficar preso
+                    // esperando um aviso que nao vem.
                     await esperarBlocoOuTempo(
                         (aoBloco) => ouvinte.assinar(aoBloco),
-                        Math.max(resta, 2500),
+                        2500,
                         (fn, ms) => setTimeout(fn, ms),
                         (id) => clearTimeout(id as NodeJS.Timeout),
                     );
                 } else {
-                    await dormirDeOlho(resta, OLHAR_MERCADO_MS, olharMercado, async (ms) => { await dormir(ms); });
+                    // Sem aviso de bloco, um piso de ritmo impede o laco de
+                    // girar na velocidade da rede queimando CU.
+                    await dormir(ritmo);
                 }
+            } else if (resta > 0) {
+                await dormirDeOlho(resta, OLHAR_MERCADO_MS, olharMercado, async (ms) => { await dormir(ms); });
             }
         }
     }

@@ -32,11 +32,20 @@ export interface PlacarDosTiros {
     acertou: number;
     reverteu: number;
     sumiu: number;
-    lucroUsd: Decimal;
+    /**
+     * O lucro ESTIMADO dos acertos — nao o realizado.
+     *
+     * Vem da medicao por eth_call feita no bloco anterior, e o contrato so
+     * garante 80% dela (`lucroMinimo`). Chamar isso de "no cofre" apresentava
+     * estimativa como caixa, com ate 20% de sobra para cima. O numero que vale
+     * e o saldo do cofre no basescan; este aqui serve para comparar tiros
+     * entre si, nao para contar dinheiro.
+     */
+    lucroEstimadoUsd: Decimal;
 }
 
 export function placarVazio(): PlacarDosTiros {
-    return { disparados: 0, acertou: 0, reverteu: 0, sumiu: 0, lucroUsd: new Decimal(0) };
+    return { disparados: 0, acertou: 0, reverteu: 0, sumiu: 0, lucroEstimadoUsd: new Decimal(0) };
 }
 
 /**
@@ -47,9 +56,9 @@ export function placarVazio(): PlacarDosTiros {
  * e nunca fique menor que a soma das partes.
  */
 export function contarTiro(p: PlacarDosTiros, d: DesfechoDoTiro, lucroUsd: Decimal | null): PlacarDosTiros {
-    const novo: PlacarDosTiros = { ...p, lucroUsd: p.lucroUsd, disparados: p.disparados + 1 };
+    const novo: PlacarDosTiros = { ...p, lucroEstimadoUsd: p.lucroEstimadoUsd, disparados: p.disparados + 1 };
     novo[d] += 1;
-    if (d === 'acertou' && lucroUsd !== null) novo.lucroUsd = p.lucroUsd.plus(lucroUsd);
+    if (d === 'acertou' && lucroUsd !== null) novo.lucroEstimadoUsd = p.lucroEstimadoUsd.plus(lucroUsd);
     return novo;
 }
 
@@ -65,5 +74,7 @@ export function comoEstaIndo(p: PlacarDosTiros): string {
         return `${p.reverteu} de ${p.disparados} reverteram: outro chegou antes. É corrida perdida por pouco, não falta de alvo.`;
     }
     const taxa = ((p.acertou / p.disparados) * 100).toFixed(0);
-    return `${p.acertou} de ${p.disparados} acertaram (${taxa}%), US$ ${p.lucroUsd.toFixed(2)} no cofre.`;
+    // "estimado", e nao "no cofre": o numero vem da medicao, e o contrato so
+    // garante 80% dela. Quem conta dinheiro e o saldo do cofre no basescan.
+    return `${p.acertou} de ${p.disparados} acertaram (${taxa}%), ~US$ ${p.lucroEstimadoUsd.toFixed(2)} estimados (confira o cofre).`;
 }

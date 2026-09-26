@@ -23,15 +23,15 @@ test('o lucro só entra quando o tiro acertou', () => {
     let p = placarVazio();
     p = contarTiro(p, 'reverteu', D(91));
     p = contarTiro(p, 'sumiu', D(91));
-    assert.equal(p.lucroUsd.toNumber(), 0, 'tiro que não acertou não pode somar lucro');
+    assert.equal(p.lucroEstimadoUsd.toNumber(), 0, 'tiro que não acertou não pode somar lucro');
     p = contarTiro(p, 'acertou', D(91));
-    assert.equal(p.lucroUsd.toNumber(), 91);
+    assert.equal(p.lucroEstimadoUsd.toNumber(), 91);
 });
 
 test('acerto sem cotação conta como acerto, mas não inventa valor', () => {
     const p = contarTiro(placarVazio(), 'acertou', null);
     assert.equal(p.acertou, 1);
-    assert.equal(p.lucroUsd.toNumber(), 0);
+    assert.equal(p.lucroEstimadoUsd.toNumber(), 0);
 });
 
 test('só reversões dizem "corrida perdida", não "falta de alvo"', () => {
@@ -67,4 +67,16 @@ test('o total é sempre a soma dos desfechos', () => {
     p = contarTiro(p, 'sumiu', null);
     assert.equal(p.disparados, 3);
     assert.equal(p.acertou + p.reverteu + p.sumiu, p.disparados);
+});
+
+test('o placar diz ESTIMADO, não "no cofre"', () => {
+    // O número vem da medição por eth_call do bloco anterior, e o contrato só
+    // garante 80% dela (lucroMinimo). Chamar isso de "no cofre" apresentava
+    // estimativa como caixa, com até 20% de sobra para cima.
+    let p = placarVazio();
+    p = contarTiro(p, 'acertou', D(88));
+    const frase = comoEstaIndo(p);
+    assert.ok(frase.includes('estimados'), frase);
+    assert.ok(frase.includes('confira o cofre'), frase);
+    assert.ok(!frase.includes('no cofre.'), 'não pode afirmar que o dinheiro está lá');
 });

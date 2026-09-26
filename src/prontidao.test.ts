@@ -155,10 +155,17 @@ test('carteira vazia não oferece gorjeta nenhuma', () => {
     assert.equal(gorjetaQueCabeNoSaldo({ gorjetaDesejadaWei: 10n ** 12n, saldoWei: 0n, baseFeeWei: 0n }), 0n);
 });
 
-test('o freio conta derrotas, que é o número que decide', () => {
+test('o freio conta derrotas, e com o gás certo o número encolheu muito', () => {
+    // Este teste dizia "aguenta 2" com a estimativa velha de 150k de gás. Com
+    // os 700k reais de uma reversão tardia, a verdade é ZERO — a US$14 de
+    // carteira ela não aguenta nem uma, nesse lance.
+    //
+    // É exatamente por isso que o freio existe: com o número errado ele
+    // liberava o tiro dizendo "aguento mais 6".
     const saldo = wei(0.00536); // ~US$14,19
-    assert.equal(derrotasQueAguenta(saldo, custoDeUmaDerrota(13_300_000_000n, 1_000_000n)), 2);
-    assert.ok(derrotasQueAguenta(saldo, custoDeUmaDerrota(910_000_000n, 1_000_000n)) > 30);
+    assert.equal(derrotasQueAguenta(saldo, custoDeUmaDerrota(13_300_000_000n, 1_000_000n)), 0);
+    // Com um lance modesto ainda sobra fôlego, e é o que o bot vai usar.
+    assert.ok(derrotasQueAguenta(saldo, custoDeUmaDerrota(910_000_000n, 1_000_000n)) >= 5);
 });
 
 // ---------------------------------------------------------------------------
@@ -255,7 +262,7 @@ test('não atira quando o lucro não paga o próprio tiro', () => {
     // de US$1 ele atiraria, pagaria mais que isso de gás e gorjeta, e o log
     // diria ACERTOU enquanto a carteira encolhia. Acerto que perde dinheiro é
     // pior que derrota, porque ninguém vai atrás.
-    const custo = custoDoTiroUsd(4_020_000_000n, 1_000_000n, ETH);
+    const custo = custoDoTiroUsd(4_020_000_000n, 1_000_000n, ETH)!;
     assert.equal(valeATentativa(D(1), custo).vale, false);
     assert.equal(valeATentativa(D(88), custo).vale, true);
 });
@@ -272,10 +279,26 @@ test('a margem existe porque o lucro medido é estimativa', () => {
     assert.equal(valeATentativa(D(25), custo, 2).vale, true);
 });
 
-test('o custo de um tiro que DÁ CERTO é maior que o de uma recusa', () => {
-    // A caçada roda inteira, então gasta mais gás que a recusa da Aave.
+test('uma reversão TARDIA custa o mesmo que um acerto', () => {
+    // A revisão mostrou que eu estimava a reversão em 150k de gás. São dois
+    // caminhos: a Aave recusando cedo (~150k) e o contrato revertendo com
+    // LucroInsuficiente DEPOIS do empréstimo, da liquidação e da venda (~700k).
+    // O segundo é o COMUM, porque o bot manda lucroMinimo = 80% do medido.
+    //
+    // O freio de sobrevivência tem que orçar pelo pior caso: com 150k ele
+    // dizia "aguento mais 6 derrotas" quando a verdade era 1.
     const prio = 4_020_000_000n;
-    const acerto = custoDoTiroUsd(prio, 1_000_000n, ETH);
+    const acerto = custoDoTiroUsd(prio, 1_000_000n, ETH)!;
     const derrota = D(custoDeUmaDerrota(prio, 1_000_000n).toString()).dividedBy(1e18).mul(ETH);
-    assert.ok(acerto.greaterThan(derrota), `acerto ${acerto.toFixed(2)} vs derrota ${derrota.toFixed(2)}`);
+    assert.equal(acerto.toFixed(8), derrota.toFixed(8), 'o freio tem que orçar pelo caminho caro');
+});
+
+test('sem cotação do ETH o custo é NULL, e null não atira', () => {
+    // Zero desarmava o piso inteiro: custo zero fazia qualquer lucro positivo
+    // passar, e o bot atirava num lucro de cinco centavos escrevendo ACERTOU
+    // enquanto a carteira encolhia.
+    assert.equal(custoDoTiroUsd(1_000_000n, 20_000_000n, D(0)), null);
+    assert.equal(custoDoTiroUsd(1_000_000n, 20_000_000n, null), null);
+    assert.equal(valeATentativa(D(0.05), null).vale, false);
+    assert.equal(valeATentativa(D(10_000), null).vale, false, 'nem um lucro enorme passa sem saber o custo');
 });

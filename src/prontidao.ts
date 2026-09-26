@@ -166,11 +166,20 @@ export function sobraDepoisDaGorjeta(lucroUsd: Decimal, fracao: number): Decimal
 /**
  * Quanto gas uma liquidacao consome quando REVERTE.
  *
- * A Aave recusa cedo, mas nao de graca: o emprestimo relampago abre, a
- * verificacao de saude falha e tudo desfaz — e o gas gasto ate ali e cobrado.
- * Estimativa conservadora; errar para mais aqui so deixa o freio mais seguro.
+ * Eram 150.000, e estava errado por 4,7 vezes — no sentido perigoso.
+ *
+ * Existem duas reversoes, e a cara e a comum. A Aave recusando cedo (posicao
+ * saudavel) custa ~150k. Mas o contrato tambem reverte com `LucroInsuficiente`
+ * DEPOIS do emprestimo, da liquidacao e da venda — ou seja gastando a cacada
+ * inteira, ~700k. E esse e o caminho COMUM, porque o bot manda
+ * `lucroMinimo = 80% do lucro medido`: basta alguem mexer no pool no mesmo
+ * bloco.
+ *
+ * Com 150k o freio de sobrevivencia dizia "aguento mais 6 derrotas" quando a
+ * verdade era 1, e liberava um tiro que leva metade da carteira. Freio que
+ * erra tem que errar para o lado seguro.
  */
-export const GAS_DE_UMA_REVERSAO = 150_000n;
+export const GAS_DE_UMA_REVERSAO = GAS_TIPICO_DE_UMA_CACADA;
 
 /**
  * O que UMA derrota custa, em wei.
@@ -292,9 +301,13 @@ export function maxFeeQueOSaldoAdianta(
 export function custoDoTiroUsd(
     prioridadeWei: bigint,
     baseFeeWei: bigint,
-    precoDoEthUsd: Decimal,
+    precoDoEthUsd: Decimal | null,
     gasUsado: bigint = GAS_TIPICO_DE_UMA_CACADA,
-): Decimal {
+): Decimal | null {
+    // Sem preco do ETH nao da para dizer quanto custa, e ZERO nao e a
+    // resposta: zero desarmava o piso inteiro, e o bot atirava num lucro de
+    // cinco centavos escrevendo "ACERTOU" enquanto a carteira encolhia.
+    if (precoDoEthUsd === null || precoDoEthUsd.lessThanOrEqualTo(0)) return null;
     const wei = (prioridadeWei + baseFeeWei) * gasUsado;
     return new Decimal(wei.toString()).dividedBy(1e18).mul(precoDoEthUsd);
 }
@@ -312,9 +325,12 @@ export function custoDoTiroUsd(
  */
 export function valeATentativa(
     lucroUsd: Decimal | null,
-    custoUsd: Decimal,
+    custoUsd: Decimal | null,
     margem = 2,
 ): { vale: boolean; porque: string } {
+    if (custoUsd === null) {
+        return { vale: false, porque: 'sem cotação do ETH: não dá para saber quanto o tiro custa' };
+    }
     if (lucroUsd === null) {
         // Sem cotacao nao da para comparar. Atirar as cegas num alvo que pode
         // ser de US$1 e gastar para descobrir.
