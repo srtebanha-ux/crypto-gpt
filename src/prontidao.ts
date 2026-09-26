@@ -282,3 +282,50 @@ export function maxFeeQueOSaldoAdianta(
     if (saldoWei <= 0n || limiteGas <= 0n) return 0n;
     return ((saldoWei * BigInt(Math.round(folga * 10_000))) / 10_000n) / limiteGas;
 }
+
+/**
+ * O que ESTE tiro custa se der certo, em dolar.
+ *
+ * Diferente de `custoDeUmaDerrota`: aqui a cacada roda inteira, entao o gas
+ * consumido e o da caçada, nao o da recusa.
+ */
+export function custoDoTiroUsd(
+    prioridadeWei: bigint,
+    baseFeeWei: bigint,
+    precoDoEthUsd: Decimal,
+    gasUsado: bigint = GAS_TIPICO_DE_UMA_CACADA,
+): Decimal {
+    const wei = (prioridadeWei + baseFeeWei) * gasUsado;
+    return new Decimal(wei.toString()).dividedBy(1e18).mul(precoDoEthUsd);
+}
+
+/**
+ * Se vale a pena atirar.
+ *
+ * O bot nao tinha piso nenhum: a unica condicao era `lucro > 0`. Num lucro de
+ * US$1 ele atiraria, pagaria mais que isso de gas e gorjeta, e o log diria
+ * "ACERTOU" enquanto a carteira encolhia. Acerto que perde dinheiro e pior que
+ * derrota, porque ninguem vai atras.
+ *
+ * A margem existe porque o lucro medido e estimativa: o preco pode andar entre
+ * a medicao e a execucao, e sair no zero a zero nao paga o risco.
+ */
+export function valeATentativa(
+    lucroUsd: Decimal | null,
+    custoUsd: Decimal,
+    margem = 2,
+): { vale: boolean; porque: string } {
+    if (lucroUsd === null) {
+        // Sem cotacao nao da para comparar. Atirar as cegas num alvo que pode
+        // ser de US$1 e gastar para descobrir.
+        return { vale: false, porque: 'sem cotação do lucro: não dá para saber se paga o gás' };
+    }
+    const precisa = custoUsd.mul(margem);
+    if (lucroUsd.lessThanOrEqualTo(precisa)) {
+        return {
+            vale: false,
+            porque: `lucro de US$ ${lucroUsd.toFixed(2)} não cobre ${margem}x o custo do tiro (US$ ${custoUsd.toFixed(2)})`,
+        };
+    }
+    return { vale: true, porque: `lucro de US$ ${lucroUsd.toFixed(2)} contra custo de US$ ${custoUsd.toFixed(2)}` };
+}

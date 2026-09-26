@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDeQualquerFonte, quedaDoMercado } from './precoDeMercado';
@@ -1315,6 +1315,19 @@ async function principal(): Promise<'parar' | void> {
                         baseFeeWei: base,
                         fracaoMaximaDoSaldo: risco,
                     });
+                    // Lucro que nao paga o proprio tiro e prejuizo com cara de
+                    // vitoria: o log diria ACERTOU enquanto a carteira
+                    // encolhia, e ninguem iria atras.
+                    const custoDoTiro = custoDoTiroUsd(prioridadePorGas, base, precoDoEth() ?? new Decimal(0));
+                    const veredicto = valeATentativa(lucroUsd, custoDoTiro, Number(process.env.CACA_MARGEM_MINIMA ?? '2'));
+                    if (!veredicto.vale) {
+                        log.info('[PEQUENO DEMAIS] Não atirei.', {
+                            devedor: alvo.devedor,
+                            porque: veredicto.porque,
+                        });
+                        continue;
+                    }
+
                     const custoSePerder = custoDeUmaDerrota(prioridadePorGas, base);
                     const aguenta = derrotasQueAguenta(saldoDeGasWei, custoSePerder);
 

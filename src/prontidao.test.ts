@@ -164,7 +164,7 @@ test('o freio conta derrotas, que é o número que decide', () => {
 // ---------------------------------------------------------------------------
 // Risco proporcional ao prêmio: 25% fixo recusava 590 para 1.
 // ---------------------------------------------------------------------------
-import { fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta } from './prontidao';
+import { fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa } from './prontidao';
 
 const SALDO = D(14.19);
 
@@ -248,4 +248,34 @@ test('o teto de gás não pode estrangular o lance', () => {
     assert.ok(comOAtual > com2M, 'o teto atual tem que permitir lance maior que 2M permitia');
     assert.ok(LIMITE_DE_GAS >= 1_000_000n, 'folga sobre os ~700k que a caçada usa');
     assert.ok(LIMITE_DE_GAS < 2_000_000n, 'mas sem congelar adiantado à toa');
+});
+
+test('não atira quando o lucro não paga o próprio tiro', () => {
+    // O bot não tinha piso nenhum: a única condição era lucro > 0. Num lucro
+    // de US$1 ele atiraria, pagaria mais que isso de gás e gorjeta, e o log
+    // diria ACERTOU enquanto a carteira encolhia. Acerto que perde dinheiro é
+    // pior que derrota, porque ninguém vai atrás.
+    const custo = custoDoTiroUsd(4_020_000_000n, 1_000_000n, ETH);
+    assert.equal(valeATentativa(D(1), custo).vale, false);
+    assert.equal(valeATentativa(D(88), custo).vale, true);
+});
+
+test('sem cotação do lucro NÃO atira às cegas', () => {
+    assert.equal(valeATentativa(null, D(1)).vale, false);
+});
+
+test('a margem existe porque o lucro medido é estimativa', () => {
+    // Sair no zero a zero não paga o risco de o preço andar entre a medição e
+    // a execução.
+    const custo = D(10);
+    assert.equal(valeATentativa(D(15), custo, 2).vale, false, 'empate apertado não vale');
+    assert.equal(valeATentativa(D(25), custo, 2).vale, true);
+});
+
+test('o custo de um tiro que DÁ CERTO é maior que o de uma recusa', () => {
+    // A caçada roda inteira, então gasta mais gás que a recusa da Aave.
+    const prio = 4_020_000_000n;
+    const acerto = custoDoTiroUsd(prio, 1_000_000n, ETH);
+    const derrota = D(custoDeUmaDerrota(prio, 1_000_000n).toString()).dividedBy(1e18).mul(ETH);
+    assert.ok(acerto.greaterThan(derrota), `acerto ${acerto.toFixed(2)} vs derrota ${derrota.toFixed(2)}`);
 });
