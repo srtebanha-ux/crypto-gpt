@@ -933,6 +933,99 @@ async function principal(): Promise<'parar' | void> {
 
     log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
     void quandoFoiAUltimaLiquidacao(topo);
+    void tiroEmSeco();
+
+    /**
+     * Percorre o caminho de tiro INTEIRO, parando um passo antes de enviar.
+     *
+     * Existe porque em tres dias de producao esse caminho nunca rodou: sem
+     * ninguem caindo, `montarAlvos`, a medicao, a leitura de saldo, a conta da
+     * gorjeta e o freio do gas adiantado ficaram todos sem exercicio. Codigo
+     * que nunca rodou nao e codigo que funciona — e o dia de descobrir isso
+     * seria justamente o dia em que aparecesse a liquidacao que paga o mes.
+     *
+     * O alvo e o mais fragil da brasa, que NAO esta liquidavel: a Aave recusa
+     * a cacada, o que e exatamente o que se quer. O que se testa e todo o
+     * resto — e nada e enviado.
+     */
+    async function tiroEmSeco(): Promise<void> {
+        const passos: Record<string, string> = {};
+        try {
+            const alvoDoEnsaio = brasa[0];
+            if (!alvoDoEnsaio) { log.warn('[EM SECO] Sem ninguém na brasa para ensaiar.'); return; }
+            passos.alvo = alvoDoEnsaio;
+
+            const montados = await montarAlvos([alvoDoEnsaio], moedas, dataProvider!, precos, casas);
+            const alvo = montados[0];
+            if (!alvo || alvo.dividaCrua === undefined) {
+                passos.montarAlvos = 'FALHOU: não consegui montar o alvo';
+                log.error('[EM SECO] O caminho de tiro PARA aqui.', passos);
+                return;
+            }
+            passos.montarAlvos = `garantia ${alvo.garantia} / dívida ${alvo.divida}`;
+            passos.pediriaEmprestado = quantoPedirEmprestado(alvo.dividaCrua).toString();
+
+            // A medicao de verdade, contra a Aave real, com piso impossivel.
+            const contrato = contratos[0];
+            const dados = contrato.tipo === 'V1'
+                ? codificarCacaV1({ garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
+                    quantoCobrir: quantoPedirEmprestado(alvo.dividaCrua), poolDeVenda: poolDeVendaV1, lucroMinimo: PISO_IMPOSSIVEL })
+                : codificarCacaV2({ garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
+                    quantoCobrir: quantoPedirEmprestado(alvo.dividaCrua), isStablePool: false, lucroMinimo: PISO_IMPOSSIVEL });
+            const r = await chamarCruComPaciencia([{ from: donoCarteira ?? undefined, to: contrato.endereco, data: dados }, 'latest']);
+            const leitura = lerRespostaDaCaca({ ok: r.ok, dados: r.dados ?? '0x', mensagem: 'mensagem' in r ? r.mensagem : undefined });
+            passos.medicao = `${leitura.desfecho}${leitura.erro ? ` (${leitura.erro})` : ''}`;
+
+            if (!ENVIAR || !carteira || !donoCarteira) {
+                passos.envio = 'ENVIAR desligado: o resto não se testa';
+                log.info('[EM SECO] Caminho conferido até onde dava.', passos);
+                return;
+            }
+
+            // Saldo: a unica coisa que so era lida dentro do tiro, e por isso
+            // aparecia como "ainda não li" para sempre.
+            try {
+                saldoDeGasWei = await (carteira.provider as JsonRpcProvider).getBalance(donoCarteira);
+                saldoLidoEm = Date.now();
+                saldoJaLido = true;
+                passos.saldo = `${new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6)} ETH`;
+            } catch (e) {
+                passos.saldo = `FALHOU: ${(e as Error).message}`;
+                log.error('[EM SECO] O caminho de tiro PARA aqui: não consigo ler o saldo.', passos);
+                return;
+            }
+
+            // A conta do tiro, com um lucro de exemplo, para ver se os freios
+            // deixariam passar.
+            const ethUsd = precoDoEth();
+            passos.precoDoEth = ethUsd === null ? 'SEM COTAÇÃO — o piso de lucro barraria tudo' : `US$ ${ethUsd.toFixed(2)}`;
+            const base = baseFeeAtual ?? 20_000_000n;
+            passos.baseFee = `${(Number(base) / 1e9).toFixed(4)} gwei`;
+            const lucroExemplo = new Decimal(88);
+            const desejada = gorjetaPorGas({ lucroUsd: lucroExemplo, precoDoEthUsd: ethUsd ?? new Decimal(0), limiteGas: GAS_TIPICO_DE_UMA_CACADA });
+            const saldoUsd = ethUsd === null ? null : new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).mul(ethUsd);
+            const risco = saldoUsd === null ? FRACAO_DO_SALDO_POR_TIRO
+                : fracaoDoSaldoQueValeArriscar({ lucroUsd: lucroExemplo, saldoUsd, fracaoBase: FRACAO_DO_SALDO_POR_TIRO, fracaoMaxima: FRACAO_MAXIMA_DO_SALDO });
+            let prio = gorjetaQueCabeNoSaldo({ gorjetaDesejadaWei: desejada, saldoWei: saldoDeGasWei, baseFeeWei: base, fracaoMaximaDoSaldo: risco });
+            let maxFee = tetoPorGas(base, prio);
+            const adiantavel = maxFeeQueOSaldoAdianta(saldoDeGasWei, LIMITE_DE_GAS);
+            if (maxFee > adiantavel) { maxFee = adiantavel; if (prio > maxFee - base) prio = maxFee - base; }
+            const custo = custoDoTiroUsd(prio, base, ethUsd);
+            const veredicto = valeATentativa(lucroExemplo, custo);
+            passos.numDeUS$88 = `gorjeta ${(Number(prio) / 1e9).toFixed(2)} gwei, adiantaria ${new Decimal(adiantadoExigido(LIMITE_DE_GAS, maxFee).toString()).dividedBy(1e18).toFixed(6)} ETH`;
+            passos.pisoDeLucro = veredicto.vale ? 'passaria' : `BARRARIA: ${veredicto.porque}`;
+            passos.adiantadoCabe = adiantavel > base ? 'sim' : 'NÃO — não conseguiria enviar';
+            passos.nonce = String(await nonceManager!.getNextNonce());
+            await nonceManager!.sync(); // devolve o contador ao valor da rede
+
+            const tudoOk = veredicto.vale && adiantavel > base && ethUsd !== null;
+            if (tudoOk) log.info('[EM SECO] Caminho de tiro INTEIRO conferido. Se alguém cair, o tiro sai.', passos);
+            else log.error('[EM SECO] O caminho de tiro tem um bloqueio. NÃO sairia tiro.', passos);
+        } catch (e) {
+            passos.erro = (e as Error).message;
+            log.error('[EM SECO] O ensaio quebrou — o caminho de tiro tem um defeito.', passos);
+        }
+    }
 
     /**
      * Ha quanto tempo alguem foi liquidado na Base, seja por quem for.
