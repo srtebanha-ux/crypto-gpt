@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
@@ -1076,10 +1076,13 @@ async function principal(): Promise<'parar' | void> {
     let saldoDeGasWei = 0n;
     let saldoLidoEm = 0;
     let saldoJaLido = false;
-    const FRACAO_DO_SALDO_POR_TIRO = Number(process.env.CACA_RISCO_POR_TIRO ?? '0.25');
+    // Uma politica, lida uma vez. Antes cada montagem relia o ambiente por
+    // conta propria, e foi assim que uma delas ficou com cinco campos de nove.
+    const POLITICA = politicaDoTiro();
+    const FRACAO_DO_SALDO_POR_TIRO = POLITICA.fracaoBaseDoSaldo;
     /** O teto do risco quando o premio e muito maior que o saldo. */
-    const FRACAO_MAXIMA_DO_SALDO = Number(process.env.CACA_RISCO_MAXIMO ?? '0.6');
-    const fracaoBase = Number(process.env.CACA_FRACAO_GORJETA ?? '0.4');
+    const FRACAO_MAXIMA_DO_SALDO = POLITICA.fracaoMaximaDoSaldo;
+    const fracaoBase = POLITICA.fracaoBaseDoLucro;
 
     /**
      * O tiro de prova: UM tiro, de proposito no prejuizo, para saber se funciona.
@@ -1326,13 +1329,7 @@ async function principal(): Promise<'parar' | void> {
                 precoDoEthUsd: ethUsd,
                 saldoWei: saldoDeGasWei,
                 baseFeeWei: base,
-                limiteGas: LIMITE_DE_GAS,
-                fracaoBaseDoLucro: fracaoBase,
-                fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
-                fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
-                margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
-                tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
-                atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+                ...POLITICA,
                 tiroDeProva: provaAgora().armado,
             };
             passos.tiroDeProva = provaAgora().porque;
@@ -1479,13 +1476,7 @@ async function principal(): Promise<'parar' | void> {
             precoDoEthUsd: precoDoEth(),
             saldoWei: saldoDeGasWei,
             baseFeeWei: baseFeeAtual ?? 20_000_000n,
-            limiteGas: LIMITE_DE_GAS,
-            fracaoBaseDoLucro: fracaoBase,
-            fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
-            fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
-            margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
-            tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
-            atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+            ...POLITICA,
             tiroDeProva: provaAgora().armado,
         });
 
@@ -1560,13 +1551,7 @@ async function principal(): Promise<'parar' | void> {
                         precoDoEthUsd: precoDoEth(),
                         saldoWei: BigInt(Math.round(eth * 1e18)),
                         baseFeeWei: baseFeeAtual ?? 20_000_000n,
-                        limiteGas: LIMITE_DE_GAS,
-                        fracaoBaseDoLucro: fracaoBase,
-                        fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
-                        fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
-                        margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
-                        tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
-                        atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+                        ...POLITICA,
                         tiroDeProva: provaAgora().armado,
                     });
                     if (f === null) return `${eth} ETH: não sei dizer`;
@@ -1700,13 +1685,7 @@ async function principal(): Promise<'parar' | void> {
             precoDoEthUsd: precoDoEth(),
             saldoWei: saldoDeGasWei,
             baseFeeWei: baseFeeAtual ?? 20_000_000n,
-            limiteGas: LIMITE_DE_GAS,
-            fracaoBaseDoLucro: fracaoBase,
-            fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
-            fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
-            margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
-            tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
-            atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+            ...POLITICA,
             tiroDeProva: provaAgora().armado,
         });
         // Sem faixa (sem cotacao, sem saldo) o piso volta ao default: nesse caso
@@ -2278,14 +2257,9 @@ async function principal(): Promise<'parar' | void> {
                         precoDoEthUsd: ethUsd,
                         saldoWei: saldoDeGasWei,
                         baseFeeWei: base,
+                        ...POLITICA,
                         limiteGas,
                         perdasSeguidas,
-                        fracaoBaseDoLucro: fracaoBase,
-                        fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
-                        fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
-                        margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
-                        tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
-                        atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
                         tiroDeProva: provaAgora().armado,
                     });
                     const fracao = decisao.fracaoDoLucro;

@@ -13,7 +13,7 @@ import { REDES } from './liquidacoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { lucroEstimado } from './perdidas';
-import { faixaQueAtira, LIMITE_DE_GAS } from './prontidao';
+import { faixaQueAtira, politicaDoTiro, comoLerAPolitica } from './prontidao';
 import { compararLeituras, naoForamLidos, comoLerOMovimento, resumir, comoLerACobertura, type Alvo, type Leitura } from './olhoNosAlvos';
 
 const RPC = process.env.OLHO_RPC ?? 'https://mainnet.base.org';
@@ -146,15 +146,24 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
     const agora: Leitura = { em: Date.now(), alvos };
     console.log(`\nbloco ${topo}  |  ${comoLerACobertura({ lidos, daJanela, daMemoria, blocos })}`);
 
+    // A MESMA politica do cacador, dos MESMOS nomes de ambiente. Passar cinco
+    // campos dos nove fez esta ferramenta publicar "faixa do bot: até US$ 66,78"
+    // enquanto o bot dizia US$ 45,80 — e com isso ela chamou de "o melhor que ele
+    // atira hoje" um alvo que o bot recusa.
+    const politica = politicaDoTiro();
     const faixa = faixaQueAtira({
         precoDoEthUsd: new Decimal(process.env.OLHO_ETH ?? '2690'),
         saldoWei: BigInt(process.env.OLHO_SALDO_WEI ?? '3341111000000000'),
-        baseFeeWei: 20_000_000n, limiteGas: LIMITE_DE_GAS,
-        fracaoBaseDoLucro: Number(process.env.CACA_FRACAO_GORJETA ?? '0.15'),
+        baseFeeWei: BigInt(process.env.OLHO_BASEFEE_WEI ?? '20000000'),
+        ...politica,
         tiroDeProva: process.env.CACA_TIRO_DE_PROVA === '1',
     });
+    // Daqui nao se ve o ambiente do Railway. Entao a faixa sai com os botoes ao
+    // lado, para ela poder comparar com o log em vez de acreditar.
     const teto = faixa?.ate ?? null;
-    console.log(`faixa do bot: até ${teto === null ? 'SEM TETO' : `US$ ${teto.toFixed(2)}`}\n`);
+    console.log(`faixa calculada AQUI: até ${teto === null ? 'SEM TETO' : `US$ ${teto.toFixed(2)}`}`);
+    console.log(`  com: ${comoLerAPolitica(politica)}`);
+    console.log('  >>> confira com o `atiroNaFaixaDe` do log: se não bater, o Railway tem outros valores\n');
 
     const vivos = alvos.filter((a) => a.queda !== null).sort((a, b) => a.queda!.comparedTo(b.queda!));
     const movs = compararLeituras(antes, { em: agora.em, alvos: vivos });

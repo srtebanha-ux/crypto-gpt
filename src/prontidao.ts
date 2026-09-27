@@ -514,6 +514,51 @@ export interface DecisaoDoTiro {
     adiantavelWei: bigint;
 }
 
+/**
+ * Os sete botoes de POLITICA do tiro, lidos do ambiente num lugar so.
+ *
+ * Existe porque a mesma regra estava em CINCO lugares — quatro montagens deste
+ * objeto dentro do cacador e uma no `olharAgora`, que le a Base de fora. Em
+ * 2026-09-27 a de fora passava cinco campos dos nove e publicou "faixa do bot:
+ * ate US$ 66,78" enquanto o bot dizia US$ 45,80: 46% de diferenca, e com ela a
+ * ferramenta anunciou como "o melhor que ele atira hoje" um alvo de US$ 66,42
+ * que o bot RECUSA. Um numero que o proprio algoritmo inventou, publicado como
+ * se fosse medicao do bot.
+ *
+ * O botao que faltava era `CACA_RISCO_MAXIMO`, e ele anda ao contrario do que
+ * parece: permitir gorjeta maior encarece cada tiro, entao a mordida de uma
+ * derrota chega a 50% do saldo num premio MENOR. Medido com o saldo dela:
+ * 0.8 -> teto US$ 45,80; 0.6 -> teto US$ 66,84.
+ *
+ * Quem le a Base de fora nao ve o ambiente do Railway. Entao a funcao aceita o
+ * ambiente como argumento: assim o de fora acerta quando os valores batem, e
+ * `comoLerAPolitica` deixa ver na hora quando nao batem.
+ */
+export function politicaDoTiro(env: Record<string, string | undefined> = process.env) {
+    return {
+        limiteGas: env.CACA_LIMITE_GAS ? BigInt(env.CACA_LIMITE_GAS) : LIMITE_DE_GAS,
+        fracaoBaseDoLucro: Number(env.CACA_FRACAO_GORJETA ?? '0.4'),
+        fracaoBaseDoSaldo: Number(env.CACA_RISCO_POR_TIRO ?? '0.25'),
+        fracaoMaximaDoSaldo: Number(env.CACA_RISCO_MAXIMO ?? '0.6'),
+        margemMinima: Number(env.CACA_MARGEM_MINIMA ?? '2'),
+        tetoDaMordida: Number(env.CACA_MORDIDA_MAXIMA ?? '0.5'),
+        atirarAmordacado: env.CACA_ATIRAR_AMORDACADO === '1',
+    };
+}
+
+/**
+ * A politica em uma linha, para quem le de fora poder CONFERIR com o log.
+ *
+ * Sem isto, uma faixa calculada aqui com outros botoes que os do Railway parece
+ * a faixa do bot e nao ha como notar. Foi assim que "ate US$ 66,78" passou por
+ * medicao.
+ */
+export function comoLerAPolitica(p: ReturnType<typeof politicaDoTiro>): string {
+    return `gás ${p.limiteGas} | gorjeta ${p.fracaoBaseDoLucro} do lucro | risco ${p.fracaoBaseDoSaldo}`
+        + `→${p.fracaoMaximaDoSaldo} do saldo | margem ${p.margemMinima}x | mordida máx ${p.tetoDaMordida}`
+        + ` | amordaçado ${p.atirarAmordacado ? 'sim' : 'não'}`;
+}
+
 export function decidirTiro(e: {
     lucroUsd: Decimal | null;
     precoDoEthUsd: Decimal | null;
@@ -601,7 +646,10 @@ export function decidirTiro(e: {
     const comum = {
         prioridadeWei, maxFeeWei, desejadaWei, amordaca, risco, fracaoDoLucro,
         custoUsd, custoSePerderWei, aguentaDerrotas,
-        soPassouPorSerProva: (e.tiroDeProva ?? false) && veredicto.vale && !passariaNormal,
+        // "So passou por ser prova" vale para as DUAS pontas: o piso de lucro e
+        // o teto que protege a caca. Cobrir so o piso deixaria o primeiro tiro
+        // grande aparecer como tiro normal.
+        soPassouPorSerProva: (e.tiroDeProva ?? false) && veredicto.vale && (!passariaNormal || mata.pula),
         adiantadoWei: adiantadoExigido(limiteGas, maxFeeWei),
         adiantavelWei,
     };
@@ -619,8 +667,29 @@ export function decidirTiro(e: {
                 : `não aguento nem uma derrota (ela custa ${new Decimal(custoSePerderWei.toString()).dividedBy(1e18).toFixed(6)} ETH)`,
         };
     }
-    if (mata.pula) return { ...comum, atira: false, porque: mata.porque };
-    return { ...comum, atira: true, porque: veredicto.porque };
+    // O modo prova NAO tem caca de migalhas para proteger. Ele existe para
+    // comprar UMA informacao — "o caminho funciona de verdade" — e a dona do bot
+    // escolheu pagar por ela com o gas inteiro se for preciso, explicitamente e
+    // mais de uma vez.
+    //
+    // Soltar o piso de lucro e manter este teto era abrir uma porta e trancar a
+    // gemea: o mesmo defeito que o CLAUDE.md registra do dia em que o modo prova
+    // soltou o portao do TIRO e nao soltou o filtro da SELECAO. Medido em
+    // 2026-09-27: com o saldo dela e `CACA_RISCO_MAXIMO=0.8`, o teto ficava em
+    // US$ 45,80 e RECUSAVA o melhor alvo visivel, de US$ 66,42 a 1,44% de cair —
+    // o modo prova recusando exatamente o alvo que ele existe para atirar.
+    //
+    // O que NAO se solta, porque nao e politica e sim aritmetica: o gas adiantado
+    // tem de caber no saldo, e uma derrota tem de ser pagavel. Sem isso o no nem
+    // aceita a transacao.
+    if (mata.pula && !e.tiroDeProva) return { ...comum, atira: false, porque: mata.porque };
+    return {
+        ...comum,
+        atira: true,
+        porque: mata.pula
+            ? `${veredicto.porque} — E SÓ SAI PORQUE É PROVA: ${mata.porque}`
+            : veredicto.porque,
+    };
 }
 
 /**

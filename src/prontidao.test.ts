@@ -4,6 +4,7 @@ import { Decimal } from 'decimal.js';
 import {
     gorjetaPorGas, tetoPorGas, lerBasefee,
     lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado, tiroEmBrancoArmado,
+    politicaDoTiro, comoLerAPolitica,
     PISO_DA_GORJETA_WEI, TETO_DA_GORJETA_WEI, LIMITE_DE_GAS,
 } from './prontidao';
 
@@ -645,15 +646,30 @@ test('o modo prova abre a ponta de BAIXO da faixa — é ali que estão as migal
     // imprimir isso como medição é exatamente o defeito que este projeto caça.
     assert.ok(normal.de !== null, 'na regra normal existe piso');
     assert.equal(prova.de, null, 'na prova NÃO existe piso, e isso se diz com null');
-    // E NÃO abre a de cima: a proteção contra baleia amordaçada fica de pé.
-    assert.equal(prova.ate?.toFixed(0), normal.ate?.toFixed(0),
-        'a prova que ela quer é de uma migalha, não de uma baleia');
+    // E abre a de CIMA também, desde 2026-09-27. Este teste afirmava o contrário
+    // ("a prova que ela quer é de uma migalha, não de uma baleia") e a dona do bot
+    // revogou isso em palavras: "nosso foco é pegar um alvo custe o que custar
+    // mesmo que isso vá todo nosso gás... precisamos saber se funciona, ai nós
+    // calibramos direitinho". O teto de US$ 45,80 estava recusando o melhor alvo
+    // visível, de US$ 66,42 — o modo prova barrando o alvo que existe para atirar.
+    assert.equal(prova.ate, null, 'no modo prova não há teto: é a informação que ela está comprando');
+    assert.ok(normal.ate !== null, 'na regra normal o teto continua de pé');
 });
 
-test('o modo prova NÃO desliga a proteção contra baleia amordaçada', () => {
-    const d = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(1986), tiroDeProva: true });
-    assert.equal(d.atira, false, 'gastar o gás todo numa baleia não prova nada');
-    assert.match(d.porque, /caça de migalhas/);
+test('o modo prova atira até na baleia, porque é isso que ela pediu', () => {
+    // A regra normal recusa, e está certa: uma derrota comeria quase todo o gás e
+    // acabaria com a caça de migalhas, que é a estratégia escolhida para DEPOIS.
+    const normal = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(1986) });
+    assert.equal(normal.atira, false);
+    assert.match(normal.porque, /caça de migalhas/);
+
+    // No modo prova sai, e o motivo diz em voz alta por que saiu — senão o
+    // primeiro tiro grande apareceria como tiro normal.
+    const prova = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(1986), tiroDeProva: true });
+    assert.equal(prova.atira, true, 'ela escolheu pagar com o gás inteiro pela informação');
+    assert.match(prova.porque, /SÓ SAI PORQUE É PROVA/);
+    assert.equal(prova.soPassouPorSerProva, true);
+    assert.equal(prova.amordaca.amordacado, true, 'sai amordaçado, e o log tem de dizer isso');
 });
 
 test('um tiro que só passa PORQUE é prova vem marcado', () => {
@@ -755,4 +771,94 @@ test('o custo do tiro em branco é de centavos, e é o argumento todo', () => {
     const usd = new Decimal((gasDaRecusa * total).toString()).dividedBy(1e18).mul(ETH_REAL);
     assert.equal(usd.toFixed(4), '0.0484');
     assert.ok(usd.lessThan('0.10'), 'se isto passar de dez centavos o argumento muda');
+});
+
+test('o modo prova solta o TETO, não só o piso — o caso real de 2026-09-27', () => {
+    // Com o saldo dela (0.003341 ETH), CACA_FRACAO_GORJETA=0.15 e
+    // CACA_RISCO_MAXIMO=0.8, o log imprimiu `atiroNaFaixaDe: QUALQUER lucro acima
+    // de zero até US$ 45.80` — e o melhor alvo visível na Base valia US$ 66,42 a
+    // 1,44% de cair. O modo prova estava RECUSANDO exatamente o alvo que ele
+    // existe para atirar: soltou o piso de lucro e manteve o teto que protege a
+    // caça de migalhas.
+    //
+    // Ela pediu isto em palavras: "se for preciso gastar todo gás para pegar
+    // qualquer alvo, programe ele pra fazer isso agora".
+    const ambiente = {
+        precoDoEthUsd: new Decimal('2692.43'),
+        saldoWei: 3341111000000000n,
+        baseFeeWei: 20_000_000n,
+        limiteGas: 1_200_000n,
+        fracaoBaseDoLucro: 0.15,
+        fracaoBaseDoSaldo: 0.25,
+        fracaoMaximaDoSaldo: 0.8,
+        margemMinima: 2,
+        tetoDaMordida: 0.5,
+        atirarAmordacado: false,
+    };
+    const premio = new Decimal('66.42');
+
+    // Na regra normal ele recusa, e isso está certo: uma derrota comeria mais da
+    // metade do gás e acabaria com a caça.
+    const normal = decidirTiro({ ...ambiente, lucroUsd: premio, tiroDeProva: false });
+    assert.equal(normal.atira, false);
+    assert.match(normal.porque, /caça de migalhas/);
+
+    // No modo prova ele atira, e DIZ que só saiu por ser prova.
+    const prova = decidirTiro({ ...ambiente, lucroUsd: premio, tiroDeProva: true });
+    assert.equal(prova.atira, true, 'o modo prova tem de atirar no melhor alvo visível');
+    assert.match(prova.porque, /SÓ SAI PORQUE É PROVA/);
+    assert.equal(prova.soPassouPorSerProva, true, 'senão o primeiro acerto vira "deu lucro" sem aviso');
+
+    // E a faixa do modo prova deixa de ter teto: era US$ 45,80.
+    assert.equal(faixaQueAtira({ ...ambiente, tiroDeProva: false })!.ate!.toFixed(2), '45.80');
+    assert.equal(faixaQueAtira({ ...ambiente, tiroDeProva: true })!.ate, null, 'no modo prova não há teto');
+});
+
+test('o que o modo prova NÃO solta é aritmética, não política', () => {
+    // Gás adiantado que não cabe no saldo e derrota impagável não são escolhas:
+    // o nó não aceita a transação. O modo prova não pode passar por cima disso.
+    const quaseSemGas = {
+        lucroUsd: new Decimal('66.42'),
+        precoDoEthUsd: new Decimal('2692.43'),
+        saldoWei: 1_000_000_000_000n,   // 0.000001 ETH
+        baseFeeWei: 20_000_000n,
+        limiteGas: 1_200_000n,
+        tiroDeProva: true,
+    };
+    const d = decidirTiro(quaseSemGas);
+    assert.equal(d.atira, false);
+    assert.doesNotMatch(d.porque, /SÓ SAI PORQUE É PROVA/);
+
+    const semNada = decidirTiro({ ...quaseSemGas, saldoWei: 0n });
+    assert.equal(semNada.atira, false);
+});
+
+test('a política do tiro tem um dono só, e lê os nomes que o Railway usa', () => {
+    // Cinco lugares montavam este objeto na mão. O de fora ficou com cinco campos
+    // de nove e publicou US$ 66,78 onde o bot dizia US$ 45,80.
+    const p = politicaDoTiro({ CACA_FRACAO_GORJETA: '0.15', CACA_RISCO_MAXIMO: '0.8' });
+    assert.equal(p.fracaoBaseDoLucro, 0.15);
+    assert.equal(p.fracaoMaximaDoSaldo, 0.8);
+    // O que não foi dito cai no default, e o default é um só.
+    assert.equal(p.fracaoBaseDoSaldo, 0.25);
+    assert.equal(p.tetoDaMordida, 0.5);
+    assert.equal(p.margemMinima, 2);
+    assert.equal(p.atirarAmordacado, false);
+
+    // Com a política dela, a faixa reproduz os DOIS números do log das 21:26.
+    const f = faixaQueAtira({
+        precoDoEthUsd: new Decimal('2692.43'),
+        saldoWei: 3341111000000000n,
+        baseFeeWei: 20_000_000n,
+        ...politicaDoTiro({ CACA_FRACAO_GORJETA: '0.15', CACA_RISCO_MAXIMO: '0.8', CACA_LIMITE_GAS: '1200000' }),
+        tiroDeProva: false,
+    });
+    // O teto bate na vírgula com o log: era o número que a ferramenta de fora
+    // errava em 46%.
+    assert.equal(f!.ate!.toFixed(2), '45.80');
+    // O `lanceInteiroAte` do log é US$ 28,22, e aqui dá US$ 28,21: a busca binária
+    // parte de uma âncora diferente quando o piso existe (aqui) e quando não
+    // existe (o log rodou em modo prova). Um centavo de resolução da busca não é
+    // divergência de regra, então a asserção é na casa que a regra determina.
+    assert.equal(f!.inteiroAte!.toFixed(1), '28.2');
 });
