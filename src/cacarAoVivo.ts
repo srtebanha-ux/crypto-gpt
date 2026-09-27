@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
@@ -1950,9 +1950,34 @@ async function principal(): Promise<'parar' | void> {
                         });
                         continue;
                     }
+                    // O corte esta certo — sem ele a cacada morria em
+                    // `insufficient funds`. O que faltava era ele FALAR.
+                    // Perder a corrida por falta de gas e resultado legitimo;
+                    // perder sem o log dizer que foi por isso e ausencia com
+                    // cara de resposta.
+                    const lanceQueQueria = prioridadePorGas;
                     if (maxFee > adiantavel) {
                         maxFee = adiantavel;
                         if (prioridadePorGas > maxFee - base) prioridadePorGas = maxFee - base;
+                    }
+                    const amordaca = lanceAmordacado({
+                        desejadaWei: lanceQueQueria,
+                        conseguidaWei: prioridadePorGas,
+                        limiteGas,
+                        baseFeeWei: base,
+                    });
+                    const emEth = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
+                    if (amordaca.amordacado) {
+                        log.warn('LANCE AMORDAÇADO POR FALTA DE GÁS. Atiro, mas com a mão amarrada.', {
+                            devedor: alvo.devedor,
+                            premio: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
+                            queriaDar: `${(Number(lanceQueQueria) / 1e9).toFixed(2)} gwei`,
+                            vouDar: `${(Number(prioridadePorGas) / 1e9).toFixed(2)} gwei`,
+                            cortado: `${(amordaca.cortado * 100).toFixed(0)}%`,
+                            saldo: `${emEth(saldoDeGasWei)} ETH`,
+                            precisariaDe: `${emEth(amordaca.saldoQuePrecisaria)} ETH na conta_bot para dar o lance inteiro`,
+                            seEuPerder: 'foi por não ter como cobrir, não por lentidão — o alvo estava na mira',
+                        });
                     }
 
                     const nonceAtual = await nonceManager.getNextNonce();
@@ -1974,6 +1999,12 @@ async function principal(): Promise<'parar' | void> {
                             devedor: alvo.devedor, 
                             hash: tx.hash,
                             gorjetaOfertadaGwei: (Number(prioridadePorGas) / 1e9).toFixed(3),
+                            // Sem isto, um tiro amordaçado tem exatamente a
+                            // mesma cara de um tiro inteiro — e a reversão que
+                            // vem depois parece lentidão em vez de falta de gás.
+                            gorjetaCortada: amordaca.amordacado
+                                ? `SIM, ${(amordaca.cortado * 100).toFixed(0)}% — queria ${(Number(lanceQueQueria) / 1e9).toFixed(2)} gwei`
+                                : 'não, lance inteiro',
                             lucroEstimadoUsd: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
                             doCicloAoTiro: `${msDoTiro}ms`,
                             lance: `${(fracao * 100).toFixed(0)}% do lucro (${perdasSeguidas} derrotas seguidas)`,

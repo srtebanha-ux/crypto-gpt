@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import {
     gorjetaPorGas, tetoPorGas, lerBasefee,
+    lanceAmordacado,
     PISO_DA_GORJETA_WEI, TETO_DA_GORJETA_WEI, LIMITE_DE_GAS,
 } from './prontidao';
 
@@ -301,4 +302,89 @@ test('sem cotação do ETH o custo é NULL, e null não atira', () => {
     assert.equal(custoDoTiroUsd(1_000_000n, 20_000_000n, null), null);
     assert.equal(valeATentativa(D(0.05), null).vale, false);
     assert.equal(valeATentativa(D(10_000), null).vale, false, 'nem um lucro enorme passa sem saber o custo');
+});
+
+// ---------------------------------------------------------------------------
+// O lance amordaçado.
+//
+// O corte do lance quando o gás adiantado não cabe acontecia em SILÊNCIO. Ele
+// está certo — sem ele a caçada morre em `insufficient funds`. O que faltava
+// era ele falar.
+//
+// Medido com o saldo real de 2026-09-27: 0,003341 ETH, ETH a US$ 2.689,51.
+// ---------------------------------------------------------------------------
+
+const SALDO_REAL = 3_341_000_000_000_000n;   // 0,003341 ETH = US$ 8,99
+const BASE_REAL_WEI = 20_000_000n;           // 0,02 gwei
+const ETH_REAL = new Decimal('2689.51');
+
+test('o caso real: prêmio de US$ 1.986 com US$ 9 de gás corta 95% do lance', () => {
+    const desejada = gorjetaPorGas({ lucroUsd: new Decimal(1986), precoDoEthUsd: ETH_REAL });
+    assert.equal(desejada, TETO_DA_GORJETA_WEI, 'o prêmio é grande: o lance bate no teto de 50 gwei');
+
+    const adiantavel = maxFeeQueOSaldoAdianta(SALDO_REAL, LIMITE_DE_GAS);
+    const conseguida = adiantavel - BASE_REAL_WEI;
+    const a = lanceAmordacado({ desejadaWei: desejada, conseguidaWei: conseguida, limiteGas: LIMITE_DE_GAS, baseFeeWei: BASE_REAL_WEI });
+
+    assert.equal(a.amordacado, true);
+    assert.equal((a.cortado * 100).toFixed(0), '95');
+    assert.equal((Number(conseguida) / 1e9).toFixed(2), '2.49', 'dá 2,49 gwei quando queria 50');
+
+    // E o número que responde "quanto preciso colocar": o saldo que soltaria
+    // o lance inteiro.
+    const precisaUsd = new Decimal(a.saldoQuePrecisaria.toString()).dividedBy(1e18).mul(ETH_REAL);
+    assert.equal(precisaUsd.toFixed(0), '179');
+});
+
+test('prêmio pequeno não amordaça nada: o lance cabe folgado', () => {
+    const desejada = gorjetaPorGas({ lucroUsd: new Decimal(2), precoDoEthUsd: ETH_REAL });
+    const adiantavel = maxFeeQueOSaldoAdianta(SALDO_REAL, LIMITE_DE_GAS);
+    assert.ok(desejada < adiantavel - BASE_REAL_WEI, 'um prêmio de US$ 2 pede um lance minúsculo');
+    const a = lanceAmordacado({ desejadaWei: desejada, conseguidaWei: desejada, limiteGas: LIMITE_DE_GAS, baseFeeWei: BASE_REAL_WEI });
+    assert.equal(a.amordacado, false);
+    assert.equal(a.cortado, 0);
+});
+
+test('corte de arredondamento não vira alarme', () => {
+    // 1% de corte é ruído. Alarmar nele treinaria a pessoa a ignorar o alarme,
+    // que é pior do que não ter alarme.
+    const a = lanceAmordacado({ desejadaWei: 1000n, conseguidaWei: 990n, limiteGas: LIMITE_DE_GAS, baseFeeWei: BASE_REAL_WEI });
+    assert.equal(a.amordacado, false);
+    assert.ok(a.cortado > 0, 'mas o corte é medido mesmo quando não alarma');
+});
+
+test('o limiar é configurável e a fronteira é >=', () => {
+    const emCima = lanceAmordacado({ desejadaWei: 100n, conseguidaWei: 80n, limiteGas: LIMITE_DE_GAS, baseFeeWei: 0n, limiar: 0.2 });
+    assert.equal(emCima.amordacado, true, '20% de corte com limiar 20% já alarma');
+    const abaixo = lanceAmordacado({ desejadaWei: 100n, conseguidaWei: 81n, limiteGas: LIMITE_DE_GAS, baseFeeWei: 0n, limiar: 0.2 });
+    assert.equal(abaixo.amordacado, false);
+});
+
+test('lance conseguido MAIOR que o desejado não vira corte negativo', () => {
+    const a = lanceAmordacado({ desejadaWei: 100n, conseguidaWei: 500n, limiteGas: LIMITE_DE_GAS, baseFeeWei: 0n });
+    assert.equal(a.cortado, 0);
+    assert.equal(a.amordacado, false);
+});
+
+test('desejada zero não divide por zero', () => {
+    const a = lanceAmordacado({ desejadaWei: 0n, conseguidaWei: 0n, limiteGas: LIMITE_DE_GAS, baseFeeWei: 0n });
+    assert.equal(a.cortado, 0);
+    assert.equal(a.amordacado, false);
+    assert.ok(Number.isFinite(Number(a.saldoQuePrecisaria)));
+});
+
+test('limite de gás zero não explode a conta do saldo necessário', () => {
+    const a = lanceAmordacado({ desejadaWei: 1000n, conseguidaWei: 10n, limiteGas: 0n, baseFeeWei: 0n });
+    assert.equal(a.saldoQuePrecisaria, 0n);
+});
+
+test('o saldo necessário inclui a folga: pedir o exato não daria para enviar', () => {
+    // `maxFeeQueOSaldoAdianta` usa 90% do saldo de propósito. Então o saldo que
+    // solta o lance inteiro é o adiantado DIVIDIDO por 0,9, não o adiantado.
+    const desejada = 10_000_000_000n; // 10 gwei
+    const a = lanceAmordacado({ desejadaWei: desejada, conseguidaWei: 1n, limiteGas: LIMITE_DE_GAS, baseFeeWei: BASE_REAL_WEI, folga: 0.9 });
+    const exato = adiantadoExigido(LIMITE_DE_GAS, tetoPorGas(BASE_REAL_WEI, desejada));
+    assert.ok(a.saldoQuePrecisaria > exato, 'tem de pedir mais que o exato');
+    // E com esse saldo o lance de fato passa.
+    assert.ok(maxFeeQueOSaldoAdianta(a.saldoQuePrecisaria, LIMITE_DE_GAS) >= tetoPorGas(BASE_REAL_WEI, desejada));
 });

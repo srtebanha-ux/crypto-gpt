@@ -293,6 +293,68 @@ export function maxFeeQueOSaldoAdianta(
 }
 
 /**
+ * Quanto o saldo AMORDACOU o lance, e de quanto saldo precisaria para soltar.
+ *
+ * Existe por um silencio. O caminho do tiro corta o lance quando o gas
+ * adiantado nao cabe — `if (maxFee > adiantavel) maxFee = adiantavel` — e isso
+ * esta certo, e salvou a cacada de morrer em `insufficient funds`. Mas o corte
+ * nao dizia nada.
+ *
+ * Medido com o saldo real de 2026-09-27 (0,003341 ETH, US$ 8,99): num premio de
+ * US$ 1.986 o bot quer dar 50 gwei e consegue 2,49. Corte de 95%. E o log
+ * imprimiria um tiro de aparencia normal, com 2,49 gwei, e depois uma reversao
+ * — e nada ligaria as duas coisas. Ela veria "reverteu" e pensaria que o bot
+ * falhou, quando na verdade ele foi coberto por nao ter como cobrir.
+ *
+ * Perder a corrida por falta de gas e um resultado legitimo. Perder sem que o
+ * log diga que foi por isso e o defeito que este projeto persegue desde o
+ * primeiro dia: ausencia com cara de resposta.
+ */
+export interface LanceAmordacado {
+    /** Fracao do lance desejado que o saldo cortou, de 0 a 1. */
+    cortado: number;
+    /** O saldo que deixaria dar o lance inteiro, em wei. */
+    saldoQuePrecisaria: bigint;
+    /** True quando o corte passou do limiar e merece log. */
+    amordacado: boolean;
+}
+
+export function lanceAmordacado(entrada: {
+    desejadaWei: bigint;
+    conseguidaWei: bigint;
+    limiteGas: bigint;
+    baseFeeWei: bigint;
+    folga?: number;
+    /** Abaixo disto o corte e ruido de arredondamento e nao merece alarme. */
+    limiar?: number;
+}): LanceAmordacado {
+    const folga = entrada.folga ?? 0.9;
+    const limiar = entrada.limiar ?? 0.2;
+    // Divisao para CIMA, e nao e detalhe: `maxFeeQueOSaldoAdianta` trunca duas
+    // vezes, entao um saldo arredondado para baixo devolve um teto um wei
+    // abaixo do necessario — e a resposta "coloque este tanto" nao soltaria o
+    // lance. Um numero que erra por um wei para o lado errado e pior que
+    // nenhum, porque ela poe o dinheiro e continua amordaçada.
+    const folgaEmMilesimos = BigInt(Math.round(folga * 10_000));
+    const exigido = adiantadoExigido(entrada.limiteGas, tetoPorGas(entrada.baseFeeWei, entrada.desejadaWei));
+    const precisaria = entrada.limiteGas <= 0n || folgaEmMilesimos <= 0n
+        ? 0n
+        : (exigido * 10_000n + folgaEmMilesimos - 1n) / folgaEmMilesimos;
+    if (entrada.desejadaWei <= 0n || entrada.conseguidaWei >= entrada.desejadaWei) {
+        return { cortado: 0, saldoQuePrecisaria: precisaria, amordacado: false };
+    }
+    const cortado = 1 - Number(entrada.conseguidaWei) / Number(entrada.desejadaWei);
+    // A comparacao com o limiar e feita em INTEIROS. Em ponto flutuante
+    // `1 - 80/100` da 0,19999999999999996, que e menor que 0,2 — e um corte de
+    // exatamente 20% nao alarmaria. Fronteira decidida por erro de arredondamento
+    // e o tipo de coisa que passa em producao meses sem ninguem ver.
+    const faltou = entrada.desejadaWei - entrada.conseguidaWei;
+    const limiarEmMilesimos = BigInt(Math.round(limiar * 1_000_000));
+    const amordacado = faltou * 1_000_000n >= limiarEmMilesimos * entrada.desejadaWei;
+    return { cortado, saldoQuePrecisaria: precisaria, amordacado };
+}
+
+/**
  * O que ESTE tiro custa se der certo, em dolar.
  *
  * Diferente de `custoDeUmaDerrota`: aqui a cacada roda inteira, entao o gas
