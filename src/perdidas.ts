@@ -48,6 +48,37 @@ export function lucroEstimado(dividaUsd: Decimal): Decimal {
     return coberto.mul(AGIO).minus(coberto.mul(CUSTO_DA_VENDA)).minus(GAS_USD);
 }
 
+/**
+ * A menor divida que ainda paga o proprio tiro. Inverte `lucroEstimado`.
+ *
+ * Existe por uma medicao concreta: a brasa — as vagas mais rapidas que o bot
+ * tem — vinha sendo preenchida por ordem de fragilidade PURA, e o mais fragil
+ * de todos na Base era uma posicao de US$ 0,65. O tiro em seco mirou nela. Uma
+ * fila de prioridade ordenada por "quem cai primeiro" sem olhar o tamanho
+ * entrega as vagas rapidas ao po e manda a baleia para a fila lenta.
+ *
+ * A margem default e 1, nao 2, e isso e deliberado: este e um filtro de
+ * SELECAO, e o portao do tiro (`valeATentativa`, margem 2) vem depois com o
+ * lucro MEDIDO em vez do estimado. Excluir aqui alguem que o portao aceitaria
+ * e o erro caro — uma liquidacao perdida. Deixar entrar um talvez custa uma
+ * vaga de leitura que ja era gratuita.
+ *
+ * O custo que entra aqui deve ser o do tiro MAIS BARATO possivel (gorjeta no
+ * piso), nao o do tiro de agora: a gorjeta e proporcional ao premio, entao um
+ * alvo pequeno e perseguido com lance pequeno. Usar o custo do lance atual
+ * excluiria justamente as migalhas que ela pediu para pegar.
+ *
+ * Devolve `null` quando nao se sabe o custo do tiro. Nesse caso nao se filtra
+ * nada: um piso inventado e pior que nenhum piso.
+ */
+export function dividaMinimaQueVale(custoDoTiroUsd: Decimal | null, margem = 1): Decimal | null {
+    if (custoDoTiroUsd === null || !custoDoTiroUsd.isFinite() || custoDoTiroUsd.lessThan(0)) return null;
+    const ganhoPorDolarCoberto = AGIO.minus(CUSTO_DA_VENDA);
+    if (ganhoPorDolarCoberto.lessThanOrEqualTo(0)) return null;
+    const lucroNecessario = custoDoTiroUsd.mul(margem).plus(GAS_USD);
+    return lucroNecessario.mul(FATIA_COBRIVEL).dividedBy(ganhoPorDolarCoberto);
+}
+
 /** Converte um valor cru para dolares. `null` quando falta preco ou casas. */
 export function emDolar(
     cru: bigint | Decimal,

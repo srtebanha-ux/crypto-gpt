@@ -4,9 +4,9 @@ import { Wallet, JsonRpcProvider } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
-import { emDolar, lucroEstimado, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
+import { emDolar, lucroEstimado, dividaMinimaQueVale, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDeQualquerFonte, quedaDoMercado } from './precoDeMercado';
@@ -59,7 +59,13 @@ export function maiorQuedaDesdeABase(base: Map<string, Decimal>, agora: Map<stri
 }
 
 /** Uma posicao medida: quem e, e a que distancia de ser liquidada. */
-export interface Medida { devedor: string; queda: Decimal }
+/**
+ * Uma posicao medida. `dividaUsd` vem DE GRACA na mesma palavra do
+ * `getUserAccountData` que da a saude, e era jogada no lixo: sem ela a fila de
+ * prioridade do bot nao sabe distinguir uma divida de US$ 0,65 de uma de
+ * US$ 4.000. `null` quando a resposta nao trouxe o campo.
+ */
+export interface Medida { devedor: string; queda: Decimal; dividaUsd: Decimal | null }
 
 /** As tres camadas, e a regua do gatilho que separa a primeira da segunda. */
 export interface Camadas {
@@ -68,6 +74,10 @@ export interface Camadas {
     margemDaBrasa: Decimal;
     /** A menor distancia ate liquidar de TODAS: quem cai primeiro no mundo. */
     menorMargem: Decimal | null;
+    /** Quantas foram descartadas por serem pequenas demais para pagar o gas. */
+    poEmDemasia: number;
+    /** Quantas sobraram: as que valem uma vaga na fila rapida. */
+    valemUmTiro: number;
 }
 
 /**
@@ -95,8 +105,21 @@ export function repartirPorFragilidade(
     medidos: Medida[],
     vagasNaBrasa: number,
     margemQuente: number,
+    pisoDeDividaUsd: Decimal | null = null,
 ): Camadas {
-    const ordenados = [...medidos].sort((a, b) => a.queda.comparedTo(b.queda));
+    // O filtro de TAMANHO vem antes da ordenacao, e e por isso que existe.
+    // A brasa e uma fila de prioridade — as vagas mais rapidas que o bot tem —
+    // e ordenar por fragilidade pura entrega essas vagas a quem nunca vai
+    // valer um tiro. O tiro em seco provou isso: o mais fragil de 234 devia
+    // US$ 0,65, e era nele que o bot apontava.
+    //
+    // Quem nao tem divida lida (`null`) NAO e descartado: cortar por falta de
+    // dado e transformar uma leitura incompleta em decisao, o defeito que este
+    // projeto ja encontrou dezenas de vezes.
+    const cabem = pisoDeDividaUsd === null
+        ? medidos
+        : medidos.filter((m) => m.dividaUsd === null || m.dividaUsd.greaterThanOrEqualTo(pisoDeDividaUsd));
+    const ordenados = [...cabem].sort((a, b) => a.queda.comparedTo(b.queda));
     const brasa = ordenados.slice(0, Math.max(0, vagasNaBrasa));
     const resto = ordenados.slice(brasa.length);
     const quentes = resto.filter((m) => m.queda.lessThanOrEqualTo(margemQuente));
@@ -108,6 +131,8 @@ export function repartirPorFragilidade(
         quentes: quentes.map((m) => m.devedor),
         margemDaBrasa,
         menorMargem: ordenados.length > 0 ? ordenados[0].queda : null,
+        poEmDemasia: medidos.length - cabem.length,
+        valemUmTiro: cabem.length,
     };
 }
 
@@ -951,11 +976,11 @@ async function principal(): Promise<'parar' | void> {
      * a cacada, o que e exatamente o que se quer. O que se testa e todo o
      * resto — e nada e enviado.
      */
-    async function tiroEmSeco(): Promise<void> {
+    async function tiroEmSeco(alvoPedido?: string): Promise<void> {
         const passos: Record<string, string> = {};
         try {
-            const alvoDoEnsaio = brasa[0];
-            if (!alvoDoEnsaio) { log.warn('[EM SECO] Sem ninguém na brasa para ensaiar.'); return; }
+            const alvoDoEnsaio = alvoPedido ?? brasa[0];
+            if (!alvoDoEnsaio) { log.warn('[EM SECO] Sem ninguém para ensaiar.'); return; }
             passos.alvo = alvoDoEnsaio;
 
             const montados = await montarAlvos([alvoDoEnsaio], moedas, dataProvider!, precos, casas);
@@ -1341,10 +1366,18 @@ async function principal(): Promise<'parar' | void> {
                         const dadoConta = loteGigante[i];
                         if (!dadoConta) continue;
                         try {
-                            const queda = quedaAteLiquidar(decodificarContaDoUsuario(dadoConta).saude);
+                            const conta = decodificarContaDoUsuario(dadoConta);
+                            const queda = quedaAteLiquidar(conta.saude);
                             if (queda === null) continue;
                             if (queda.isZero()) { if (!caidos.includes(aLer[i])) caidos.push(aLer[i]); }
-                            else medidos.push({ devedor: aLer[i], queda });
+                            // A Aave responde a divida em "moeda base": dolares
+                            // com 8 casas. Vem na mesma resposta da saude, de
+                            // graca, e era descartada.
+                            else medidos.push({
+                                devedor: aLer[i],
+                                queda,
+                                dividaUsd: conta.dividaBase.dividedBy(1e8),
+                            });
                         } catch {}
                     }
 
@@ -1367,20 +1400,41 @@ async function principal(): Promise<'parar' | void> {
                         // e o diagnostico apontaria 'cobertura' quando o
                         // problema era velocidade.
                         await contarAsQuePassaram(blocoAtual);
-                        const camadas = repartirPorFragilidade(medidos, vagasNaBrasa, MARGEM_QUENTE);
+                        // O piso sai do tiro MAIS BARATO possivel — gorjeta no
+                        // piso — e nao do lance de agora: a gorjeta e
+                        // proporcional ao premio, entao migalha se persegue com
+                        // lance de migalha. Usar o custo do lance atual
+                        // excluiria exatamente as migalhas que sao o alvo.
+                        const pisoDeDivida = dividaMinimaQueVale(
+                            custoDoTiroUsd(PISO_DA_GORJETA_WEI, baseFeeAtual ?? 0n, precoDoEth()),
+                        );
+                        const camadas = repartirPorFragilidade(medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida);
                         brasa = camadas.brasa;
                         quentes = camadas.quentes;
                         margemDaBrasa = camadas.margemDaBrasa;
                         menorMargem = camadas.menorMargem;
-                        if (!jaEnsaiou && brasa.length > 0) {
+                        // O ensaio exercita o CAMINHO, nao ganha dinheiro:
+                        // se a brasa ficou vazia porque todo mundo esta abaixo
+                        // do piso de tamanho, qualquer devedor nao-liquidavel
+                        // serve. Sem esta saida o piso calaria justamente o
+                        // unico teste que prova que o tiro sai.
+                        const paraEnsaiar = brasa[0]
+                            ?? [...medidos].sort((a, b) => a.queda.comparedTo(b.queda))[0]?.devedor;
+                        if (!jaEnsaiou && paraEnsaiar) {
                             jaEnsaiou = true;
-                            void tiroEmSeco();
+                            void tiroEmSeco(paraEnsaiar);
                         }
                         ultimoCompleto = Date.now();
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
                             alvosChecados: aLer.length,
                             naBrasa: brasa.length,
                             naListaQuente: quentes.length,
+                            // A resposta para "por que 23h sem nada": nao e o
+                            // bot que esta cego, e a lista que e de po. Sem
+                            // este numero "naBrasa 234" parecia 234 alvos.
+                            valemUmTiro: pisoDeDivida === null
+                                ? `${medidos.length} (sem cotação do ETH: não filtrei por tamanho)`
+                                : `${camadas.valemUmTiro} de ${medidos.length} — ${camadas.poEmDemasia} devem menos de US$ ${pisoDeDivida.toFixed(2)} e não pagariam o próprio gás`,
                             gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
                             tempoDeResposta: `${Date.now() - inicioDoCiclo}ms`,
                             ondeFoiOTempo:

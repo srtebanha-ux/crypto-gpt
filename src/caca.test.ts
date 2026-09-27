@@ -4,6 +4,8 @@ import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
 import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade } from './cacarAoVivo';
+import { dividaMinimaQueVale, lucroEstimado } from './perdidas';
+import { custoDoTiroUsd, PISO_DA_GORJETA_WEI } from './prontidao';
 
 const coder = AbiCoder.defaultAbiCoder();
 const A = '0x1111111111111111111111111111111111111111';
@@ -216,6 +218,7 @@ test('a brasa cabe nas vagas que sobram do multicall dos preços', () => {
     const medidos = Array.from({ length: 1166 }, (_, i) => ({
         devedor: `0x${String(i).padStart(40, '0')}`,
         queda: new Decimal(0.03 + i * 0.02),
+        dividaUsd: new Decimal(5000),
     }));
     const c = repartirPorFragilidade(medidos, vagas, 25);
     assert.equal(c.brasa.length, vagas);
@@ -229,10 +232,10 @@ test('a brasa sai ORDENADA POR FRAGILIDADE, não pela ordem que chegou', () => {
     // O defeito mais repetido deste projeto: fatiar slice(0, N) de uma lista
     // ordenada por outra coisa e publicar a amostra como se fosse ranking.
     const medidos = [
-        { devedor: '0xA', queda: new Decimal(40) },
-        { devedor: '0xB', queda: new Decimal(0.5) },
-        { devedor: '0xC', queda: new Decimal(9) },
-        { devedor: '0xD', queda: new Decimal(2) },
+        { devedor: '0xA', queda: new Decimal(40), dividaUsd: new Decimal(5000) },
+        { devedor: '0xB', queda: new Decimal(0.5), dividaUsd: new Decimal(5000) },
+        { devedor: '0xC', queda: new Decimal(9), dividaUsd: new Decimal(5000) },
+        { devedor: '0xD', queda: new Decimal(2), dividaUsd: new Decimal(5000) },
     ];
     const c = repartirPorFragilidade(medidos, 2, 25);
     assert.deepEqual(c.brasa, ['0xB', '0xD']);
@@ -241,7 +244,7 @@ test('a brasa sai ORDENADA POR FRAGILIDADE, não pela ordem que chegou', () => {
 });
 
 test('brasa que cobre todo mundo dentro da margem arma o gatilho na margem', () => {
-    const c = repartirPorFragilidade([{ devedor: '0xA', queda: new Decimal(3) }], 10, 25);
+    const c = repartirPorFragilidade([{ devedor: '0xA', queda: new Decimal(3), dividaUsd: new Decimal(5000) }], 10, 25);
     assert.deepEqual(c.brasa, ['0xA']);
     assert.deepEqual(c.quentes, []);
     assert.equal(c.margemDaBrasa.toNumber(), 25);
@@ -303,4 +306,151 @@ test('a comparação ignora maiúsculas do checksum', () => {
 test('os seletores de cofre() e dono() sao os que o contrato publica', () => {
     assert.equal(SELETOR_COFRE, '0x8fb8a14a');
     assert.equal(SELETOR_DONO, '0x70514bea');
+});
+
+// ---------------------------------------------------------------------------
+// O piso de TAMANHO da brasa.
+//
+// Estes testes existem por uma linha de log real, do tiro em seco de
+// 2026-09-27: o alvo escolhido — o mais fragil de 234 na brasa — pediria
+// emprestado 119.283.982.799.745 wei de WETH. Isso e US$ 0,32. A divida
+// inteira era US$ 0,65. A fila mais rapida do bot estava apontada para po, e
+// o log dizia "naBrasa: 234" como se fossem 234 alvos.
+// ---------------------------------------------------------------------------
+
+/** As condicoes exatas do log do tiro em seco. */
+const BASEFEE_DO_LOG = 20_000_000n;              // 0,0200 gwei
+const ETH_DO_LOG = new Decimal('2714.75');
+const DIVIDA_DO_ALVO_DO_LOG = new Decimal('0.6477');   // 2 x US$ 0,32
+
+test('o piso de tamanho sai do tiro MAIS BARATO, e o alvo do tiro em seco fica 37x abaixo dele', () => {
+    const custoMinimo = custoDoTiroUsd(PISO_DA_GORJETA_WEI, BASEFEE_DO_LOG, ETH_DO_LOG);
+    assert.ok(custoMinimo !== null);
+    // 700.000 de gás x 0,12 gwei = 0,000084 ETH.
+    assert.equal(custoMinimo!.toFixed(4), '0.2280');
+
+    const piso = dividaMinimaQueVale(custoMinimo);
+    assert.ok(piso !== null);
+    assert.equal(piso!.toFixed(2), '23.95');
+
+    // O alvo que o bot mirou não chega nem perto.
+    assert.ok(piso!.dividedBy(DIVIDA_DO_ALVO_DO_LOG).greaterThan(35),
+        `o alvo do log devia US$ ${DIVIDA_DO_ALVO_DO_LOG.toFixed(2)}, ${piso!.dividedBy(DIVIDA_DO_ALVO_DO_LOG).toFixed(0)}x abaixo do piso`);
+
+    // E o lucro dele é centavos de centavo — menos que o gás.
+    assert.ok(lucroEstimado(DIVIDA_DO_ALVO_DO_LOG).lessThan(0),
+        'liquidar US$ 0,65 dá prejuízo depois do gás');
+});
+
+test('quem está exatamente no piso entra: o corte é >=, não >', () => {
+    const piso = dividaMinimaQueVale(new Decimal('0.2280390'));
+    const c = repartirPorFragilidade(
+        [{ devedor: '0xA', queda: new Decimal(1), dividaUsd: piso }],
+        10, 25, piso,
+    );
+    assert.deepEqual(c.brasa, ['0xA']);
+    assert.equal(c.poEmDemasia, 0);
+});
+
+test('o piso da SELEÇÃO é mais frouxo que o portão do TIRO — errar excluindo é o erro caro', () => {
+    const custo = new Decimal('0.2280390');
+    const daSelecao = dividaMinimaQueVale(custo, 1)!;
+    const doPortao = dividaMinimaQueVale(custo, 2)!;
+    assert.ok(daSelecao.lessThan(doPortao),
+        `seleção US$ ${daSelecao.toFixed(2)} tem de ser menor que portão US$ ${doPortao.toFixed(2)}`);
+    // Nada que o portão aceitaria pode ser cortado antes de chegar nele.
+    assert.ok(lucroEstimado(doPortao).greaterThanOrEqualTo(custo.mul(2).minus(1e-9)));
+});
+
+test('pó mais frágil NÃO rouba a vaga da baleia menos frágil', () => {
+    // O defeito, no menor caso que o mostra: uma vaga, duas posições.
+    const piso = new Decimal(24);
+    const medidos = [
+        { devedor: '0xPO',     queda: new Decimal(0.01), dividaUsd: new Decimal('0.65') },
+        { devedor: '0xBALEIA', queda: new Decimal(3),    dividaUsd: new Decimal(4000) },
+    ];
+    const semPiso = repartirPorFragilidade(medidos, 1, 25);
+    assert.deepEqual(semPiso.brasa, ['0xPO'], 'sem piso, a fragilidade pura entrega a vaga ao pó');
+
+    const comPiso = repartirPorFragilidade(medidos, 1, 25, piso);
+    assert.deepEqual(comPiso.brasa, ['0xBALEIA']);
+    assert.equal(comPiso.poEmDemasia, 1);
+    assert.equal(comPiso.valemUmTiro, 1);
+});
+
+test('a régua da postura (menorMargem) para de ser ditada pelo pó', () => {
+    // menorMargem alimenta posturaPorMargem: é ela que decide se o bot vai
+    // para 200ms. Vinda do pó, o bot acelerava por uma posição de US$ 0,65.
+    const medidos = [
+        { devedor: '0xPO',     queda: new Decimal(0.004), dividaUsd: new Decimal('0.65') },
+        { devedor: '0xBALEIA', queda: new Decimal(6),     dividaUsd: new Decimal(4000) },
+    ];
+    assert.equal(repartirPorFragilidade(medidos, 5, 25).menorMargem!.toNumber(), 0.004);
+    assert.equal(repartirPorFragilidade(medidos, 5, 25, new Decimal(24)).menorMargem!.toNumber(), 6);
+});
+
+test('o gatilho (margemDaBrasa) também passa a ignorar o pó que ficou de fora', () => {
+    const medidos = [
+        { devedor: '0xA', queda: new Decimal(1),  dividaUsd: new Decimal(4000) },
+        { devedor: '0xPO', queda: new Decimal(2), dividaUsd: new Decimal('0.65') },
+        { devedor: '0xB', queda: new Decimal(8),  dividaUsd: new Decimal(4000) },
+    ];
+    // Uma vaga só. Sem piso o gatilho seria a margem do pó (2%): o bot releria
+    // a lista quente por causa de alguém que nunca valeria um tiro.
+    assert.equal(repartirPorFragilidade(medidos, 1, 25).margemDaBrasa.toNumber(), 2);
+    assert.equal(repartirPorFragilidade(medidos, 1, 25, new Decimal(24)).margemDaBrasa.toNumber(), 8);
+});
+
+test('sem cotação do ETH não se filtra nada: piso inventado é pior que piso nenhum', () => {
+    assert.equal(dividaMinimaQueVale(null), null);
+    assert.equal(custoDoTiroUsd(PISO_DA_GORJETA_WEI, BASEFEE_DO_LOG, null), null);
+    const medidos = [{ devedor: '0xPO', queda: new Decimal(0.01), dividaUsd: new Decimal('0.65') }];
+    const c = repartirPorFragilidade(medidos, 10, 25, null);
+    assert.deepEqual(c.brasa, ['0xPO'], 'sem piso a lista passa inteira — cego é melhor que cego achando que vê');
+    assert.equal(c.poEmDemasia, 0);
+    assert.equal(c.valemUmTiro, 1);
+});
+
+test('dívida NÃO lida não é descartada: falta de dado não vira decisão', () => {
+    const medidos = [{ devedor: '0xSEMDADO', queda: new Decimal(0.5), dividaUsd: null }];
+    const c = repartirPorFragilidade(medidos, 10, 25, new Decimal(24));
+    assert.deepEqual(c.brasa, ['0xSEMDADO']);
+    assert.equal(c.poEmDemasia, 0);
+});
+
+test('a conta fecha: o que vale mais o que foi cortado é o total medido', () => {
+    const medidos = Array.from({ length: 50 }, (_, i) => ({
+        devedor: `0x${String(i).padStart(40, '0')}`,
+        queda: new Decimal(1 + i * 0.1),
+        // Um em cada três é pó.
+        dividaUsd: i % 3 === 0 ? new Decimal('0.65') : new Decimal(5000),
+    }));
+    const c = repartirPorFragilidade(medidos, 234, 25, new Decimal(24));
+    assert.equal(c.valemUmTiro + c.poEmDemasia, 50);
+    assert.equal(c.poEmDemasia, 17);
+    assert.equal(c.brasa.length, 33);
+});
+
+test('um piso maior que todo mundo deixa a brasa vazia — e isso é informação, não bug', () => {
+    // Base com gás caríssimo: o piso sobe e pode passar de todo mundo. A brasa
+    // vazia com o número do pó ao lado é a resposta para "por que 23h sem
+    // nada": não é o bot que está cego, é a lista que é de pó.
+    const medidos = [
+        { devedor: '0xA', queda: new Decimal(1), dividaUsd: new Decimal(10) },
+        { devedor: '0xB', queda: new Decimal(2), dividaUsd: new Decimal(20) },
+    ];
+    const c = repartirPorFragilidade(medidos, 234, 25, new Decimal(100));
+    assert.deepEqual(c.brasa, []);
+    assert.deepEqual(c.quentes, []);
+    assert.equal(c.menorMargem, null);
+    assert.equal(c.poEmDemasia, 2);
+    assert.equal(c.valemUmTiro, 0);
+    assert.equal(c.margemDaBrasa.toNumber(), 25);
+});
+
+test('gás caro na Base sobe o piso: a mesma lista vale menos quando o bloco cobra mais', () => {
+    const caro = custoDoTiroUsd(PISO_DA_GORJETA_WEI, 5_000_000_000n, ETH_DO_LOG); // 5 gwei
+    const barato = custoDoTiroUsd(PISO_DA_GORJETA_WEI, BASEFEE_DO_LOG, ETH_DO_LOG);
+    assert.ok(dividaMinimaQueVale(caro)!.greaterThan(dividaMinimaQueVale(barato)!.mul(10)),
+        'a 5 gwei o piso tem de subir em mais de uma ordem de grandeza');
 });
