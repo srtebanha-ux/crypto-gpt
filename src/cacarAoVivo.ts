@@ -9,6 +9,7 @@ import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, D
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
+import { registrar as registrarDeriva, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDeQualquerFonte, quedaDoMercado } from './precoDeMercado';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
@@ -761,6 +762,16 @@ async function principal(): Promise<'parar' | void> {
     let quentes: string[] = [];
     /** Os mais frageis de todos: viajam de graca no multicall dos precos. */
     let brasa: string[] = [];
+    /**
+     * A saude de cada um da brasa ao longo do tempo.
+     *
+     * Existe porque o alvo mais fragil que sobrou depois do piso de tamanho tem
+     * garantia USDC contra divida USDC, e nesse caso o preco CANCELA na conta da
+     * saude: ela cai so por juro, numa reta, sem o mercado fazer nada. Reta da
+     * para extrapolar — e ai o alvo deixa de ser surpresa e passa a ter hora.
+     * A leitura ja acontece a cada ciclo; guardar nao custa CU nenhum.
+     */
+    const historicoDeSaude = new Map<string, Amostra[]>();
     /** A margem do primeiro que ficou de fora da brasa: a regua do gatilho. */
     let margemDaBrasa = new Decimal(0);
     let ultimoSinalDeVida = 0;
@@ -1045,6 +1056,16 @@ async function principal(): Promise<'parar' | void> {
             passos.adiantadoCabe = adiantavel > base ? 'sim' : 'NÃO — não conseguiria enviar';
             passos.nonce = String(await nonceManager!.getNextNonce());
             await nonceManager!.sync(); // devolve o contador ao valor da rede
+            // A pergunta que o log nao respondia: QUANTO FALTA para este alvo.
+            // Sai de graca — a varredura acabou de medir a margem dele, e o
+            // ensaio mira justamente o primeiro da brasa.
+            passos.margemDoAlvo = menorMargem === null
+                ? 'ainda não medida'
+                : `precisa cair ${menorMargem.toFixed(4)}% para virar alvo`;
+            const projecao = projetar(historicoDeSaude.get(alvoDoEnsaio.toLowerCase()) ?? []);
+            passos.chegaPorJuro = projecao.cruza
+                ? `em ${emQuantoTempo(projecao.emMs)} (${projecao.taxaAnual.mul(100).toFixed(2)}%/ano, ${projecao.amostras} amostras)`
+                : `não projetável: ${projecao.porque}`;
 
             const tudoOk = veredicto.vale && adiantavel > base && ethUsd !== null;
             if (tudoOk) log.info('[EM SECO] Caminho de tiro INTEIRO conferido. Se alguém cair, o tiro sai.', passos);
@@ -1319,7 +1340,9 @@ async function principal(): Promise<'parar' | void> {
                 const dadoConta = resp[inicioDaBrasa + i];
                 if (!dadoConta) continue;
                 try {
-                    const queda = quedaAteLiquidar(decodificarContaDoUsuario(dadoConta).saude);
+                    const saude = decodificarContaDoUsuario(dadoConta).saude;
+                    registrarDeriva(historicoDeSaude, brasa[i]!, saude, Date.now());
+                    const queda = quedaAteLiquidar(saude);
                     if (queda !== null && queda.isZero()) caidos.push(brasa[i]);
                 } catch {}
             }
@@ -1411,6 +1434,11 @@ async function principal(): Promise<'parar' | void> {
                         const camadas = repartirPorFragilidade(medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida);
                         brasa = camadas.brasa;
                         quentes = camadas.quentes;
+                        // Quem saiu da brasa leva o historico embora. Sem isso
+                        // uma posicao que voltasse teria amostras de dois
+                        // regimes diferentes na mesma reta, e a reta inventaria
+                        // uma previsao.
+                        esquecerQuemSaiu(historicoDeSaude, brasa);
                         margemDaBrasa = camadas.margemDaBrasa;
                         menorMargem = camadas.menorMargem;
                         // O ensaio exercita o CAMINHO, nao ganha dinheiro:
@@ -1436,6 +1464,22 @@ async function principal(): Promise<'parar' | void> {
                                 ? `${medidos.length} (sem cotação do ETH: não filtrei por tamanho)`
                                 : `${camadas.valemUmTiro} de ${medidos.length} — ${camadas.poEmDemasia} devem menos de US$ ${pisoDeDivida.toFixed(2)} e não pagariam o próprio gás`,
                             gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
+                            // Para os alvos cujo preco CANCELA na conta da saude
+                            // (garantia e divida na mesma moeda), a chegada e
+                            // calculavel dias antes. Este e o unico numero do
+                            // log que fala do FUTURO, e ele so aparece quando
+                            // as tres guardas de `projetar` deixam.
+                            chegandoPorJuro: (() => {
+                                const fila = oQueVemPorAi(historicoDeSaude, 30 * 86_400_000);
+                                if (fila.length === 0) {
+                                    return historicoDeSaude.size < 2
+                                        ? 'ainda medindo a deriva'
+                                        : 'ninguém com deriva de juro projetável em 30 dias';
+                                }
+                                return fila.slice(0, 3)
+                                    .map((c) => `${c.devedor.slice(0, 10)}… em ${emQuantoTempo(c.emMs)} (${c.taxaAnual.mul(100).toFixed(2)}%/ano)`)
+                                    .join(' | ');
+                            })(),
                             tempoDeResposta: `${Date.now() - inicioDoCiclo}ms`,
                             ondeFoiOTempo:
                                 `rede ${ultimaMedicao.msRede}ms somados / decodificação ${ultimaMedicao.msDecode}ms ` +
