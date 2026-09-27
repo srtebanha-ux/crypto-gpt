@@ -163,6 +163,37 @@ export function lucroEstimado(
 }
 
 /**
+ * Qual de dois premios e o MAIOR — e, no empate, qual deles decide.
+ *
+ * Existe porque o lucro SATURA no teto do pool (`lucroMaximo`, US$ 1.985,95
+ * medido em 2026-09-27): uma divida de US$ 1,9M e uma de US$ 5M rendem
+ * exatamente o mesmo numero, ate a ultima casa, porque a Aerodrome nao aguenta
+ * vender mais que a fatia otima. Entao empate nao e caso raro entre baleias, e
+ * o caso NORMAL.
+ *
+ * Com `>` estrito o desempate caia na ordem do array, que e a ordem em que o
+ * multicall voltou. Em 2026-09-27 isso publicou `5%: maior US$ 1986 a 3.85%` as
+ * 19:46 e `a 4.04%` as 20:02, e `10%: ... a 6.05%` virou `a 9.48%`: parecia o
+ * premio se afastando do alcance e NADA tinha se movido — era outra baleia
+ * empatada ganhando o desempate. Ausencia com cara de resposta, medida rodando
+ * `oQueUmaQuedaRenderia` com a MESMA lista em duas ordens.
+ *
+ * No empate vence quem esta MAIS PERTO de cair, porque e UM alvo por vez que
+ * dispara: entre dois premios iguais, o que decide e o que chega primeiro.
+ *
+ * Devolve negativo quando `a` vem antes de `b`, no formato que `Array.sort`
+ * espera — e a MESMA regra que escolhe o maior de um degrau e a que ordena a
+ * lista do olho nos alvos, para as duas nao divergirem de novo.
+ */
+export function comparaPremio(
+    a: { lucroUsd: Decimal; quedaPct: Decimal },
+    b: { lucroUsd: Decimal; quedaPct: Decimal },
+): number {
+    const porLucro = b.lucroUsd.comparedTo(a.lucroUsd);
+    return porLucro !== 0 ? porLucro : a.quedaPct.comparedTo(b.quedaPct);
+}
+
+/**
  * A menor divida que ainda paga o proprio tiro. Inverte `lucroDaCobertura`.
  *
  * Existe por uma medicao concreta: a brasa — as vagas mais rapidas que o bot

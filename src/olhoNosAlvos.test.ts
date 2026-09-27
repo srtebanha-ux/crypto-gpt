@@ -127,3 +127,23 @@ test('o resumo ignora quem saiu e quem dá prejuízo', () => {
     assert.equal(r.naFaixa.length, 1);
     assert.equal(r.naFaixa[0]!.devedor, '0xBOM');
 });
+
+test('no empate de prêmio, o resumo aponta quem cai primeiro', () => {
+    // A gêmea do defeito de `oQueUmaQuedaRenderia`: o lucro satura no teto do
+    // pool (US$ 1.985,95 medido em 2026-09-27), então duas baleias empatam até a
+    // última casa e `sort` devolvia a ordem do array — a ordem em que o multicall
+    // voltou. `melhorDeTodos` virava sorteio.
+    //
+    // Mesma lista em duas ordens, mesma resposta: a que está mais PERTO.
+    const perto = alvo('0xPERTO', 2.125, 1933691, 1985.95);
+    const longe = alvo('0xLONGE', 9.48, 5000000, 1985.95);
+    for (const lista of [[perto, longe], [longe, perto]]) {
+        const r = resumir(lista, null);
+        assert.equal(r.melhorDeTodos!.devedor, '0xPERTO');
+        assert.equal(r.naFaixa[0]!.devedor, '0xPERTO');
+    }
+    // E com teto, "o melhor que ele NÃO alcança" também é o mais perto dos dois.
+    for (const lista of [[perto, longe], [longe, perto]]) {
+        assert.equal(resumir(lista, new Decimal('66.78')).melhorForaDaFaixa!.devedor, '0xPERTO');
+    }
+});

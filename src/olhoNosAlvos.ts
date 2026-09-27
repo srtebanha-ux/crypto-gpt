@@ -17,6 +17,7 @@
 // justamente para isso, e a primeira (monotonicidade) reprovaria qualquer serie
 // de preco. Entao aqui se mostra o que ANDOU, medido, e nao o que vai andar.
 import { Decimal } from 'decimal.js';
+import { comparaPremio } from './perdidas';
 
 export interface Alvo {
     devedor: string;
@@ -129,7 +130,12 @@ export interface Resumo {
 export function resumir(alvos: Alvo[], tetoDaFaixa: Decimal | null): Resumo {
     const vivos = alvos.filter((a) => a.queda !== null && a.lucroUsd.greaterThan(0));
     const cabe = (a: Alvo) => tetoDaFaixa === null || a.lucroUsd.lessThanOrEqualTo(tetoDaFaixa);
-    const porValor = [...vivos].sort((a, b) => b.lucroUsd.comparedTo(a.lucroUsd));
+    // Ordenar por lucro so NAO basta: o lucro satura no teto do pool, entao as
+    // baleias empatam e o empate caia na ordem do array. `comparaPremio` e a
+    // mesma regra que escolhe o maior de um degrau em `oQueUmaQuedaRenderia` —
+    // uma regra em dois lugares e a mesma regra.
+    const porValor = [...vivos].sort((a, b) =>
+        comparaPremio({ lucroUsd: a.lucroUsd, quedaPct: a.queda! }, { lucroUsd: b.lucroUsd, quedaPct: b.queda! }));
     const naFaixa = porValor.filter(cabe);
     return {
         naFaixa,

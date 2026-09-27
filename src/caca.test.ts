@@ -551,6 +551,31 @@ test('o caso real: um alvo a 1,1562% e o que viria atrás dele', () => {
     assert.ok(t[1]!.lucroUsd.greaterThan(t[0]!.lucroUsd.mul(50)));
 });
 
+test('o caso real de 2026-09-27: duas baleias empatadas no teto do pool', () => {
+    // O log das 19:46 disse `5%: maior US$ 1986 a 3.85%` e o das 20:02, dezesseis
+    // minutos depois, `a 4.04%`; no degrau de 10% foi de 6.05% para 9.48%. Parecia
+    // o prêmio se afastando do alcance. NADA havia se movido: o lucro satura no
+    // teto do pool (US$ 1.985,95), então as baleias empatam até a última casa e o
+    // desempate caía na ordem em que o multicall voltou.
+    //
+    // A prova é a MESMA lista em duas ordens dando a MESMA resposta — e a resposta
+    // é a que está mais PERTO de cair, porque é um alvo por vez que dispara.
+    const perto = { devedor: '0xPERTO', queda: new Decimal('2.12'), dividaUsd: new Decimal('1933691.53') };
+    const longe = { devedor: '0xLONGE', queda: new Decimal('4.04'), dividaUsd: new Decimal(5_000_000) };
+
+    assert.equal(
+        lucroEstimado(perto.dividaUsd).toFixed(8),
+        lucroEstimado(longe.dividaUsd).toFixed(8),
+        'as duas dívidas têm que empatar, senão o teste não testa o empate',
+    );
+
+    for (const lista of [[perto, longe], [longe, perto]]) {
+        const [degrau] = oQueUmaQuedaRenderia(lista, [5]);
+        assert.equal(degrau!.maior!.quedaPct.toFixed(2), '2.12');
+        assert.equal(degrau!.maior!.lucroUsd.toFixed(0), '1986');
+    }
+});
+
 test('a linha que ela vai ler tem forma travada', () => {
     // Formatação escondida dentro de um log não tem teste, e é esta linha que
     // decide se continua na Aave da Base ou vai caçar em outro protocolo.

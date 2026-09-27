@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import {
+import { comparaPremio,
     lucroEstimado, emDolar, ondeEuEstava, montarPlacar, oQueIssoQuerDizer,
     type Perdida, type Cobertura,
 } from './perdidas';
@@ -168,4 +168,15 @@ test('piso zero conta tudo que tem cotação, e nada do que não tem', () => {
     assert.equal(placar.valiam.length, 1, 'a de um centavo entra com piso zero');
     assert.equal(placar.comCotacao, 1, 'a sem cotação não vira zero: fica de fora da conta');
     assert.equal(placar.total, 2);
+});
+
+test('comparaPremio: lucro manda, e o empate vai para quem cai primeiro', () => {
+    const p = (lucro: string, queda: string) => ({ lucroUsd: new Decimal(lucro), quedaPct: new Decimal(queda) });
+    // Lucro maior vem antes, mesmo estando mais longe.
+    assert.ok(comparaPremio(p('1986', '9.48'), p('66.42', '1.44')) < 0);
+    // Empate exato: vence o mais perto de cair, porque é UM alvo por vez.
+    assert.ok(comparaPremio(p('1985.95441843', '2.12'), p('1985.95441843', '4.04')) < 0);
+    assert.ok(comparaPremio(p('1985.95441843', '4.04'), p('1985.95441843', '2.12')) > 0);
+    // Empate nos dois campos é 0, senão `sort` fica instável de novo.
+    assert.equal(comparaPremio(p('1986', '2.12'), p('1986', '2.12')), 0);
 });

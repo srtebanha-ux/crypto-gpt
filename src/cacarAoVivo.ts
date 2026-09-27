@@ -4,7 +4,7 @@ import { Wallet, JsonRpcProvider } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
-import { emDolar, lucroEstimado, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
+import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
@@ -270,7 +270,11 @@ export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degr
             if (lucro.greaterThan(0)) {
                 lucroUsd = lucroUsd.plus(lucro);
                 quantosValem++;
-                if (maior === null || lucro.greaterThan(maior.lucroUsd)) maior = { lucroUsd: lucro, quedaPct: m.queda };
+                const candidato = { lucroUsd: lucro, quedaPct: m.queda };
+                // O desempate vive em `comparaPremio` porque o lucro satura no
+                // teto do pool: duas baleias empatam ate a ultima casa, e com
+                // `>` estrito quem ganhava era a ordem do multicall.
+                if (maior === null || comparaPremio(candidato, maior) < 0) maior = candidato;
             }
         }
         return { quedaPct, quantos: alcancados.length, quantosValem, dividaUsd, lucroUsd, maior };
