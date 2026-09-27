@@ -1134,6 +1134,33 @@ async function principal(): Promise<'parar' | void> {
     let enviados = 0;
     let janelaComecouEm = Date.now();
 
+    // O saldo de gas lido AQUI, no boot, e nao so no primeiro tiro.
+    //
+    // Era lido de forma preguicosa — no ensaio em seco e no caminho quente — e
+    // as duas coisas acontecem DEPOIS da primeira varredura completa. Resultado
+    // no log de 17:22: o placar rodou com saldo zero, `faixaQueAtira` devolveu
+    // `null` ("sem gas nao atira nada"), e o piso caiu no default de US$20 —
+    // exatamente o numero que o conserto anterior foi feito para tirar de la.
+    //
+    // Uma ida a rede no boot, uma vez, para o resto do processo saber quanto
+    // tem. Se falhar, `saldoJaLido` fica falso e quem depende dele continua
+    // dizendo "nao sei" em vez de assumir zero.
+    if (carteira !== null && donoCarteira !== null) {
+        try {
+            saldoDeGasWei = await (carteira.provider as JsonRpcProvider).getBalance(donoCarteira);
+            saldoLidoEm = Date.now();
+            saldoJaLido = true;
+            log.info('Gás na conta_bot, lido no boot.', {
+                saldo: `${new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6)} ETH`,
+                porQueAgora: 'sem isto o placar e a faixa de tiro nasciam sem saber quanto há',
+            });
+        } catch (e) {
+            log.warn('Não consegui ler o gás no boot. Sigo sem saber, e quem depende disso vai dizer que não sabe.', {
+                erro: (e as Error).message,
+            });
+        }
+    }
+
     log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
     void quandoFoiAUltimaLiquidacao(topo);
     // O tiro em seco NAO pode sair daqui: a brasa so existe depois da primeira
@@ -1430,8 +1457,15 @@ async function principal(): Promise<'parar' | void> {
         const horas = (Date.now() - desdeOBoot.emMs) / 3_600_000;
         log.info('[PLACAR] Liquidações que aconteceram sem mim.', {
             janela: `blocos ${de}–${ate}`,
+            // "sem cotacao OU sem saldo" junta duas causas com consertos
+            // diferentes numa frase so. Saber qual e a diferenca entre "espere"
+            // e "mande ETH para a conta_bot".
             pisoUsado: faixaAgora === null
-                ? 'US$ 20,00 (não sei a faixa agora: sem cotação ou sem saldo)'
+                ? `US$ 20,00 — não sei a faixa agora: ${
+                    !saldoJaLido ? 'ainda não consegui ler o gás da conta_bot'
+                    : saldoDeGasWei === 0n ? 'a conta_bot está sem gás'
+                    : precoDoEth() === null ? 'sem cotação do ETH'
+                    : 'algum freio barra qualquer prêmio'}`
                 : pisoDoPlacar === null
                     ? 'qualquer lucro acima de zero (modo prova)'
                     : `US$ ${pisoDoPlacar.toFixed(2)}`,
