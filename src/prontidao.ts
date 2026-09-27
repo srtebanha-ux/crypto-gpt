@@ -355,6 +355,60 @@ export function lanceAmordacado(entrada: {
 }
 
 /**
+ * O TIRO DE PROVA: um tiro, de proposito no prejuizo, para saber se funciona.
+ *
+ * A decisao e dela, e e boa: "mesmo que a gente gaste todo o gas pra pouco
+ * lucro, mas ai saberemos que funciona". Codigo que nunca rodou nao e codigo
+ * que funciona, e ate agora o caminho inteiro do tiro nunca saiu de verdade —
+ * `nonce: 4` ha dias, nenhuma transacao enviada. O ensaio em seco prova tudo
+ * MENOS as duas coisas que so a rede responde: a Aave aceita a liquidacao, e o
+ * contrato consegue vender a garantia e mandar o lucro para o cofre.
+ *
+ * O que este modo faz: derruba a exigencia de lucro (de "2x o custo" para
+ * "qualquer lucro acima de zero"), o que abre a faixa de baixo — de US$ 0,45
+ * para centavos. E ai o alvo mais barato do mundo serve, e a prova custa o gas
+ * de um tiro minimo, uns US$ 0,25, em vez dos US$ 4,71 de um tiro grande.
+ *
+ * O que este modo NAO faz, de proposito: nao desliga a protecao contra baleia
+ * amordaçada. A prova que ela quer e de uma migalha; gastar o gas todo numa
+ * baleia que provavelmente perde a corrida nao prova nada e acaba com o
+ * dinheiro da prova.
+ *
+ * A TRAVA, que e a parte que importa: um tiro significa UM. O container do
+ * Railway reinicia varias vezes por dia e uma trava em memoria voltaria armada
+ * a cada reinicio — tres reinicios e o gas acaba. Entao a trava mora na
+ * blockchain: o nonce da carteira. Ele so sobe quando uma transacao sai, nunca
+ * volta, e e lido no boot de graca. `ateNonce` e o nonce de hoje; assim que o
+ * tiro de prova sair, o nonce passa dele e o modo se desarma sozinho, para
+ * sempre, em qualquer container.
+ */
+export function tiroDeProvaArmado(entrada: {
+    ligado: boolean;
+    nonceAtual: number;
+    /** O nonce de HOJE. O tiro de prova vale enquanto o nonce nao passar disto. */
+    ateNonce: number;
+}): { armado: boolean; porque: string } {
+    if (!entrada.ligado) return { armado: false, porque: 'CACA_TIRO_DE_PROVA não está ligado' };
+    if (!Number.isInteger(entrada.nonceAtual) || entrada.nonceAtual < 0) {
+        return { armado: false, porque: `nonce inválido (${entrada.nonceAtual}) — não arrisco sem saber` };
+    }
+    if (!Number.isInteger(entrada.ateNonce) || entrada.ateNonce < 0) {
+        return { armado: false, porque: 'CACA_TIRO_DE_PROVA_ATE_NONCE não foi definido — sem trava eu não armo' };
+    }
+    if (entrada.nonceAtual > entrada.ateNonce) {
+        return {
+            armado: false,
+            porque: `já saiu tiro: nonce ${entrada.nonceAtual} passou de ${entrada.ateNonce}. A prova foi feita`,
+        };
+    }
+    return {
+        armado: true,
+        porque: `ARMADO: nonce ${entrada.nonceAtual} ainda não passou de ${entrada.ateNonce}. ` +
+            'Este tiro é para PROVAR, não para lucrar',
+    };
+}
+
+/**
  * A REGRA DO TIRO, num lugar so.
  *
  * Existe por uma mentira no log. O ensaio em seco imprimia "Se alguem cair, o
@@ -388,6 +442,8 @@ export interface DecisaoDoTiro {
     custoUsd: Decimal | null;
     custoSePerderWei: bigint;
     aguentaDerrotas: number;
+    /** True quando este tiro so passou porque o modo prova baixou a exigencia. */
+    soPassouPorSerProva: boolean;
     adiantadoWei: bigint;
     adiantavelWei: bigint;
 }
@@ -405,6 +461,11 @@ export function decidirTiro(e: {
     margemMinima?: number;
     tetoDaMordida?: number;
     atirarAmordacado?: boolean;
+    /**
+     * Modo prova: aceita qualquer lucro acima de zero em vez de exigir 2x o
+     * custo. NAO desliga a protecao contra baleia amordaçada.
+     */
+    tiroDeProva?: boolean;
 }): DecisaoDoTiro {
     const limiteGas = e.limiteGas ?? LIMITE_DE_GAS;
     const fracaoDoLucro = fracaoAdaptativa({
@@ -439,7 +500,9 @@ export function decidirTiro(e: {
     });
 
     const custoUsd = custoDoTiroUsd(prioridadeWei, e.baseFeeWei, e.precoDoEthUsd);
-    const veredicto = valeATentativa(e.lucroUsd, custoUsd, e.margemMinima ?? 2);
+    // No modo prova a margem cai para zero: qualquer lucro acima de zero passa.
+    // Nao e descuido, e o preco da informacao — e ela escolheu pagar.
+    const veredicto = valeATentativa(e.lucroUsd, custoUsd, e.tiroDeProva ? 0 : (e.margemMinima ?? 2));
 
     let maxFeeWei = tetoPorGas(e.baseFeeWei, prioridadeWei);
     const adiantavelWei = maxFeeQueOSaldoAdianta(e.saldoWei, limiteGas);
@@ -465,9 +528,14 @@ export function decidirTiro(e: {
         atirarAmordacado: e.atirarAmordacado,
     });
 
+    // Se o tiro passa NA PROVA mas nao passaria na regra normal, a pessoa tem
+    // de ver isso escrito: senao o primeiro acerto vira "ele funciona e da
+    // lucro" quando foi "ele funciona e deu prejuizo de proposito".
+    const passariaNormal = valeATentativa(e.lucroUsd, custoUsd, e.margemMinima ?? 2).vale;
     const comum = {
         prioridadeWei, maxFeeWei, desejadaWei, amordaca, risco, fracaoDoLucro,
         custoUsd, custoSePerderWei, aguentaDerrotas,
+        soPassouPorSerProva: (e.tiroDeProva ?? false) && veredicto.vale && !passariaNormal,
         adiantadoWei: adiantadoExigido(limiteGas, maxFeeWei),
         adiantavelWei,
     };

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import {
     gorjetaPorGas, tetoPorGas, lerBasefee,
-    lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira,
+    lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado,
     PISO_DA_GORJETA_WEI, TETO_DA_GORJETA_WEI, LIMITE_DE_GAS,
 } from './prontidao';
 
@@ -595,4 +595,87 @@ test('o adiantado devolvido é o que o nó vai cobrar, não uma estimativa', () 
     const d = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(5) });
     assert.equal(d.adiantadoWei, d.maxFeeWei * LIMITE_DE_GAS);
     assert.ok(d.adiantadoWei <= SALDO_REAL, 'e cabe no saldo, senão não dava para enviar');
+});
+
+// ---------------------------------------------------------------------------
+// O tiro de prova.
+//
+// Decisão dela: "eu acho que a gente tem que pegar uma migalha obrigatoriamente,
+// pq se nao nunca vamos saber se esta funcionando... mesmo que a gente gaste
+// todo o gás pra pouco lucro, mas ai saberemos que funciona".
+//
+// É comprar informação com dinheiro, e é legítimo. O que não pode é a compra
+// virar hábito: UM tiro significa UM, e a trava tem de sobreviver aos reinícios
+// do Railway. Por isso ela mora no nonce da carteira, que só sobe.
+// ---------------------------------------------------------------------------
+
+test('a trava do tiro de prova mora no nonce, e se desarma quando o tiro sai', () => {
+    assert.equal(tiroDeProvaArmado({ ligado: true, nonceAtual: 4, ateNonce: 4 }).armado, true);
+    // Saiu o tiro: o nonce virou 5 e o modo morre. Para sempre, em qualquer
+    // container — é isso que uma trava em memória não conseguiria fazer.
+    const morto = tiroDeProvaArmado({ ligado: true, nonceAtual: 5, ateNonce: 4 });
+    assert.equal(morto.armado, false);
+    assert.match(morto.porque, /já saiu tiro/);
+});
+
+test('sem a variável da trava NÃO arma: trava esquecida é gás queimado a cada deploy', () => {
+    const r = tiroDeProvaArmado({ ligado: true, nonceAtual: 4, ateNonce: -1 });
+    assert.equal(r.armado, false);
+    assert.match(r.porque, /ATE_NONCE não foi definido/);
+});
+
+test('nonce desconhecido NÃO arma: "não sei" não pode virar "pode atirar"', () => {
+    assert.equal(tiroDeProvaArmado({ ligado: true, nonceAtual: -1, ateNonce: 4 }).armado, false);
+    assert.equal(tiroDeProvaArmado({ ligado: true, nonceAtual: NaN, ateNonce: 4 }).armado, false);
+});
+
+test('desligado não arma, mesmo com tudo o resto certo', () => {
+    assert.equal(tiroDeProvaArmado({ ligado: false, nonceAtual: 4, ateNonce: 4 }).armado, false);
+});
+
+test('o modo prova abre a ponta de BAIXO da faixa — é ali que estão as migalhas', () => {
+    const normal = faixaQueAtira(AMBIENTE_REAL)!;
+    const prova = faixaQueAtira({ ...AMBIENTE_REAL, tiroDeProva: true })!;
+    assert.ok(prova.de.lessThan(normal.de.dividedBy(4)),
+        `prova abre de US$ ${normal.de.toFixed(2)} para US$ ${prova.de.toFixed(4)}`);
+    // E NÃO abre a de cima: a proteção contra baleia amordaçada fica de pé.
+    assert.equal(prova.ate.toFixed(0), normal.ate.toFixed(0),
+        'a prova que ela quer é de uma migalha, não de uma baleia');
+});
+
+test('o modo prova NÃO desliga a proteção contra baleia amordaçada', () => {
+    const d = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(1986), tiroDeProva: true });
+    assert.equal(d.atira, false, 'gastar o gás todo numa baleia não prova nada');
+    assert.match(d.porque, /caça de migalhas/);
+});
+
+test('um tiro que só passa PORQUE é prova vem marcado', () => {
+    // Sem essa marca o primeiro acerto viraria "ele funciona e dá lucro" quando
+    // foi "ele funciona e deu prejuízo de propósito".
+    const migalhinha = new Decimal('0.30');
+    const normal = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: migalhinha });
+    const prova = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: migalhinha, tiroDeProva: true });
+    assert.equal(normal.atira, false, 'na regra normal não passaria');
+    assert.equal(prova.atira, true, 'na prova passa');
+    assert.equal(prova.soPassouPorSerProva, true);
+});
+
+test('um tiro que passaria de qualquer jeito NÃO é marcado como prova', () => {
+    const bom = new Decimal(5);
+    const prova = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: bom, tiroDeProva: true });
+    assert.equal(prova.atira, true);
+    assert.equal(prova.soPassouPorSerProva, false, 'este passaria sem a prova: não é compra de informação');
+});
+
+test('nem no modo prova o lucro pode ser ZERO ou negativo', () => {
+    // Margem zero quer dizer "qualquer lucro acima de zero", não "qualquer
+    // coisa". Atirar num lucro nulo gastaria gás para provar nada.
+    for (const l of [new Decimal(0), new Decimal('-1')]) {
+        assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: l, tiroDeProva: true }).atira, false, `lucro ${l}`);
+    }
+});
+
+test('o modo prova não inventa cotação: sem preço do ETH continua barrado', () => {
+    const d = decidirTiro({ ...AMBIENTE_REAL, precoDoEthUsd: null, lucroUsd: new Decimal(5), tiroDeProva: true });
+    assert.equal(d.atira, false);
 });

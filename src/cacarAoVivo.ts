@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
@@ -227,8 +227,12 @@ export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degr
  */
 export function comoLerAsQuedas(degraus: Degrau[]): string {
     if (degraus.length === 0) return 'nada medido';
+    // `alcanca` e `valem` sao numeros diferentes, e a diferenca e a resposta
+    // para "o tiro de prova tem alvo?". `1%: 0 valem` nao dizia se ali existem
+    // zero posicoes ou cinquenta posicoes pequenas demais para a regra normal —
+    // e o modo prova atira justamente nessas.
     return degraus
-        .map((d) => `${d.quedaPct}%: ${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)})`)
+        .map((d) => `${d.quedaPct}%: ${d.quantos} alcanço/${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)})`)
         .join(' | ');
 }
 
@@ -360,6 +364,17 @@ class LocalNonceManager {
      * ja gasto, levar 'replacement underpriced', decrementar de novo, e ficar
      * preso naquele numero para sempre.
      */
+    /**
+     * O nonce que ele acredita ser o proximo, sem ir a rede.
+     *
+     * Existe para a trava do tiro de prova poder ser conferida no caminho
+     * quente sem uma ida a rede — e `null` virou -1 la, porque "nao sei o
+     * nonce" nao pode virar "pode atirar".
+     */
+    public nonceConhecido(): number {
+        return this.currentNonce ?? -1;
+    }
+
     public async aposFalhar(): Promise<void> {
         try {
             await this.sync();
@@ -999,6 +1014,26 @@ async function principal(): Promise<'parar' | void> {
     const fracaoBase = Number(process.env.CACA_FRACAO_GORJETA ?? '0.4');
 
     /**
+     * O tiro de prova: UM tiro, de proposito no prejuizo, para saber se funciona.
+     *
+     * A trava mora na BLOCKCHAIN, nao em memoria. O container do Railway
+     * reinicia varias vezes por dia, e uma trava em memoria voltaria armada a
+     * cada reinicio — tres reinicios e o gas acaba. O nonce da carteira so sobe
+     * quando uma transacao sai, nunca volta, e e lido no boot de graca.
+     */
+    const PROVA_LIGADA = process.env.CACA_TIRO_DE_PROVA === '1';
+    const PROVA_ATE_NONCE = process.env.CACA_TIRO_DE_PROVA_ATE_NONCE === undefined
+        ? -1
+        : Number(process.env.CACA_TIRO_DE_PROVA_ATE_NONCE);
+    function provaAgora(): { armado: boolean; porque: string } {
+        return tiroDeProvaArmado({
+            ligado: PROVA_LIGADA,
+            nonceAtual: nonceManager?.nonceConhecido() ?? -1,
+            ateNonce: PROVA_ATE_NONCE,
+        });
+    }
+
+    /**
      * Alvos montados ANTES do oraculo escrever.
      *
      * A Aave nao deixa liquidar antes de o preco on-chain mudar, entao ver
@@ -1203,7 +1238,9 @@ async function principal(): Promise<'parar' | void> {
                 margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
                 tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
                 atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+                tiroDeProva: provaAgora().armado,
             };
+            passos.tiroDeProva = provaAgora().porque;
             const emEth6 = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
             const d88 = decidirTiro({ ...ambiente, lucroUsd: new Decimal(88) });
             passos.numDeUS$88 = `gorjeta ${(Number(d88.prioridadeWei) / 1e9).toFixed(2)} gwei` +
@@ -1907,6 +1944,7 @@ async function principal(): Promise<'parar' | void> {
                         margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
                         tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
                         atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+                        tiroDeProva: provaAgora().armado,
                     });
                     const fracao = decisao.fracaoDoLucro;
                     const risco = decisao.risco;
@@ -1946,6 +1984,20 @@ async function principal(): Promise<'parar' | void> {
                         continue;
                     }
 
+                    if (decisao.soPassouPorSerProva) {
+                        // Sem este aviso o primeiro acerto viraria "ele
+                        // funciona e da lucro" quando foi "ele funciona e deu
+                        // prejuizo de proposito". Comprar informacao e legitimo;
+                        // confundir a compra com receita, nao.
+                        log.warn('TIRO DE PROVA — este tiro NÃO passaria na regra normal.', {
+                            devedor: alvo.devedor,
+                            premio: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
+                            custoDoTiro: decisao.custoUsd === null ? 'sem cotação' : `US$ ${decisao.custoUsd.toFixed(2)}`,
+                            oQueIssoE: 'estou comprando a informação de que o caminho funciona, não lucro',
+                            aTrava: provaAgora().porque,
+                            depoisDisso: 'o nonce sobe e o modo se desarma sozinho, para sempre',
+                        });
+                    }
                     if (amordaca.amordacado) {
                         log.warn('LANCE AMORDAÇADO POR FALTA DE GÁS. Atiro, mas com a mão amarrada.', {
                             devedor: alvo.devedor,

@@ -560,7 +560,7 @@ test('a linha que ela vai ler tem forma travada', () => {
     ];
     assert.equal(
         comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [2, 5])),
-        '2%: 1 valem (US$ 2) | 5%: 2 valem (US$ 89)',
+        '2%: 1 alcanço/1 valem (US$ 2) | 5%: 2 alcanço/2 valem (US$ 89)',
     );
 });
 
@@ -699,4 +699,17 @@ test('nunca pede mais que a metade: a Aave recusa acima do close factor', () => 
         const p = quantoPedirEmprestado(cru, new Decimal(100_000), teto);
         assert.ok(p <= cru / 2n, `teto ${teto.toFixed(0)} pediu ${p}`);
     }
+});
+
+test('a linha mostra ALCANÇO e VALEM separados — é a resposta para "a prova tem alvo?"', () => {
+    // `1%: 0 valem` não dizia se ali existem zero posições ou cinquenta
+    // pequenas demais para a regra normal. O tiro de prova atira justamente
+    // nessas, então a diferença entre os dois números é o que decide.
+    const medidos = [
+        { devedor: '0xPO1', queda: new Decimal(0.5), dividaUsd: new Decimal('0.65') },
+        { devedor: '0xPO2', queda: new Decimal(0.7), dividaUsd: new Decimal(5) },
+        { devedor: '0xBOM', queda: new Decimal(0.9), dividaUsd: new Decimal(4000) },
+    ];
+    const linha = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1]));
+    assert.equal(linha, '1%: 3 alcanço/1 valem (US$ 87)');
 });
