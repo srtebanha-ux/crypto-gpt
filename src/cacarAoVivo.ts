@@ -182,6 +182,21 @@ export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degr
     });
 }
 
+/**
+ * A tabela de quedas em uma linha, para o log.
+ *
+ * Existe separada porque e ISTO que a pessoa le para decidir se continua na
+ * Aave da Base ou vai cacar em outro protocolo. Formatacao escondida dentro de
+ * um log nao tem teste, e uma tabela que muda de forma em silencio faz a
+ * decisao virar adivinhacao.
+ */
+export function comoLerAsQuedas(degraus: Degrau[]): string {
+    if (degraus.length === 0) return 'nada medido';
+    return degraus
+        .map((d) => `${d.quedaPct}%: ${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)})`)
+        .join(' | ');
+}
+
 export type Varredura = 'nenhuma' | 'quentes' | 'completa';
 
 /**
@@ -824,6 +839,18 @@ async function principal(): Promise<'parar' | void> {
      * por segundo — e ajustar 233 retas a cada segundo queimaria CPU para
      * responder sempre a mesma coisa: o ETA anda em dias, nao em segundos.
      */
+    /**
+     * A tabela "o que uma queda de X% renderia", da ultima varredura completa.
+     *
+     * Guardada porque ela so podia ser calculada na varredura completa — que
+     * roda de hora em hora — e por isso aparecia numa linha de log sozinha, a
+     * cada sessenta minutos. O numero que decide a estrategia (esperar o
+     * mercado ou ir cacar em outro protocolo) ficava inalcancavel na pratica:
+     * quem le o log copia a linha do ciclo ou a do ensaio, nao uma linha que
+     * passou uma hora atras. Um numero que ninguem consegue ler nao informa
+     * nada, mesmo estando correto.
+     */
+    let tabelaDeQuedas = 'ainda não medida';
     let chegadaEmMs: number | null = null;
     let chegadaCalculadaEm = 0;
     const VALIDADE_DA_CHEGADA_MS = Number(process.env.CACA_VALIDADE_CHEGADA_MS ?? '60000');
@@ -1131,6 +1158,7 @@ async function principal(): Promise<'parar' | void> {
                 ? 'ainda não medida'
                 : `precisa cair ${menorMargem.toFixed(4)}% para virar alvo`;
             const projecao = projetar(historicoDeSaude.get(alvoDoEnsaio.toLowerCase()) ?? []);
+            passos.seOMercadoCair = tabelaDeQuedas;
             passos.chegaPorJuro = projecao.cruza
                 ? `em ${emQuantoTempo(projecao.emMs)} (${projecao.taxaAnual.mul(100).toFixed(2)}%/ano, ${projecao.amostras} amostras)`
                 : `não projetável: ${projecao.porque}`;
@@ -1450,6 +1478,7 @@ async function principal(): Promise<'parar' | void> {
                             const ms = msAteAProximaChegada();
                             return ms === null ? 'nenhuma projetável' : `a mais próxima em ${emQuantoTempo(ms)}`;
                         })(),
+                        seOMercadoCair: tabelaDeQuedas,
                         gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
                         naListaQuente: quentes.length,
                         custou: `${Date.now() - inicioDoCiclo}ms`,
@@ -1524,6 +1553,7 @@ async function principal(): Promise<'parar' | void> {
                         // regimes diferentes na mesma reta, e a reta inventaria
                         // uma previsao.
                         esquecerQuemSaiu(historicoDeSaude, brasa);
+                        tabelaDeQuedas = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1, 2, 3, 5, 10]));
                         margemDaBrasa = camadas.margemDaBrasa;
                         menorMargem = camadas.menorMargem;
                         // O ensaio exercita o CAMINHO, nao ganha dinheiro:
@@ -1556,9 +1586,7 @@ async function principal(): Promise<'parar' | void> {
                             // ir procurar caça em outro lugar. `menorMargem`
                             // sozinha nao dizia se atras do primeiro vem um ou
                             // vem cinquenta.
-                            seOMercadoCair: oQueUmaQuedaRenderia(medidos, [1, 2, 3, 5, 10])
-                                .map((d) => `${d.quedaPct}%: ${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)})`)
-                                .join(' | '),
+                            seOMercadoCair: tabelaDeQuedas,
                             // Para os alvos cujo preco CANCELA na conta da saude
                             // (garantia e divida na mesma moeda), a chegada e
                             // calculavel dias antes. Este e o unico numero do

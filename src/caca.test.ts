@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
-import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, oQueUmaQuedaRenderia } from './cacarAoVivo';
+import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, oQueUmaQuedaRenderia, comoLerAsQuedas } from './cacarAoVivo';
 import { dividaMinimaQueVale, lucroEstimado } from './perdidas';
 import { custoDoTiroUsd, PISO_DA_GORJETA_WEI } from './prontidao';
 
@@ -541,4 +541,23 @@ test('o caso real: um alvo a 1,1562% e o que viria atrás dele', () => {
     // Uma de 5% já vale 50x mais. É esta diferença que o log não mostrava.
     assert.equal(t[1]!.quantosValem, 2);
     assert.ok(t[1]!.lucroUsd.greaterThan(t[0]!.lucroUsd.mul(50)));
+});
+
+test('a linha que ela vai ler tem forma travada', () => {
+    // Formatação escondida dentro de um log não tem teste, e é esta linha que
+    // decide se continua na Aave da Base ou vai caçar em outro protocolo.
+    const medidos = [
+        { devedor: '0xPERTO', queda: new Decimal('1.1562'), dividaUsd: new Decimal('91.74') },
+        { devedor: '0xMEDIO', queda: new Decimal(4),        dividaUsd: new Decimal(4000) },
+    ];
+    assert.equal(
+        comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [2, 5])),
+        '2%: 1 valem (US$ 2) | 5%: 2 valem (US$ 90)',
+    );
+});
+
+test('tabela vazia diz "nada medido", não vira string vazia', () => {
+    // String vazia no log some no meio dos outros campos e parece que o campo
+    // não existe — o oposto de informar.
+    assert.equal(comoLerAsQuedas([]), 'nada medido');
 });
