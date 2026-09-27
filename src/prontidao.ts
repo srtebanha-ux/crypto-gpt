@@ -355,6 +355,65 @@ export function lanceAmordacado(entrada: {
 }
 
 /**
+ * Este tiro amordacado mataria a caca de migalhas?
+ *
+ * Existe porque a dona do bot decidiu — e repetiu — que a estrategia e ficar
+ * nas migalhas, e o codigo nao sabia disso. Ele atirava em qualquer premio que
+ * passasse o piso de lucro, inclusive nos que o saldo amordaca a 5% do lance
+ * pretendido. E ai esta a assimetria que importa:
+ *
+ *   - Na faixa das migalhas (ate US$ 11,69 com o saldo de 2026-09-27) o lance
+ *     sai INTEIRO. O bot compete de igual para igual.
+ *   - Num premio grande o lance sai a 2,49 gwei quando queria 50. A chance de
+ *     ganhar e pequena, e UMA derrota custa US$ 4,71 — metade do gas.
+ *
+ * Ou seja: perseguir o premio grande com a mao amarrada arrisca a estrategia
+ * que FUNCIONA em troca de uma que provavelmente nao ganha. Depois de uma
+ * derrota dessas nao ha mais gas para as migalhas.
+ *
+ * Isto NAO e prudencia generica — o bot continua atirando com lance inteiro em
+ * tudo que couber, e continua aceitando derrotas na faixa onde elas cabem. E
+ * uma regra especifica: nao troco a caca que funciona por uma loteria em que
+ * estou lancando 5% do que deveria.
+ *
+ * `atirarAmordacado` solta a trava inteira, e e assim que se muda de plano
+ * quando houver gas para o lance grande. A decisao fica no ambiente, nao
+ * escondida numa constante.
+ */
+export function mataACacaDeMigalhas(entrada: {
+    amordacado: boolean;
+    custoDaDerrotaWei: bigint;
+    saldoWei: bigint;
+    /** Fracao do saldo que uma derrota pode comer. Acima disso, a caca morre. */
+    tetoDaMordida?: number;
+    atirarAmordacado?: boolean;
+}): { pula: boolean; porque: string } {
+    if (entrada.atirarAmordacado) {
+        return { pula: false, porque: 'trava solta: CACA_ATIRAR_AMORDACADO está ligado' };
+    }
+    if (!entrada.amordacado) {
+        return { pula: false, porque: 'lance inteiro — esta é a faixa onde o saldo compete' };
+    }
+    if (entrada.saldoWei <= 0n) {
+        return { pula: true, porque: 'sem saldo nenhum' };
+    }
+    const teto = entrada.tetoDaMordida ?? 0.5;
+    // Comparacao em inteiros: `mordida > teto` em ponto flutuante decide
+    // fronteira por arredondamento, e este arquivo ja levou esse defeito uma vez.
+    const tetoEmMilionesimos = BigInt(Math.round(teto * 1_000_000));
+    const mordeDemais = entrada.custoDaDerrotaWei * 1_000_000n > tetoEmMilionesimos * entrada.saldoWei;
+    if (!mordeDemais) {
+        return { pula: false, porque: 'amordaçado, mas uma derrota aqui não mata a caça' };
+    }
+    const pct = (Number(entrada.custoDaDerrotaWei) / Number(entrada.saldoWei) * 100).toFixed(0);
+    return {
+        pula: true,
+        porque: `lance amordaçado E uma derrota comeria ${pct}% do gás (teto ${(teto * 100).toFixed(0)}%). ` +
+            'Perder isto acaba com a caça de migalhas, que é a estratégia escolhida',
+    };
+}
+
+/**
  * O que ESTE tiro custa se der certo, em dolar.
  *
  * Diferente de `custoDeUmaDerrota`: aqui a cacada roda inteira, entao o gas

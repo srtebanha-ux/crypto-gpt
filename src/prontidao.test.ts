@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import {
     gorjetaPorGas, tetoPorGas, lerBasefee,
-    lanceAmordacado,
+    lanceAmordacado, mataACacaDeMigalhas,
     PISO_DA_GORJETA_WEI, TETO_DA_GORJETA_WEI, LIMITE_DE_GAS,
 } from './prontidao';
 
@@ -387,4 +387,85 @@ test('o saldo necessário inclui a folga: pedir o exato não daria para enviar',
     assert.ok(a.saldoQuePrecisaria > exato, 'tem de pedir mais que o exato');
     // E com esse saldo o lance de fato passa.
     assert.ok(maxFeeQueOSaldoAdianta(a.saldoQuePrecisaria, LIMITE_DE_GAS) >= tetoPorGas(BASE_REAL_WEI, desejada));
+});
+
+// ---------------------------------------------------------------------------
+// Não trocar a caça que funciona por uma loteria com a mão amarrada.
+//
+// A estratégia escolhida é ficar nas migalhas. Com o saldo de 2026-09-27 o
+// lance sai INTEIRO até um prêmio de US$ 11,69 — ali o bot compete de igual
+// para igual. Acima disso ele lança 2,49 gwei querendo 50, e UMA derrota come
+// metade do gás: depois dela não há mais caça de migalhas nenhuma.
+// ---------------------------------------------------------------------------
+
+test('migalha com lance inteiro: atira sempre, e nem chega a avaliar mordida', () => {
+    const r = mataACacaDeMigalhas({
+        amordacado: false,
+        custoDaDerrotaWei: SALDO_REAL,   // comeria o saldo TODO
+        saldoWei: SALDO_REAL,
+    });
+    assert.equal(r.pula, false, 'lance inteiro é a faixa dela: atira');
+    assert.match(r.porque, /faixa onde o saldo compete/);
+});
+
+test('prêmio grande amordaçado que comeria metade do gás: não atira', () => {
+    const derrota = SALDO_REAL * 6n / 10n;   // 60% do saldo
+    const r = mataACacaDeMigalhas({ amordacado: true, custoDaDerrotaWei: derrota, saldoWei: SALDO_REAL });
+    assert.equal(r.pula, true);
+    assert.match(r.porque, /60% do gás/);
+    assert.match(r.porque, /estratégia escolhida/);
+});
+
+test('amordaçado mas com mordida pequena: atira — não é prudência genérica', () => {
+    const derrota = SALDO_REAL / 10n;    // 10% do saldo
+    const r = mataACacaDeMigalhas({ amordacado: true, custoDaDerrotaWei: derrota, saldoWei: SALDO_REAL });
+    assert.equal(r.pula, false);
+    assert.match(r.porque, /não mata a caça/);
+});
+
+test('a trava solta inteira com CACA_ATIRAR_AMORDACADO: mudar de plano é uma variável', () => {
+    const r = mataACacaDeMigalhas({
+        amordacado: true,
+        custoDaDerrotaWei: SALDO_REAL,
+        saldoWei: SALDO_REAL,
+        atirarAmordacado: true,
+    });
+    assert.equal(r.pula, false);
+    assert.match(r.porque, /CACA_ATIRAR_AMORDACADO/);
+});
+
+test('a fronteira da mordida é comparada em INTEIROS', () => {
+    // Exatamente no teto NÃO pula (a comparação é >, não >=), e um wei acima
+    // pula. Em ponto flutuante essa fronteira escorrega — este arquivo já levou
+    // esse defeito uma vez hoje.
+    const metade = SALDO_REAL / 2n;
+    assert.equal(mataACacaDeMigalhas({ amordacado: true, custoDaDerrotaWei: metade, saldoWei: SALDO_REAL }).pula, false);
+    assert.equal(mataACacaDeMigalhas({ amordacado: true, custoDaDerrotaWei: metade + 1n, saldoWei: SALDO_REAL }).pula, true);
+});
+
+test('saldo zero não divide por zero nem atira', () => {
+    const r = mataACacaDeMigalhas({ amordacado: true, custoDaDerrotaWei: 1n, saldoWei: 0n });
+    assert.equal(r.pula, true);
+    assert.match(r.porque, /sem saldo/);
+});
+
+test('o teto é configurável: com 0,9 ela aceita quase quebrar o gás numa aposta', () => {
+    const derrota = SALDO_REAL * 6n / 10n;
+    const r = mataACacaDeMigalhas({ amordacado: true, custoDaDerrotaWei: derrota, saldoWei: SALDO_REAL, tetoDaMordida: 0.9 });
+    assert.equal(r.pula, false, '60% de mordida passa com teto de 90%');
+});
+
+test('o caso real inteiro: US$ 11,69 passa, US$ 1.986 não', () => {
+    const tetoDoSaldo = maxFeeQueOSaldoAdianta(SALDO_REAL, LIMITE_DE_GAS) - BASE_REAL_WEI;
+    for (const [premio, esperado] of [[11.69, false], [1986, true]] as const) {
+        const desejada = gorjetaPorGas({ lucroUsd: new Decimal(premio), precoDoEthUsd: ETH_REAL });
+        const conseguida = desejada > tetoDoSaldo ? tetoDoSaldo : desejada;
+        const a = lanceAmordacado({ desejadaWei: desejada, conseguidaWei: conseguida, limiteGas: LIMITE_DE_GAS, baseFeeWei: BASE_REAL_WEI });
+        const r = mataACacaDeMigalhas({
+            amordacado: a.amordacado,
+            custoDaDerrotaWei: (conseguida + BASE_REAL_WEI) * 700_000n,
+            saldoWei: SALDO_REAL,
+        });
+        assert.equal(r.pula, esperado, `prêmio US$ ${premio}: ${r.porque}`);
+    }
 });

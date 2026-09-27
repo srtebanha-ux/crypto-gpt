@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
@@ -1967,6 +1967,33 @@ async function principal(): Promise<'parar' | void> {
                         baseFeeWei: base,
                     });
                     const emEth = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
+
+                    // A estrategia escolhida e ficar nas migalhas, e o codigo
+                    // nao sabia disso: ele atirava em qualquer premio que
+                    // passasse o piso, inclusive nos que o saldo amordaca a 5%
+                    // do lance. Uma derrota dessas come metade do gas e acaba
+                    // com a caca que FUNCIONA.
+                    const mata = mataACacaDeMigalhas({
+                        amordacado: amordaca.amordacado,
+                        custoDaDerrotaWei: custoDeUmaDerrota(prioridadePorGas, base),
+                        saldoWei: saldoDeGasWei,
+                        tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
+                        atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+                    });
+                    if (mata.pula) {
+                        log.warn('NÃO ATIREI NESTE GRANDE — ficaria sem gás para as migalhas.', {
+                            devedor: alvo.devedor,
+                            premio: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
+                            porque: mata.porque,
+                            queriaDar: `${(Number(lanceQueQueria) / 1e9).toFixed(2)} gwei`,
+                            sóConsigo: `${(Number(prioridadePorGas) / 1e9).toFixed(2)} gwei`,
+                            paraLiberar: `${emEth(amordaca.saldoQuePrecisaria)} ETH na conta_bot, ` +
+                                'ou CACA_ATIRAR_AMORDACADO=1 para atirar amordaçado mesmo assim',
+                            oQueEuDeixeiPassar: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
+                        });
+                        continue;
+                    }
+
                     if (amordaca.amordacado) {
                         log.warn('LANCE AMORDAÇADO POR FALTA DE GÁS. Atiro, mas com a mão amarrada.', {
                             devedor: alvo.devedor,
