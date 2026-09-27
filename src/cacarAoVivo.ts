@@ -933,7 +933,10 @@ async function principal(): Promise<'parar' | void> {
 
     log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
     void quandoFoiAUltimaLiquidacao(topo);
-    void tiroEmSeco();
+    // O tiro em seco NAO pode sair daqui: a brasa so existe depois da primeira
+    // varredura completa, e chamado aqui ele achava a lista vazia e desistia
+    // dois segundos antes de ela ser preenchida.
+    let jaEnsaiou = false;
 
     /**
      * Percorre o caminho de tiro INTEIRO, parando um passo antes de enviar.
@@ -1369,6 +1372,10 @@ async function principal(): Promise<'parar' | void> {
                         quentes = camadas.quentes;
                         margemDaBrasa = camadas.margemDaBrasa;
                         menorMargem = camadas.menorMargem;
+                        if (!jaEnsaiou && brasa.length > 0) {
+                            jaEnsaiou = true;
+                            void tiroEmSeco();
+                        }
                         ultimoCompleto = Date.now();
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
                             alvosChecados: aLer.length,
