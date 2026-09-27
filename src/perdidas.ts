@@ -9,6 +9,7 @@
 // zero no log, e a resposta certa para cada uma e oposta.
 import { Decimal } from 'decimal.js';
 import type { Liquidacao } from './liquidacoes';
+import { POOLS } from './contratos';
 
 /**
  * O agio que a Aave paga a quem liquida. 5% e o valor tipico na Base; varia
@@ -36,16 +37,98 @@ export const GAS_USD = new Decimal(0.3);
 export const FATIA_COBRIVEL = new Decimal(2);
 
 /**
+ * A profundidade do pool onde a garantia e realmente vendida.
+ *
+ * Nao e constante de projeto: e a medicao de 2026-09-19 no pool da Aerodrome
+ * que o contrato usa, guardada em `contratos.ts` com endereco e data. Importar
+ * daqui em vez de repetir o numero e o que impede as duas coisas divergirem.
+ */
+export const PROFUNDIDADE_DA_VENDA = POOLS.aerodrome!.profundidadeUsd;
+
+/**
  * Quanto ESTA liquidacao teria dado de lucro, se fosse sua.
  *
- * Note que o lucro nao e a divida: e o agio sobre a METADE da divida, menos o
- * custo de vender a garantia. Uma liquidacao de US$4.000 rende uns US$88, e
- * nao US$4.000 — confundir os dois e o erro que ja apareceu duas vezes neste
- * projeto, sempre no mesmo sentido: otimista.
+ * O lucro nao e a divida: e o agio sobre a METADE da divida, menos o custo de
+ * vender a garantia. Uma liquidacao de US$4.000 rende uns US$87, e nao
+ * US$4.000.
+ *
+ * E o custo de vender NAO E UMA CONSTANTE. Foi tratado como constante aqui, e
+ * em 2026-09-27 isso produziu uma linha de log dizendo que uma queda de 10% do
+ * mercado poria US$ 2.161.328 na mesa. O numero verdadeiro e da ordem de
+ * US$ 2.000 — mil vezes menor — porque as posicoes que faziam aquele total
+ * somam US$ 95 milhoes de divida, e vender US$ 50 milhoes de garantia num pool
+ * de US$ 4,4 milhoes nao custa 0,59%: custa o pool inteiro.
+ *
+ * `src/venda.ts` existe desde antes disso, e o cabecalho dele avisa deste
+ * exato erro ("e o motivo de o relatorio dizer que uma liquidacao de $42
+ * milhoes renderia $978 mil"). O defeito foi calcular de novo em vez de usar o
+ * que ja estava medido.
+ *
+ * A formula: `escorregamento = venda / (reserva + venda)`, exata para produto
+ * constante. `CUSTO_DA_VENDA` continua respondendo pela taxa do pool e pelo
+ * premio do flash loan, que nao dependem do tamanho; o escorregamento e a
+ * parte que depende, e e ela que mata a baleia.
+ *
+ * Duas derivacoes independentes concordam com o resultado: esta formula da
+ * lucro maximo de US$ 1.986 numa divida de US$ 182 mil, e a medicao de
+ * `contratos.ts` registrou US$ 2.103 de lucro maximo com teto de US$ 390 mil.
  */
-export function lucroEstimado(dividaUsd: Decimal): Decimal {
+export function lucroEstimado(
+    dividaUsd: Decimal,
+    profundidadeUsd: Decimal = PROFUNDIDADE_DA_VENDA,
+): Decimal {
     const coberto = dividaUsd.dividedBy(FATIA_COBRIVEL);
-    return coberto.mul(AGIO).minus(coberto.mul(CUSTO_DA_VENDA)).minus(GAS_USD);
+    // Vende-se a GARANTIA recebida, que e o coberto mais o agio — nao o coberto.
+    const venda = coberto.mul(new Decimal(1).plus(AGIO));
+    const escorregamento = profundidadeUsd.lessThanOrEqualTo(0)
+        ? new Decimal(1)
+        : venda.dividedBy(profundidadeUsd.plus(venda));
+    return coberto
+        .mul(AGIO)
+        .minus(coberto.mul(CUSTO_DA_VENDA))
+        .minus(venda.mul(escorregamento))
+        .minus(GAS_USD);
+}
+
+/**
+ * A maior divida que ainda da lucro neste pool, e a que da o MAIOR lucro.
+ *
+ * Existem porque o teto estava implicito: o bot sabia recusar um alvo grande
+ * (a simulacao reverte, o piso de lucro barra), mas nada no log dizia que
+ * existe um tamanho acima do qual nao ha o que ganhar. Teto implicito e o
+ * mesmo que teto inexistente para quem le.
+ *
+ * Busca por varredura e nao forma fechada de proposito: a curva tem maximo
+ * interior e a forma fechada dela e feia o bastante para esconder um erro de
+ * sinal. Isto roda uma vez por varredura completa, uma vez por hora.
+ */
+export function dividaQueRendeMais(
+    profundidadeUsd: Decimal = PROFUNDIDADE_DA_VENDA,
+    passos = 400,
+): { divida: Decimal; lucro: Decimal } {
+    let melhor = { divida: new Decimal(0), lucro: new Decimal(0) };
+    // Ate o dobro da profundidade: alem disso o escorregamento passa de 50% e a
+    // curva ja esta despencando havia muito.
+    const teto = profundidadeUsd.mul(2);
+    for (let i = 1; i <= passos; i++) {
+        const d = teto.mul(i).dividedBy(passos);
+        const l = lucroEstimado(d, profundidadeUsd);
+        if (l.greaterThan(melhor.lucro)) melhor = { divida: d, lucro: l };
+    }
+    return melhor;
+}
+
+export function tetoDaDivida(
+    profundidadeUsd: Decimal = PROFUNDIDADE_DA_VENDA,
+    passos = 4000,
+): Decimal {
+    const teto = profundidadeUsd.mul(2);
+    let ultimaQueDaLucro = new Decimal(0);
+    for (let i = 1; i <= passos; i++) {
+        const d = teto.mul(i).dividedBy(passos);
+        if (lucroEstimado(d, profundidadeUsd).greaterThan(0)) ultimaQueDaLucro = d;
+    }
+    return ultimaQueDaLucro;
 }
 
 /**

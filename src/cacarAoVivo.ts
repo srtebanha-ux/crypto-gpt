@@ -4,7 +4,7 @@ import { Wallet, JsonRpcProvider } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
-import { emDolar, lucroEstimado, dividaMinimaQueVale, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
+import { emDolar, lucroEstimado, dividaMinimaQueVale, dividaQueRendeMais, tetoDaDivida, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
@@ -851,6 +851,8 @@ async function principal(): Promise<'parar' | void> {
      * nada, mesmo estando correto.
      */
     let tabelaDeQuedas = 'ainda não medida';
+    /** Calculado uma vez: depende so da profundidade medida, que nao muda em memoria. */
+    let tetoDoPool = '';
     let chegadaEmMs: number | null = null;
     let chegadaCalculadaEm = 0;
     const VALIDADE_DA_CHEGADA_MS = Number(process.env.CACA_VALIDADE_CHEGADA_MS ?? '60000');
@@ -1159,6 +1161,7 @@ async function principal(): Promise<'parar' | void> {
                 : `precisa cair ${menorMargem.toFixed(4)}% para virar alvo`;
             const projecao = projetar(historicoDeSaude.get(alvoDoEnsaio.toLowerCase()) ?? []);
             passos.seOMercadoCair = tabelaDeQuedas;
+            passos.tetoDoPool = tetoDoPool;
             passos.chegaPorJuro = projecao.cruza
                 ? `em ${emQuantoTempo(projecao.emMs)} (${projecao.taxaAnual.mul(100).toFixed(2)}%/ano, ${projecao.amostras} amostras)`
                 : `não projetável: ${projecao.porque}`;
@@ -1554,6 +1557,19 @@ async function principal(): Promise<'parar' | void> {
                         // uma previsao.
                         esquecerQuemSaiu(historicoDeSaude, brasa);
                         tabelaDeQuedas = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1, 2, 3, 5, 10]));
+                        // O teto era IMPLICITO: o bot sabia recusar uma baleia
+                        // (a simulacao reverte, o piso de lucro barra), mas
+                        // nada no log dizia que existe um tamanho acima do qual
+                        // nao ha o que ganhar. Para quem le, teto implicito e o
+                        // mesmo que teto inexistente — e foi assim que eu mesmo
+                        // publiquei uma queda de 10% valendo US$ 2,1 milhoes.
+                        if (tetoDoPool === '') {
+                            const melhor = dividaQueRendeMais();
+                            tetoDoPool =
+                                `pool de US$ ${PROFUNDIDADE_DA_VENDA.toFixed(0)}: ` +
+                                `lucro máximo US$ ${melhor.lucro.toFixed(0)} numa dívida de ` +
+                                `US$ ${melhor.divida.toFixed(0)}; acima de US$ ${tetoDaDivida().toFixed(0)} é prejuízo`;
+                        }
                         margemDaBrasa = camadas.margemDaBrasa;
                         menorMargem = camadas.menorMargem;
                         // O ensaio exercita o CAMINHO, nao ganha dinheiro:
@@ -1587,6 +1603,7 @@ async function principal(): Promise<'parar' | void> {
                             // sozinha nao dizia se atras do primeiro vem um ou
                             // vem cinquenta.
                             seOMercadoCair: tabelaDeQuedas,
+                            tetoDoPool,
                             // Para os alvos cujo preco CANCELA na conta da saude
                             // (garantia e divida na mesma moeda), a chegada e
                             // calculavel dias antes. Este e o unico numero do

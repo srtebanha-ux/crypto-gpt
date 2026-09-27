@@ -4,7 +4,7 @@ import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
 import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, oQueUmaQuedaRenderia, comoLerAsQuedas } from './cacarAoVivo';
-import { dividaMinimaQueVale, lucroEstimado } from './perdidas';
+import { dividaMinimaQueVale, lucroEstimado, dividaQueRendeMais, tetoDaDivida } from './perdidas';
 import { custoDoTiroUsd, PISO_DA_GORJETA_WEI } from './prontidao';
 
 const coder = AbiCoder.defaultAbiCoder();
@@ -361,8 +361,15 @@ test('o piso da SELEÇÃO é mais frouxo que o portão do TIRO — errar excluin
     const doPortao = dividaMinimaQueVale(custo, 2)!;
     assert.ok(daSelecao.lessThan(doPortao),
         `seleção US$ ${daSelecao.toFixed(2)} tem de ser menor que portão US$ ${doPortao.toFixed(2)}`);
-    // Nada que o portão aceitaria pode ser cortado antes de chegar nele.
-    assert.ok(lucroEstimado(doPortao).greaterThanOrEqualTo(custo.mul(2).minus(1e-9)));
+    // `dividaMinimaQueVale` inverte a fórmula SEM escorregamento, e isso é
+    // deliberado: no tamanho do piso (US$ 34) a venda é de US$ 18 num pool de
+    // US$ 4,4 milhões, e o escorregamento vale sete centésimos de milésimo de
+    // centavo. Invertir a curva inteira para ganhar isso seria precisão falsa —
+    // e o erro que sobra empurra o piso para BAIXO, que é o lado seguro para um
+    // filtro de seleção.
+    const faltou = custo.mul(2).minus(lucroEstimado(doPortao));
+    assert.ok(faltou.lessThan('0.0001'), `faltou US$ ${faltou.toFixed(10)}, que é nada`);
+    assert.ok(faltou.greaterThan(0), 'e falta para MENOS: o piso admite um pouco mais, não menos');
 });
 
 test('pó mais frágil NÃO rouba a vaga da baleia menos frágil', () => {
@@ -491,8 +498,9 @@ test('o lucro somado NÃO é a dívida somada — o erro otimista clássico', ()
     const medidos = [{ devedor: '0xA', queda: new Decimal(1), dividaUsd: new Decimal(4000) }];
     const [um] = oQueUmaQuedaRenderia(medidos, [1]);
     assert.equal(um!.dividaUsd.toFixed(0), '4000');
-    // Ágio de 5% sobre a METADE, menos o custo de vender, menos o gás: ~US$ 88.
-    assert.equal(um!.lucroUsd.toFixed(0), '88');
+    // Ágio de 5% sobre a METADE, menos a taxa do pool, menos o escorregamento
+    // da venda de US$ 2.100, menos o gás: US$ 86,90.
+    assert.equal(um!.lucroUsd.toFixed(0), '87');
     assert.ok(um!.lucroUsd.lessThan(um!.dividaUsd.dividedBy(40)));
 });
 
@@ -552,7 +560,7 @@ test('a linha que ela vai ler tem forma travada', () => {
     ];
     assert.equal(
         comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [2, 5])),
-        '2%: 1 valem (US$ 2) | 5%: 2 valem (US$ 90)',
+        '2%: 1 valem (US$ 2) | 5%: 2 valem (US$ 89)',
     );
 });
 
@@ -560,4 +568,89 @@ test('tabela vazia diz "nada medido", não vira string vazia', () => {
     // String vazia no log some no meio dos outros campos e parece que o campo
     // não existe — o oposto de informar.
     assert.equal(comoLerAsQuedas([]), 'nada medido');
+});
+
+// ---------------------------------------------------------------------------
+// O defeito de 2026-09-27 10:54, e o pior que eu cometi nesta sessão.
+//
+// A linha que o bot imprimiu, e que eu tinha acabado de construir e enviar como
+// o número que decidiria a estratégia:
+//
+//   "10%: 100 valem (US$ 2161328)"
+//
+// Dois milhões de dólares numa queda de 10%. O número verdadeiro é da ordem de
+// US$ 2.000 — mil vezes menor. O total vinha de posições que somam US$ 95
+// milhões de dívida, e `lucroEstimado` cobrava delas os mesmos 0,59% de custo
+// de venda que cobra de uma dívida de US$ 4.000.
+//
+// Vender US$ 50 milhões de garantia num pool de US$ 4,4 milhões não custa
+// 0,59%: custa o pool inteiro. E `src/venda.ts` existe DESDE ANTES disso, com
+// um cabeçalho avisando deste exato erro. Eu calculei de novo em vez de usar o
+// que já estava medido.
+// ---------------------------------------------------------------------------
+
+test('a baleia de US$ 95 milhões dá PREJUÍZO, não US$ 2,1 milhões', () => {
+    const lucro = lucroEstimado(new Decimal(95_454_358));
+    assert.ok(lucro.lessThan(0), `deu ${lucro.toFixed(0)}`);
+    // O número que eu tinha imprimido, para constar o tamanho do erro.
+    const oQueEuDisse = new Decimal(95_454_358).dividedBy(2).mul(0.05 - 0.0059).minus(0.3);
+    assert.equal(oQueEuDisse.toFixed(0), '2104768');
+    assert.ok(lucro.lessThan(oQueEuDisse.negated().mul(10)), 'errei por muito mais que uma ordem de grandeza');
+});
+
+test('a posição de US$ 1,95 milhão a 3% também é prejuízo', () => {
+    // Era ela que fazia o degrau de 3% saltar de US$ 69 para US$ 43.084.
+    assert.ok(lucroEstimado(new Decimal(1_950_862)).lessThan(-100_000));
+});
+
+test('existe um TETO de dívida, e um tamanho ótimo', () => {
+    const melhor = dividaQueRendeMais();
+    const teto = tetoDaDivida();
+    assert.equal(melhor.lucro.toFixed(0), '1984');
+    assert.equal(melhor.divida.toFixed(0), '176365');
+    assert.equal(teto.toFixed(0), '368162');
+    // Acima do teto, prejuízo. Abaixo, lucro. É isso que teto quer dizer.
+    assert.ok(lucroEstimado(teto.mul('1.05')).lessThan(0));
+    assert.ok(lucroEstimado(teto.mul('0.95')).greaterThan(0));
+});
+
+test('o teto bate com a medição INDEPENDENTE que já estava em contratos.ts', () => {
+    // contratos.ts registrou, em 2026-09-19: lucro máximo US$ 2.103 e teto de
+    // dívida US$ 390 mil para este pool. Esta fórmula, derivada por outro
+    // caminho, dá US$ 1.984 e US$ 368 mil. Duas derivações independentes
+    // dentro de 6% uma da outra é o que me faz confiar na segunda.
+    const daMedicao = { lucro: new Decimal(2103), teto: new Decimal(390_000) };
+    const daFormula = { lucro: dividaQueRendeMais().lucro, teto: tetoDaDivida() };
+    const erro = (a: Decimal, b: Decimal) => a.minus(b).abs().dividedBy(b);
+    assert.ok(erro(daFormula.lucro, daMedicao.lucro).lessThan('0.07'),
+        `lucro: fórmula ${daFormula.lucro.toFixed(0)} vs medição ${daMedicao.lucro.toFixed(0)}`);
+    assert.ok(erro(daFormula.teto, daMedicao.teto).lessThan('0.07'),
+        `teto: fórmula ${daFormula.teto.toFixed(0)} vs medição ${daMedicao.teto.toFixed(0)}`);
+});
+
+test('pool mais raso derruba o teto: o custo de vender é do POOL, não do projeto', () => {
+    // O Uniswap V2 medido tem US$ 649.469 — 6,8x mais raso. contratos.ts
+    // registrou US$ 300 de lucro máximo e teto de US$ 57 mil nele.
+    const raso = new Decimal(649_469);
+    const m = dividaQueRendeMais(raso);
+    assert.ok(m.lucro.lessThan(dividaQueRendeMais().lucro.dividedBy(4)),
+        `pool 6,8x mais raso rende ${m.lucro.toFixed(0)}, muito menos que o fundo`);
+    assert.ok(tetoDaDivida(raso).lessThan(tetoDaDivida().dividedBy(4)));
+});
+
+test('profundidade zero não vira lucro infinito nem NaN', () => {
+    const l = lucroEstimado(new Decimal(4000), new Decimal(0));
+    assert.ok(l.isFinite());
+    assert.ok(l.lessThan(0), 'sem pool não se vende nada, então não há lucro');
+});
+
+test('a tabela de quedas fica HONESTA: a baleia não entra como prêmio', () => {
+    const medidos = [
+        { devedor: '0xBOM',    queda: new Decimal(1), dividaUsd: new Decimal(4000) },
+        { devedor: '0xBALEIA', queda: new Decimal(1), dividaUsd: new Decimal(95_454_358) },
+    ];
+    const [um] = oQueUmaQuedaRenderia(medidos, [1]);
+    assert.equal(um!.quantos, 2, 'as duas são alcançadas');
+    assert.equal(um!.quantosValem, 1, 'só uma vale');
+    assert.equal(um!.lucroUsd.toFixed(0), '87', 'e o prêmio é só o dela');
 });
