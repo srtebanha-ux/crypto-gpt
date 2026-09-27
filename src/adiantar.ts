@@ -251,6 +251,65 @@ export function quemArmar(brasaOrdenada: string[], quantos: number): string[] {
  * do que economiza, entao so se arma quando o feed esta perto de escrever — e
  * so se o que ja esta armado nao serve mais.
  */
+/**
+ * A postura que a CHEGADA POR JURO pede, independente do mercado.
+ *
+ * Existe por um buraco que so ficou visivel com os dois numeros lado a lado no
+ * log de 2026-09-27 10:31:
+ *
+ *     margemDoAlvo: "precisa cair 1.1562% para virar alvo"
+ *     mercado:      "0.1007% abaixo do oráculo (dormindo)"
+ *
+ * O alvo mais perto tem garantia USDC contra divida USDC. O preco CANCELA na
+ * conta da saude dele: ele NAO precisa do mercado para cair, ele cai por juro.
+ * E toda a prontidao do bot estava amarrada no mercado — `valeArmar` recusa
+ * armar quando a postura e 'dormindo', e `ritmoDaPostura` devolve os 8
+ * segundos cheios. Ou seja: o alvo mais proximo que existe ia chegar com o bot
+ * dormindo, desarmado, e ate 8 segundos atrasado. Quatro blocos da Base.
+ *
+ * Os limiares sao generosos de proposito, e a conta justifica: chegada por juro
+ * e RARA (meses de distancia) e PREVISTA, entao uma hora de ritmo de 1s mais
+ * dez minutos de 200ms custam uns 170 mil CUs por chegada, contra um teto de
+ * 38 milhoes por mes. Apertar isso economizaria nada e poderia custar a
+ * liquidacao.
+ *
+ * A precisao tambem melhora sozinha perto do fim: a taxa de juros da Aave anda
+ * com a utilizacao, entao uma previsao de 283 dias e mole — mas uma de dez
+ * minutos exigiria que a taxa mudasse drasticamente dentro desses dez minutos
+ * para errar. E a projecao e refeita a cada varredura.
+ */
+export function posturaPorChegada(
+    msAteChegar: number | null,
+    pertoMs = 3_600_000,
+    muitoPertoMs = 600_000,
+): Postura {
+    if (msAteChegar === null || !Number.isFinite(msAteChegar) || msAteChegar < 0) return 'dormindo';
+    if (msAteChegar <= muitoPertoMs) return 'dedo no gatilho';
+    if (msAteChegar <= pertoMs) return 'atento';
+    return 'dormindo';
+}
+
+/** Da mais urgente para a menos. A ordem e explicita para nao depender do enum. */
+const URGENCIA: Record<Postura, number> = { 'dedo no gatilho': 2, atento: 1, dormindo: 0 };
+
+/**
+ * A mais urgente das duas posturas.
+ *
+ * Duas coisas independentes podem exigir pressa — o mercado caindo e um juro
+ * chegando — e a resposta certa e a mais exigente das duas, nunca a ultima
+ * calculada. Sobrescrever uma com a outra apagaria metade dos motivos de correr.
+ */
+export function posturaMaisForte(a: Postura, b: Postura): Postura {
+    return URGENCIA[a] >= URGENCIA[b] ? a : b;
+}
+
+/**
+ * Se vale armar, considerando que juro chegando tambem e motivo.
+ *
+ * `valeArmar` recusa quando a postura e 'dormindo', e isso esta certo para o
+ * mercado. Mas a postura combinada ja carrega a chegada por juro, entao passar
+ * a combinada aqui e o que fecha o buraco.
+ */
 export function valeArmar(
     postura: Postura,
     armadoHaMs: number,

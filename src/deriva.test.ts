@@ -6,6 +6,7 @@ import {
     registrar, esquecerQuemSaiu, projetar, oQueVemPorAi, emQuantoTempo,
     INTERVALO_DA_AMOSTRA_MS, MINIMO_DE_AMOSTRAS, type Amostra,
 } from './deriva';
+import { posturaPorChegada, posturaMaisForte, posturaPorMargem, valeArmar } from './adiantar';
 
 const MIN = 60_000;
 const HORA = 3_600_000;
@@ -263,4 +264,72 @@ test('emQuantoTempo fala português em cada escala', () => {
     assert.equal(emQuantoTempo(30 * MIN), '30min');
     assert.equal(emQuantoTempo(5 * HORA), '5.0h');
     assert.equal(emQuantoTempo(7.3 * DIA), '7.3 dias');
+});
+
+// ---------------------------------------------------------------------------
+// A postura da chegada por juro.
+//
+// Existe por dois campos lado a lado no log de 2026-09-27 10:31:
+//
+//   margemDoAlvo: "precisa cair 1.1562% para virar alvo"
+//   mercado:      "0.1007% abaixo do oráculo (dormindo)"
+//
+// O alvo mais próximo tem garantia USDC contra dívida USDC: o preço CANCELA na
+// conta da saúde dele. Ele não precisa do mercado para cair. E toda a prontidão
+// estava amarrada no mercado — ele chegaria com o bot dormindo e desarmado.
+// ---------------------------------------------------------------------------
+
+test('chegada longe não acorda ninguém: 283 dias é para dormir', () => {
+    assert.equal(posturaPorChegada(283 * DIA), 'dormindo');
+});
+
+test('chegada dentro de uma hora deixa o bot atento', () => {
+    assert.equal(posturaPorChegada(50 * MIN), 'atento');
+});
+
+test('chegada em dez minutos põe o dedo no gatilho', () => {
+    assert.equal(posturaPorChegada(9 * MIN), 'dedo no gatilho');
+    assert.equal(posturaPorChegada(0), 'dedo no gatilho', 'chegando agora é a hora de correr');
+});
+
+test('sem projeção NÃO vira urgência: null dorme', () => {
+    // O oposto seria o pior caso possível: não saber quando o alvo chega e
+    // tratar isso como "chega já", correndo a 200ms para sempre.
+    assert.equal(posturaPorChegada(null), 'dormindo');
+    assert.equal(posturaPorChegada(NaN), 'dormindo');
+    assert.equal(posturaPorChegada(Infinity), 'dormindo');
+    assert.equal(posturaPorChegada(-1), 'dormindo');
+});
+
+test('a postura combinada é a MAIS urgente, nunca a última calculada', () => {
+    assert.equal(posturaMaisForte('dormindo', 'atento'), 'atento');
+    assert.equal(posturaMaisForte('atento', 'dormindo'), 'atento');
+    assert.equal(posturaMaisForte('atento', 'dedo no gatilho'), 'dedo no gatilho');
+    assert.equal(posturaMaisForte('dedo no gatilho', 'atento'), 'dedo no gatilho');
+    assert.equal(posturaMaisForte('dormindo', 'dormindo'), 'dormindo');
+});
+
+test('o caso exato do log: mercado dormindo + juro chegando = bot acordado', () => {
+    // 0,1007% de queda não alcança o limiar de escrita do feed (0,5%), então o
+    // mercado manda dormir. Com o juro a 40 minutos, o bot tem de estar atento.
+    const doMercado = posturaPorMargem(new Decimal('0.1007'), new Decimal('1.1562'));
+    assert.equal(doMercado, 'dormindo', 'é isso que o log mostrava');
+    const combinada = posturaMaisForte(doMercado, posturaPorChegada(40 * MIN));
+    assert.equal(combinada, 'atento', 'e é isso que ele passa a fazer');
+    // E armar deixa de ser recusado, que era o buraco.
+    assert.equal(valeArmar(doMercado, 10_000, 5_000), false, 'o defeito');
+    assert.equal(valeArmar(combinada, 10_000, 5_000), true, 'o conserto');
+});
+
+test('juro chegando não estraga o ritmo quando o mercado já está correndo', () => {
+    const combinada = posturaMaisForte('dedo no gatilho', posturaPorChegada(283 * DIA));
+    assert.equal(combinada, 'dedo no gatilho');
+});
+
+test('a conta de CU de uma chegada: generoso e ainda assim desprezível', () => {
+    // Uma hora a 1s mais dez minutos a 200ms, a 26 CUs por leitura.
+    const cus = (3600 / 1) * 26 + (600 / 0.2) * 26;
+    assert.equal(cus, 171_600);
+    // Contra um teto de 38 milhões por mês, e chegadas separadas por MESES.
+    assert.ok(cus < 38_000_000 * 0.005, `${cus} CUs é meio por cento do teto`);
 });

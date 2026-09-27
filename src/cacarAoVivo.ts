@@ -5,7 +5,7 @@ import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, dividaMinimaQueVale, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
-import { posturaPorMargem, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
+import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
@@ -817,6 +817,29 @@ async function principal(): Promise<'parar' | void> {
      * A leitura ja acontece a cada ciclo; guardar nao custa CU nenhum.
      */
     const historicoDeSaude = new Map<string, Amostra[]>();
+    /**
+     * O ETA da proxima chegada por juro, em ms, ou `null` se nenhuma projeta.
+     *
+     * Vem com cache porque a postura e reavaliada a cada olhada de mercado — uma
+     * por segundo — e ajustar 233 retas a cada segundo queimaria CPU para
+     * responder sempre a mesma coisa: o ETA anda em dias, nao em segundos.
+     */
+    let chegadaEmMs: number | null = null;
+    let chegadaCalculadaEm = 0;
+    const VALIDADE_DA_CHEGADA_MS = Number(process.env.CACA_VALIDADE_CHEGADA_MS ?? '60000');
+    function msAteAProximaChegada(): number | null {
+        const agora = Date.now();
+        if (agora - chegadaCalculadaEm < VALIDADE_DA_CHEGADA_MS) {
+            // O tempo que passou desde a conta ja encurtou a espera. Devolver o
+            // valor parado faria o bot ficar 'atento' um minuto a mais do que o
+            // devido — e, no fim da contagem, nunca chegar a zero.
+            return chegadaEmMs === null ? null : Math.max(0, chegadaEmMs - (agora - chegadaCalculadaEm));
+        }
+        const fila = oQueVemPorAi(historicoDeSaude, 7 * 86_400_000);
+        chegadaEmMs = fila.length > 0 ? fila[0]!.emMs : null;
+        chegadaCalculadaEm = agora;
+        return chegadaEmMs;
+    }
     /** A margem do primeiro que ficou de fora da brasa: a regua do gatilho. */
     let margemDaBrasa = new Decimal(0);
     let ultimoSinalDeVida = 0;
@@ -1291,7 +1314,14 @@ async function principal(): Promise<'parar' | void> {
         }
         const queda = quedaDoMercado(doMercado, doOraculo);
         quedaDoMercadoAgora = queda;
-        const nova = posturaPorMargem(queda, menorMargem, DESVIO_DE_ESCRITA);
+        // Duas coisas independentes podem exigir pressa, e a resposta e a mais
+        // exigente das duas. O mercado cobre quem cai por PRECO; a chegada por
+        // juro cobre quem cai sozinho — e era esse que ia chegar com o bot
+        // dormindo e desarmado, porque o preco cancela na conta da saude dele.
+        const nova = posturaMaisForte(
+            posturaPorMargem(queda, menorMargem, DESVIO_DE_ESCRITA),
+            posturaPorChegada(msAteAProximaChegada()),
+        );
         // Armar enquanto o preco cai, nao depois que o bloco chega.
         if (valeArmar(nova, Date.now() - tentouArmarEm, VALIDADE_ARMADO_MS)) void armar();
         const ficouUrgente = ritmoDaPostura(nova, INTERVALO_MS) < ritmoDaPostura(postura, INTERVALO_MS);
@@ -1416,6 +1446,10 @@ async function principal(): Promise<'parar' | void> {
                             ? 'SEM COTAÇÃO — ritmo fixo'
                             : `${mercadoAgora()!.toFixed(4)}% abaixo do oráculo (${posturaAgora()}, via ${fonteDoPreco})`,
                         oraculoJaCaiuPct: `${maiorQueda.toFixed(4)}%`,
+                        chegandoPorJuro: (() => {
+                            const ms = msAteAProximaChegada();
+                            return ms === null ? 'nenhuma projetável' : `a mais próxima em ${emQuantoTempo(ms)}`;
+                        })(),
                         gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
                         naListaQuente: quentes.length,
                         custou: `${Date.now() - inicioDoCiclo}ms`,
