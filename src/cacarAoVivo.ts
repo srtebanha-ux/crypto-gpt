@@ -112,6 +112,8 @@ export interface Camadas {
     menorMargem: Decimal | null;
     /** Quantas foram descartadas por serem pequenas demais para pagar o gas. */
     poEmDemasia: number;
+    /** Quantas vagas da brasa foram para alvos de PROVA (abaixo do piso). */
+    vagasDeProva: number;
     /** Quantas sobraram: as que valem uma vaga na fila rapida. */
     valemUmTiro: number;
 }
@@ -142,6 +144,29 @@ export function repartirPorFragilidade(
     vagasNaBrasa: number,
     margemQuente: number,
     pisoDeDividaUsd: Decimal | null = null,
+    /**
+     * Vagas reservadas para alvos de PROVA: os mais frageis ENTRE OS QUE O PISO
+     * DE TAMANHO CORTOU.
+     *
+     * Existe por um furo que o log de 17:53 mostrou. A tabela dizia
+     * `1%: 3 alcanço/0 valem` — tres posicoes a menos de 1% de cair, nenhuma
+     * passando o piso de US$ 22,14. E o `maisPerto` dizia 1,1555%, que e o mais
+     * fragil DENTRE OS QUE PASSAM o piso.
+     *
+     * Ou seja: as tres posicoes que o modo prova existe para atirar estavam
+     * FORA da brasa. So seriam relidas na varredura de hora em hora — e quando
+     * uma caisse, o bot descobriria com ate uma hora de atraso, depois de outro
+     * ja ter levado.
+     *
+     * O modo prova soltava o portao do TIRO e nao soltava o filtro da SELECAO.
+     * Metade do conserto nao conserta nada.
+     *
+     * As vagas saem de dentro das 233, e nao por cima: o multicall nao tem mais
+     * que isso. E `menorMargem` e `margemDaBrasa` continuam saindo dos alvos de
+     * verdade, porque sao elas que decidem o ritmo de 200ms — acelerar o bot
+     * inteiro por um alvo de 22 centavos seria trocar um furo por outro.
+     */
+    vagasParaProva = 0,
 ): Camadas {
     // O filtro de TAMANHO vem antes da ordenacao, e e por isso que existe.
     // A brasa e uma fila de prioridade — as vagas mais rapidas que o bot tem —
@@ -156,20 +181,39 @@ export function repartirPorFragilidade(
         ? medidos
         : medidos.filter((m) => m.dividaUsd === null || m.dividaUsd.greaterThanOrEqualTo(pisoDeDividaUsd));
     const ordenados = [...cabem].sort((a, b) => a.queda.comparedTo(b.queda));
-    const brasa = ordenados.slice(0, Math.max(0, vagasNaBrasa));
+
+    // Os alvos de prova: os mais frageis entre os que o piso cortou.
+    const deProva = vagasParaProva <= 0 || pisoDeDividaUsd === null
+        ? []
+        : medidos
+            .filter((m) => m.dividaUsd !== null && m.dividaUsd.lessThan(pisoDeDividaUsd))
+            .sort((a, b) => a.queda.comparedTo(b.queda))
+            .slice(0, vagasParaProva);
+
+    const vagasParaOsDeVerdade = Math.max(0, vagesNaBrasaSegura(vagasNaBrasa) - deProva.length);
+    const brasa = ordenados.slice(0, vagasParaOsDeVerdade);
     const resto = ordenados.slice(brasa.length);
     const quentes = resto.filter((m) => m.queda.lessThanOrEqualTo(margemQuente));
     // Se a brasa cobre todo mundo que esta dentro da margem, nao ha ninguem
     // entre uma camada e outra: o proximo alvo do gatilho e a propria margem.
     const margemDaBrasa = resto.length > 0 ? resto[0].queda : new Decimal(margemQuente);
     return {
-        brasa: brasa.map((m) => m.devedor),
+        // Os de prova entram na brasa para serem lidos a cada ciclo, que e o
+        // unico jeito de nao descobrir a queda deles uma hora depois.
+        brasa: [...brasa.map((m) => m.devedor), ...deProva.map((m) => m.devedor)],
         quentes: quentes.map((m) => m.devedor),
         margemDaBrasa,
+        // As reguas continuam saindo dos alvos de VERDADE.
         menorMargem: ordenados.length > 0 ? ordenados[0].queda : null,
         poEmDemasia: medidos.length - cabem.length,
         valemUmTiro: cabem.length,
+        vagasDeProva: deProva.length,
     };
+}
+
+/** As vagas nunca podem ser negativas nem fracionarias: o multicall conta inteiro. */
+function vagesNaBrasaSegura(n: number): number {
+    return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
 }
 
 /** Uma linha da tabela "o que uma queda de X% poria na mesa". */
@@ -1731,7 +1775,14 @@ async function principal(): Promise<'parar' | void> {
                         const pisoDeDivida = dividaMinimaQueVale(
                             custoDoTiroUsd(PISO_DA_GORJETA_WEI, baseFeeAtual ?? 0n, precoDoEth()),
                         );
-                        const camadas = repartirPorFragilidade(medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida);
+                        // Com a prova armada, algumas vagas da brasa vao para
+                        // os alvos que o piso cortou — sem isso o modo prova
+                        // solta o portao do tiro e deixa seus proprios alvos
+                        // fora da vigilancia de cada ciclo.
+                        const camadas = repartirPorFragilidade(
+                            medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida,
+                            provaAgora().armado ? Number(process.env.CACA_VAGAS_DE_PROVA ?? '10') : 0,
+                        );
                         brasa = camadas.brasa;
                         quentes = camadas.quentes;
                         // Quem saiu da brasa leva o historico embora. Sem isso
@@ -1774,6 +1825,9 @@ async function principal(): Promise<'parar' | void> {
                             // A resposta para "por que 23h sem nada": nao e o
                             // bot que esta cego, e a lista que e de po. Sem
                             // este numero "naBrasa 234" parecia 234 alvos.
+                            vagasDeProva: camadas.vagasDeProva === 0
+                                ? 'nenhuma (modo prova desligado)'
+                                : `${camadas.vagasDeProva} das ${brasa.length} vagas da brasa estão vigiando alvos de PROVA (abaixo do piso)`,
                             valemUmTiro: pisoDeDivida === null
                                 ? `${medidos.length} (sem cotação do ETH: não filtrei por tamanho)`
                                 : `${camadas.valemUmTiro} de ${medidos.length} — ${camadas.poEmDemasia} devem menos de US$ ${pisoDeDivida.toFixed(2)} e não pagariam o próprio gás`,

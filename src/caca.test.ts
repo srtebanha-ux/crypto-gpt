@@ -713,3 +713,91 @@ test('a linha mostra ALCANÇO e VALEM separados — é a resposta para "a prova 
     const linha = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1]));
     assert.equal(linha, '1%: 3 alcanço/1 valem (US$ 87)');
 });
+
+// ---------------------------------------------------------------------------
+// As vagas de prova.
+//
+// O log de 17:53 mostrou o furo: `1%: 3 alcanço/0 valem` e `maisPerto: 1.1555%`.
+// Três posições a menos de 1% de cair, nenhuma passando o piso de tamanho — e
+// o `maisPerto` medindo só quem passa. Ou seja: as três posições que o modo
+// prova existe para atirar estavam FORA da brasa, e só seriam relidas na
+// varredura de hora em hora.
+//
+// O modo prova soltava o portão do TIRO e não soltava o filtro da SELEÇÃO.
+// Metade do conserto não conserta nada.
+// ---------------------------------------------------------------------------
+
+test('o furo: sem vagas de prova, o alvo da prova fica fora da brasa', () => {
+    const piso = new Decimal(22);
+    const medidos = [
+        { devedor: '0xPROVA', queda: new Decimal('0.5'), dividaUsd: new Decimal(10) },   // dust, pertíssimo
+        { devedor: '0xREAL',  queda: new Decimal(3),     dividaUsd: new Decimal(4000) },
+    ];
+    const sem = repartirPorFragilidade(medidos, 10, 25, piso);
+    assert.deepEqual(sem.brasa, ['0xREAL'], 'o alvo da prova não está sendo vigiado');
+    assert.equal(sem.vagasDeProva, 0);
+});
+
+test('com vagas de prova, ele entra na brasa e passa a ser lido a cada ciclo', () => {
+    const piso = new Decimal(22);
+    const medidos = [
+        { devedor: '0xPROVA', queda: new Decimal('0.5'), dividaUsd: new Decimal(10) },
+        { devedor: '0xREAL',  queda: new Decimal(3),     dividaUsd: new Decimal(4000) },
+    ];
+    const com = repartirPorFragilidade(medidos, 10, 25, piso, 5);
+    assert.ok(com.brasa.includes('0xPROVA'), 'agora é vigiado');
+    assert.ok(com.brasa.includes('0xREAL'), 'e o de verdade continua');
+    assert.equal(com.vagasDeProva, 1);
+});
+
+test('as vagas de prova saem DE DENTRO das da brasa, não por cima', () => {
+    // O multicall cabe 233 e não 234. Estourar isso quebraria a leitura toda.
+    const medidos = [
+        ...Array.from({ length: 300 }, (_, i) => ({
+            devedor: `0xR${i}`, queda: new Decimal(1 + i * 0.01), dividaUsd: new Decimal(4000),
+        })),
+        ...Array.from({ length: 50 }, (_, i) => ({
+            devedor: `0xP${i}`, queda: new Decimal(0.1 + i * 0.001), dividaUsd: new Decimal(5),
+        })),
+    ];
+    const c = repartirPorFragilidade(medidos, 233, 25, new Decimal(22), 10);
+    assert.equal(c.brasa.length, 233, 'nunca passa da capacidade do multicall');
+    assert.equal(c.vagasDeProva, 10);
+    assert.equal(c.brasa.filter((d) => d.startsWith('0xP')).length, 10);
+    assert.equal(c.brasa.filter((d) => d.startsWith('0xR')).length, 223);
+});
+
+test('as RÉGUAS continuam saindo dos alvos de verdade, não dos de prova', () => {
+    // `menorMargem` decide o ritmo de 200ms. Se um alvo de 22 centavos a 0,1%
+    // ditasse a régua, o bot inteiro aceleraria por ele — trocaria um furo por
+    // outro, e este custa CU.
+    const medidos = [
+        { devedor: '0xPROVA', queda: new Decimal('0.1'), dividaUsd: new Decimal(5) },
+        { devedor: '0xREAL',  queda: new Decimal(6),     dividaUsd: new Decimal(4000) },
+    ];
+    const c = repartirPorFragilidade(medidos, 10, 25, new Decimal(22), 5);
+    assert.ok(c.brasa.includes('0xPROVA'), 'vigiado');
+    assert.equal(c.menorMargem!.toNumber(), 6, 'mas a régua é a do alvo de verdade');
+});
+
+test('sem piso não há vagas de prova: não existe "abaixo do piso" sem piso', () => {
+    const medidos = [{ devedor: '0xA', queda: new Decimal(1), dividaUsd: new Decimal(5) }];
+    assert.equal(repartirPorFragilidade(medidos, 10, 25, null, 10).vagasDeProva, 0);
+});
+
+test('vagas de prova negativas ou fracionárias não quebram a conta', () => {
+    const medidos = [
+        { devedor: '0xP', queda: new Decimal('0.5'), dividaUsd: new Decimal(5) },
+        { devedor: '0xR', queda: new Decimal(3), dividaUsd: new Decimal(4000) },
+    ];
+    assert.equal(repartirPorFragilidade(medidos, 10, 25, new Decimal(22), -5).vagasDeProva, 0);
+    assert.equal(repartirPorFragilidade(medidos, 1.7, 25, new Decimal(22), 1).brasa.length, 1,
+        'vaga fracionária arredonda para baixo: o multicall conta inteiro');
+});
+
+test('dívida NÃO lida não é escolhida como alvo de prova: não se sabe se é pó', () => {
+    const medidos = [{ devedor: '0xSEMDADO', queda: new Decimal('0.1'), dividaUsd: null }];
+    const c = repartirPorFragilidade(medidos, 10, 25, new Decimal(22), 10);
+    assert.equal(c.vagasDeProva, 0);
+    assert.ok(c.brasa.includes('0xSEMDADO'), 'ela entra como alvo NORMAL, que é o certo');
+});
