@@ -1477,7 +1477,25 @@ async function principal(): Promise<'parar' | void> {
             saldoWei: saldoDeGasWei,
             baseFeeWei: baseFeeAtual ?? 20_000_000n,
             ...POLITICA,
-            tiroDeProva: provaAgora().armado,
+        // O CENSO mede a faixa SUSTENTAVEL, nunca a do tiro de prova.
+        //
+        // O tiro de prova e UM tiro, pago com o gas inteiro se preciso, para
+        // comprar a informacao "o caminho funciona". Nao e como o bot vive.
+        // Quando o teto do modo prova entrou aqui, em 2026-09-27, o censo
+        // passou a dizer `naSUAFaixa: 57 de 57`, `ABRE 0 novas` em toda fatia
+        // de gas, `nenhuma das duas faixas tem dono` e
+        // `US$ 1835 em 9,3 dias (~US$ 5946/mes)`.
+        //
+        // Aquele numero e falso e e o pior tipo de falso: otimista, com cara
+        // de medicao, e justificando colocar dinheiro. As 57 incluem as 9
+        // grandes, que o bot so pega gastando todo o gas num tiro — pode uma
+        // vez, nao 185 por mes — e que o proprio censo mediu como tendo dono
+        // (4 endereços, o maior com 44%). O numero sustentavel e o de antes:
+        // 48 de 57, US$ 102 em 9,3 dias, ~US$ 330/mes.
+        //
+        // E a decisao do gas que o CLAUDE.md registra nasce DESTA faixa. Medir
+        // com o teto do tiro unico apagava a medicao que a produziu.
+            tiroDeProva: false,
         });
 
         const dentroDaFaixa = comLucro.filter((a) => {
@@ -1528,7 +1546,14 @@ async function principal(): Promise<'parar' | void> {
             olhei: `${diasOlhados.toFixed(1)} dias (${janelasLidas} janelas, ${janelasQueFalharam} falharam)`,
             aconteceram: `${achadas.length} no total, ${porDia.toFixed(1)} por dia, ~${Math.round(porMes)} por mês`,
             aUltima: horasDaUltima < 1 ? `${Math.round(horasDaUltima * 60)} minutos atrás` : `${horasDaUltima.toFixed(1)} horas atrás`,
-            // ESTE e o numero que decide a estrategia.
+            // ESTE e o numero que decide a estrategia — e ele fala da faixa
+            // SUSTENTAVEL, de proposito. Dizer QUAL faixa e importa: quando o
+            // teto do tiro de prova entrou aqui por engano, o censo publicou
+            // "~US$ 5946/mes" sem nada no log avisando que era outra pergunta.
+            qualFaixa: provaAgora().armado
+                ? 'a faixa SUSTENTÁVEL (regra normal). O tiro de prova está armado e atira SEM TETO, '
+                  + 'mas isso é UM tiro para testar — não entra nesta conta'
+                : 'a faixa sustentável (regra normal)',
             naSUAFaixa: faixa === null
                 ? `${dentroDaFaixa.length} com lucro acima de zero (não sei a faixa agora)`
                 : `${dentroDaFaixa.length} de ${achadas.length} — entre ${
@@ -1552,7 +1577,10 @@ async function principal(): Promise<'parar' | void> {
                         saldoWei: BigInt(Math.round(eth * 1e18)),
                         baseFeeWei: baseFeeAtual ?? 20_000_000n,
                         ...POLITICA,
-                        tiroDeProva: provaAgora().armado,
+                        // Sustentavel, pelo mesmo motivo da faixa do censo acima:
+                        // "quanto de gas colocar" e uma pergunta sobre viver
+                        // disso, nao sobre um tiro unico de teste.
+                        tiroDeProva: false,
                     });
                     if (f === null) return `${eth} ETH: não sei dizer`;
                     const dentro = comCotacao.filter((a) =>

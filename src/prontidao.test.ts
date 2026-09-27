@@ -862,3 +862,27 @@ test('a política do tiro tem um dono só, e lê os nomes que o Railway usa', ()
     // divergência de regra, então a asserção é na casa que a regra determina.
     assert.equal(f!.inteiroAte!.toFixed(1), '28.2');
 });
+
+test('a faixa do CENSO e a do TIRO respondem perguntas diferentes', () => {
+    // O censo pergunta "do que o bot vive?". O tiro de prova pergunta "o caminho
+    // funciona?". Em 2026-09-27 as duas usaram a mesma resposta e o censo passou a
+    // publicar `naSUAFaixa: 57 de 57` e `~US$ 5946/mês` — o dinheiro da faixa de
+    // cima, que o próprio censo mediu como tendo dono, apresentado como renda dela.
+    const ambiente = {
+        precoDoEthUsd: new Decimal('2680.90'),
+        saldoWei: 3341111000000000n,
+        baseFeeWei: 20_000_000n,
+        ...politicaDoTiro({ CACA_FRACAO_GORJETA: '0.15', CACA_RISCO_MAXIMO: '0.8', CACA_LIMITE_GAS: '1200000' }),
+    };
+    const premioDaBaleia = new Decimal('1985.95');
+
+    // A pergunta do CENSO: a baleia NÃO entra. É isto que sustenta a decisão do
+    // gás registrada no CLAUDE.md.
+    const censo = faixaQueAtira({ ...ambiente, tiroDeProva: false })!;
+    assert.ok(censo.ate !== null, 'a faixa sustentável TEM teto');
+    assert.ok(premioDaBaleia.greaterThan(censo.ate!), 'e a baleia está acima dele');
+
+    // A pergunta do TIRO: a baleia entra, porque ela pediu um alvo custe o que custar.
+    assert.equal(faixaQueAtira({ ...ambiente, tiroDeProva: true })!.ate, null);
+    assert.equal(decidirTiro({ ...ambiente, tiroDeProva: true, lucroUsd: premioDaBaleia }).atira, true);
+});
