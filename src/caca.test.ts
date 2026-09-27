@@ -560,7 +560,7 @@ test('a linha que ela vai ler tem forma travada', () => {
     ];
     assert.equal(
         comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [2, 5])),
-        '2%: 1 alcanço/1 valem (US$ 2) | 5%: 2 alcanço/2 valem (US$ 89)',
+        '2%: 1 alcanço/1 valem (US$ 2, maior US$ 2 a 1.16%) | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00%)',
     );
 });
 
@@ -711,7 +711,7 @@ test('a linha mostra ALCANÇO e VALEM separados — é a resposta para "a prova 
         { devedor: '0xBOM', queda: new Decimal(0.9), dividaUsd: new Decimal(4000) },
     ];
     const linha = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1]));
-    assert.equal(linha, '1%: 3 alcanço/1 valem (US$ 87)');
+    assert.equal(linha, '1%: 3 alcanço/1 valem (US$ 87, maior US$ 87 a 0.90%)');
 });
 
 // ---------------------------------------------------------------------------
@@ -800,4 +800,28 @@ test('dívida NÃO lida não é escolhida como alvo de prova: não se sabe se é
     const c = repartirPorFragilidade(medidos, 10, 25, new Decimal(22), 10);
     assert.equal(c.vagasDeProva, 0);
     assert.ok(c.brasa.includes('0xSEMDADO'), 'ela entra como alvo NORMAL, que é o certo');
+});
+
+test('a soma escondia a forma: o MAIOR sozinho entra na linha', () => {
+    // Conferido direto na Base em 2026-09-27: o bot dizia "2%: 3 valem (US$ 91)",
+    // que parece três liquidações de US$ 30 — nada. Eram DUAS, e uma vale
+    // US$ 66,44 a 1,44% de cair. A média apagava exatamente a boa notícia, e é
+    // o maior sozinho que decide, porque é UM alvo por vez que dispara.
+    const medidos = [
+        { devedor: '0xGRANDE', queda: new Decimal('1.441'), dividaUsd: new Decimal(3053) },
+        { devedor: '0xMEDIO',  queda: new Decimal('1.580'), dividaUsd: new Decimal(1065) },
+    ];
+    const [d] = oQueUmaQuedaRenderia(medidos, [2]);
+    assert.equal(d!.lucroUsd.toFixed(2), '89.55', 'a soma bate com a minha varredura independente');
+    assert.equal(d!.maior!.lucroUsd.toFixed(2), '66.44');
+    assert.equal(d!.maior!.quedaPct.toFixed(3), '1.441');
+    assert.match(comoLerAsQuedas([d!]), /maior US\$ 66 a 1\.44%/);
+});
+
+test('degrau sem ninguém que valha não inventa um maior', () => {
+    const medidos = [{ devedor: '0xPO', queda: new Decimal(1), dividaUsd: new Decimal('0.65') }];
+    const [d] = oQueUmaQuedaRenderia(medidos, [2]);
+    assert.equal(d!.quantosValem, 0);
+    assert.equal(d!.maior, null);
+    assert.equal(comoLerAsQuedas([d!]), '2%: 1 alcanço/0 valem (US$ 0)');
 });

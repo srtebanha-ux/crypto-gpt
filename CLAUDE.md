@@ -69,22 +69,39 @@ distância, custando 3.000 CUs.
 Então: antes de concluir "não tem", varra o histórico. Ele é barato e não
 depende de esperar nada acontecer.
 
-## O que este ambiente NÃO alcança
+## A rede: LIBERADA em 2026-09-27
 
-A política de rede bloqueia RPCs de blockchain. Conferido em 2026-09-27:
-`mainnet.base.org`, `base.llamarpc.com` e `base-rpc.publicnode.com` todos
-devolvem `403 policy denial` no CONNECT do proxy.
+`mainnet.base.org` está na allowlist do ambiente. Dá para conferir a Base
+direto daqui, em segundos. Isto resolveu a causa-raiz de metade dos dez erros:
+antes, cada fato da rede custava um deploy e alguém colar o log — vinte minutos
+por pergunta — e era esse atrito que me fazia preencher buracos com inferência.
 
-Consequência prática, e é a causa-raiz de metade dos erros: para conferir
-qualquer fato da rede eu dependo de um deploy e de alguém colar o log — vinte
-minutos por pergunta. Foi esse atrito que me fez preencher os buracos com
-inferência em vez de medição.
+Duas armadilhas medidas na hora de usar:
 
-Se um host de RPC for liberado na política de rede do ambiente, eu confiro
-direto, em segundos, e a regra 1 deixa de depender de disciplina.
+1. **O `fetch` do Node ignora o `HTTPS_PROXY`** e cai num caminho de rede com
+   política mais estreita: ele devolve `Host not in allowlist` enquanto o
+   `curl` passa, no MESMO instante. Use um dispatcher explícito:
 
-Enquanto não for: **peça o log em vez de inferir.** Um log a mais custa vinte
-minutos. Uma inferência errada custou um dia inteiro, duas vezes.
+   ```ts
+   import { ProxyAgent, fetch } from 'undici';
+   const agente = new ProxyAgent(process.env.HTTPS_PROXY!);
+   await fetch(RPC, { dispatcher: agente, ... });
+   ```
+
+2. **O RPC público tem limites**, e eles falham em silêncio se você não olhar:
+   `eth_getLogs` recusa acima de 2.000 blocos, e requisições em rajada são
+   barradas. Sem repetição com espera, uma varredura devolve "0 encontrados",
+   que é resposta falsa com cara de medição. Na primeira tentativa eu li 86,3%
+   dos devedores e o script se recusou a concluir; com espera maior deu 100%.
+   **Sempre declare a cobertura ao lado do resultado.**
+
+Primeiro uso, em 2026-09-27: varri 3.286 devedores da Base e medi o degrau de
+2% de forma independente. Deu US$ 89,55; o bot, com outro RPC, outra janela e
+outro código, dizia US$ 91. **1,6% de diferença.** Foi a primeira vez que os
+números do bot foram conferidos por fora.
+
+Ainda assim: **peça o log quando a dúvida for sobre o que o bot ESTÁ fazendo.**
+A rede diz o que é verdade na blockchain; só o log diz o que o bot entendeu.
 
 ## Como este projeto mede o próprio erro
 

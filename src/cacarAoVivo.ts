@@ -226,6 +226,17 @@ export interface Degrau {
     dividaUsd: Decimal;
     /** Soma do lucro das que valem. NAO e a divida. */
     lucroUsd: Decimal;
+    /**
+     * O MAIOR premio sozinho dentro do degrau, e a que distancia ele esta.
+     *
+     * A soma escondia a forma. "2%: 3 valem (US$ 91)" parece tres liquidacoes
+     * de US$ 30 — nada. Conferido direto na Base em 2026-09-27, eram DUAS, e
+     * uma delas vale US$ 66,44 e esta a 1,44% de cair: um alvo perto, grande e
+     * dentro da faixa. A media apagava exatamente a boa noticia.
+     *
+     * E e o maior sozinho que decide, porque e UM alvo por vez que dispara.
+     */
+    maior: { lucroUsd: Decimal; quedaPct: Decimal } | null;
 }
 
 /**
@@ -248,6 +259,7 @@ export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degr
         let dividaUsd = new Decimal(0);
         let lucroUsd = new Decimal(0);
         let quantosValem = 0;
+        let maior: { lucroUsd: Decimal; quedaPct: Decimal } | null = null;
         for (const m of alcancados) {
             if (m.dividaUsd === null) continue;
             dividaUsd = dividaUsd.plus(m.dividaUsd);
@@ -255,9 +267,13 @@ export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degr
             // Somar lucro negativo mascararia o po dentro do total: uma
             // posicao que da prejuizo nao subtrai do premio das outras, ela
             // simplesmente nao e atirada.
-            if (lucro.greaterThan(0)) { lucroUsd = lucroUsd.plus(lucro); quantosValem++; }
+            if (lucro.greaterThan(0)) {
+                lucroUsd = lucroUsd.plus(lucro);
+                quantosValem++;
+                if (maior === null || lucro.greaterThan(maior.lucroUsd)) maior = { lucroUsd: lucro, quedaPct: m.queda };
+            }
         }
-        return { quedaPct, quantos: alcancados.length, quantosValem, dividaUsd, lucroUsd };
+        return { quedaPct, quantos: alcancados.length, quantosValem, dividaUsd, lucroUsd, maior };
     });
 }
 
@@ -275,8 +291,12 @@ export function comoLerAsQuedas(degraus: Degrau[]): string {
     // para "o tiro de prova tem alvo?". `1%: 0 valem` nao dizia se ali existem
     // zero posicoes ou cinquenta posicoes pequenas demais para a regra normal —
     // e o modo prova atira justamente nessas.
+    // O MAIOR sozinho entra na linha porque e UM alvo por vez que dispara, e
+    // porque a soma escondia a forma: "3 valem US$ 91" parecia tres de US$ 30,
+    // e era uma de US$ 66 a 1,44% de cair.
     return degraus
-        .map((d) => `${d.quedaPct}%: ${d.quantos} alcanço/${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)})`)
+        .map((d) => `${d.quedaPct}%: ${d.quantos} alcanço/${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)}${
+            d.maior === null ? '' : `, maior US$ ${d.maior.lucroUsd.toFixed(0)} a ${d.maior.quedaPct.toFixed(2)}%`})`)
         .join(' | ');
 }
 
