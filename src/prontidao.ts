@@ -355,6 +355,72 @@ export function lanceAmordacado(entrada: {
 }
 
 /**
+ * O TIRO EM BRANCO: uma transacao de verdade, que vai reverter de proposito.
+ *
+ * Existe por uma pressa legitima: "preciso que ele de um tiro logo, porque
+ * estamos perdendo tempo pra descobrir que nunca funciona". E o tiro de prova
+ * nao resolve isso, porque ele espera o mercado — e o mercado nao esta dando
+ * liquidacao nenhuma.
+ *
+ * A saida e separar duas perguntas que estavam grudadas:
+ *
+ *   A) A Aave aceita a liquidacao e o contrato consegue vender a garantia?
+ *      -> so um alvo liquidavel de verdade responde. Tem de esperar.
+ *
+ *   B) O bot consegue ASSINAR, MANDAR, ser minerado, ler o recibo e contar o
+ *      resultado?
+ *      -> qualquer transacao responde. Nao precisa esperar nada.
+ *
+ * (B) nunca rodou: `nonce: 4` ha cinco dias. E (B) da para provar HOJE, de
+ * proposito, por uns cinco centavos: manda-se a cacada num alvo que NAO esta
+ * liquidavel, com piso de lucro impossivel. A Aave recusa cedo, a transacao e
+ * minerada como falha, e o recibo volta. Gasta-se o gas de uma recusa —
+ * 150 mil de gas a 0,12 gwei na Base, US$ 0,048.
+ *
+ * O que isso prova: a chave do Railway assina, o nonce esta certo, o no aceita
+ * o gas adiantado com o saldo que ela tem de verdade, a transacao entra num
+ * bloco da Base, `lerRecibo` classifica como 'reverteu', e o placar conta.
+ *
+ * O que isso NAO prova, e precisa estar escrito em letra grande: nada sobre a
+ * Aave aceitar uma liquidacao nem sobre a venda na Aerodrome. Essas duas so um
+ * alvo liquidavel responde — e um "tiro em branco" que fosse vendido como
+ * "funciona" seria pior que nao ter atirado.
+ *
+ * A trava e a mesma do tiro de prova, no nonce, e por isso ATENCAO: o branco
+ * queima o nonce 4. Se os dois estiverem armados no mesmo numero, o branco
+ * desarma o de prova. Os limites tem de ser diferentes — o log diz isso depois
+ * de atirar.
+ */
+export function tiroEmBrancoArmado(entrada: {
+    ligado: boolean;
+    nonceAtual: number;
+    ateNonce: number;
+    /** O alvo TEM de ter revertido na medicao. Se nao reverteu, algo mudou. */
+    medicaoReverteu: boolean;
+}): { armado: boolean; porque: string } {
+    if (!entrada.ligado) return { armado: false, porque: 'CACA_TIRO_EM_BRANCO não está ligado' };
+    if (!entrada.medicaoReverteu) {
+        // Se o alvo do ensaio ficou liquidavel, um tiro em branco seria jogar
+        // dinheiro fora numa hora em que cabia um tiro de verdade.
+        return { armado: false, porque: 'a medição NÃO reverteu — o alvo pode estar liquidável, e aí cabe tiro de verdade' };
+    }
+    if (!Number.isInteger(entrada.nonceAtual) || entrada.nonceAtual < 0) {
+        return { armado: false, porque: `nonce inválido (${entrada.nonceAtual}) — não mando nada sem saber` };
+    }
+    if (!Number.isInteger(entrada.ateNonce) || entrada.ateNonce < 0) {
+        return { armado: false, porque: 'CACA_TIRO_EM_BRANCO_ATE_NONCE não foi definido — sem trava eu não mando' };
+    }
+    if (entrada.nonceAtual > entrada.ateNonce) {
+        return { armado: false, porque: `já foi: nonce ${entrada.nonceAtual} passou de ${entrada.ateNonce}` };
+    }
+    return {
+        armado: true,
+        porque: `ARMADO: nonce ${entrada.nonceAtual} ainda não passou de ${entrada.ateNonce}. ` +
+            'Vai reverter DE PROPÓSITO, e prova o caminho de envio — não a liquidação',
+    };
+}
+
+/**
  * O TIRO DE PROVA: um tiro, de proposito no prejuizo, para saber se funciona.
  *
  * A decisao e dela, e e boa: "mesmo que a gente gaste todo o gas pra pouco

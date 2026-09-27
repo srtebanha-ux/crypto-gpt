@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import {
     gorjetaPorGas, tetoPorGas, lerBasefee,
-    lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado,
+    lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado, tiroEmBrancoArmado,
     PISO_DA_GORJETA_WEI, TETO_DA_GORJETA_WEI, LIMITE_DE_GAS,
 } from './prontidao';
 
@@ -681,4 +681,74 @@ test('nem no modo prova o lucro pode ser ZERO ou negativo', () => {
 test('o modo prova não inventa cotação: sem preço do ETH continua barrado', () => {
     const d = decidirTiro({ ...AMBIENTE_REAL, precoDoEthUsd: null, lucroUsd: new Decimal(5), tiroDeProva: true });
     assert.equal(d.atira, false);
+});
+
+// ---------------------------------------------------------------------------
+// O tiro em branco: a regra de armar.
+//
+// Ela pediu pressa: "preciso que ele de um tiro logo, porque estamos perdendo
+// tempo pra descobrir que nunca funciona". O tiro de prova não resolve isso,
+// porque espera o mercado — e o mercado não está dando liquidação nenhuma.
+//
+// A saída é separar duas perguntas que estavam grudadas:
+//   (A) a Aave aceita e o contrato vende?  -> só um alvo liquidável responde
+//   (B) o bot assina, manda, é minerado e lê o recibo?  -> qualquer transação
+//
+// (B) nunca rodou, e dá para provar por uns cinco centavos mandando a caçada
+// num alvo NÃO liquidável, com piso impossível.
+//
+// ATENÇÃO: só a regra de ARMAR está aqui. O envio em si não foi ligado — o
+// classificador de segurança bloqueou a edição, e é uma trava razoável: é
+// código que gasta dinheiro de verdade na blockchain. Fica para a decisão dela.
+// ---------------------------------------------------------------------------
+
+test('arma quando a medição reverteu e o nonce não passou da trava', () => {
+    const r = tiroEmBrancoArmado({ ligado: true, nonceAtual: 4, ateNonce: 4, medicaoReverteu: true });
+    assert.equal(r.armado, true);
+    assert.match(r.porque, /reverter DE PROPÓSITO/);
+});
+
+test('NÃO arma se a medição não reverteu: aí cabe tiro de verdade', () => {
+    // Se o alvo do ensaio ficou liquidável, gastar num tiro em branco seria
+    // jogar dinheiro fora exatamente na hora em que havia dinheiro a ganhar.
+    const r = tiroEmBrancoArmado({ ligado: true, nonceAtual: 4, ateNonce: 4, medicaoReverteu: false });
+    assert.equal(r.armado, false);
+    assert.match(r.porque, /pode estar liquidável/);
+});
+
+test('a trava no nonce vale igual: uma vez e nunca mais', () => {
+    const r = tiroEmBrancoArmado({ ligado: true, nonceAtual: 5, ateNonce: 4, medicaoReverteu: true });
+    assert.equal(r.armado, false);
+    assert.match(r.porque, /já foi/);
+});
+
+test('sem a variável da trava NÃO arma, e nonce desconhecido também não', () => {
+    assert.equal(tiroEmBrancoArmado({ ligado: true, nonceAtual: 4, ateNonce: -1, medicaoReverteu: true }).armado, false);
+    assert.equal(tiroEmBrancoArmado({ ligado: true, nonceAtual: -1, ateNonce: 4, medicaoReverteu: true }).armado, false);
+    assert.equal(tiroEmBrancoArmado({ ligado: true, nonceAtual: NaN, ateNonce: 4, medicaoReverteu: true }).armado, false);
+});
+
+test('desligado não arma, mesmo com tudo o resto certo', () => {
+    assert.equal(tiroEmBrancoArmado({ ligado: false, nonceAtual: 4, ateNonce: 4, medicaoReverteu: true }).armado, false);
+});
+
+test('as duas travas são independentes — senão o branco desarma a prova', () => {
+    // O branco queima o nonce 4. Se os dois estivessem no mesmo número, a prova
+    // de verdade morreria junto, e a pessoa descobriria esperando para sempre.
+    const depoisDoBranco = 5;
+    assert.equal(tiroEmBrancoArmado({ ligado: true, nonceAtual: depoisDoBranco, ateNonce: 4, medicaoReverteu: true }).armado,
+        false, 'o branco se desarma');
+    assert.equal(tiroDeProvaArmado({ ligado: true, nonceAtual: depoisDoBranco, ateNonce: 4 }).armado,
+        false, 'e com o MESMO limite a prova morre junto — é o que não se quer');
+    assert.equal(tiroDeProvaArmado({ ligado: true, nonceAtual: depoisDoBranco, ateNonce: 5 }).armado,
+        true, 'com o limite um acima, a prova sobrevive');
+});
+
+test('o custo do tiro em branco é de centavos, e é o argumento todo', () => {
+    // 150 mil de gás (recusa cedo da Aave) a 0,12 gwei na Base.
+    const gasDaRecusa = 150_000n;
+    const total = PISO_DA_GORJETA_WEI + BASE_REAL_WEI;
+    const usd = new Decimal((gasDaRecusa * total).toString()).dividedBy(1e18).mul(ETH_REAL);
+    assert.equal(usd.toFixed(4), '0.0484');
+    assert.ok(usd.lessThan('0.10'), 'se isto passar de dez centavos o argumento muda');
 });
