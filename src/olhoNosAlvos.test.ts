@@ -1,0 +1,99 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { Decimal } from 'decimal.js';
+import { compararLeituras, naoForamLidos, comoLerOMovimento, emQuantoTempoHumano, type Alvo, type Leitura } from './olhoNosAlvos';
+
+const alvo = (d: string, queda: number | null, divida = 3053, lucro = 66.44): Alvo => ({
+    devedor: d, queda: queda === null ? null : new Decimal(queda),
+    dividaUsd: new Decimal(divida), lucroUsd: new Decimal(lucro),
+});
+const leitura = (em: number, alvos: Alvo[]): Leitura => ({ em, alvos });
+
+test('o caso real: o alvo de 1,441% andando para mais perto', () => {
+    const antes = leitura(0, [alvo('0xc4d36f95', 1.441)]);
+    const agora = leitura(12 * 60_000, [alvo('0xc4d36f95', 1.398)]);
+    const [m] = compararLeituras(antes, agora);
+    assert.equal(m!.tipo, 'andou');
+    if (m!.tipo !== 'andou') return;
+    assert.equal(m.deltaPontos.toFixed(3), '-0.043');
+    assert.match(comoLerOMovimento(m), /CHEGOU 0\.043 mais perto em 12min/);
+});
+
+test('o sinal negativo quer dizer CHEGANDO PERTO, e isso vai escrito', () => {
+    // Um sinal contraintuitivo sem palavra ao lado é um convite a ler ao
+    // contrário — e aqui ler ao contrário é achar que o alvo está fugindo.
+    const perto = compararLeituras(leitura(0, [alvo('0xA', 2)]), leitura(60_000, [alvo('0xA', 1.5)]))[0]!;
+    const longe = compararLeituras(leitura(0, [alvo('0xA', 2)]), leitura(60_000, [alvo('0xA', 2.5)]))[0]!;
+    assert.match(comoLerOMovimento(perto), /CHEGOU/);
+    assert.match(comoLerOMovimento(longe), /afastou/);
+});
+
+test('parado é parado, e não vira movimento minúsculo', () => {
+    const m = compararLeituras(leitura(0, [alvo('0xA', 2)]), leitura(60_000, [alvo('0xA', 2)]))[0]!;
+    assert.match(comoLerOMovimento(m), /parado/);
+});
+
+test('sem leitura anterior, todos são NOVOS — não "andaram zero"', () => {
+    const movs = compararLeituras(null, leitura(1000, [alvo('0xA', 1.4), alvo('0xB', 2.2)]));
+    assert.equal(movs.length, 2);
+    assert.ok(movs.every((m) => m.tipo === 'novo'));
+    assert.match(comoLerOMovimento(movs[0]!), /NOVO/);
+});
+
+test('dívida paga vira SAIU, não margem zero', () => {
+    // `quedaAteLiquidar` devolve null para quem não deve nada. Tratar isso
+    // como 0% faria o alvo parecer liquidável — o pior erro possível aqui.
+    const m = compararLeituras(leitura(0, [alvo('0xA', 1.4)]), leitura(60_000, [alvo('0xA', null)]))[0]!;
+    assert.equal(m.tipo, 'saiu');
+    assert.match(comoLerOMovimento(m), /SAIU da lista \(estava a 1\.400%\)/);
+});
+
+test('quem NÃO foi lido agora não é dado como sumido', () => {
+    // Falta de leitura não é desaparecimento. Confundir os dois transforma um
+    // buraco de cobertura em fato — o defeito que este projeto mais encontra.
+    const antes = leitura(0, [alvo('0xA', 1.4), alvo('0xB', 2.2)]);
+    const agora = leitura(60_000, [alvo('0xA', 1.3)]);
+    assert.deepEqual(compararLeituras(antes, agora).map((m) => m.tipo), ['andou']);
+    assert.deepEqual(naoForamLidos(antes, agora), ['0xB']);
+    assert.deepEqual(naoForamLidos(null, agora), [], 'sem leitura anterior ninguém está faltando');
+});
+
+test('endereço em caixa diferente é a mesma pessoa', () => {
+    const m = compararLeituras(leitura(0, [alvo('0xAbC', 2)]), leitura(60_000, [alvo('0xabc', 1.9)]))[0]!;
+    assert.equal(m.tipo, 'andou');
+    assert.deepEqual(naoForamLidos(leitura(0, [alvo('0xAbC', 2)]), leitura(60_000, [alvo('0xabc', 1.9)])), []);
+});
+
+test('o delta é em PONTOS da margem, não em porcentagem da margem', () => {
+    // De 2% para 1% é −1 ponto, e NÃO "caiu 50%". As duas leituras são
+    // diferentes e misturá-las já custou caro neste projeto.
+    const m = compararLeituras(leitura(0, [alvo('0xA', 2)]), leitura(60_000, [alvo('0xA', 1)]))[0]!;
+    if (m.tipo !== 'andou') return assert.fail();
+    assert.equal(m.deltaPontos.toFixed(3), '-1.000');
+});
+
+test('tempo em português, em cada escala', () => {
+    assert.equal(emQuantoTempoHumano(45_000), '45s');
+    assert.equal(emQuantoTempoHumano(12 * 60_000), '12min');
+    assert.equal(emQuantoTempoHumano(3 * 3_600_000), '3.0h');
+});
+
+test('movimento menor que a casa mostrada é PARADO, não "CHEGOU 0.000 mais perto"', () => {
+    // A primeira leitura de verdade imprimiu exatamente isso: uma frase
+    // afirmando movimento ao lado de um número que diz zero. O delta era real,
+    // só menor que meio milésimo. Texto contradizendo o próprio número é o
+    // defeito que este projeto mais encontra.
+    const m = compararLeituras(
+        leitura(0, [alvo('0xA', 1.4401)]),
+        leitura(15_000, [alvo('0xA', 1.44005)]),
+    )[0]!;
+    if (m.tipo !== 'andou') return assert.fail();
+    assert.ok(!m.deltaPontos.isZero(), 'o movimento existe');
+    assert.match(comoLerOMovimento(m), /parado \(mexeu menos que a casa mostrada\)/);
+    assert.doesNotMatch(comoLerOMovimento(m), /CHEGOU 0\.000/);
+});
+
+test('exatamente na resolução ainda conta como movimento', () => {
+    const m = compararLeituras(leitura(0, [alvo('0xA', 2)]), leitura(15_000, [alvo('0xA', 1.9994)]))[0]!;
+    assert.match(comoLerOMovimento(m), /CHEGOU 0\.001 mais perto/);
+});
