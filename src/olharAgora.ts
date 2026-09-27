@@ -6,7 +6,7 @@
 //     npx tsx src/olharAgora.ts            olha os alvos guardados
 //     npx tsx src/olharAgora.ts --varrer   refaz a lista varrendo a Base
 import { ProxyAgent, fetch as uf } from 'undici';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Decimal } from 'decimal.js';
 import { REDES } from './liquidacoes';
@@ -14,7 +14,7 @@ import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodifica
 import { MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { lucroEstimado } from './perdidas';
 import { faixaQueAtira, LIMITE_DE_GAS } from './prontidao';
-import { compararLeituras, naoForamLidos, comoLerOMovimento, resumir, type Alvo, type Leitura } from './olhoNosAlvos';
+import { compararLeituras, naoForamLidos, comoLerOMovimento, resumir, comoLerACobertura, type Alvo, type Leitura } from './olhoNosAlvos';
 
 const RPC = process.env.OLHO_RPC ?? 'https://mainnet.base.org';
 const ONDE = process.env.OLHO_ARQUIVO ?? '.olho/alvos.json';
@@ -41,8 +41,35 @@ async function rpc<T>(metodo: string, params: unknown[], tentativas = 6): Promis
     throw new Error(ultimo);
 }
 
+/**
+ * Todo devedor que eu JA conheco, de qualquer leitura guardada em `.olho/`.
+ *
+ * A varredura so acha quem pediu emprestado DENTRO da janela (~7,4 dias no
+ * padrao). Quem pegou o emprestimo antes disso nao emite evento nenhum agora e
+ * fica invisivel. Em 2026-09-27 isso apagou os dois alvos que mais importam:
+ * `0x9ff24fd4` a 1,1551% e a baleia `0x67d0938f` a 2,1251% com US$ 1,93M de
+ * divida — as duas confirmadas vivas por `eth_call` direto no mesmo minuto em
+ * que a varredura dizia ter lido 100%.
+ *
+ * Ler de novo quem eu ja vi custa um lugar num multicall de 150. E barato, e e
+ * a diferenca entre a lista certa e uma lista que perde a baleia.
+ */
+function sementes(pasta: string): string[] {
+    const vistos = new Set<string>();
+    if (!existsSync(pasta)) return [];
+    for (const nome of readdirSync(pasta)) {
+        if (!nome.endsWith('.json')) continue;
+        try {
+            const j = JSON.parse(readFileSync(`${pasta}/${nome}`, 'utf8')) as { alvos?: Array<{ devedor?: string }> };
+            for (const a of j.alvos ?? []) if (a.devedor) vistos.add(a.devedor.toLowerCase());
+        } catch { /* um arquivo estragado nao derruba a leitura */ }
+    }
+    return [...vistos];
+}
+
 /** Varre a Base atras de quem esta perto de cair. Declara a cobertura. */
-async function varrer(topo: number, ateQuedaPct: number): Promise<{ alvos: Alvo[]; lidos: number; total: number }> {
+async function varrer(topo: number, ateQuedaPct: number, semente: string[]): Promise<
+    { alvos: Alvo[]; lidos: number; daJanela: number; daMemoria: number; blocos: number }> {
     // O RPC publico recusa eth_getLogs acima de 2.000 blocos. Medido.
     const JANELA = 2_000, QUANTAS = Number(process.env.OLHO_JANELAS ?? '160');
     const vistos = new Set<string>();
@@ -58,9 +85,13 @@ async function varrer(topo: number, ateQuedaPct: number): Promise<{ alvos: Alvo[
         if (i % 40 === 39) process.stderr.write(`.${vistos.size}`);
         await dormir(150);
     }
+    const daJanela = vistos.size;
+    // A memoria entra no universo, nunca o substitui: um alvo conhecido que a
+    // janela nao acha continua sendo lido.
+    for (const d of semente) vistos.add(d.toLowerCase());
     const lista = [...vistos];
     const { alvos, lidos } = await lerContas(lista, ateQuedaPct);
-    return { alvos, lidos, total: lista.length };
+    return { alvos, lidos, daJanela, daMemoria: lista.length - daJanela, blocos: JANELA * QUANTAS };
 }
 
 async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos: Alvo[]; lidos: number }> {
@@ -100,18 +131,20 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
         : null;
 
     const ATE = Number(process.env.OLHO_ATE_PCT ?? '5');
-    let alvos: Alvo[], lidos: number, total: number;
+    let alvos: Alvo[], lidos: number, daJanela: number, daMemoria: number, blocos: number;
     if (varreu || antes === null) {
-        ({ alvos, lidos, total } = await varrer(topo, ATE));
+        ({ alvos, lidos, daJanela, daMemoria, blocos } = await varrer(topo, ATE, sementes(dirname(ONDE))));
     } else {
-        const lista = antes.alvos.map((a) => a.devedor);
+        // Releitura: a lista guardada AQUI mais tudo que outras leituras viram.
+        const lista = [...new Set([...antes.alvos.map((a) => a.devedor.toLowerCase()), ...sementes(dirname(ONDE))])];
+        // Sem filtro de distancia na releitura: um alvo vigiado que se afastou
+        // tem de aparecer "afastou", nunca desaparecer em silencio.
         ({ alvos, lidos } = await lerContas(lista, 1e9));
-        total = lista.length;
+        daJanela = 0; daMemoria = lista.length; blocos = 0;
     }
 
-    const cobertura = total === 0 ? 100 : (lidos / total) * 100;
     const agora: Leitura = { em: Date.now(), alvos };
-    console.log(`\nbloco ${topo}  |  li ${lidos} de ${total} (${cobertura.toFixed(1)}%)${cobertura < 99 ? '  >>> COBERTURA BAIXA: não conclua daqui' : ''}`);
+    console.log(`\nbloco ${topo}  |  ${comoLerACobertura({ lidos, daJanela, daMemoria, blocos })}`);
 
     const faixa = faixaQueAtira({
         precoDoEthUsd: new Decimal(process.env.OLHO_ETH ?? '2690'),

@@ -144,3 +144,54 @@ export function resumir(alvos: Alvo[], tetoDaFaixa: Decimal | null): Resumo {
         somaNaFaixa: naFaixa.reduce((acc, a) => acc.plus(a.lucroUsd), new Decimal(0)),
     };
 }
+
+/** De onde veio cada endereco que a leitura tentou ler. */
+export interface Cobertura {
+    /** Lidos com sucesso. */
+    lidos: number;
+    /** Achados varrendo eventos de emprestimo na janela. */
+    daJanela: number;
+    /** Ja conhecidos de leituras anteriores, que a janela nao acharia. */
+    daMemoria: number;
+    /** Tamanho da janela varrida, em blocos. Zero quando nao varreu. */
+    blocos: number;
+    /** Segundos por bloco da rede, para virar dias. Base: 2s. */
+    segundosPorBloco?: number;
+}
+
+/**
+ * A linha da cobertura, dizendo QUAL universo foi lido.
+ *
+ * Existe por um erro meu de 2026-09-27, do tipo que este projeto mais comete.
+ * A varredura imprimiu `li 3290 de 3290 (100.0%)` e, no MESMO minuto, um
+ * `eth_call` direto mostrou que os dois alvos que mais importam estavam vivos e
+ * fora da lista: `0x9ff24fd4` a 1,1551% e a baleia `0x67d0938f` a 2,1251% com
+ * US$ 1,93M. Os dois pegaram o emprestimo antes da janela de ~7,4 dias, entao
+ * nenhum evento `Borrow` os revelou.
+ *
+ * O `100.0%` estava aritmeticamente certo e semanticamente falso: era 100% do
+ * que eu ACHEI, lido como 100% de quem existe. Por causa dele o RESUMO disse
+ * que o maior premio fora do alcance estava a 3,846%, quando o mesmo premio
+ * (saturado no teto do pool) estava a 2,125% — quase o dobro mais perto.
+ *
+ * Entao a linha nunca mais diz so uma porcentagem: diz de onde veio o universo
+ * e avisa que emprestimo mais antigo que a janela so entra pela memoria.
+ */
+export function comoLerACobertura(c: Cobertura): string {
+    const total = c.daJanela + c.daMemoria;
+    const pct = total === 0 ? 100 : (c.lidos / total) * 100;
+    const dias = c.blocos === 0 ? null : (c.blocos * (c.segundosPorBloco ?? 2)) / 86_400;
+    const partes = [
+        `li ${c.lidos} de ${total} endereços (${pct.toFixed(1)}%)`,
+        dias === null
+            ? `${c.daMemoria} guardados de leituras anteriores`
+            : `${c.daJanela} que pediram emprestado nos últimos ${c.blocos} blocos (~${dias.toFixed(1)} dias)`
+                + (c.daMemoria > 0 ? ` + ${c.daMemoria} guardados de leituras anteriores` : ''),
+    ];
+    const avisos: string[] = [];
+    if (pct < 99) avisos.push('COBERTURA BAIXA: não conclua daqui');
+    // O aviso vale SEMPRE que houve varredura, inclusive a 100%: foi justamente
+    // com 100% que a lista perdeu a baleia.
+    if (c.blocos > 0) avisos.push('este total é quem eu ACHEI, não quem existe: empréstimo mais antigo que a janela só entra se já estiver guardado');
+    return partes.join(': ') + avisos.map((a) => `\n  >>> ${a}`).join('');
+}

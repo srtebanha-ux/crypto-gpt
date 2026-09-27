@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { compararLeituras, naoForamLidos, comoLerOMovimento, emQuantoTempoHumano, resumir, type Alvo, type Leitura } from './olhoNosAlvos';
+import { compararLeituras, naoForamLidos, comoLerOMovimento, emQuantoTempoHumano, resumir, comoLerACobertura, type Alvo, type Leitura } from './olhoNosAlvos';
 
 const alvo = (d: string, queda: number | null, divida = 3053, lucro = 66.44): Alvo => ({
     devedor: d, queda: queda === null ? null : new Decimal(queda),
@@ -146,4 +146,28 @@ test('no empate de prêmio, o resumo aponta quem cai primeiro', () => {
     for (const lista of [[perto, longe], [longe, perto]]) {
         assert.equal(resumir(lista, new Decimal('66.78')).melhorForaDaFaixa!.devedor, '0xPERTO');
     }
+});
+
+test('a cobertura diz de onde veio o universo, e avisa até a 100%', () => {
+    // O caso real: 3290 de 3290 lidos, "100.0%", e a baleia de US$ 1,93M a
+    // 2,1251% fora da lista porque pegou o empréstimo antes da janela.
+    const l = comoLerACobertura({ lidos: 3290, daJanela: 3290, daMemoria: 0, blocos: 320_000 });
+    assert.match(l, /li 3290 de 3290 endereços \(100\.0%\)/);
+    assert.match(l, /últimos 320000 blocos \(~7\.4 dias\)/);
+    assert.match(l, /quem eu ACHEI, não quem existe/, 'o aviso vale inclusive a 100%');
+    assert.doesNotMatch(l, /COBERTURA BAIXA/);
+
+    // Com memória, ela aparece somada e nomeada.
+    assert.match(
+        comoLerACobertura({ lidos: 3294, daJanela: 3290, daMemoria: 4, blocos: 320_000 }),
+        /de 3294 endereços \(100\.0%\): 3290 que pediram emprestado .* \+ 4 guardados/,
+    );
+
+    // Releitura da lista guardada: não houve janela, então não há aviso de janela.
+    const so = comoLerACobertura({ lidos: 24, daJanela: 0, daMemoria: 24, blocos: 0 });
+    assert.match(so, /li 24 de 24 endereços \(100\.0%\): 24 guardados/);
+    assert.doesNotMatch(so, /quem eu ACHEI/);
+
+    // Cobertura baixa continua gritando.
+    assert.match(comoLerACobertura({ lidos: 86, daJanela: 100, daMemoria: 0, blocos: 2000 }), /COBERTURA BAIXA/);
 });
