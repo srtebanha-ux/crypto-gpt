@@ -1392,7 +1392,7 @@ async function principal(): Promise<'parar' | void> {
         // Essa resposta existe no historico da rede, sem esperar ninguem cair e
         // sem mandar transacao nenhuma. Custa uns 3.000 CUs uma vez por boot —
         // 0,008% do teto do mes.
-        const achadas: Array<{ bloco: number; ativo: string; cru: bigint | Decimal; hash: string }> = [];
+        const achadas: Array<{ bloco: number; ativo: string; cru: bigint | Decimal; hash: string; liquidante: string }> = [];
         let janelasLidas = 0;
         let janelasQueFalharam = 0;
         let blocoMaisAntigoOlhado = topo;
@@ -1413,7 +1413,7 @@ async function principal(): Promise<'parar' | void> {
                 for (const cru of logs) {
                     try {
                         const l = decodificarLiquidacao(cru);
-                        achadas.push({ bloco: l.bloco, ativo: l.ativoDaDivida, cru: l.dividaCrua, hash: cru.transactionHash });
+                        achadas.push({ bloco: l.bloco, ativo: l.ativoDaDivida, cru: l.dividaCrua, hash: cru.transactionHash, liquidante: l.liquidante });
                     } catch { /* um log estranho nao invalida o censo */ }
                 }
             } catch {
@@ -1492,6 +1492,56 @@ async function principal(): Promise<'parar' | void> {
                 .sort((a, b) => b.lucroUsd!.comparedTo(a.lucroUsd!))
                 .slice(0, 3)
                 .map((a) => `US$ ${a.lucroUsd!.toFixed(2)} (dívida US$ ${a.dividaUsd!.toFixed(0)}) https://basescan.org/tx/${a.hash}`),
+            // O que CADA saldo teria alcançado, medido no historico e nao
+            // estimado. "Quanto de gas colocar" era palpite; aqui vira conta.
+            oQueCadaSaldoAlcancaria: (() => {
+                const comCotacao = comLucro.filter((a) => a.lucroUsd !== null);
+                return [0.01, 0.02, 0.05, 0.1].map((eth) => {
+                    const f = faixaQueAtira({
+                        precoDoEthUsd: precoDoEth(),
+                        saldoWei: BigInt(Math.round(eth * 1e18)),
+                        baseFeeWei: baseFeeAtual ?? 20_000_000n,
+                        limiteGas: LIMITE_DE_GAS,
+                        fracaoBaseDoLucro: fracaoBase,
+                        fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
+                        fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
+                        margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
+                        tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
+                        atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+                        tiroDeProva: provaAgora().armado,
+                    });
+                    if (f === null) return `${eth} ETH: não sei dizer`;
+                    const dentro = comCotacao.filter((a) =>
+                        (f.de === null || a.lucroUsd!.greaterThanOrEqualTo(f.de)) && a.lucroUsd!.lessThanOrEqualTo(f.ate));
+                    const soma = dentro.reduce((acc, a) => acc.plus(a.lucroUsd!), new Decimal(0));
+                    const usdDoSaldo = precoDoEth() === null ? null : new Decimal(eth).mul(precoDoEth()!);
+                    return `${eth} ETH${usdDoSaldo === null ? '' : ` (US$ ${usdDoSaldo.toFixed(0)})`}: teto US$ ${f.ate.toFixed(0)}, ` +
+                        `alcançaria ${dentro.length} delas valendo US$ ${soma.toFixed(2)} ` +
+                        `(~US$ ${soma.dividedBy(Math.max(diasOlhados, 0.01)).mul(30).toFixed(0)}/mês)`;
+                });
+            })(),
+            // Quem esta levando, e quao concentrado. E o melhor palpite que os
+            // dados dao sobre a chance de GANHAR a corrida: um endereco levando
+            // quase tudo e concorrencia dedicada; trinta enderecos diferentes e
+            // uma faixa que ninguem disputa a serio.
+            quemEstaLevando: (() => {
+                const porLiquidante = new Map<string, number>();
+                for (const a of achadas) {
+                    const k = a.liquidante.toLowerCase();
+                    porLiquidante.set(k, (porLiquidante.get(k) ?? 0) + 1);
+                }
+                const ordenado = [...porLiquidante.entries()].sort((a, b) => b[1] - a[1]);
+                const topo = ordenado[0];
+                return {
+                    quantosLiquidantes: porLiquidante.size,
+                    oMaior: topo === undefined
+                        ? 'ninguém'
+                        : `${topo[0].slice(0, 10)}… levou ${topo[1]} de ${achadas.length} (${Math.round((topo[1] / achadas.length) * 100)}%)`,
+                    leitura: porLiquidante.size >= achadas.length / 2
+                        ? 'MUITOS endereços diferentes: a faixa não tem dono, e entrar é plausível'
+                        : 'CONCENTRADO em poucos endereços: há bots dedicados, e ganhar a corrida é mais difícil',
+                };
+            })(),
             ATENCAO: 'isto é OPORTUNIDADE que passou, não renda perdida: para cada uma dessas eu ainda teria de ' +
                 'ganhar a corrida de outro liquidador. É o teto do que a faixa pode dar, não o que ela daria',
             oQueIssoQuerDizer: dentroDaFaixa.length === 0
