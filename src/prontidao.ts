@@ -579,8 +579,16 @@ export function decidirTiro(e: {
  * ate a precisao pedida.
  */
 export interface FaixaDeTiro {
-    /** Abaixo disto o premio nao paga o proprio gas. */
-    de: Decimal;
+    /**
+     * Abaixo disto o premio nao paga o proprio gas. `null` quando NAO HA piso —
+     * o que acontece no modo prova, onde qualquer lucro acima de zero passa.
+     *
+     * Era um numero sempre, e no modo prova ele devolvia 0,0001: o chao da
+     * propria busca, nao uma medicao. O log imprimiu "US$ 0.00 a US$ 45.68.
+     * Abaixo nao paga o gas" — um piso inventado pelo algoritmo, com uma frase
+     * que o contradiz. `null` diz a verdade: nao existe piso.
+     */
+    de: Decimal | null;
     /** Acima disto uma derrota comeria mais gas do que a caca aguenta. */
     ate: Decimal;
     /**
@@ -609,18 +617,17 @@ export function faixaQueAtira(
     }
     if (ancora === null) return null;
 
-    // 2) Ponta de baixo: o menor premio que ainda atira.
-    let de = ancora;
-    if (!atira(new Decimal('0.0001'))) {
-        let fora = new Decimal('0.0001');
+    // 2) Ponta de baixo: o menor premio que ainda atira, ou `null` se nao ha.
+    const PROBE = new Decimal('0.000001');
+    let de: Decimal | null = null;
+    if (!atira(PROBE)) {
+        let fora = PROBE;
         let dentro = ancora;
         for (let i = 0; i < passos; i++) {
             const meio = fora.plus(dentro).dividedBy(2);
             if (atira(meio)) dentro = meio; else fora = meio;
         }
         de = dentro;
-    } else {
-        de = new Decimal('0.0001');
     }
 
     // 3) Ponta de cima: o maior premio que ainda atira.
@@ -642,12 +649,13 @@ export function faixaQueAtira(
         const d = decidirTiro({ ...e, lucroUsd: usd });
         return d.atira && !d.amordaca.amordacado;
     };
+    const chao = de ?? PROBE;
     let inteiroAte: Decimal | null = null;
-    if (inteiro(de)) {
+    if (inteiro(chao)) {
         if (inteiro(ate)) {
             inteiroAte = ate;
         } else {
-            let dentro = de;
+            let dentro = chao;
             let fora = ate;
             for (let i = 0; i < passos; i++) {
                 const meio = dentro.plus(fora).dividedBy(2);

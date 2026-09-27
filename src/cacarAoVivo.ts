@@ -1253,11 +1253,17 @@ async function principal(): Promise<'parar' | void> {
             // saldo ainda atira. E o numero que a estrategia escolhida pede, e
             // que o log nunca deu.
             const faixa = faixaQueAtira(ambiente);
+            // Sem piso NAO e piso zero. O modo prova apaga o piso de lucro, e
+            // dizer "US$ 0,00. Abaixo nao paga o gas" era um numero inventado
+            // pela propria busca ao lado de uma frase que o contradiz.
             passos.atiroNaFaixaDe = faixa === null
                 ? 'NENHUM prêmio — algum freio barra tudo'
-                : `US$ ${faixa.de.toFixed(2)} a US$ ${faixa.ate.toFixed(2)} ` +
-                  `(R$ ${faixa.de.mul(5.4).toFixed(2)} a R$ ${faixa.ate.mul(5.4).toFixed(2)}). ` +
-                  'Abaixo não paga o gás; acima uma derrota mata a caça';
+                : faixa.de === null
+                    ? `QUALQUER lucro acima de zero até US$ ${faixa.ate.toFixed(2)} (R$ ${faixa.ate.mul(5.4).toFixed(2)}). ` +
+                      'NÃO existe piso: é o modo prova, e ele atira sabendo que pode dar prejuízo'
+                    : `US$ ${faixa.de.toFixed(2)} a US$ ${faixa.ate.toFixed(2)} ` +
+                      `(R$ ${faixa.de.mul(5.4).toFixed(2)} a R$ ${faixa.ate.mul(5.4).toFixed(2)}). ` +
+                      'Abaixo não paga o gás; acima uma derrota mata a caça';
             passos.lanceInteiroAte = faixa === null || faixa.inteiroAte === null
                 ? 'nenhum prêmio com lance inteiro'
                 : `US$ ${faixa.inteiroAte.toFixed(2)} (R$ ${faixa.inteiroAte.mul(5.4).toFixed(2)}). ` +
@@ -2120,6 +2126,20 @@ async function principal(): Promise<'parar' | void> {
                                 verNaBlockchain: `https://basescan.org/tx/${hashDoTiro}`,
                             };
                             if (desfecho === 'acertou') {
+                                if (decisao.soPassouPorSerProva) {
+                                    // Um acerto de prova prova o CAMINHO, e nao
+                                    // que a estrategia da dinheiro. O cofre vai
+                                    // receber centavos: a evidencia e a
+                                    // transacao, nao o saldo.
+                                    log.warn('*** A PROVA FOI FEITA. O caminho inteiro funcionou de verdade. ***', {
+                                        oQueIssoProva: 'a Aave aceitou a liquidação, o contrato vendeu a garantia e mandou o lucro para o cofre',
+                                        oQueIssoNAOProva: 'que a estratégia dá dinheiro — este tiro foi escolhido por ser barato, não por ser lucrativo',
+                                        ondeVer: `https://basescan.org/tx/${tx.hash}`,
+                                        oCofre: 'vai receber centavos, não um valor visível. A evidência é a transação',
+                                        aTravaAgora: 'o nonce subiu: o modo prova se desarmou sozinho, para sempre',
+                                        oQueFazerAgora: 'desligar CACA_TIRO_DE_PROVA no Railway e voltar à regra normal',
+                                    });
+                                }
                                 log.info('*** ACERTOU! O dinheiro foi para o cofre. ***', {
                                     ...dados,
                                     cofre: `https://basescan.org/address/${COFRE_ESPERADO}`,

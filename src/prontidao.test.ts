@@ -512,13 +512,14 @@ test('a FAIXA que atira tem duas pontas, e as duas importam', () => {
     const f = faixaQueAtira(AMBIENTE_REAL);
     assert.ok(f !== null);
     // Ponta de baixo: abaixo dela o prêmio não paga o próprio gás.
-    assert.equal(f!.de.toFixed(2), '0.45');
+    assert.ok(f!.de !== null, 'na regra normal existe piso');
+    assert.equal(f!.de!.toFixed(2), '0.45');
     // Ponta de cima: acima dela uma derrota come metade do gás.
     assert.equal(f!.ate.toFixed(0), '67');
     // As duas pontas são de verdade: dentro atira, fora não.
-    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.de }).atira, true, 'a ponta de baixo atira');
+    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.de! }).atira, true, 'a ponta de baixo atira');
     assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.ate }).atira, true, 'a ponta de cima atira');
-    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.de.mul('0.9') }).atira, false, 'abaixo, não');
+    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.de!.mul('0.9') }).atira, false, 'abaixo, não');
     assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.ate.mul('1.1') }).atira, false, 'acima, não');
 });
 
@@ -636,8 +637,10 @@ test('desligado não arma, mesmo com tudo o resto certo', () => {
 test('o modo prova abre a ponta de BAIXO da faixa — é ali que estão as migalhas', () => {
     const normal = faixaQueAtira(AMBIENTE_REAL)!;
     const prova = faixaQueAtira({ ...AMBIENTE_REAL, tiroDeProva: true })!;
-    assert.ok(prova.de.lessThan(normal.de.dividedBy(4)),
-        `prova abre de US$ ${normal.de.toFixed(2)} para US$ ${prova.de.toFixed(4)}`);
+    // E "sem piso" é `null`, não zero: 0,0001 era o chão da própria busca, e
+    // imprimir isso como medição é exatamente o defeito que este projeto caça.
+    assert.ok(normal.de !== null, 'na regra normal existe piso');
+    assert.equal(prova.de, null, 'na prova NÃO existe piso, e isso se diz com null');
     // E NÃO abre a de cima: a proteção contra baleia amordaçada fica de pé.
     assert.equal(prova.ate.toFixed(0), normal.ate.toFixed(0),
         'a prova que ela quer é de uma migalha, não de uma baleia');
