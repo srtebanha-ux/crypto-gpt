@@ -1399,7 +1399,28 @@ async function principal(): Promise<'parar' | void> {
             } catch { /* log estranho nao derruba o placar */ }
         }
 
-        const placar = montarPlacar(perdidas);
+        // O piso do placar e o piso DO BOT, tirado da faixa que ele atira agora.
+        // Estava fixo em US$20 e ficou desatualizado em silencio: com o modo
+        // prova o bot atira em qualquer lucro acima de zero, e o placar diria
+        // "nao teve" sobre exatamente a liquidacao que ela esta esperando.
+        const faixaAgora = faixaQueAtira({
+            precoDoEthUsd: precoDoEth(),
+            saldoWei: saldoDeGasWei,
+            baseFeeWei: baseFeeAtual ?? 20_000_000n,
+            limiteGas: LIMITE_DE_GAS,
+            fracaoBaseDoLucro: fracaoBase,
+            fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
+            fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
+            margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
+            tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
+            atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+            tiroDeProva: provaAgora().armado,
+        });
+        // Sem faixa (sem cotacao, sem saldo) o piso volta ao default: nesse caso
+        // nao se sabe o que o bot atiraria, e inventar zero encheria o placar de
+        // poeira com cara de oportunidade perdida.
+        const pisoDoPlacar = faixaAgora === null ? new Decimal(20) : faixaAgora.de;
+        const placar = montarPlacar(perdidas, pisoDoPlacar ?? new Decimal(0));
         desdeOBoot.blocos += ate - de + 1;
         desdeOBoot.aconteceram += placar.total;
         desdeOBoot.valiamAPena += placar.valiam.length;
@@ -1409,6 +1430,11 @@ async function principal(): Promise<'parar' | void> {
         const horas = (Date.now() - desdeOBoot.emMs) / 3_600_000;
         log.info('[PLACAR] Liquidações que aconteceram sem mim.', {
             janela: `blocos ${de}–${ate}`,
+            pisoUsado: faixaAgora === null
+                ? 'US$ 20,00 (não sei a faixa agora: sem cotação ou sem saldo)'
+                : pisoDoPlacar === null
+                    ? 'qualquer lucro acima de zero (modo prova)'
+                    : `US$ ${pisoDoPlacar.toFixed(2)}`,
             aconteceram: placar.total,
             valiamAPena: placar.valiam.length,
             // O acumulado e o que responde a pergunta. Uma hora em branco tem
@@ -1421,7 +1447,7 @@ async function principal(): Promise<'parar' | void> {
                 lucroQuePassou: `US$ ${desdeOBoot.lucro.toFixed(2)}`,
                 ondeEuEstava: desdeOBoot.porCobertura,
             },
-            oQueIssoQuerDizer: oQueIssoQuerDizer(placar),
+            oQueIssoQuerDizer: oQueIssoQuerDizer(placar, faixaAgora === null ? new Decimal(20) : pisoDoPlacar),
             asTresMaiores: placar.valiam.slice(0, 3).map((x) => ({
                 divida: x.dividaUsd === null ? 'sem cotação' : `US$ ${x.dividaUsd.toFixed(0)}`,
                 lucro: `US$ ${x.lucroUsd!.toFixed(2)}`,

@@ -257,6 +257,17 @@ export interface PlacarDasPerdidas {
  *
  * O piso existe porque liquidacao de US$50 de divida rende US$1 e nao paga o
  * gas; conta-la como "perdida" inflaria o numero e esconderia o que importa.
+ *
+ * MAS o piso tem de ser o do BOT, nao um numero escolhido aqui. O default de
+ * US$20 ficou desatualizado sem ninguem notar: o bot passou a atirar em
+ * qualquer lucro acima de zero (modo prova) e o placar continuou medindo contra
+ * US$20. Uma liquidacao de US$5 — justamente a que ela esta esperando para
+ * provar que funciona — aconteceria, o bot a quereria, e o placar imprimiria
+ * "Nenhuma liquidacao na sua faixa de lucro. Nao teve."
+ *
+ * O placar existe para responder "passou algo que eu queria?". Com o piso
+ * errado ele responde a pergunta de outro bot. Quem chama passa o piso de
+ * verdade, tirado da faixa que o bot atira hoje.
  */
 export function montarPlacar(perdidas: Perdida[], pisoDeLucroUsd = new Decimal(20)): PlacarDasPerdidas {
     const porCobertura: Record<Cobertura, number> = { brasa: 0, quente: 0, 'na lista': 0, 'nem sabia': 0 };
@@ -283,9 +294,16 @@ export function montarPlacar(perdidas: Perdida[], pisoDeLucroUsd = new Decimal(2
  * Existe para o placar nao virar uma tabela que ninguem sabe ler. O balde
  * maior diz o que consertar, e cada um pede um conserto diferente.
  */
-export function oQueIssoQuerDizer(placar: PlacarDasPerdidas): string {
+export function oQueIssoQuerDizer(placar: PlacarDasPerdidas, pisoUsado?: Decimal | null): string {
     if (placar.valiam.length === 0) {
-        return 'Nenhuma liquidação na sua faixa de lucro. Não foi velocidade nem cobertura: não teve.';
+        // O piso entra na frase porque "na sua faixa de lucro" e a parte que
+        // pode estar errada, e sem o numero ninguem consegue conferir.
+        const piso = pisoUsado === undefined
+            ? ''
+            : pisoUsado === null
+                ? ' (piso: qualquer lucro acima de zero)'
+                : ` (piso: US$ ${pisoUsado.toFixed(2)})`;
+        return `Nenhuma liquidação na sua faixa de lucro${piso}. Não foi velocidade nem cobertura: não teve.`;
     }
     const c = placar.porCobertura;
     const ordenados = (Object.keys(c) as Cobertura[]).filter((k) => c[k] > 0).sort((a, b) => c[b] - c[a]);

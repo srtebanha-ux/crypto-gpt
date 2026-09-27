@@ -113,3 +113,59 @@ test('zero liquidações na faixa NÃO vira acusação de lentidão', () => {
     const vazio = montarPlacar([perdida({ lucroUsd: D(1), cobertura: 'brasa' })]);
     assert.ok(oQueIssoQuerDizer(vazio).includes('não teve'));
 });
+
+// ---------------------------------------------------------------------------
+// O piso do placar tem de ser o piso DO BOT.
+//
+// Estava fixo em US$ 20 e ficou desatualizado em silêncio. Com o modo prova o
+// bot atira em qualquer lucro acima de zero, e o placar imprimiria "Nenhuma
+// liquidação na sua faixa de lucro. Não teve." sobre exatamente a liquidação
+// que ela está esperando para provar que o bot funciona.
+//
+// O placar existe para responder "passou algo que eu queria?". Com o piso
+// errado ele responde a pergunta de outro bot.
+// ---------------------------------------------------------------------------
+
+const perdidaDe = (lucroUsd: number, cobertura: Cobertura = 'brasa'): Perdida => ({
+    devedor: `0x${'11'.repeat(20)}`,
+    liquidante: `0x${'22'.repeat(20)}`,
+    bloco: 1,
+    dividaUsd: new Decimal(lucroUsd * 50),
+    lucroUsd: new Decimal(lucroUsd),
+    cobertura,
+});
+
+test('o defeito: uma liquidação de US$ 5 desaparecia atrás do piso de US$ 20', () => {
+    const passou = [perdidaDe(5)];
+    const comPisoAntigo = montarPlacar(passou, new Decimal(20));
+    assert.equal(comPisoAntigo.valiam.length, 0, 'era isso que o log dizia');
+    assert.match(oQueIssoQuerDizer(comPisoAntigo), /não teve/i);
+
+    // Com o piso do modo prova ela aparece, que é o certo.
+    const comPisoDaProva = montarPlacar(passou, new Decimal(0));
+    assert.equal(comPisoDaProva.valiam.length, 1);
+    assert.equal(comPisoDaProva.somaDoLucroPerdido.toFixed(2), '5.00');
+});
+
+test('a frase de "não teve" carrega o piso, senão não dá para conferir', () => {
+    const vazio = montarPlacar([], new Decimal(20));
+    assert.match(oQueIssoQuerDizer(vazio, new Decimal(20)), /piso: US\$ 20\.00/);
+    assert.match(oQueIssoQuerDizer(vazio, null), /qualquer lucro acima de zero/);
+    // Sem informação de piso, a frase fica como era — não inventa um número.
+    assert.equal(oQueIssoQuerDizer(vazio).includes('piso'), false);
+});
+
+test('o piso continua servindo ao que foi feito para: não inflar com poeira', () => {
+    // Com piso de US$ 1, uma liquidação de 2 centavos não entra como "perdida".
+    const placar = montarPlacar([perdidaDe(0.02), perdidaDe(5)], new Decimal(1));
+    assert.equal(placar.valiam.length, 1);
+    assert.equal(placar.total, 2, 'mas as duas continuam CONTADAS: aconteceram');
+});
+
+test('piso zero conta tudo que tem cotação, e nada do que não tem', () => {
+    const semCotacao: Perdida = { ...perdidaDe(5), lucroUsd: null, dividaUsd: null };
+    const placar = montarPlacar([perdidaDe(0.01), semCotacao], new Decimal(0));
+    assert.equal(placar.valiam.length, 1, 'a de um centavo entra com piso zero');
+    assert.equal(placar.comCotacao, 1, 'a sem cotação não vira zero: fica de fora da conta');
+    assert.equal(placar.total, 2);
+});
