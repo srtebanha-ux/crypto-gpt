@@ -103,6 +103,40 @@ números do bot foram conferidos por fora.
 Ainda assim: **peça o log quando a dúvida for sobre o que o bot ESTÁ fazendo.**
 A rede diz o que é verdade na blockchain; só o log diz o que o bot entendeu.
 
+## A decisão do gás, medida em 2026-09-27 — NÃO adicione
+
+A dona do bot disse desde o começo "a gente não combinou de ficar nas
+migalhas?". Eu derivei duas vezes dali, com números que pareciam bons, e as
+duas vezes ela estava certa. Agora está medido, e fica escrito para as
+próximas sessões não re-litigarem.
+
+O censo mediu a concentração de CADA fatia que o gás abriria, nos últimos 9,3
+dias da Aave na Base:
+
+    faixa dela (até US$ 45)  51 liquidações entre 15 endereços, maior 18%  ABERTA
+    0.01 ETH abre 6 novas     6 entre 2 endereços, maior 50%, top3 100%   TEM DONO
+    0.02 ETH abre 7 novas     7 entre 2 endereços, maior 57%, top3 100%   TEM DONO
+    0.05 ETH abre 9 novas     9 entre 4 endereços, maior 44%, top3  89%   TEM DONO
+    0.1  ETH abre 10 novas   10 entre 4 endereços, maior 50%, top3  90%   TEM DONO
+
+**Todas as fatias que o gás abre têm dono.** Dois endereços levaram 100% da
+primeira. Colocar US$ 27 não compra oportunidade: compra o direito de disputar
+com dois bots dedicados que levaram tudo por nove dias.
+
+E há uma assimetria que piora: o lucro dela numa posição grande é limitado pelo
+pool da Aerodrome em US$ 1.986 (`coberturaOtima`). Quem usa agregador cobre
+mais da mesma dívida e ganha mais — então tem mais incentivo para pagar gorjeta
+alta. Ela perderia o leilão por desenho, não por lentidão.
+
+A faixa dela, ao contrário, é aberta: 15 endereços, ninguém acima de 18%. É
+onde US$ 9 de gás compete de igual para igual.
+
+**Conclusão: ficar nas migalhas. Não é conformismo, é o que os dados dizem.**
+
+Se alguma sessão futura quiser reabrir isso, o teste é rodar o censo de novo e
+olhar `oQueCadaSaldoAlcancaria`: se alguma fatia passar a dizer "fatia sem
+dono", a conta muda. Até lá, não muda.
+
 ## Como este projeto mede o próprio erro
 
 O defeito que mais aparece aqui tem nome: **ausência com cara de resposta** —
