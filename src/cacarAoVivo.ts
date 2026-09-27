@@ -1479,6 +1479,36 @@ async function principal(): Promise<'parar' | void> {
         const porMes = porDia * 30;
         const naFaixaPorMes = diasOlhados > 0 ? (dentroDaFaixa.length / diasOlhados) * 30 : 0;
 
+        // Contar e descrever a concentracao vive UMA vez e serve os dois
+        // campos que precisam dela. Duas copias da mesma regra e o defeito que
+        // este projeto achou oito vezes num dia — inclusive em mim.
+        const contarLiquidantes = (lista: typeof comLucro) => {
+            const por = new Map<string, number>();
+            for (const a of lista) {
+                const k = a.liquidante.toLowerCase();
+                por.set(k, (por.get(k) ?? 0) + 1);
+            }
+            const ordenado = [...por.entries()].sort((a, b) => b[1] - a[1]);
+            const total = lista.length;
+            const fatia = (n: number) => (total === 0 ? 0 : n / total);
+            return {
+                total,
+                jogadores: por.size,
+                fatiaDoMaior: ordenado[0] ? fatia(ordenado[0][1]) : 0,
+                fatiaDoTop3: fatia(ordenado.slice(0, 3).reduce((acc, e) => acc + e[1], 0)),
+            };
+        };
+        type Contagem = ReturnType<typeof contarLiquidantes>;
+        const descreverLiquidantes = (c: Contagem) => c.total === 0
+            ? 'nenhuma'
+            : `${c.total} entre ${c.jogadores} endereços; o maior levou ${
+                Math.round(c.fatiaDoMaior * 100)}%, os três maiores ${Math.round(c.fatiaDoTop3 * 100)}%`;
+        // Dominado e um endereco levando metade, ou tres levando quase tudo com
+        // pouquissimos jogadores. Com menos de cinco liquidacoes nao se afirma
+        // nada: amostra pequena demais para chamar de dono.
+        const dominado = (c: Contagem) =>
+            c.total >= 5 && (c.fatiaDoMaior >= 0.5 || (c.fatiaDoTop3 >= 0.8 && c.jogadores <= 4));
+
         log.info('[MERCADO] Censo das liquidações da Aave na Base.', {
             olhei: `${diasOlhados.toFixed(1)} dias (${janelasLidas} janelas, ${janelasQueFalharam} falharam)`,
             aconteceram: `${achadas.length} no total, ${porDia.toFixed(1)} por dia, ~${Math.round(porMes)} por mês`,
@@ -1521,10 +1551,23 @@ async function principal(): Promise<'parar' | void> {
                         && (f.ate === null || a.lucroUsd!.lessThanOrEqualTo(f.ate)));
                     const soma = dentro.reduce((acc, a) => acc.plus(a.lucroUsd!), new Decimal(0));
                     const usdDoSaldo = precoDoEth() === null ? null : new Decimal(eth).mul(precoDoEth()!);
+                    // A fatia NOVA — o que este saldo abre e o atual não alcança.
+                    // Sem isto o número "alcançaria US$ 584" parece dinheiro
+                    // disponível, quando pode estar todo numa faixa com dono.
+                    const novas = dentro.filter((a) => !dentroDaFaixa.includes(a));
+                    const somaNova = novas.reduce((acc, a) => acc.plus(a.lucroUsd!), new Decimal(0));
+                    const cNovas = contarLiquidantes(novas);
                     return `${eth} ETH${usdDoSaldo === null ? '' : ` (US$ ${usdDoSaldo.toFixed(0)})`}: teto ${
-                        f.ate === null ? 'NENHUM (alcança tudo)' : `US$ ${f.ate.toFixed(0)}`}, ` +
-                        `alcançaria ${dentro.length} delas valendo US$ ${soma.toFixed(2)} ` +
-                        `(~US$ ${soma.dividedBy(Math.max(diasOlhados, 0.01)).mul(30).toFixed(0)}/mês)`;
+                        f.ate === null ? 'NENHUM (alcança tudo)' : `US$ ${f.ate.toFixed(0)}`} | ` +
+                        `alcança ${dentro.length} valendo US$ ${soma.toFixed(2)} ` +
+                        `(~US$ ${soma.dividedBy(Math.max(diasOlhados, 0.01)).mul(30).toFixed(0)}/mês) | ` +
+                        `ABRE ${novas.length} novas valendo US$ ${somaNova.toFixed(2)} — ${
+                            descreverLiquidantes(cNovas)}${
+                            novas.length === 0 ? '' : dominado(cNovas)
+                                ? ' >>> ESSA FATIA TEM DONO: o gás compra acesso a uma briga'
+                                : cNovas.total < 5
+                                    ? ' >>> poucas demais para dizer se tem dono'
+                                    : ' >>> fatia sem dono: o gás compra oportunidade de verdade'}`;
                 });
             })(),
             // Quem esta levando, e quao concentrado. E o melhor palpite que os
@@ -1549,44 +1592,15 @@ async function principal(): Promise<'parar' | void> {
             // bot dedicado. Medir os dois juntos mistura duas corridas
             // diferentes numa media que nao descreve nenhuma.
             quemEstaLevando: (() => {
-                const contar = (lista: typeof comLucro) => {
-                    const por = new Map<string, number>();
-                    for (const a of lista) {
-                        const k = a.liquidante.toLowerCase();
-                        por.set(k, (por.get(k) ?? 0) + 1);
-                    }
-                    const ordenado = [...por.entries()].sort((a, b) => b[1] - a[1]);
-                    const total = lista.length;
-                    const fatia = (n: number) => (total === 0 ? 0 : n / total);
-                    const topo3 = ordenado.slice(0, 3).reduce((acc, e) => acc + e[1], 0);
-                    return {
-                        total,
-                        jogadores: por.size,
-                        maior: ordenado[0],
-                        fatiaDoMaior: ordenado[0] ? fatia(ordenado[0][1]) : 0,
-                        fatiaDoTop3: fatia(topo3),
-                    };
-                };
-                const descrever = (c: ReturnType<typeof contar>) => c.total === 0
-                    ? 'nenhuma'
-                    : `${c.total} liquidações entre ${c.jogadores} endereços; o maior levou ${
-                        Math.round(c.fatiaDoMaior * 100)}%, os três maiores ${Math.round(c.fatiaDoTop3 * 100)}%`;
-
-                const todos = contar(comLucro);
-                const naFaixa = contar(comLucro.filter((a) => dentroDaFaixa.includes(a)));
-                const acimaDaFaixa = contar(comLucro.filter((a) => !dentroDaFaixa.includes(a) && a.lucroUsd !== null));
-
-                // Regra defensavel: dominado e um endereco levando quase tudo, ou
-                // tres levando quase tudo com pouquissimos jogadores.
-                const dominado = (c: ReturnType<typeof contar>) =>
-                    c.total >= 5 && (c.fatiaDoMaior >= 0.5 || (c.fatiaDoTop3 >= 0.8 && c.jogadores <= 4));
+                const naFaixa = contarLiquidantes(comLucro.filter((a) => dentroDaFaixa.includes(a)));
+                const acima = contarLiquidantes(comLucro.filter((a) => !dentroDaFaixa.includes(a) && a.lucroUsd !== null));
                 return {
-                    tudo: descrever(todos),
-                    naSuaFaixa: descrever(naFaixa),
-                    acimaDaSuaFaixa: descrever(acimaDaFaixa),
+                    tudo: descreverLiquidantes(contarLiquidantes(comLucro)),
+                    naSuaFaixa: descreverLiquidantes(naFaixa),
+                    acimaDaSuaFaixa: descreverLiquidantes(acima),
                     leitura: dominado(naFaixa)
                         ? 'a SUA faixa tem dono: um endereço leva a maior parte das migalhas, e entrar é briga'
-                        : dominado(acimaDaFaixa)
+                        : dominado(acima)
                             ? 'a sua faixa é aberta, mas a de cima tem dono: catar migalhas é plausível, '
                               + 'disputar as grandes provavelmente não'
                             : 'nenhuma das duas faixas tem dono. Não é um mercado fechado, e entrar é plausível',
