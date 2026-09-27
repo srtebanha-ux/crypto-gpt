@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { compararLeituras, naoForamLidos, comoLerOMovimento, emQuantoTempoHumano, type Alvo, type Leitura } from './olhoNosAlvos';
+import { compararLeituras, naoForamLidos, comoLerOMovimento, emQuantoTempoHumano, resumir, type Alvo, type Leitura } from './olhoNosAlvos';
 
 const alvo = (d: string, queda: number | null, divida = 3053, lucro = 66.44): Alvo => ({
     devedor: d, queda: queda === null ? null : new Decimal(queda),
@@ -96,4 +96,34 @@ test('movimento menor que a casa mostrada é PARADO, não "CHEGOU 0.000 mais per
 test('exatamente na resolução ainda conta como movimento', () => {
     const m = compararLeituras(leitura(0, [alvo('0xA', 2)]), leitura(15_000, [alvo('0xA', 1.9994)]))[0]!;
     assert.match(comoLerOMovimento(m), /CHEGOU 0\.001 mais perto/);
+});
+
+test('o resumo responde "o que vale a pena", que a lista por proximidade não respondia', () => {
+    // A leitura real de 2026-09-27 imprimiu 16 linhas onde o alvo de R$ 359 e o
+    // de 12 centavos tinham a mesma marca `>> ATIRA`, a seis linhas um do
+    // outro. Ordenar por quem cai primeiro está certo para saber quem cai
+    // primeiro, e errado para saber o que vale — são duas perguntas.
+    const alvos = [
+        alvo('0xPERTO_POBRE', 1.4, 19, 0.12),
+        alvo('0xBOM', 1.441, 3054, 66.45),
+        alvo('0xGRANDE', 3.846, 213196, 1985.95),
+    ];
+    const r = resumir(alvos, new Decimal('66.78'));
+    assert.equal(r.naFaixa[0]!.devedor, '0xBOM', 'o melhor que ele ATIRA vem primeiro');
+    assert.equal(r.naFaixa.length, 2);
+    assert.equal(r.somaNaFaixa.toFixed(2), '66.57');
+    assert.equal(r.melhorDeTodos!.devedor, '0xGRANDE');
+    assert.equal(r.melhorForaDaFaixa!.devedor, '0xGRANDE');
+});
+
+test('sem teto, tudo cabe na faixa e não há "melhor fora"', () => {
+    const r = resumir([alvo('0xA', 2, 213196, 1985.95)], null);
+    assert.equal(r.naFaixa.length, 1);
+    assert.equal(r.melhorForaDaFaixa, null);
+});
+
+test('o resumo ignora quem saiu e quem dá prejuízo', () => {
+    const r = resumir([alvo('0xSAIU', null, 0, 0), alvo('0xPO', 1, 10, -0.3), alvo('0xBOM', 2, 3054, 66.45)], null);
+    assert.equal(r.naFaixa.length, 1);
+    assert.equal(r.naFaixa[0]!.devedor, '0xBOM');
 });

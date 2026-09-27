@@ -106,3 +106,35 @@ export function comoLerOMovimento(m: Movimento): string {
         `(era ${m.antes.toFixed(3)}%, ${sinal} em ${emQuantoTempoHumano(m.msDesde)})  ` +
         `dívida US$ ${m.alvo.dividaUsd.toFixed(0)}  vale US$ ${m.alvo.lucroUsd.toFixed(2)}`;
 }
+
+export interface Resumo {
+    /** O que o bot atiraria HOJE, com o maior premio primeiro. */
+    naFaixa: Alvo[];
+    /** O melhor que existe, atirando ou nao. */
+    melhorDeTodos: Alvo | null;
+    /** O melhor que o bot NAO alcanca, e o teto que faltaria para alcancar. */
+    melhorForaDaFaixa: Alvo | null;
+    somaNaFaixa: Decimal;
+}
+
+/**
+ * O resumo, porque a lista ordenada por PROXIMIDADE enterra a resposta.
+ *
+ * A leitura de 2026-09-27 imprimiu 16 linhas em que o alvo de R$ 359 e o de
+ * 12 centavos apareciam com a mesma marca `>> ATIRA`, separados por seis
+ * linhas. Ordenar por quem cai primeiro esta certo para saber quem cai
+ * primeiro, e errado para saber o que vale a pena — sao duas perguntas, e a
+ * lista so respondia a primeira.
+ */
+export function resumir(alvos: Alvo[], tetoDaFaixa: Decimal | null): Resumo {
+    const vivos = alvos.filter((a) => a.queda !== null && a.lucroUsd.greaterThan(0));
+    const cabe = (a: Alvo) => tetoDaFaixa === null || a.lucroUsd.lessThanOrEqualTo(tetoDaFaixa);
+    const porValor = [...vivos].sort((a, b) => b.lucroUsd.comparedTo(a.lucroUsd));
+    const naFaixa = porValor.filter(cabe);
+    return {
+        naFaixa,
+        melhorDeTodos: porValor[0] ?? null,
+        melhorForaDaFaixa: porValor.find((a) => !cabe(a)) ?? null,
+        somaNaFaixa: naFaixa.reduce((acc, a) => acc.plus(a.lucroUsd), new Decimal(0)),
+    };
+}

@@ -14,7 +14,7 @@ import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodifica
 import { MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { lucroEstimado } from './perdidas';
 import { faixaQueAtira, LIMITE_DE_GAS } from './prontidao';
-import { compararLeituras, naoForamLidos, comoLerOMovimento, type Alvo, type Leitura } from './olhoNosAlvos';
+import { compararLeituras, naoForamLidos, comoLerOMovimento, resumir, type Alvo, type Leitura } from './olhoNosAlvos';
 
 const RPC = process.env.OLHO_RPC ?? 'https://mainnet.base.org';
 const ONDE = process.env.OLHO_ARQUIVO ?? '.olho/alvos.json';
@@ -132,6 +132,26 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
     }
     const faltaram = naoForamLidos(antes, { em: agora.em, alvos: vivos });
     if (faltaram.length > 0) console.log(`\n${faltaram.length} não foram lidos agora (NÃO quer dizer que sumiram): ${faltaram.slice(0, 5).map((d) => d.slice(0, 10) + '…').join(', ')}`);
+
+    // O resumo, porque a lista ordenada por PROXIMIDADE enterra a resposta:
+    // o alvo de R$ 359 e o de 12 centavos saem com a mesma marca, a seis
+    // linhas de distancia.
+    const BRL = Number(process.env.OLHO_BRL ?? '5.4');
+    const r = resumir(vivos, teto);
+    const emReais = (d: Decimal) => `R$ ${d.mul(BRL).toFixed(0)}`;
+    console.log('\n--- RESUMO ---');
+    if (r.naFaixa.length === 0) {
+        console.log('O bot não atiraria em NENHUM destes hoje.');
+    } else {
+        const m = r.naFaixa[0]!;
+        console.log(`MELHOR que ele atira hoje: ${m.devedor.slice(0, 10)}… vale US$ ${m.lucroUsd.toFixed(2)} (${emReais(m.lucroUsd)}), precisa cair ${m.queda!.toFixed(3)}%`);
+        console.log(`Na faixa: ${r.naFaixa.length} alvos somando US$ ${r.somaNaFaixa.toFixed(2)} (${emReais(r.somaNaFaixa)}) — mas cai UM por vez`);
+    }
+    if (r.melhorForaDaFaixa) {
+        const f = r.melhorForaDaFaixa;
+        console.log(`FORA do alcance, o maior: ${f.devedor.slice(0, 10)}… vale US$ ${f.lucroUsd.toFixed(2)} (${emReais(f.lucroUsd)}) a ${f.queda!.toFixed(3)}%`);
+        console.log(`  para alcançar esse, o teto teria de ir de ${teto === null ? 'sem teto' : `US$ ${teto.toFixed(2)}`} para US$ ${f.lucroUsd.toFixed(2)}`);
+    }
 
     mkdirSync(dirname(ONDE), { recursive: true });
     writeFileSync(ONDE, JSON.stringify({ em: agora.em, alvos: vivos.map((a) => ({
