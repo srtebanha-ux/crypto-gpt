@@ -1329,12 +1329,16 @@ async function principal(): Promise<'parar' | void> {
             // pela propria busca ao lado de uma frase que o contradiz.
             passos.atiroNaFaixaDe = faixa === null
                 ? 'NENHUM prêmio — algum freio barra tudo'
-                : faixa.de === null
-                    ? `QUALQUER lucro acima de zero até US$ ${faixa.ate.toFixed(2)} (R$ ${faixa.ate.mul(5.4).toFixed(2)}). ` +
-                      'NÃO existe piso: é o modo prova, e ele atira sabendo que pode dar prejuízo'
-                    : `US$ ${faixa.de.toFixed(2)} a US$ ${faixa.ate.toFixed(2)} ` +
-                      `(R$ ${faixa.de.mul(5.4).toFixed(2)} a R$ ${faixa.ate.mul(5.4).toFixed(2)}). ` +
-                      'Abaixo não paga o gás; acima uma derrota mata a caça';
+                : (() => {
+                    const topo = faixa.ate === null
+                        ? 'SEM TETO (não achei limite: o gás dá conta de qualquer prêmio)'
+                        : `US$ ${faixa.ate.toFixed(2)} (R$ ${faixa.ate.mul(5.4).toFixed(2)})`;
+                    return faixa.de === null
+                        ? `QUALQUER lucro acima de zero até ${topo}. ` +
+                          'NÃO existe piso: é o modo prova, e ele atira sabendo que pode dar prejuízo'
+                        : `de US$ ${faixa.de.toFixed(2)} (R$ ${faixa.de.mul(5.4).toFixed(2)}) até ${topo}. ` +
+                          'Abaixo não paga o gás; acima uma derrota mata a caça';
+                })();
             passos.lanceInteiroAte = faixa === null || faixa.inteiroAte === null
                 ? 'nenhum prêmio com lance inteiro'
                 : `US$ ${faixa.inteiroAte.toFixed(2)} (R$ ${faixa.inteiroAte.mul(5.4).toFixed(2)}). ` +
@@ -1465,7 +1469,7 @@ async function principal(): Promise<'parar' | void> {
             if (a.lucroUsd === null) return false;
             if (faixa === null) return a.lucroUsd.greaterThan(0);
             if (faixa.de !== null && a.lucroUsd.lessThan(faixa.de)) return false;
-            return a.lucroUsd.lessThanOrEqualTo(faixa.ate);
+            return faixa.ate === null || a.lucroUsd.lessThanOrEqualTo(faixa.ate);
         });
         const somaDaFaixa = dentroDaFaixa.reduce((acc, a) => acc.plus(a.lucroUsd!), new Decimal(0));
         const semCotacao = comLucro.filter((a) => a.lucroUsd === null).length;
@@ -1483,7 +1487,8 @@ async function principal(): Promise<'parar' | void> {
             naSUAFaixa: faixa === null
                 ? `${dentroDaFaixa.length} com lucro acima de zero (não sei a faixa agora)`
                 : `${dentroDaFaixa.length} de ${achadas.length} — entre ${
-                    faixa.de === null ? 'qualquer lucro' : `US$ ${faixa.de.toFixed(2)}`} e US$ ${faixa.ate.toFixed(2)}`,
+                    faixa.de === null ? 'qualquer lucro' : `US$ ${faixa.de.toFixed(2)}`} e ${
+                    faixa.ate === null ? 'SEM TETO' : `US$ ${faixa.ate.toFixed(2)}`}`,
             lucroQuePassouNaFaixa: `US$ ${somaDaFaixa.toFixed(2)} em ${diasOlhados.toFixed(1)} dias ` +
                 `(~US$ ${somaDaFaixa.dividedBy(Math.max(diasOlhados, 0.01)).mul(30).toFixed(2)}/mês, ${Math.round(naFaixaPorMes)} migalhas/mês)`,
             semCotacao: semCotacao === 0 ? 'nenhuma' : `${semCotacao} não consegui precificar (moeda fora do meu mapa)`,
@@ -1512,10 +1517,12 @@ async function principal(): Promise<'parar' | void> {
                     });
                     if (f === null) return `${eth} ETH: não sei dizer`;
                     const dentro = comCotacao.filter((a) =>
-                        (f.de === null || a.lucroUsd!.greaterThanOrEqualTo(f.de)) && a.lucroUsd!.lessThanOrEqualTo(f.ate));
+                        (f.de === null || a.lucroUsd!.greaterThanOrEqualTo(f.de))
+                        && (f.ate === null || a.lucroUsd!.lessThanOrEqualTo(f.ate)));
                     const soma = dentro.reduce((acc, a) => acc.plus(a.lucroUsd!), new Decimal(0));
                     const usdDoSaldo = precoDoEth() === null ? null : new Decimal(eth).mul(precoDoEth()!);
-                    return `${eth} ETH${usdDoSaldo === null ? '' : ` (US$ ${usdDoSaldo.toFixed(0)})`}: teto US$ ${f.ate.toFixed(0)}, ` +
+                    return `${eth} ETH${usdDoSaldo === null ? '' : ` (US$ ${usdDoSaldo.toFixed(0)})`}: teto ${
+                        f.ate === null ? 'NENHUM (alcança tudo)' : `US$ ${f.ate.toFixed(0)}`}, ` +
                         `alcançaria ${dentro.length} delas valendo US$ ${soma.toFixed(2)} ` +
                         `(~US$ ${soma.dividedBy(Math.max(diasOlhados, 0.01)).mul(30).toFixed(0)}/mês)`;
                 });
@@ -1524,22 +1531,67 @@ async function principal(): Promise<'parar' | void> {
             // dados dao sobre a chance de GANHAR a corrida: um endereco levando
             // quase tudo e concorrencia dedicada; trinta enderecos diferentes e
             // uma faixa que ninguem disputa a serio.
+            // Quem esta levando, e — o que importa mais — se quem leva as
+            // MIGALHAS e o mesmo que leva as grandes.
+            //
+            // A primeira versao disto errou o veredicto, e errou para o lado
+            // caro: com 17 liquidantes e o maior levando 20% ela imprimiu
+            // "CONCENTRADO: ganhar a corrida e mais dificil", o que empurraria a
+            // dona do bot a desistir. A regra era `liquidantes < liquidacoes/2`
+            // — arbitraria, e nao mede concentracao nenhuma: ela chamaria de
+            // concentrado qualquer mercado onde cada um leva mais de duas.
+            //
+            // 17 jogadores, nenhum acima de 20%, e um mercado ABERTO. O maior
+            // tem 3,3x a fatia media, nao 30x.
+            //
+            // E a pergunta de verdade nem e essa: e se a faixa DELA tem dono.
+            // Migalha de US$ 2 bot grande ignora; liquidacao de US$ 1.500 tem
+            // bot dedicado. Medir os dois juntos mistura duas corridas
+            // diferentes numa media que nao descreve nenhuma.
             quemEstaLevando: (() => {
-                const porLiquidante = new Map<string, number>();
-                for (const a of achadas) {
-                    const k = a.liquidante.toLowerCase();
-                    porLiquidante.set(k, (porLiquidante.get(k) ?? 0) + 1);
-                }
-                const ordenado = [...porLiquidante.entries()].sort((a, b) => b[1] - a[1]);
-                const topo = ordenado[0];
+                const contar = (lista: typeof comLucro) => {
+                    const por = new Map<string, number>();
+                    for (const a of lista) {
+                        const k = a.liquidante.toLowerCase();
+                        por.set(k, (por.get(k) ?? 0) + 1);
+                    }
+                    const ordenado = [...por.entries()].sort((a, b) => b[1] - a[1]);
+                    const total = lista.length;
+                    const fatia = (n: number) => (total === 0 ? 0 : n / total);
+                    const topo3 = ordenado.slice(0, 3).reduce((acc, e) => acc + e[1], 0);
+                    return {
+                        total,
+                        jogadores: por.size,
+                        maior: ordenado[0],
+                        fatiaDoMaior: ordenado[0] ? fatia(ordenado[0][1]) : 0,
+                        fatiaDoTop3: fatia(topo3),
+                    };
+                };
+                const descrever = (c: ReturnType<typeof contar>) => c.total === 0
+                    ? 'nenhuma'
+                    : `${c.total} liquidações entre ${c.jogadores} endereços; o maior levou ${
+                        Math.round(c.fatiaDoMaior * 100)}%, os três maiores ${Math.round(c.fatiaDoTop3 * 100)}%`;
+
+                const todos = contar(comLucro);
+                const naFaixa = contar(comLucro.filter((a) => dentroDaFaixa.includes(a)));
+                const acimaDaFaixa = contar(comLucro.filter((a) => !dentroDaFaixa.includes(a) && a.lucroUsd !== null));
+
+                // Regra defensavel: dominado e um endereco levando quase tudo, ou
+                // tres levando quase tudo com pouquissimos jogadores.
+                const dominado = (c: ReturnType<typeof contar>) =>
+                    c.total >= 5 && (c.fatiaDoMaior >= 0.5 || (c.fatiaDoTop3 >= 0.8 && c.jogadores <= 4));
                 return {
-                    quantosLiquidantes: porLiquidante.size,
-                    oMaior: topo === undefined
-                        ? 'ninguém'
-                        : `${topo[0].slice(0, 10)}… levou ${topo[1]} de ${achadas.length} (${Math.round((topo[1] / achadas.length) * 100)}%)`,
-                    leitura: porLiquidante.size >= achadas.length / 2
-                        ? 'MUITOS endereços diferentes: a faixa não tem dono, e entrar é plausível'
-                        : 'CONCENTRADO em poucos endereços: há bots dedicados, e ganhar a corrida é mais difícil',
+                    tudo: descrever(todos),
+                    naSuaFaixa: descrever(naFaixa),
+                    acimaDaSuaFaixa: descrever(acimaDaFaixa),
+                    leitura: dominado(naFaixa)
+                        ? 'a SUA faixa tem dono: um endereço leva a maior parte das migalhas, e entrar é briga'
+                        : dominado(acimaDaFaixa)
+                            ? 'a sua faixa é aberta, mas a de cima tem dono: catar migalhas é plausível, '
+                              + 'disputar as grandes provavelmente não'
+                            : 'nenhuma das duas faixas tem dono. Não é um mercado fechado, e entrar é plausível',
+                    comoLerIsto: 'fatia do maior perto de 50% é domínio; com dez ou mais endereços e ninguém '
+                        + 'acima de um terço, é mercado aberto. A média das duas faixas juntas não descreve nenhuma',
                 };
             })(),
             ATENCAO: 'isto é OPORTUNIDADE que passou, não renda perdida: para cada uma dessas eu ainda teria de ' +

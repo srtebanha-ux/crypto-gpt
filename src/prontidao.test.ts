@@ -515,12 +515,13 @@ test('a FAIXA que atira tem duas pontas, e as duas importam', () => {
     assert.ok(f!.de !== null, 'na regra normal existe piso');
     assert.equal(f!.de!.toFixed(2), '0.45');
     // Ponta de cima: acima dela uma derrota come metade do gás.
-    assert.equal(f!.ate.toFixed(0), '67');
+    assert.ok(f!.ate !== null, 'com US$ 9 existe teto');
+    assert.equal(f!.ate!.toFixed(0), '67');
     // As duas pontas são de verdade: dentro atira, fora não.
     assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.de! }).atira, true, 'a ponta de baixo atira');
-    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.ate }).atira, true, 'a ponta de cima atira');
+    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.ate! }).atira, true, 'a ponta de cima atira');
     assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.de!.mul('0.9') }).atira, false, 'abaixo, não');
-    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.ate.mul('1.1') }).atira, false, 'acima, não');
+    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.ate!.mul('1.1') }).atira, false, 'acima, não');
 });
 
 test('o teto do LANCE INTEIRO é outra coisa que o teto do TIRO — eu confundi os dois', () => {
@@ -533,10 +534,10 @@ test('o teto do LANCE INTEIRO é outra coisa que o teto do TIRO — eu confundi 
     // mão: a conta à mão só olhou o corte do gás adiantado e esqueceu que
     // `gorjetaQueCabeNoSaldo` corta ANTES, pela fração de risco de 25%.
     assert.equal(f.inteiroAte!.toFixed(2), '6.90');
-    assert.ok(f.inteiroAte!.lessThan(f.ate), 'o teto do lance inteiro é MENOR que o teto do tiro');
+    assert.ok(f.inteiroAte!.lessThan(f.ate!), 'o teto do lance inteiro é MENOR que o teto do tiro');
 
     // No meio da faixa o bot atira amordaçado — vale, mas com desvantagem.
-    const meio = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f.inteiroAte!.plus(f.ate).dividedBy(2) });
+    const meio = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f.inteiroAte!.plus(f.ate!).dividedBy(2) });
     assert.equal(meio.atira, true, 'atira');
     assert.equal(meio.amordaca.amordacado, true, 'e amordaçado');
 });
@@ -544,7 +545,8 @@ test('o teto do LANCE INTEIRO é outra coisa que o teto do TIRO — eu confundi 
 test('com gás de sobra o lance inteiro cobre a faixa toda', () => {
     const gordo = { ...AMBIENTE_REAL, saldoWei: 200_000_000_000_000_000n };
     const f = faixaQueAtira(gordo)!;
-    assert.equal(f.inteiroAte!.toFixed(2), f.ate.toFixed(2), 'nada amordaçado: o saldo dá conta');
+    assert.equal(f.ate, null, 'sem teto de tiro');
+    assert.ok(f.inteiroAte !== null, 'e o lance inteiro cobre até onde se procurou');
 });
 
 test('sem cotação do ETH nada sai, e o motivo diz isso', () => {
@@ -567,7 +569,9 @@ test('com gás de sobra o prêmio grande volta a sair', () => {
     assert.equal(d.atira, true, d.porque);
     assert.equal(d.amordaca.amordacado, false);
     const f = faixaQueAtira(gordo);
-    assert.ok(f!.ate.greaterThan(1986), `a ponta de cima sobe para US$ ${f!.ate.toFixed(0)}`);
+    // Com 0,2 ETH não há teto dentro do que se procura — e isso se diz com
+    // `null`, não com o chão da busca disfarçado de medição.
+    assert.equal(f!.ate, null, 'sem teto: o gás dá conta de qualquer prêmio');
 });
 
 test('CACA_ATIRAR_AMORDACADO faz o prêmio grande sair mesmo com US$ 9', () => {
@@ -642,7 +646,7 @@ test('o modo prova abre a ponta de BAIXO da faixa — é ali que estão as migal
     assert.ok(normal.de !== null, 'na regra normal existe piso');
     assert.equal(prova.de, null, 'na prova NÃO existe piso, e isso se diz com null');
     // E NÃO abre a de cima: a proteção contra baleia amordaçada fica de pé.
-    assert.equal(prova.ate.toFixed(0), normal.ate.toFixed(0),
+    assert.equal(prova.ate?.toFixed(0), normal.ate?.toFixed(0),
         'a prova que ela quer é de uma migalha, não de uma baleia');
 });
 

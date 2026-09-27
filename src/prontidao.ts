@@ -655,8 +655,17 @@ export interface FaixaDeTiro {
      * que o contradiz. `null` diz a verdade: nao existe piso.
      */
     de: Decimal | null;
-    /** Acima disto uma derrota comeria mais gas do que a caca aguenta. */
-    ate: Decimal;
+    /**
+     * Acima disto uma derrota comeria mais gas do que a caca aguenta. `null`
+     * quando NAO HA teto dentro do que se procurou.
+     *
+     * Era um numero sempre, e com gas de sobra devolvia `tetoDaBusca` — o chao
+     * da propria varredura, publicado como medicao. O log imprimiu "teto
+     * US$ 1000000", que nao e um teto: e "nao achei teto ate um milhao". Eu
+     * tinha consertado exatamente isso na ponta de BAIXO e deixei o mesmo
+     * defeito na de cima.
+     */
+    ate: Decimal | null;
     /**
      * Ate onde o lance sai INTEIRO. Entre este e `ate` o bot atira amordaçado:
      * ainda vale, mas com desvantagem no leilao.
@@ -696,8 +705,8 @@ export function faixaQueAtira(
         de = dentro;
     }
 
-    // 3) Ponta de cima: o maior premio que ainda atira.
-    let ate = tetoDaBusca;
+    // 3) Ponta de cima: o maior premio que ainda atira, ou `null` se nao ha.
+    let ate: Decimal | null = null;
     if (!atira(tetoDaBusca)) {
         let dentro = ancora;
         let fora = tetoDaBusca;
@@ -716,13 +725,14 @@ export function faixaQueAtira(
         return d.atira && !d.amordaca.amordacado;
     };
     const chao = de ?? PROBE;
+    const teto = ate ?? tetoDaBusca;
     let inteiroAte: Decimal | null = null;
     if (inteiro(chao)) {
-        if (inteiro(ate)) {
-            inteiroAte = ate;
+        if (inteiro(teto)) {
+            inteiroAte = teto;
         } else {
             let dentro = chao;
-            let fora = ate;
+            let fora = teto;
             for (let i = 0; i < passos; i++) {
                 const meio = dentro.plus(fora).dividedBy(2);
                 if (inteiro(meio)) dentro = meio; else fora = meio;
