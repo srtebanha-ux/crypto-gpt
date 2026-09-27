@@ -73,83 +73,111 @@ export const PROFUNDIDADE_DA_VENDA = POOLS.aerodrome!.profundidadeUsd;
  * lucro maximo de US$ 1.986 numa divida de US$ 182 mil, e a medicao de
  * `contratos.ts` registrou US$ 2.103 de lucro maximo com teto de US$ 390 mil.
  */
-export function lucroEstimado(
-    dividaUsd: Decimal,
+export function lucroDaCobertura(
+    coberturaUsd: Decimal,
     profundidadeUsd: Decimal = PROFUNDIDADE_DA_VENDA,
 ): Decimal {
-    const coberto = dividaUsd.dividedBy(FATIA_COBRIVEL);
-    // Vende-se a GARANTIA recebida, que e o coberto mais o agio — nao o coberto.
-    const venda = coberto.mul(new Decimal(1).plus(AGIO));
+    if (coberturaUsd.lessThanOrEqualTo(0)) return GAS_USD.negated();
+    // Vende-se a GARANTIA recebida, que e a cobertura mais o agio.
+    const venda = coberturaUsd.mul(new Decimal(1).plus(AGIO));
     const escorregamento = profundidadeUsd.lessThanOrEqualTo(0)
         ? new Decimal(1)
         : venda.dividedBy(profundidadeUsd.plus(venda));
-    return coberto
+    return coberturaUsd
         .mul(AGIO)
-        .minus(coberto.mul(CUSTO_DA_VENDA))
+        .minus(coberturaUsd.mul(CUSTO_DA_VENDA))
         .minus(venda.mul(escorregamento))
         .minus(GAS_USD);
 }
 
+const otimaPorProfundidade = new Map<string, Decimal>();
+
 /**
- * A maior divida que ainda da lucro neste pool, e a que da o MAIOR lucro.
+ * A fatia da divida que rende MAIS neste pool.
  *
- * Existem porque o teto estava implicito: o bot sabia recusar um alvo grande
- * (a simulacao reverte, o piso de lucro barra), mas nada no log dizia que
- * existe um tamanho acima do qual nao ha o que ganhar. Teto implicito e o
- * mesmo que teto inexistente para quem le.
+ * Aqui esta a correcao de uma conclusao minha que estava errada. Eu tinha
+ * escrito que uma posicao de US$ 95 milhoes "da prejuizo de US$ 44 milhoes", e
+ * isso so e verdade se a gente insistir em cobrir METADE dela. A Aave nao
+ * obriga: `debtToCover` pode ser qualquer valor ate o limite do close factor.
+ * Cobrir menos e sempre permitido.
  *
- * Busca por varredura e nao forma fechada de proposito: a curva tem maximo
- * interior e a forma fechada dela e feia o bastante para esconder um erro de
- * sinal. Isto roda uma vez por varredura completa, uma vez por hora.
+ * Entao divida grande nao e prejuizo — e premio COM TETO. Cobre-se a fatia
+ * otima e leva-se o maximo que o pool aguenta, e o resto da divida fica lá.
+ *
+ * `quantoPedirEmprestado` pedia metade sempre, com um comentario dizendo que
+ * "pedir menos e deixar agio na mesa". Verdade para posicao pequena, falso para
+ * baleia: lá, pedir metade e deixar o agio inteiro dentro do escorregamento.
+ *
+ * Varredura em vez de forma fechada: a derivada zera numa cubica, e cubica em
+ * decisao de dinheiro e um lugar otimo para esconder um erro de sinal. O
+ * resultado e memorizado porque a profundidade nao muda em memoria e isto e
+ * chamado uma vez por posicao medida — milhares por varredura.
  */
-export function dividaQueRendeMais(
+export function coberturaOtima(
     profundidadeUsd: Decimal = PROFUNDIDADE_DA_VENDA,
-    passos = 400,
-): { divida: Decimal; lucro: Decimal } {
-    let melhor = { divida: new Decimal(0), lucro: new Decimal(0) };
-    // Ate o dobro da profundidade: alem disso o escorregamento passa de 50% e a
-    // curva ja esta despencando havia muito.
-    const teto = profundidadeUsd.mul(2);
+    passos = 2000,
+): Decimal {
+    const chave = `${profundidadeUsd.toString()}|${passos}`;
+    const guardada = otimaPorProfundidade.get(chave);
+    if (guardada !== undefined) return guardada;
+    let melhorC = new Decimal(0);
+    let melhorL = GAS_USD.negated();
     for (let i = 1; i <= passos; i++) {
-        const d = teto.mul(i).dividedBy(passos);
-        const l = lucroEstimado(d, profundidadeUsd);
-        if (l.greaterThan(melhor.lucro)) melhor = { divida: d, lucro: l };
+        const c = profundidadeUsd.mul(i).dividedBy(passos);
+        const l = lucroDaCobertura(c, profundidadeUsd);
+        if (l.greaterThan(melhorL)) { melhorL = l; melhorC = c; }
     }
-    return melhor;
+    otimaPorProfundidade.set(chave, melhorC);
+    return melhorC;
 }
 
-export function tetoDaDivida(
-    profundidadeUsd: Decimal = PROFUNDIDADE_DA_VENDA,
-    passos = 4000,
-): Decimal {
-    const teto = profundidadeUsd.mul(2);
-    let ultimaQueDaLucro = new Decimal(0);
-    for (let i = 1; i <= passos; i++) {
-        const d = teto.mul(i).dividedBy(passos);
-        if (lucroEstimado(d, profundidadeUsd).greaterThan(0)) ultimaQueDaLucro = d;
-    }
-    return ultimaQueDaLucro;
+/** O maximo que uma cacada pode render neste pool, por melhor que seja o alvo. */
+export function lucroMaximo(profundidadeUsd: Decimal = PROFUNDIDADE_DA_VENDA): Decimal {
+    return lucroDaCobertura(coberturaOtima(profundidadeUsd), profundidadeUsd);
 }
 
 /**
- * A menor divida que ainda paga o proprio tiro. Inverte `lucroEstimado`.
+ * Quanto ESTA liquidacao renderia, cobrindo a melhor fatia possivel.
+ *
+ * O lucro nao e a divida: e o agio sobre o que se COBRE, menos a taxa do pool,
+ * menos o escorregamento da venda, menos o gas. Uma liquidacao de US$ 4.000
+ * rende US$ 87.
+ *
+ * O custo de vender NAO E CONSTANTE, e tratar como constante produziu, em
+ * 2026-09-27, uma linha de log prometendo US$ 2.161.328 numa queda de 10%. E
+ * insistir em cobrir metade produziu, na correcao seguinte, um "prejuizo de
+ * US$ 44 milhoes" igualmente falso. As duas respostas erradas tinham a mesma
+ * raiz: tratar como fixo algo que e escolha nossa.
+ *
+ * O resultado satura: acima da fatia otima o lucro para de crescer e NAO cai,
+ * porque a gente simplesmente nao cobre mais que isso.
+ */
+export function lucroEstimado(
+    dividaUsd: Decimal,
+    profundidadeUsd: Decimal = PROFUNDIDADE_DA_VENDA,
+    coberturaMaximaUsd?: Decimal,
+): Decimal {
+    const teto = coberturaMaximaUsd ?? coberturaOtima(profundidadeUsd);
+    const coberto = Decimal.min(dividaUsd.dividedBy(FATIA_COBRIVEL), teto);
+    return lucroDaCobertura(coberto, profundidadeUsd);
+}
+
+/**
+ * A menor divida que ainda paga o proprio tiro. Inverte `lucroDaCobertura`.
  *
  * Existe por uma medicao concreta: a brasa — as vagas mais rapidas que o bot
  * tem — vinha sendo preenchida por ordem de fragilidade PURA, e o mais fragil
- * de todos na Base era uma posicao de US$ 0,65. O tiro em seco mirou nela. Uma
- * fila de prioridade ordenada por "quem cai primeiro" sem olhar o tamanho
- * entrega as vagas rapidas ao po e manda a baleia para a fila lenta.
+ * de todos na Base era uma posicao de US$ 0,65. O tiro em seco mirou nela.
  *
  * A margem default e 1, nao 2, e isso e deliberado: este e um filtro de
  * SELECAO, e o portao do tiro (`valeATentativa`, margem 2) vem depois com o
  * lucro MEDIDO em vez do estimado. Excluir aqui alguem que o portao aceitaria
- * e o erro caro — uma liquidacao perdida. Deixar entrar um talvez custa uma
- * vaga de leitura que ja era gratuita.
+ * e o erro caro — uma liquidacao perdida.
  *
- * O custo que entra aqui deve ser o do tiro MAIS BARATO possivel (gorjeta no
- * piso), nao o do tiro de agora: a gorjeta e proporcional ao premio, entao um
- * alvo pequeno e perseguido com lance pequeno. Usar o custo do lance atual
- * excluiria justamente as migalhas que ela pediu para pegar.
+ * A inversao ignora o escorregamento de proposito: no tamanho do piso a venda
+ * e de dezenas de dolares num pool de milhoes, e o escorregamento vale frações
+ * de centavo. Inverter a curva inteira para ganhar isso seria precisao falsa, e
+ * o erro que sobra empurra o piso para BAIXO — o lado seguro aqui.
  *
  * Devolve `null` quando nao se sabe o custo do tiro. Nesse caso nao se filtra
  * nada: um piso inventado e pior que nenhum piso.

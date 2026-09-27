@@ -4,7 +4,7 @@ import { Wallet, JsonRpcProvider } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
-import { emDolar, lucroEstimado, dividaMinimaQueVale, dividaQueRendeMais, tetoDaDivida, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
+import { emDolar, lucroEstimado, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
@@ -28,13 +28,48 @@ import { POOLS } from './contratos';
  * reverteria, sempre — e os ensaios nunca denunciaram porque batiam na recusa
  * da Aave (posicao saudavel) antes de chegar ao emprestimo.
  *
- * A Aave so deixa cobrir metade da divida enquanto a saude esta entre 0,95 e 1.
+ * A Aave so deixa cobrir METADE da divida enquanto a saude esta entre 0,95 e 1.
  * Pedir mais que isso e emprestar dinheiro que sera devolvido sem uso, pagando
- * premio a toa; pedir menos e deixar agio na mesa.
+ * premio a toa.
+ *
+ * Mas "pedir menos e deixar agio na mesa" — o que estava escrito aqui — e
+ * verdade para posicao pequena e FALSO para baleia. A Aave nao obriga a cobrir
+ * metade: `debtToCover` pode ser qualquer valor ate esse limite. E numa divida
+ * de US$ 95 milhoes, cobrir metade significa vender US$ 50 milhoes de garantia
+ * num pool de US$ 4,4 milhoes — o agio inteiro fica dentro do escorregamento e
+ * sobra prejuizo.
+ *
+ * Entao o teto e o MENOR de dois: metade da divida, e a fatia que o pool
+ * aguenta com lucro maximo. Divida grande deixa de ser prejuizo e passa a ser
+ * premio com teto.
+ *
+ * A conversao para unidades cruas e uma regra de tres na propria divida: a
+ * razao cobertura/divida nao tem unidade, entao nao preciso de casas decimais
+ * nem de preco aqui — so dos dois numeros que o alvo ja carrega.
+ *
+ * Sem `dividaUsd` (falta cotacao) volta a metade, que e o comportamento antigo:
+ * na duvida, quem barra o tiro ruim e a simulacao, nao um palpite meu.
  */
 export const FATIA_COBRIVEL = 2n;
-export function quantoPedirEmprestado(dividaCrua: bigint): bigint {
-    return dividaCrua / FATIA_COBRIVEL;
+export function quantoPedirEmprestado(
+    dividaCrua: bigint,
+    dividaUsd?: Decimal,
+    coberturaMaximaUsd?: Decimal,
+): bigint {
+    const metade = dividaCrua / FATIA_COBRIVEL;
+    if (dividaUsd === undefined || coberturaMaximaUsd === undefined) return metade;
+    if (!dividaUsd.isFinite() || dividaUsd.lessThanOrEqualTo(0)) return metade;
+    if (!coberturaMaximaUsd.isFinite() || coberturaMaximaUsd.lessThanOrEqualTo(0)) return metade;
+    if (dividaUsd.dividedBy(2).lessThanOrEqualTo(coberturaMaximaUsd)) return metade;
+    const cru = new Decimal(dividaCrua.toString()).mul(coberturaMaximaUsd.dividedBy(dividaUsd));
+    try {
+        const v = BigInt(cru.toFixed(0));
+        // Zero significaria mandar uma cacada que nao cobre nada. Acima da
+        // metade a Aave recusa. Fora da faixa, metade.
+        return v > 0n && v < metade ? v : metade;
+    } catch {
+        return metade;
+    }
 }
 
 /**
@@ -1084,6 +1119,17 @@ async function principal(): Promise<'parar' | void> {
      * a cacada, o que e exatamente o que se quer. O que se testa e todo o
      * resto — e nada e enviado.
      */
+    /**
+     * Quanto cobrir deste alvo, em unidades cruas.
+     *
+     * Um lugar so. Eram seis chamadas espalhadas de `quantoPedirEmprestado`, e
+     * seis lugares para esquecer o teto da fatia em um deles — exatamente o
+     * tipo de coisa que passa em teste e falha no dia do tiro.
+     */
+    function cobrir(alvo: Alvo): bigint {
+        return quantoPedirEmprestado(alvo.dividaCrua!, alvo.dividaUsd, coberturaOtima());
+    }
+
     async function tiroEmSeco(alvoPedido?: string): Promise<void> {
         const passos: Record<string, string> = {};
         try {
@@ -1099,15 +1145,18 @@ async function principal(): Promise<'parar' | void> {
                 return;
             }
             passos.montarAlvos = `garantia ${alvo.garantia} / dívida ${alvo.divida}`;
-            passos.pediriaEmprestado = quantoPedirEmprestado(alvo.dividaCrua).toString();
+            passos.pediriaEmprestado = cobrir(alvo).toString();
+            passos.fatia = alvo.dividaUsd === undefined
+                ? 'metade (sem cotação da dívida)'
+                : `US$ ${alvo.dividaUsd.dividedBy(2).lessThanOrEqualTo(coberturaOtima()) ? alvo.dividaUsd.dividedBy(2).toFixed(2) + ' (metade)' : coberturaOtima().toFixed(0) + ' (fatia ótima — a dívida é maior que o pool aguenta)'}`;
 
             // A medicao de verdade, contra a Aave real, com piso impossivel.
             const contrato = contratos[0];
             const dados = contrato.tipo === 'V1'
                 ? codificarCacaV1({ garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
-                    quantoCobrir: quantoPedirEmprestado(alvo.dividaCrua), poolDeVenda: poolDeVendaV1, lucroMinimo: PISO_IMPOSSIVEL })
+                    quantoCobrir: cobrir(alvo), poolDeVenda: poolDeVendaV1, lucroMinimo: PISO_IMPOSSIVEL })
                 : codificarCacaV2({ garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
-                    quantoCobrir: quantoPedirEmprestado(alvo.dividaCrua), isStablePool: false, lucroMinimo: PISO_IMPOSSIVEL });
+                    quantoCobrir: cobrir(alvo), isStablePool: false, lucroMinimo: PISO_IMPOSSIVEL });
             const r = await chamarCruComPaciencia([{ from: donoCarteira ?? undefined, to: contrato.endereco, data: dados }, 'latest']);
             const leitura = lerRespostaDaCaca({ ok: r.ok, dados: r.dados ?? '0x', mensagem: 'mensagem' in r ? r.mensagem : undefined });
             passos.medicao = `${leitura.desfecho}${leitura.erro ? ` (${leitura.erro})` : ''}`;
@@ -1564,11 +1613,11 @@ async function principal(): Promise<'parar' | void> {
                         // mesmo que teto inexistente — e foi assim que eu mesmo
                         // publiquei uma queda de 10% valendo US$ 2,1 milhoes.
                         if (tetoDoPool === '') {
-                            const melhor = dividaQueRendeMais();
                             tetoDoPool =
-                                `pool de US$ ${PROFUNDIDADE_DA_VENDA.toFixed(0)}: ` +
-                                `lucro máximo US$ ${melhor.lucro.toFixed(0)} numa dívida de ` +
-                                `US$ ${melhor.divida.toFixed(0)}; acima de US$ ${tetoDaDivida().toFixed(0)} é prejuízo`;
+                                `pool de US$ ${PROFUNDIDADE_DA_VENDA.toFixed(0)}: cubro no máximo ` +
+                                `US$ ${coberturaOtima().toFixed(0)} por caçada, e isso rende ` +
+                                `US$ ${lucroMaximo().toFixed(0)}. Dívida maior não é problema — ` +
+                                `cubro só a fatia ótima e deixo o resto`;
                         }
                         margemDaBrasa = camadas.margemDaBrasa;
                         menorMargem = camadas.menorMargem;
@@ -1682,7 +1731,7 @@ async function principal(): Promise<'parar' | void> {
                             garantia: alvo.garantia,
                             divida: alvo.divida,
                             devedor: alvo.devedor,
-                            quantoCobrir: quantoPedirEmprestado(alvo.dividaCrua!),
+                            quantoCobrir: cobrir(alvo),
                             poolDeVenda: poolDeVendaV1,
                             lucroMinimo: PISO_IMPOSSIVEL,
                           })
@@ -1690,7 +1739,7 @@ async function principal(): Promise<'parar' | void> {
                             garantia: alvo.garantia,
                             divida: alvo.divida,
                             devedor: alvo.devedor,
-                            quantoCobrir: quantoPedirEmprestado(alvo.dividaCrua!),
+                            quantoCobrir: cobrir(alvo),
                             isStablePool: false,
                             lucroMinimo: PISO_IMPOSSIVEL,
                           });
@@ -1760,7 +1809,7 @@ async function principal(): Promise<'parar' | void> {
                             garantia: alvo.garantia,
                             divida: alvo.divida,
                             devedor: alvo.devedor,
-                            quantoCobrir: quantoPedirEmprestado(alvo.dividaCrua!),
+                            quantoCobrir: cobrir(alvo),
                             poolDeVenda: poolDeVendaV1,
                             lucroMinimo: piso,
                           })
@@ -1768,7 +1817,7 @@ async function principal(): Promise<'parar' | void> {
                             garantia: alvo.garantia,
                             divida: alvo.divida,
                             devedor: alvo.devedor,
-                            quantoCobrir: quantoPedirEmprestado(alvo.dividaCrua!),
+                            quantoCobrir: cobrir(alvo),
                             isStablePool: false,
                             lucroMinimo: piso,
                           });
