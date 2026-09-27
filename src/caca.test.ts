@@ -212,9 +212,12 @@ test('reler as 1.166 quentes em TODO ciclo estoura o teto', () => {
 });
 
 test('a brasa cabe nas vagas que sobram do multicall dos preços', () => {
-    // 250 chamadas por multicall, menos o bloco, menos os 15 preços.
-    const vagas = 250 - 15 - 1;
-    assert.equal(vagas, 234);
+    // 250 chamadas por multicall, menos os 15 preços, menos DUAS de carona no
+    // mesmo eth_call: o número do bloco e o basefee. O log de produção diz
+    // `naBrasa: 233`, e é esta conta que tem de dar nele — um comentário que
+    // documenta 234 vagas quando o código reserva 2 é documentação que mente.
+    const vagas = 250 - 15 - 2;
+    assert.equal(vagas, 233);
     const medidos = Array.from({ length: 1166 }, (_, i) => ({
         devedor: `0x${String(i).padStart(40, '0')}`,
         queda: new Decimal(0.03 + i * 0.02),
