@@ -137,6 +137,51 @@ export function repartirPorFragilidade(
     };
 }
 
+/** Uma linha da tabela "o que uma queda de X% poria na mesa". */
+export interface Degrau {
+    quedaPct: number;
+    /** Quantas posicoes uma queda desse tamanho alcancaria. */
+    quantos: number;
+    /** Dessas, quantas pagariam o proprio gas. */
+    quantosValem: number;
+    dividaUsd: Decimal;
+    /** Soma do lucro das que valem. NAO e a divida. */
+    lucroUsd: Decimal;
+}
+
+/**
+ * O que uma queda de mercado de X% poria na mesa, hoje.
+ *
+ * Existe por causa de um numero que nao dava para interpretar: `menorMargem` de
+ * 1,1562% diz que o alvo mais perto precisa de 1,16% de queda, mas nao diz se
+ * atras dele vem um ou vem cinquenta. "Quanto vale um tombo de 2%" e a pergunta
+ * que decide se vale a pena esperar o mercado ou ir procurar caca em outro
+ * lugar, e ela nao tinha resposta nenhuma no log.
+ *
+ * `quantos` e `quantosValem` sao numeros diferentes de proposito: alcancar nao e
+ * lucrar. E o lucro somado NAO e a divida somada — e o agio sobre a metade dela
+ * menos o custo de vender. Confundir os dois e o erro que este projeto ja
+ * cometeu duas vezes, sempre no mesmo sentido: otimista.
+ */
+export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degrau[] {
+    return [...degraus].sort((a, b) => a - b).map((quedaPct) => {
+        const alcancados = medidos.filter((m) => m.queda.lessThanOrEqualTo(quedaPct));
+        let dividaUsd = new Decimal(0);
+        let lucroUsd = new Decimal(0);
+        let quantosValem = 0;
+        for (const m of alcancados) {
+            if (m.dividaUsd === null) continue;
+            dividaUsd = dividaUsd.plus(m.dividaUsd);
+            const lucro = lucroEstimado(m.dividaUsd);
+            // Somar lucro negativo mascararia o po dentro do total: uma
+            // posicao que da prejuizo nao subtrai do premio das outras, ela
+            // simplesmente nao e atirada.
+            if (lucro.greaterThan(0)) { lucroUsd = lucroUsd.plus(lucro); quantosValem++; }
+        }
+        return { quedaPct, quantos: alcancados.length, quantosValem, dividaUsd, lucroUsd };
+    });
+}
+
 export type Varredura = 'nenhuma' | 'quentes' | 'completa';
 
 /**
@@ -1390,6 +1435,12 @@ async function principal(): Promise<'parar' | void> {
                         if (!dadoConta) continue;
                         try {
                             const conta = decodificarContaDoUsuario(dadoConta);
+                            // A varredura completa le a saude de TODO MUNDO, e
+                            // era a unica leitura que nao alimentava a deriva.
+                            // Sem isto o ensaio no boot dizia "0 amostras" e a
+                            // primeira projecao esperava dez minutos a mais do
+                            // que precisava.
+                            registrarDeriva(historicoDeSaude, aLer[i]!, conta.saude, Date.now());
                             const queda = quedaAteLiquidar(conta.saude);
                             if (queda === null) continue;
                             if (queda.isZero()) { if (!caidos.includes(aLer[i])) caidos.push(aLer[i]); }
@@ -1464,6 +1515,16 @@ async function principal(): Promise<'parar' | void> {
                                 ? `${medidos.length} (sem cotação do ETH: não filtrei por tamanho)`
                                 : `${camadas.valemUmTiro} de ${medidos.length} — ${camadas.poEmDemasia} devem menos de US$ ${pisoDeDivida.toFixed(2)} e não pagariam o próprio gás`,
                             gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
+                            maisPerto: camadas.menorMargem === null
+                                ? 'ninguém'
+                                : `precisa cair ${camadas.menorMargem.toFixed(4)}%`,
+                            // A pergunta que decide se vale esperar o mercado ou
+                            // ir procurar caça em outro lugar. `menorMargem`
+                            // sozinha nao dizia se atras do primeiro vem um ou
+                            // vem cinquenta.
+                            seOMercadoCair: oQueUmaQuedaRenderia(medidos, [1, 2, 3, 5, 10])
+                                .map((d) => `${d.quedaPct}%: ${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)})`)
+                                .join(' | '),
                             // Para os alvos cujo preco CANCELA na conta da saude
                             // (garantia e divida na mesma moeda), a chegada e
                             // calculavel dias antes. Este e o unico numero do

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
-import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade } from './cacarAoVivo';
+import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, oQueUmaQuedaRenderia } from './cacarAoVivo';
 import { dividaMinimaQueVale, lucroEstimado } from './perdidas';
 import { custoDoTiroUsd, PISO_DA_GORJETA_WEI } from './prontidao';
 
@@ -453,4 +453,89 @@ test('gás caro na Base sobe o piso: a mesma lista vale menos quando o bloco cob
     const barato = custoDoTiroUsd(PISO_DA_GORJETA_WEI, BASEFEE_DO_LOG, ETH_DO_LOG);
     assert.ok(dividaMinimaQueVale(caro)!.greaterThan(dividaMinimaQueVale(barato)!.mul(10)),
         'a 5 gwei o piso tem de subir em mais de uma ordem de grandeza');
+});
+
+// ---------------------------------------------------------------------------
+// "O que uma queda de X% poria na mesa."
+//
+// Existe por causa de `margemDoAlvo: "precisa cair 1.1562%"` no ensaio de
+// 2026-09-27 10:31. O numero sozinho nao dizia se atras do primeiro alvo vem
+// um ou vem cinquenta — e e isso que decide se vale esperar o mercado.
+// ---------------------------------------------------------------------------
+
+test('a tabela de quedas é cumulativa e ordenada, não a ordem que chegou', () => {
+    const medidos = [
+        { devedor: '0xA', queda: new Decimal(0.5), dividaUsd: new Decimal(4000) },
+        { devedor: '0xB', queda: new Decimal(2.5), dividaUsd: new Decimal(4000) },
+        { devedor: '0xC', queda: new Decimal(7),   dividaUsd: new Decimal(4000) },
+    ];
+    const t = oQueUmaQuedaRenderia(medidos, [5, 1, 10, 3]);
+    assert.deepEqual(t.map((d) => d.quedaPct), [1, 3, 5, 10], 'os degraus saem em ordem');
+    assert.deepEqual(t.map((d) => d.quantos), [1, 2, 2, 3], 'cada degrau inclui os anteriores');
+});
+
+test('alcançar não é lucrar: o pó entra em quantos e fica fora de quantosValem', () => {
+    const medidos = [
+        { devedor: '0xPO',     queda: new Decimal(0.1), dividaUsd: new Decimal('0.65') },
+        { devedor: '0xBALEIA', queda: new Decimal(0.2), dividaUsd: new Decimal(4000) },
+    ];
+    const [um] = oQueUmaQuedaRenderia(medidos, [1]);
+    assert.equal(um!.quantos, 2);
+    assert.equal(um!.quantosValem, 1, 'US$ 0,65 é alcançado mas não paga o próprio gás');
+});
+
+test('o lucro somado NÃO é a dívida somada — o erro otimista clássico', () => {
+    const medidos = [{ devedor: '0xA', queda: new Decimal(1), dividaUsd: new Decimal(4000) }];
+    const [um] = oQueUmaQuedaRenderia(medidos, [1]);
+    assert.equal(um!.dividaUsd.toFixed(0), '4000');
+    // Ágio de 5% sobre a METADE, menos o custo de vender, menos o gás: ~US$ 88.
+    assert.equal(um!.lucroUsd.toFixed(0), '88');
+    assert.ok(um!.lucroUsd.lessThan(um!.dividaUsd.dividedBy(40)));
+});
+
+test('prejuízo de uma posição não é subtraído do prêmio das outras', () => {
+    // Somar lucro negativo mascararia o pó dentro do total e faria uma queda
+    // parecer menos lucrativa do que é: a posição ruim simplesmente não é
+    // atirada, ela não come o lucro da boa.
+    const so = oQueUmaQuedaRenderia([{ devedor: '0xA', queda: new Decimal(1), dividaUsd: new Decimal(4000) }], [1]);
+    const com = oQueUmaQuedaRenderia([
+        { devedor: '0xA', queda: new Decimal(1), dividaUsd: new Decimal(4000) },
+        { devedor: '0xPO', queda: new Decimal(1), dividaUsd: new Decimal('0.65') },
+    ], [1]);
+    assert.equal(com[0]!.lucroUsd.toFixed(4), so[0]!.lucroUsd.toFixed(4));
+});
+
+test('dívida não lida não conta como zero nem quebra a soma', () => {
+    const medidos = [
+        { devedor: '0xA', queda: new Decimal(1), dividaUsd: null },
+        { devedor: '0xB', queda: new Decimal(1), dividaUsd: new Decimal(4000) },
+    ];
+    const [um] = oQueUmaQuedaRenderia(medidos, [1]);
+    assert.equal(um!.quantos, 2, 'ela é alcançada: isso se sabe');
+    assert.equal(um!.quantosValem, 1, 'mas não se pode afirmar que vale');
+    assert.equal(um!.dividaUsd.toFixed(0), '4000');
+});
+
+test('lista vazia dá zeros, não NaN', () => {
+    const t = oQueUmaQuedaRenderia([], [1, 5]);
+    assert.deepEqual(t.map((d) => d.quantos), [0, 0]);
+    assert.equal(t[0]!.lucroUsd.toFixed(2), '0.00');
+    assert.equal(t[0]!.dividaUsd.toFixed(2), '0.00');
+});
+
+test('o caso real: um alvo a 1,1562% e o que viria atrás dele', () => {
+    // A margem medida, mais uma cauda plausível. Serve para provar que a
+    // tabela distingue "um alvo sozinho" de "um alvo e uma fila".
+    const medidos = [
+        { devedor: '0xPERTO', queda: new Decimal('1.1562'), dividaUsd: new Decimal('91.74') },
+        { devedor: '0xATRAS1', queda: new Decimal(4),  dividaUsd: new Decimal(4000) },
+        { devedor: '0xATRAS2', queda: new Decimal(8),  dividaUsd: new Decimal(4000) },
+    ];
+    const t = oQueUmaQuedaRenderia(medidos, [2, 5, 10]);
+    // Uma queda de 2% pega SÓ o de perto, e ele rende centavos.
+    assert.equal(t[0]!.quantosValem, 1);
+    assert.equal(t[0]!.lucroUsd.toFixed(2), '1.72');
+    // Uma de 5% já vale 50x mais. É esta diferença que o log não mostrava.
+    assert.equal(t[1]!.quantosValem, 2);
+    assert.ok(t[1]!.lucroUsd.greaterThan(t[0]!.lucroUsd.mul(50)));
 });
