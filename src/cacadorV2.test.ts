@@ -121,3 +121,52 @@ test('o cofre esta gravado como imutavel e nao e o dono', async () => {
     assert.equal(`0x${lido.slice(-40)}`.toLowerCase(), COFRE.toLowerCase());
     assert.notEqual(`0x${lido.slice(-40)}`.toLowerCase(), DONO_PADRAO.toLowerCase());
 });
+
+// ---------------------------------------------------------------------------
+// Garantia e divida na MESMA moeda.
+//
+// O alvo mais fragil da brasa em 2026-09-27, depois do piso de tamanho entrar,
+// era exatamente isto: garantia 0x833589fc…2913 e divida 0x833589fc…2913 — USDC
+// nos dois lados. E o melhor caso que existe: sem troca, sem escorregamento,
+// sem depender da profundidade de nenhum pool. O contrato ja tratava (linha
+// 187), mas era o unico caminho que NENHUM teste percorria — e codigo que
+// nunca rodou nao e codigo que funciona.
+// ---------------------------------------------------------------------------
+
+test('mesma moeda nos dois lados: nao passa pela DEX, e o lucro e o agio inteiro', async () => {
+    // O cambio do roteador vai a 90% DE PROPOSITO. Se o contrato encostar na
+    // DEX, ela devolve menos que o emprestimo e a cacada reverte. Passar com
+    // este cambio e a prova de que a troca foi pulada, nao uma suposicao.
+    const c = await cena(9_000);
+    await c.exigir(c.cacador, chamarCacar({ garantia: c.divida, divida: c.divida, piso: 1n }));
+
+    // Sem venda, o lucro e o agio da Aave menos o premio do flash loan. Nada
+    // de escorregamento no meio: e a conta mais limpa que este bot consegue.
+    assert.equal(
+        BigInt(await c.exigir(c.divida, saldo(COFRE))),
+        GARANTIA - A_DEVOLVER,
+        'o cofre recebe o agio inteiro menos o premio do emprestimo',
+    );
+    assert.equal(BigInt(await c.exigir(c.divida, saldo(c.cacador))), 0n, 'o caçador termina vazio');
+    assert.equal(BigInt(await c.exigir(c.divida, saldo(DONO_PADRAO))), 0n, 'o dono nao recebe nada');
+});
+
+test('pular a DEX nao pula a trava de lucro', async () => {
+    const c = await cena(9_000);
+    await assert.rejects(
+        c.exigir(c.cacador, chamarCacar({ garantia: c.divida, divida: c.divida, piso: EMPRESTIMO })),
+        'piso impossivel tem de reverter tudo, mesmo sem troca nenhuma',
+    );
+    assert.equal(BigInt(await c.exigir(c.divida, saldo(COFRE))), 0n);
+});
+
+test('mesma moeda: o cofre continua sendo o destino, mesmo sem a DEX no caminho', async () => {
+    // A trava que motivou a V2 inteira nao pode ter uma porta dos fundos no
+    // caminho curto: era em `_venderGarantia` que o `transfer` morava.
+    const c = await cena(9_000);
+    const estranho = `0x${'ab'.repeat(20)}`;
+    const r = await c.chamar(c.cacador, chamarCacar({ garantia: c.divida, divida: c.divida, piso: 1n }), estranho);
+    assert.equal(r.reverteu, true, 'estranho nao caça nem pelo caminho curto');
+    assert.ok(r.retorno.startsWith(sel('NaoEDono()')), `veio ${r.retorno}`);
+    assert.equal(BigInt(await c.exigir(c.divida, saldo(COFRE))), 0n);
+});
