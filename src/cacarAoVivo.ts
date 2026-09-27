@@ -1382,41 +1382,123 @@ async function principal(): Promise<'parar' | void> {
     async function quandoFoiAUltimaLiquidacao(topo: number): Promise<void> {
         const PASSO = PEDACO * 5;      // ~5,5 horas de blocos por consulta
         const ATE_ONDE_OLHAR = 40;     // ~9 dias para tras
+
+        // ANTES esta funcao parava na PRIMEIRA janela com liquidacao e jogava
+        // todo o resto fora. Ela respondia "ha quanto tempo foi a ultima" e mais
+        // nada — e a pergunta que decide a estrategia e outra: nos ultimos nove
+        // dias, quantas migalhas passaram DENTRO da minha faixa, e valendo
+        // quanto?
+        //
+        // Essa resposta existe no historico da rede, sem esperar ninguem cair e
+        // sem mandar transacao nenhuma. Custa uns 3.000 CUs uma vez por boot —
+        // 0,008% do teto do mes.
+        const achadas: Array<{ bloco: number; ativo: string; cru: bigint | Decimal; hash: string }> = [];
+        let janelasLidas = 0;
+        let janelasQueFalharam = 0;
+        let blocoMaisAntigoOlhado = topo;
+
         for (let i = 0; i < ATE_ONDE_OLHAR; i += 1) {
             const ate = topo - i * PASSO;
             const de = Math.max(0, ate - PASSO + 1);
             if (ate <= 0) break;
             try {
-                const logs = await chamar<Array<{ blockNumber: string; transactionHash: string }>>('eth_getLogs', [{
+                const logs = await chamar<Array<{ address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string }>>('eth_getLogs', [{
                     address: REDE.pool,
                     fromBlock: `0x${de.toString(16)}`,
                     toBlock: `0x${ate.toString(16)}`,
                     topics: [TOPIC_LIQUIDATION_CALL],
                 }]);
-                if (logs.length > 0) {
-                    const ultimo = logs[logs.length - 1];
-                    const bloco = Number.parseInt(ultimo.blockNumber, 16);
-                    const horas = ((topo - bloco) * 2) / 3600;
-                    log.info('[MERCADO] A última liquidação na Aave da Base foi:', {
-                        haQuantoTempo: horas < 1 ? `${Math.round(horas * 60)} minutos` : `${horas.toFixed(1)} horas`,
-                        bloco,
-                        transacao: `https://basescan.org/tx/${ultimo.transactionHash}`,
-                        nessaJanela: `${logs.length} liquidações em ~5,5 horas`,
-                        oQueIssoQuerDizer: horas < 24
-                            ? 'o mercado ainda liquida: esperar é a resposta certa'
-                            : 'faz mais de um dia — a faixa esfriou, e a conta de 66/mês envelheceu',
-                    });
-                    return;
+                janelasLidas += 1;
+                blocoMaisAntigoOlhado = de;
+                for (const cru of logs) {
+                    try {
+                        const l = decodificarLiquidacao(cru);
+                        achadas.push({ bloco: l.bloco, ativo: l.ativoDaDivida, cru: l.dividaCrua, hash: cru.transactionHash });
+                    } catch { /* um log estranho nao invalida o censo */ }
                 }
             } catch {
-                // Uma janela que falha nao invalida a busca: segue para tras.
+                // Uma janela que falha nao invalida a busca, mas ENTRA NA CONTA:
+                // um censo com buracos que se apresenta como completo seria
+                // ausencia com cara de resposta.
+                janelasQueFalharam += 1;
             }
             await dormir(200);
         }
-        const dias = ((ATE_ONDE_OLHAR * PASSO * 2) / 86400).toFixed(1);
-        log.warn('[MERCADO] NENHUMA liquidação encontrada para trás.', {
-            olheiPara: `${dias} dias`,
-            oQueIssoQuerDizer: 'não é o bot dormindo: é a Aave da Base sem liquidar ninguém há mais de uma semana. A estratégia das migalhas precisa ser revista.',
+
+        const diasOlhados = ((topo - blocoMaisAntigoOlhado) * 2) / 86400;
+
+        if (achadas.length === 0) {
+            log.warn('[MERCADO] NENHUMA liquidação encontrada para trás.', {
+                olheiPara: `${diasOlhados.toFixed(1)} dias`,
+                janelasLidas,
+                janelasQueFalharam,
+                oQueIssoQuerDizer: janelasQueFalharam > janelasLidas / 4
+                    ? 'MAS um quarto das janelas falhou: pode ser o RPC, não o mercado. Não conclua nada daqui'
+                    : 'não é o bot dormindo: é a Aave da Base sem liquidar ninguém há mais de uma semana. A estratégia das migalhas precisa ser revista.',
+            });
+            return;
+        }
+
+        // Precificar no FIM, e nao durante a varredura: no comeco do boot o mapa
+        // de precos ainda pode estar vazio, e precificar cedo daria `null` nas
+        // primeiras janelas — um censo torto por acidente de ordem.
+        const comLucro = achadas.map((a) => {
+            const dividaUsd = emDolar(a.cru, casas.get(a.ativo.toLowerCase()), precos.get(a.ativo.toLowerCase()));
+            return { ...a, dividaUsd, lucroUsd: dividaUsd === null ? null : lucroEstimado(dividaUsd) };
+        });
+
+        const faixa = faixaQueAtira({
+            precoDoEthUsd: precoDoEth(),
+            saldoWei: saldoDeGasWei,
+            baseFeeWei: baseFeeAtual ?? 20_000_000n,
+            limiteGas: LIMITE_DE_GAS,
+            fracaoBaseDoLucro: fracaoBase,
+            fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
+            fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
+            margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
+            tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
+            atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+            tiroDeProva: provaAgora().armado,
+        });
+
+        const dentroDaFaixa = comLucro.filter((a) => {
+            if (a.lucroUsd === null) return false;
+            if (faixa === null) return a.lucroUsd.greaterThan(0);
+            if (faixa.de !== null && a.lucroUsd.lessThan(faixa.de)) return false;
+            return a.lucroUsd.lessThanOrEqualTo(faixa.ate);
+        });
+        const somaDaFaixa = dentroDaFaixa.reduce((acc, a) => acc.plus(a.lucroUsd!), new Decimal(0));
+        const semCotacao = comLucro.filter((a) => a.lucroUsd === null).length;
+        const maisRecente = comLucro.reduce((a, b) => (b.bloco > a.bloco ? b : a));
+        const horasDaUltima = ((topo - maisRecente.bloco) * 2) / 3600;
+        const porDia = diasOlhados > 0 ? achadas.length / diasOlhados : 0;
+        const porMes = porDia * 30;
+        const naFaixaPorMes = diasOlhados > 0 ? (dentroDaFaixa.length / diasOlhados) * 30 : 0;
+
+        log.info('[MERCADO] Censo das liquidações da Aave na Base.', {
+            olhei: `${diasOlhados.toFixed(1)} dias (${janelasLidas} janelas, ${janelasQueFalharam} falharam)`,
+            aconteceram: `${achadas.length} no total, ${porDia.toFixed(1)} por dia, ~${Math.round(porMes)} por mês`,
+            aUltima: horasDaUltima < 1 ? `${Math.round(horasDaUltima * 60)} minutos atrás` : `${horasDaUltima.toFixed(1)} horas atrás`,
+            // ESTE e o numero que decide a estrategia.
+            naSUAFaixa: faixa === null
+                ? `${dentroDaFaixa.length} com lucro acima de zero (não sei a faixa agora)`
+                : `${dentroDaFaixa.length} de ${achadas.length} — entre ${
+                    faixa.de === null ? 'qualquer lucro' : `US$ ${faixa.de.toFixed(2)}`} e US$ ${faixa.ate.toFixed(2)}`,
+            lucroQuePassouNaFaixa: `US$ ${somaDaFaixa.toFixed(2)} em ${diasOlhados.toFixed(1)} dias ` +
+                `(~US$ ${somaDaFaixa.dividedBy(Math.max(diasOlhados, 0.01)).mul(30).toFixed(2)}/mês, ${Math.round(naFaixaPorMes)} migalhas/mês)`,
+            semCotacao: semCotacao === 0 ? 'nenhuma' : `${semCotacao} não consegui precificar (moeda fora do meu mapa)`,
+            asTresMaiores: comLucro
+                .filter((a) => a.lucroUsd !== null)
+                .sort((a, b) => b.lucroUsd!.comparedTo(a.lucroUsd!))
+                .slice(0, 3)
+                .map((a) => `US$ ${a.lucroUsd!.toFixed(2)} (dívida US$ ${a.dividaUsd!.toFixed(0)}) https://basescan.org/tx/${a.hash}`),
+            ATENCAO: 'isto é OPORTUNIDADE que passou, não renda perdida: para cada uma dessas eu ainda teria de ' +
+                'ganhar a corrida de outro liquidador. É o teto do que a faixa pode dar, não o que ela daria',
+            oQueIssoQuerDizer: dentroDaFaixa.length === 0
+                ? 'NENHUMA liquidação caiu na sua faixa em todo o período. Esperar não resolve: a faixa é que está no lugar errado'
+                : naFaixaPorMes >= 20
+                    ? 'a faixa tem movimento de verdade. Esperar é a resposta certa'
+                    : 'a faixa tem movimento, mas pouco. Dá para provar que funciona; não dá para viver disso ainda',
         });
     }
 
