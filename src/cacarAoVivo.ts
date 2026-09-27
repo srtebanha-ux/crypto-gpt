@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { emDolar, lucroEstimado, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
@@ -1186,20 +1186,45 @@ async function principal(): Promise<'parar' | void> {
             passos.precoDoEth = ethUsd === null ? 'SEM COTAÇÃO — o piso de lucro barraria tudo' : `US$ ${ethUsd.toFixed(2)}`;
             const base = baseFeeAtual ?? 20_000_000n;
             passos.baseFee = `${(Number(base) / 1e9).toFixed(4)} gwei`;
-            const lucroExemplo = new Decimal(88);
-            const desejada = gorjetaPorGas({ lucroUsd: lucroExemplo, precoDoEthUsd: ethUsd ?? new Decimal(0), limiteGas: GAS_TIPICO_DE_UMA_CACADA });
-            const saldoUsd = ethUsd === null ? null : new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).mul(ethUsd);
-            const risco = saldoUsd === null ? FRACAO_DO_SALDO_POR_TIRO
-                : fracaoDoSaldoQueValeArriscar({ lucroUsd: lucroExemplo, saldoUsd, fracaoBase: FRACAO_DO_SALDO_POR_TIRO, fracaoMaxima: FRACAO_MAXIMA_DO_SALDO });
-            let prio = gorjetaQueCabeNoSaldo({ gorjetaDesejadaWei: desejada, saldoWei: saldoDeGasWei, baseFeeWei: base, fracaoMaximaDoSaldo: risco });
-            let maxFee = tetoPorGas(base, prio);
-            const adiantavel = maxFeeQueOSaldoAdianta(saldoDeGasWei, LIMITE_DE_GAS);
-            if (maxFee > adiantavel) { maxFee = adiantavel; if (prio > maxFee - base) prio = maxFee - base; }
-            const custo = custoDoTiroUsd(prio, base, ethUsd);
-            const veredicto = valeATentativa(lucroExemplo, custo);
-            passos.numDeUS$88 = `gorjeta ${(Number(prio) / 1e9).toFixed(2)} gwei, adiantaria ${new Decimal(adiantadoExigido(LIMITE_DE_GAS, maxFee).toString()).dividedBy(1e18).toFixed(6)} ETH`;
-            passos.pisoDeLucro = veredicto.vale ? 'passaria' : `BARRARIA: ${veredicto.porque}`;
-            passos.adiantadoCabe = adiantavel > base ? 'sim' : 'NÃO — não conseguiria enviar';
+            // A MESMA regra do caminho quente, nao uma copia dela. A copia
+            // que morava aqui conferia tres freios de quatro, e quando entrou o
+            // freio que protege a caca de migalhas ela nao soube: o ensaio
+            // passou a imprimir "Se alguem cair, o tiro sai" para um premio de
+            // US$ 88 que o caminho de verdade RECUSA. O unico teste que existe
+            // para dizer se o bot atira estava mentindo.
+            const ambiente = {
+                precoDoEthUsd: ethUsd,
+                saldoWei: saldoDeGasWei,
+                baseFeeWei: base,
+                limiteGas: LIMITE_DE_GAS,
+                fracaoBaseDoLucro: fracaoBase,
+                fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
+                fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
+                margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
+                tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
+                atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
+            };
+            const emEth6 = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
+            const d88 = decidirTiro({ ...ambiente, lucroUsd: new Decimal(88) });
+            passos.numDeUS$88 = `gorjeta ${(Number(d88.prioridadeWei) / 1e9).toFixed(2)} gwei` +
+                (d88.amordaca.amordacado ? ` (AMORDAÇADA — queria ${(Number(d88.desejadaWei) / 1e9).toFixed(2)})` : ' (inteira)') +
+                `, adiantaria ${emEth6(d88.adiantadoWei)} ETH`;
+            passos.numDeUS$88Atiraria = d88.atira ? 'SIM' : `NÃO — ${d88.porque}`;
+            passos.adiantadoCabe = d88.adiantavelWei > base ? 'sim' : 'NÃO — não conseguiria enviar';
+
+            // A fronteira da faixa das migalhas: o maior premio pelo qual este
+            // saldo ainda atira. E o numero que a estrategia escolhida pede, e
+            // que o log nunca deu.
+            const faixa = faixaQueAtira(ambiente);
+            passos.atiroNaFaixaDe = faixa === null
+                ? 'NENHUM prêmio — algum freio barra tudo'
+                : `US$ ${faixa.de.toFixed(2)} a US$ ${faixa.ate.toFixed(2)} ` +
+                  `(R$ ${faixa.de.mul(5.4).toFixed(2)} a R$ ${faixa.ate.mul(5.4).toFixed(2)}). ` +
+                  'Abaixo não paga o gás; acima uma derrota mata a caça';
+            passos.lanceInteiroAte = faixa === null || faixa.inteiroAte === null
+                ? 'nenhum prêmio com lance inteiro'
+                : `US$ ${faixa.inteiroAte.toFixed(2)} (R$ ${faixa.inteiroAte.mul(5.4).toFixed(2)}). ` +
+                  'Entre este e o topo da faixa eu atiro, mas amordaçada — com desvantagem no leilão'
             passos.nonce = String(await nonceManager!.getNextNonce());
             await nonceManager!.sync(); // devolve o contador ao valor da rede
             // A pergunta que o log nao respondia: QUANTO FALTA para este alvo.
@@ -1215,9 +1240,15 @@ async function principal(): Promise<'parar' | void> {
                 ? `em ${emQuantoTempo(projecao.emMs)} (${projecao.taxaAnual.mul(100).toFixed(2)}%/ano, ${projecao.amostras} amostras)`
                 : `não projetável: ${projecao.porque}`;
 
-            const tudoOk = veredicto.vale && adiantavel > base && ethUsd !== null;
-            if (tudoOk) log.info('[EM SECO] Caminho de tiro INTEIRO conferido. Se alguém cair, o tiro sai.', passos);
-            else log.error('[EM SECO] O caminho de tiro tem um bloqueio. NÃO sairia tiro.', passos);
+            // O veredicto passa a ser sobre a FAIXA, nao sobre um premio de
+            // exemplo. "O tiro sai" testando US$ 88 era falso de duas maneiras:
+            // o freio das migalhas recusa esse premio, e nada dizia em que
+            // premio ele SAI.
+            if (faixa !== null && ethUsd !== null) {
+                log.info('[EM SECO] Caminho de tiro INTEIRO conferido. Sai tiro dentro da faixa.', passos);
+            } else {
+                log.error('[EM SECO] O caminho de tiro tem um bloqueio. NÃO sai tiro em NENHUM prêmio.', passos);
+            }
         } catch (e) {
             passos.erro = (e as Error).message;
             log.error('[EM SECO] O ensaio quebrou — o caminho de tiro tem um defeito.', passos);
@@ -1833,13 +1864,6 @@ async function principal(): Promise<'parar' | void> {
                         casas.get(alvo.divida.toLowerCase()),
                         precos.get(alvo.divida.toLowerCase()),
                     );
-                    const fracao = fracaoAdaptativa({ base: fracaoBase, perdasSeguidas });
-                    const desejada = gorjetaPorGas({
-                        lucroUsd: lucroUsd ?? new Decimal(0),
-                        precoDoEthUsd: precoDoEth() ?? new Decimal(0),
-                        limiteGas: GAS_TIPICO_DE_UMA_CACADA,
-                        fracaoDoLucro: fracao,
-                    });
                     const base = baseFeeAtual ?? 20_000_000n;
 
                     // O saldo e lido no maximo uma vez por minuto: e uma ida a
@@ -1863,132 +1887,60 @@ async function principal(): Promise<'parar' | void> {
                         continue;
                     }
 
-                    // Quanto arriscar depende do PREMIO. Uma fracao fixa fazia
-                    // o bot recusar uma aposta de 590 para 1 com a mesma cara
-                    // com que recusava uma de 3 para 1.
-                    // Sem o preco do ETH nao da para comparar premio com
-                    // saldo — mas isso NAO pode virar risco zero. Zero aqui
-                    // caia em "SEM GAS PARA ATIRAR", e o bot recusaria o tiro
-                    // culpando o gas, tendo gas: diagnostico errado com cara
-                    // de certeza. Sem cotacao, o certo e o risco basico.
+                    // TODA a conta do lance e TODOS os freios vivem em
+                    // `decidirTiro`, e o ensaio em seco chama a MESMA funcao.
+                    // Isto era uma copia aqui e outra la, e elas divergiram no
+                    // mesmo dia em que a segunda ganhou um freio novo: o ensaio
+                    // passou a imprimir "o tiro sai" para um premio que este
+                    // caminho recusa. Uma regra, um lugar.
                     const ethUsd = precoDoEth();
-                    const saldoUsd = ethUsd === null
-                        ? null
-                        : new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).mul(ethUsd);
-                    const risco = saldoUsd === null || lucroUsd === null
-                        ? FRACAO_DO_SALDO_POR_TIRO
-                        : fracaoDoSaldoQueValeArriscar({
-                            lucroUsd,
-                            saldoUsd,
-                            fracaoBase: FRACAO_DO_SALDO_POR_TIRO,
-                            fracaoMaxima: FRACAO_MAXIMA_DO_SALDO,
-                        });
-                    let prioridadePorGas = gorjetaQueCabeNoSaldo({
-                        gorjetaDesejadaWei: desejada,
+                    const decisao = decidirTiro({
+                        lucroUsd,
+                        precoDoEthUsd: ethUsd,
                         saldoWei: saldoDeGasWei,
                         baseFeeWei: base,
-                        fracaoMaximaDoSaldo: risco,
-                    });
-                    // Lucro que nao paga o proprio tiro e prejuizo com cara de
-                    // vitoria: o log diria ACERTOU enquanto a carteira
-                    // encolhia, e ninguem iria atras.
-                    const custoDoTiro = custoDoTiroUsd(prioridadePorGas, base, precoDoEth() ?? new Decimal(0));
-                    const veredicto = valeATentativa(lucroUsd, custoDoTiro, Number(process.env.CACA_MARGEM_MINIMA ?? '2'));
-                    if (disjuntorAberto) {
-                        continue;
-                    }
-                    if (!veredicto.vale) {
-                        log.info('[PEQUENO DEMAIS] Não atirei.', {
-                            devedor: alvo.devedor,
-                            porque: veredicto.porque,
-                        });
-                        continue;
-                    }
-
-                    const custoSePerder = custoDeUmaDerrota(prioridadePorGas, base);
-                    const aguenta = derrotasQueAguenta(saldoDeGasWei, custoSePerder);
-
-                    if (prioridadePorGas === 0n || aguenta < 1) {
-                        const semSaldo = saldoDeGasWei === 0n;
-                        log.error(
-                            semSaldo
-                                ? 'SEM GÁS PARA ATIRAR. Não disparo: ficar sem gás perde todas as próximas, não só esta.'
-                                : 'NÃO DISPAREI, e não é falta de gás — o lance calculado deu zero. Isto é defeito meu, não do mercado.',
-                            {
-                                devedor: alvo.devedor,
-                                saldoEth: new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6),
-                                precoDoEth: ethUsd === null ? 'SEM COTAÇÃO' : `US$ ${ethUsd.toFixed(2)}`,
-                                lucroEstimado: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
-                                riscoUsado: `${(risco * 100).toFixed(0)}%`,
-                                oQueFazer: semSaldo
-                                    ? `mandar ETH do cofre 0x3dffA934...1512A7 para a conta_bot ${donoCarteira}`
-                                    : 'me mandar esta linha inteira',
-                            },
-                        );
-                        continue;
-                    }
-                    if (prioridadePorGas < desejada) {
-                        log.warn('Lance cortado pelo saldo: ofereço menos do que o lucro justificaria.', {
-                            queria: `${(Number(desejada) / 1e9).toFixed(2)} gwei`,
-                            ofereco: `${(Number(prioridadePorGas) / 1e9).toFixed(2)} gwei`,
-                            aguentaDerrotas: aguenta,
-                        });
-                    }
-                    // O no cobra `gasLimit × maxFeePerGas` ADIANTADO, pelo teto
-                    // e nao pelo gas usado, e devolve o resto depois. Ignorar
-                    // isso fazia toda cacada morrer em `insufficient funds`
-                    // com o log culpando a rede: o bot pareceria sem alvo,
-                    // tendo alvo e tendo gas.
-                    let maxFee = tetoPorGas(base, prioridadePorGas);
-                    const adiantavel = maxFeeQueOSaldoAdianta(saldoDeGasWei, limiteGas);
-                    if (adiantavel <= base) {
-                        log.error('O GÁS ADIANTADO NÃO CABE NO SALDO. Não disparo.', {
-                            devedor: alvo.devedor,
-                            saldoEth: new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6),
-                            precisariaAdiantar: new Decimal(adiantadoExigido(limiteGas, maxFee).toString()).dividedBy(1e18).toFixed(6),
-                            oQueFazer: `mandar ETH do cofre 0x3dffA934...1512A7 para a conta_bot ${donoCarteira}`,
-                        });
-                        continue;
-                    }
-                    // O corte esta certo — sem ele a cacada morria em
-                    // `insufficient funds`. O que faltava era ele FALAR.
-                    // Perder a corrida por falta de gas e resultado legitimo;
-                    // perder sem o log dizer que foi por isso e ausencia com
-                    // cara de resposta.
-                    const lanceQueQueria = prioridadePorGas;
-                    if (maxFee > adiantavel) {
-                        maxFee = adiantavel;
-                        if (prioridadePorGas > maxFee - base) prioridadePorGas = maxFee - base;
-                    }
-                    const amordaca = lanceAmordacado({
-                        desejadaWei: lanceQueQueria,
-                        conseguidaWei: prioridadePorGas,
                         limiteGas,
-                        baseFeeWei: base,
-                    });
-                    const emEth = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
-
-                    // A estrategia escolhida e ficar nas migalhas, e o codigo
-                    // nao sabia disso: ele atirava em qualquer premio que
-                    // passasse o piso, inclusive nos que o saldo amordaca a 5%
-                    // do lance. Uma derrota dessas come metade do gas e acaba
-                    // com a caca que FUNCIONA.
-                    const mata = mataACacaDeMigalhas({
-                        amordacado: amordaca.amordacado,
-                        custoDaDerrotaWei: custoDeUmaDerrota(prioridadePorGas, base),
-                        saldoWei: saldoDeGasWei,
+                        perdasSeguidas,
+                        fracaoBaseDoLucro: fracaoBase,
+                        fracaoBaseDoSaldo: FRACAO_DO_SALDO_POR_TIRO,
+                        fracaoMaximaDoSaldo: FRACAO_MAXIMA_DO_SALDO,
+                        margemMinima: Number(process.env.CACA_MARGEM_MINIMA ?? '2'),
                         tetoDaMordida: Number(process.env.CACA_MORDIDA_MAXIMA ?? '0.5'),
                         atirarAmordacado: process.env.CACA_ATIRAR_AMORDACADO === '1',
                     });
-                    if (mata.pula) {
-                        log.warn('NÃO ATIREI NESTE GRANDE — ficaria sem gás para as migalhas.', {
+                    const fracao = decisao.fracaoDoLucro;
+                    const risco = decisao.risco;
+                    const amordaca = decisao.amordaca;
+                    const prioridadePorGas = decisao.prioridadeWei;
+                    const maxFee = decisao.maxFeeWei;
+                    const custoSePerder = decisao.custoSePerderWei;
+                    const aguenta = decisao.aguentaDerrotas;
+                    const saldoUsd = ethUsd === null
+                        ? null
+                        : new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).mul(ethUsd);
+                    const emEth = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
+
+                    if (disjuntorAberto) continue;
+
+                    if (!decisao.atira) {
+                        // UM log de recusa, com o motivo que a propria regra
+                        // deu. Eram quatro blocos, cada um com sua conta e sua
+                        // chance de discordar dos outros.
+                        log.warn(`NÃO ATIREI: ${decisao.porque}`, {
                             devedor: alvo.devedor,
                             premio: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
-                            porque: mata.porque,
-                            queriaDar: `${(Number(lanceQueQueria) / 1e9).toFixed(2)} gwei`,
+                            saldo: `${emEth(saldoDeGasWei)} ETH`,
+                            precoDoEth: ethUsd === null ? 'SEM COTAÇÃO' : `US$ ${ethUsd.toFixed(2)}`,
+                            queriaDar: `${(Number(decisao.desejadaWei) / 1e9).toFixed(2)} gwei`,
                             sóConsigo: `${(Number(prioridadePorGas) / 1e9).toFixed(2)} gwei`,
-                            paraLiberar: `${emEth(amordaca.saldoQuePrecisaria)} ETH na conta_bot, ` +
-                                'ou CACA_ATIRAR_AMORDACADO=1 para atirar amordaçado mesmo assim',
+                            cortado: amordaca.amordacado ? `${(amordaca.cortado * 100).toFixed(0)}%` : 'nada',
+                            riscoUsado: `${(risco * 100).toFixed(0)}%`,
+                            seEuPerderCusta: `${emEth(custoSePerder)} ETH (aguento ${aguenta})`,
+                            oQueFazer: saldoDeGasWei === 0n
+                                ? `mandar ETH do cofre 0x3dffA934...1512A7 para a conta_bot ${donoCarteira}`
+                                : amordaca.amordacado
+                                    ? `${emEth(amordaca.saldoQuePrecisaria)} ETH na conta_bot libera o lance inteiro, ou CACA_ATIRAR_AMORDACADO=1`
+                                    : 'me mandar esta linha inteira',
                             oQueEuDeixeiPassar: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
                         });
                         continue;
@@ -1998,11 +1950,11 @@ async function principal(): Promise<'parar' | void> {
                         log.warn('LANCE AMORDAÇADO POR FALTA DE GÁS. Atiro, mas com a mão amarrada.', {
                             devedor: alvo.devedor,
                             premio: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
-                            queriaDar: `${(Number(lanceQueQueria) / 1e9).toFixed(2)} gwei`,
+                            queriaDar: `${(Number(decisao.desejadaWei) / 1e9).toFixed(2)} gwei`,
                             vouDar: `${(Number(prioridadePorGas) / 1e9).toFixed(2)} gwei`,
                             cortado: `${(amordaca.cortado * 100).toFixed(0)}%`,
                             saldo: `${emEth(saldoDeGasWei)} ETH`,
-                            precisariaDe: `${emEth(amordaca.saldoQuePrecisaria)} ETH na conta_bot para dar o lance inteiro`,
+                            precisariaDe: `${emEth(amordaca.saldoQuePrecisaria)} ETH na conta_bot para o lance inteiro`,
                             seEuPerder: 'foi por não ter como cobrir, não por lentidão — o alvo estava na mira',
                         });
                     }
@@ -2030,7 +1982,7 @@ async function principal(): Promise<'parar' | void> {
                             // mesma cara de um tiro inteiro — e a reversão que
                             // vem depois parece lentidão em vez de falta de gás.
                             gorjetaCortada: amordaca.amordacado
-                                ? `SIM, ${(amordaca.cortado * 100).toFixed(0)}% — queria ${(Number(lanceQueQueria) / 1e9).toFixed(2)} gwei`
+                                ? `SIM, ${(amordaca.cortado * 100).toFixed(0)}% — queria ${(Number(decisao.desejadaWei) / 1e9).toFixed(2)} gwei`
                                 : 'não, lance inteiro',
                             lucroEstimadoUsd: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
                             doCicloAoTiro: `${msDoTiro}ms`,

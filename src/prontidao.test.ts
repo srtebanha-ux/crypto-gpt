@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import {
     gorjetaPorGas, tetoPorGas, lerBasefee,
-    lanceAmordacado, mataACacaDeMigalhas,
+    lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira,
     PISO_DA_GORJETA_WEI, TETO_DA_GORJETA_WEI, LIMITE_DE_GAS,
 } from './prontidao';
 
@@ -468,4 +468,131 @@ test('o caso real inteiro: US$ 11,69 passa, US$ 1.986 não', () => {
         });
         assert.equal(r.pula, esperado, `prêmio US$ ${premio}: ${r.porque}`);
     }
+});
+
+// ---------------------------------------------------------------------------
+// A regra do tiro, num lugar só.
+//
+// O ensaio em seco tinha sua PRÓPRIA cópia da conta do lance, e conferia três
+// freios de quatro. Quando entrou o freio que protege a caça de migalhas, o
+// ensaio não soube: passou a imprimir "Se alguém cair, o tiro sai" para um
+// prêmio de US$ 88 que o caminho de verdade RECUSA.
+//
+// Duas cópias da mesma regra foi o defeito desta sessão inteira, em seis
+// lugares. Aqui estava no pior: no único teste que diz se o bot atira.
+// ---------------------------------------------------------------------------
+
+const AMBIENTE_REAL = {
+    precoDoEthUsd: ETH_REAL,
+    saldoWei: SALDO_REAL,
+    baseFeeWei: BASE_REAL_WEI,
+    limiteGas: LIMITE_DE_GAS,
+};
+
+test('o defeito exato: com US$ 9 de gás, um prêmio de US$ 88 NÃO sai', () => {
+    const d = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(88) });
+    assert.equal(d.atira, false, `o ensaio dizia que saía. porque: ${d.porque}`);
+    assert.match(d.porque, /caça de migalhas/);
+    assert.equal(d.amordaca.amordacado, true);
+    assert.equal((d.amordaca.cortado * 100).toFixed(0), '87');
+});
+
+test('uma migalha de US$ 5 sai, com lance inteiro', () => {
+    const d = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(5) });
+    assert.equal(d.atira, true, d.porque);
+    assert.equal(d.amordaca.amordacado, false, 'lance inteiro: é a faixa dela');
+    assert.ok(d.aguentaDerrotas >= 2, `aguenta ${d.aguentaDerrotas} derrotas`);
+});
+
+test('a FAIXA que atira tem duas pontas, e as duas importam', () => {
+    // Eu escrevi esta função primeiro como "o maior prêmio que atira", com
+    // busca binária a partir de um centavo, e ela devolveu null para um saldo
+    // que atira bem. O erro era de raciocínio: a decisão não é monótona no
+    // prêmio — pequeno demais não paga o gás, grande demais fica amordaçado.
+    const f = faixaQueAtira(AMBIENTE_REAL);
+    assert.ok(f !== null);
+    // Ponta de baixo: abaixo dela o prêmio não paga o próprio gás.
+    assert.equal(f!.de.toFixed(2), '0.45');
+    // Ponta de cima: acima dela uma derrota come metade do gás.
+    assert.equal(f!.ate.toFixed(0), '67');
+    // As duas pontas são de verdade: dentro atira, fora não.
+    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.de }).atira, true, 'a ponta de baixo atira');
+    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.ate }).atira, true, 'a ponta de cima atira');
+    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.de.mul('0.9') }).atira, false, 'abaixo, não');
+    assert.equal(decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f!.ate.mul('1.1') }).atira, false, 'acima, não');
+});
+
+test('o teto do LANCE INTEIRO é outra coisa que o teto do TIRO — eu confundi os dois', () => {
+    // Eu informei "o bot para de atirar em US$ 11,69". Errado: ele para de
+    // atirar em US$ 66,80 e para de atirar COM FORÇA em US$ 11,69. São duas
+    // perguntas, e a resposta de uma não serve para a outra.
+    const f = faixaQueAtira(AMBIENTE_REAL)!;
+    assert.ok(f.inteiroAte !== null);
+    // E o número certo é US$ 6,90, não os US$ 11,69 que eu tinha calculado à
+    // mão: a conta à mão só olhou o corte do gás adiantado e esqueceu que
+    // `gorjetaQueCabeNoSaldo` corta ANTES, pela fração de risco de 25%.
+    assert.equal(f.inteiroAte!.toFixed(2), '6.90');
+    assert.ok(f.inteiroAte!.lessThan(f.ate), 'o teto do lance inteiro é MENOR que o teto do tiro');
+
+    // No meio da faixa o bot atira amordaçado — vale, mas com desvantagem.
+    const meio = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: f.inteiroAte!.plus(f.ate).dividedBy(2) });
+    assert.equal(meio.atira, true, 'atira');
+    assert.equal(meio.amordaca.amordacado, true, 'e amordaçado');
+});
+
+test('com gás de sobra o lance inteiro cobre a faixa toda', () => {
+    const gordo = { ...AMBIENTE_REAL, saldoWei: 200_000_000_000_000_000n };
+    const f = faixaQueAtira(gordo)!;
+    assert.equal(f.inteiroAte!.toFixed(2), f.ate.toFixed(2), 'nada amordaçado: o saldo dá conta');
+});
+
+test('sem cotação do ETH nada sai, e o motivo diz isso', () => {
+    const d = decidirTiro({ ...AMBIENTE_REAL, precoDoEthUsd: null, lucroUsd: new Decimal(5) });
+    assert.equal(d.atira, false);
+    assert.match(d.porque, /cotação/);
+    assert.equal(faixaQueAtira({ ...AMBIENTE_REAL, precoDoEthUsd: null }), null);
+});
+
+test('saldo zero: recusa e o motivo manda encher a conta_bot', () => {
+    const d = decidirTiro({ ...AMBIENTE_REAL, saldoWei: 0n, lucroUsd: new Decimal(5) });
+    assert.equal(d.atira, false);
+    assert.equal(faixaQueAtira({ ...AMBIENTE_REAL, saldoWei: 0n }), null);
+});
+
+test('com gás de sobra o prêmio grande volta a sair', () => {
+    // 0,2 ETH na conta_bot. A faixa deixa de ser o gargalo.
+    const gordo = { ...AMBIENTE_REAL, saldoWei: 200_000_000_000_000_000n };
+    const d = decidirTiro({ ...gordo, lucroUsd: new Decimal(1986) });
+    assert.equal(d.atira, true, d.porque);
+    assert.equal(d.amordaca.amordacado, false);
+    const f = faixaQueAtira(gordo);
+    assert.ok(f!.ate.greaterThan(1986), `a ponta de cima sobe para US$ ${f!.ate.toFixed(0)}`);
+});
+
+test('CACA_ATIRAR_AMORDACADO faz o prêmio grande sair mesmo com US$ 9', () => {
+    const d = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(1986), atirarAmordacado: true });
+    assert.equal(d.atira, true, d.porque);
+    assert.equal(d.amordaca.amordacado, true, 'sai, mas amordaçado — e o log diz');
+});
+
+test('o freio que barra é o PRIMEIRO da ordem do caminho quente', () => {
+    // Um prêmio que não paga o gás tem de ser barrado pelo piso de lucro, e não
+    // pelo freio das migalhas: senão o log manda encher a conta_bot quando o
+    // problema é o alvo ser pequeno demais.
+    const d = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal('0.30') });
+    assert.equal(d.atira, false);
+    assert.match(d.porque, /não cobre 2x o custo/);
+});
+
+test('derrotas seguidas sobem a fração do lucro, e a decisão continua coerente', () => {
+    const calmo = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(5), perdasSeguidas: 0 });
+    const ferido = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(5), perdasSeguidas: 4 });
+    assert.ok(ferido.fracaoDoLucro > calmo.fracaoDoLucro, 'o lance sobe depois de perder');
+    assert.ok(ferido.desejadaWei > calmo.desejadaWei);
+});
+
+test('o adiantado devolvido é o que o nó vai cobrar, não uma estimativa', () => {
+    const d = decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(5) });
+    assert.equal(d.adiantadoWei, d.maxFeeWei * LIMITE_DE_GAS);
+    assert.ok(d.adiantadoWei <= SALDO_REAL, 'e cabe no saldo, senão não dava para enviar');
 });

@@ -355,6 +355,243 @@ export function lanceAmordacado(entrada: {
 }
 
 /**
+ * A REGRA DO TIRO, num lugar so.
+ *
+ * Existe por uma mentira no log. O ensaio em seco imprimia "Se alguem cair, o
+ * tiro sai" depois de conferir os freios com um lucro de exemplo de US$ 88 — e
+ * ele conferia so tres deles, porque tinha sua PROPRIA copia da conta do lance.
+ * Quando entrou o freio que protege a caca de migalhas, o ensaio nao soube:
+ * passou a dizer que o tiro sai num premio de US$ 88 que o caminho de verdade
+ * RECUSA.
+ *
+ * Duas copias da mesma regra e o defeito que esta sessao inteira perseguiu, em
+ * seis lugares diferentes. Aqui ele estava no pior lugar possivel: no unico
+ * teste que existe para dizer se o bot atira.
+ *
+ * Entao a regra passa a morar aqui, e os dois — o ensaio e o caminho quente —
+ * chamam a mesma funcao. A ordem dos freios e a do caminho quente, de proposito,
+ * inclusive onde ela e levemente conservadora: o piso de lucro e avaliado com a
+ * gorjeta ANTES do corte do adiantado, entao o custo considerado e o maior.
+ */
+export interface DecisaoDoTiro {
+    atira: boolean;
+    porque: string;
+    /** A gorjeta final, depois de todos os cortes. */
+    prioridadeWei: bigint;
+    maxFeeWei: bigint;
+    /** O que a gorjeta queria ser antes do saldo cortar. */
+    desejadaWei: bigint;
+    amordaca: LanceAmordacado;
+    /** Fracao do saldo que este premio justifica arriscar. */
+    risco: number;
+    fracaoDoLucro: number;
+    custoUsd: Decimal | null;
+    custoSePerderWei: bigint;
+    aguentaDerrotas: number;
+    adiantadoWei: bigint;
+    adiantavelWei: bigint;
+}
+
+export function decidirTiro(e: {
+    lucroUsd: Decimal | null;
+    precoDoEthUsd: Decimal | null;
+    saldoWei: bigint;
+    baseFeeWei: bigint;
+    limiteGas?: bigint;
+    perdasSeguidas?: number;
+    fracaoBaseDoLucro?: number;
+    fracaoBaseDoSaldo?: number;
+    fracaoMaximaDoSaldo?: number;
+    margemMinima?: number;
+    tetoDaMordida?: number;
+    atirarAmordacado?: boolean;
+}): DecisaoDoTiro {
+    const limiteGas = e.limiteGas ?? LIMITE_DE_GAS;
+    const fracaoDoLucro = fracaoAdaptativa({
+        base: e.fracaoBaseDoLucro ?? FRACAO_DO_LUCRO,
+        perdasSeguidas: e.perdasSeguidas ?? 0,
+    });
+    const desejadaWei = gorjetaPorGas({
+        lucroUsd: e.lucroUsd ?? new Decimal(0),
+        precoDoEthUsd: e.precoDoEthUsd ?? new Decimal(0),
+        limiteGas: GAS_TIPICO_DE_UMA_CACADA,
+        fracaoDoLucro,
+    });
+    const saldoUsd = e.precoDoEthUsd === null
+        ? null
+        : new Decimal(e.saldoWei.toString()).dividedBy(1e18).mul(e.precoDoEthUsd);
+    // Sem cotacao o risco NAO vira zero: zero cairia em "sem gas para atirar" e
+    // o bot recusaria culpando o gas, tendo gas.
+    const fracaoBaseDoSaldo = e.fracaoBaseDoSaldo ?? 0.25;
+    const risco = saldoUsd === null || e.lucroUsd === null
+        ? fracaoBaseDoSaldo
+        : fracaoDoSaldoQueValeArriscar({
+            lucroUsd: e.lucroUsd,
+            saldoUsd,
+            fracaoBase: fracaoBaseDoSaldo,
+            fracaoMaxima: e.fracaoMaximaDoSaldo ?? 0.6,
+        });
+    let prioridadeWei = gorjetaQueCabeNoSaldo({
+        gorjetaDesejadaWei: desejadaWei,
+        saldoWei: e.saldoWei,
+        baseFeeWei: e.baseFeeWei,
+        fracaoMaximaDoSaldo: risco,
+    });
+
+    const custoUsd = custoDoTiroUsd(prioridadeWei, e.baseFeeWei, e.precoDoEthUsd);
+    const veredicto = valeATentativa(e.lucroUsd, custoUsd, e.margemMinima ?? 2);
+
+    let maxFeeWei = tetoPorGas(e.baseFeeWei, prioridadeWei);
+    const adiantavelWei = maxFeeQueOSaldoAdianta(e.saldoWei, limiteGas);
+    if (maxFeeWei > adiantavelWei) {
+        maxFeeWei = adiantavelWei;
+        if (prioridadeWei > maxFeeWei - e.baseFeeWei) {
+            prioridadeWei = maxFeeWei > e.baseFeeWei ? maxFeeWei - e.baseFeeWei : 0n;
+        }
+    }
+    const amordaca = lanceAmordacado({
+        desejadaWei,
+        conseguidaWei: prioridadeWei,
+        limiteGas,
+        baseFeeWei: e.baseFeeWei,
+    });
+    const custoSePerderWei = custoDeUmaDerrota(prioridadeWei, e.baseFeeWei);
+    const aguentaDerrotas = derrotasQueAguenta(e.saldoWei, custoSePerderWei);
+    const mata = mataACacaDeMigalhas({
+        amordacado: amordaca.amordacado,
+        custoDaDerrotaWei: custoSePerderWei,
+        saldoWei: e.saldoWei,
+        tetoDaMordida: e.tetoDaMordida,
+        atirarAmordacado: e.atirarAmordacado,
+    });
+
+    const comum = {
+        prioridadeWei, maxFeeWei, desejadaWei, amordaca, risco, fracaoDoLucro,
+        custoUsd, custoSePerderWei, aguentaDerrotas,
+        adiantadoWei: adiantadoExigido(limiteGas, maxFeeWei),
+        adiantavelWei,
+    };
+    // A ordem e a do caminho quente. O primeiro freio que barra e o que explica.
+    if (!veredicto.vale) return { ...comum, atira: false, porque: veredicto.porque };
+    if (adiantavelWei <= e.baseFeeWei) {
+        return { ...comum, atira: false, porque: 'o gás adiantado não cabe no saldo' };
+    }
+    if (prioridadeWei === 0n || aguentaDerrotas < 1) {
+        return {
+            ...comum,
+            atira: false,
+            porque: e.saldoWei === 0n
+                ? 'sem gás nenhum'
+                : `não aguento nem uma derrota (ela custa ${new Decimal(custoSePerderWei.toString()).dividedBy(1e18).toFixed(6)} ETH)`,
+        };
+    }
+    if (mata.pula) return { ...comum, atira: false, porque: mata.porque };
+    return { ...comum, atira: true, porque: veredicto.porque };
+}
+
+/**
+ * A FAIXA de premio pela qual este saldo atira: de quanto ate quanto.
+ *
+ * Eu escrevi isto primeiro como "o maior premio que atira", com busca binaria a
+ * partir de um centavo, e o proprio teste derrubou: devolveu `null` para um
+ * saldo que atira bem. O erro era de raciocinio, nao de codigo — a decisao NAO
+ * e monotona no premio. Ela e falsa, depois verdadeira, depois falsa outra vez:
+ *
+ *   - premio pequeno demais nao paga o proprio gas (piso de lucro)
+ *   - no meio, atira
+ *   - premio grande demais amordaça o lance e uma derrota mata a caca
+ *
+ * Ou seja e um INTERVALO, e chamar de "teto" escondia metade da verdade. Com o
+ * saldo de 2026-09-27 a faixa e de uns US$ 0,46 a uns US$ 11,70 — e a ponta de
+ * baixo importa tanto quanto a de cima, porque e ela que diz que as migalhas
+ * miudas tambem nao servem.
+ *
+ * A varredura para achar o ancora e geometrica porque a faixa pode ser estreita
+ * e estar em qualquer escala; as duas buscas binarias depois disso sao exatas
+ * ate a precisao pedida.
+ */
+export interface FaixaDeTiro {
+    /** Abaixo disto o premio nao paga o proprio gas. */
+    de: Decimal;
+    /** Acima disto uma derrota comeria mais gas do que a caca aguenta. */
+    ate: Decimal;
+    /**
+     * Ate onde o lance sai INTEIRO. Entre este e `ate` o bot atira amordaçado:
+     * ainda vale, mas com desvantagem no leilao.
+     *
+     * Existe porque eu mesma confundi os dois e informei o numero errado: disse
+     * que o bot parava de atirar em US$ 11,69 quando ele para de atirar em
+     * US$ 66,80 e para de atirar COM FORCA em US$ 11,69. Sao perguntas
+     * diferentes e a resposta de uma nao serve para a outra.
+     */
+    inteiroAte: Decimal | null;
+}
+
+export function faixaQueAtira(
+    e: Omit<Parameters<typeof decidirTiro>[0], 'lucroUsd'>,
+    tetoDaBusca = new Decimal(1_000_000),
+    passos = 60,
+): FaixaDeTiro | null {
+    const atira = (usd: Decimal) => decidirTiro({ ...e, lucroUsd: usd }).atira;
+
+    // 1) Achar QUALQUER premio que atire, subindo em escala geometrica.
+    let ancora: Decimal | null = null;
+    for (let x = new Decimal('0.01'); x.lessThanOrEqualTo(tetoDaBusca); x = x.mul('1.2')) {
+        if (atira(x)) { ancora = x; break; }
+    }
+    if (ancora === null) return null;
+
+    // 2) Ponta de baixo: o menor premio que ainda atira.
+    let de = ancora;
+    if (!atira(new Decimal('0.0001'))) {
+        let fora = new Decimal('0.0001');
+        let dentro = ancora;
+        for (let i = 0; i < passos; i++) {
+            const meio = fora.plus(dentro).dividedBy(2);
+            if (atira(meio)) dentro = meio; else fora = meio;
+        }
+        de = dentro;
+    } else {
+        de = new Decimal('0.0001');
+    }
+
+    // 3) Ponta de cima: o maior premio que ainda atira.
+    let ate = tetoDaBusca;
+    if (!atira(tetoDaBusca)) {
+        let dentro = ancora;
+        let fora = tetoDaBusca;
+        for (let i = 0; i < passos; i++) {
+            const meio = dentro.plus(fora).dividedBy(2);
+            if (atira(meio)) dentro = meio; else fora = meio;
+        }
+        ate = dentro;
+    }
+
+    // Ate onde o lance sai INTEIRO. Monotono no premio: a gorjeta desejada
+    // cresce com o premio e o teto do saldo para de crescer, entao uma vez
+    // amordaçado, amordaçado para sempre.
+    const inteiro = (usd: Decimal) => {
+        const d = decidirTiro({ ...e, lucroUsd: usd });
+        return d.atira && !d.amordaca.amordacado;
+    };
+    let inteiroAte: Decimal | null = null;
+    if (inteiro(de)) {
+        if (inteiro(ate)) {
+            inteiroAte = ate;
+        } else {
+            let dentro = de;
+            let fora = ate;
+            for (let i = 0; i < passos; i++) {
+                const meio = dentro.plus(fora).dividedBy(2);
+                if (inteiro(meio)) dentro = meio; else fora = meio;
+            }
+            inteiroAte = dentro;
+        }
+    }
+    return { de, ate, inteiroAte };
+}
+
+/**
  * Este tiro amordacado mataria a caca de migalhas?
  *
  * Existe porque a dona do bot decidiu — e repetiu — que a estrategia e ficar
