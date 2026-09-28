@@ -8,6 +8,41 @@ pesquisa, prompt ruim ou informação que faltasse dela.
 Estas quatro regras existem para as próximas sessões, que não vão lembrar de
 nada disto.
 
+## REGRA 0 — PROIBIDO PEDIR DEPLOY COM BASE SÓ EM `npm test`
+
+Escrita pela dona do bot em 2026-09-28, depois de uma tarde servindo de QA no
+Railway: cinco minutos de varredura a cada deploy para descobrir que o código
+continuava quebrado em produção.
+
+**Teste unitário não pega o que quebrou naquele dia.** Os três defeitos foram:
+
+1. **Ordem de leitura.** `precoCancela` só era preenchido depois de
+   `montarAlvos`, que com a postura "dormindo" nunca rodava. Então TODO alvo
+   tinha par desconhecido, "desconhecido conta como sensível" punha os imunes na
+   frente, e o `[EM SECO]` mirou `0x034a3304` — weETH contra WETH — publicando
+   `precisa cair 0.0434%` sobre uma posição que nenhuma queda alcança.
+2. **Estado contraditório.** `[BLOCO]` imprimiu `vagasDeProva: "nenhuma (modo
+   prova desligado)"` 100ms antes de `[EM SECO]` imprimir `tiroDeProva: ARMADO`.
+   Duas linhas do mesmo log discordando sobre o mesmo estado.
+3. **Endereço inventado.** A lista de famílias tinha `0x80d1e0f4…`, que eu
+   escrevi de cabeça e não existe. Endereço de cabeça é o mesmo defeito que este
+   arquivo persegue, só que em hexadecimal.
+
+Os 1.298 testes passavam em todos os três.
+
+**Então: `mainnet.base.org` está na allowlist deste ambiente. Antes de commitar
+e pedir deploy, rode `npx tsx src/mostrarAFila.ts` e cole o JSON real na tela
+dela.** Essa ferramenta roda as FUNÇÕES REAIS do caçador — `repartirPorFragilidade`,
+`montarAlvos`, `oPrecoCancela`, `oQueUmaQuedaRenderia`, `codificarCacaV1/V2`,
+`lerRespostaDaCaca` — contra os dados reais, e imprime o mesmo JSON que o log do
+Railway imprimiria.
+
+`montarAlvos` recebe o transporte por parâmetro exatamente para isso: a
+ferramenta roda a mesma função, e não uma cópia dela. Uma cópia provaria a
+cópia.
+
+"Os testes passam" não é prova de nada sobre produção. **O JSON da rede é.**
+
 ## 1. Nunca afirme um número que você não RODOU
 
 Três dos dez erros foram aritmética minha numa mensagem:

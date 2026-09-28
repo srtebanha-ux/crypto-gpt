@@ -127,13 +127,42 @@ export interface Medida {
  * na mesma familia. Medido em 2026-09-28 — `0x034a3304` e weETH contra WETH e
  * aparecia como "precisa cair 0,044%", quando so um depeg o derruba.
  */
+// AS 15 RESERVAS DA AAVE NA BASE, LIDAS DA REDE em 2026-09-28 com
+// `getReservesList()` e `symbol()` de cada uma. A lista anterior tinha um
+// endereco que eu INVENTEI — `0x80d1e0f4…`, que nao existe. Endereco escrito de
+// cabeca e o mesmo defeito que este projeto persegue, so que em hexadecimal.
 const FAMILIAS: string[][] = [
-    // ETH e seus derivados de staking na Base.
-    ['0x4200000000000000000000000000000000000006', '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22',
-     '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452', '0x04c0599ae5a44757c0af6f9ec3b93da8976c150a'],
-    // Dolar e seus vizinhos.
-    ['0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca',
-     '0x80d1e0f4a26e5f4da0a2d3d4c8e2e7f5b4c3a2d1'],
+    [
+        '0x4200000000000000000000000000000000000006', // WETH
+        '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22', // cbETH
+        '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452', // wstETH
+        '0x04c0599ae5a44757c0af6f9ec3b93da8976c150a', // weETH
+        '0x2416092f143378750bb29b79ed961ab195cceea5', // ezETH
+        '0xedfa23602d0ec14714057867a78d01e94176bea0', // wrsETH
+    ],
+    [
+        '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf', // cbBTC
+        '0xecac9c5f704e954931349da37f60e39f515c11c1', // LBTC
+        '0x236aa50979d5f3de3bd1eeb40e81137f22ab794b', // tBTC
+    ],
+    [
+        '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', // USDC
+        '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca', // USDbC
+        '0x6bb7a212910682dcfdbd5bcbb3e28fb4e8da10ee', // GHO
+        '0x660975730059246a68521a3e2fbd4740173100f5', // syrupUSDC
+    ],
+    // FORA DE PROPOSITO, e os dois merecem o motivo escrito:
+    //
+    // EURC (`0x60a3e35c…`) e EURO. Contra dolar ele tem risco de CAMBIO de
+    // verdade — medido em 2026-09-28, `0x675c8697` tem garantia em USDC e
+    // divida em EURC e o piso deu ZERO: o preco derruba aquela posicao. Poe-lo
+    // na familia do dolar mandaria um alvo genuinamente sensivel para o fim da
+    // fila, que e o defeito deste conserto ao contrario.
+    //
+    // AAVE (`0x63706e40…`) e token volatil, nao e familia de ninguem.
+    //
+    // USDT nao entra porque NAO E reserva da Aave na Base: a lista de 15 lida
+    // da rede nao tem USDT.
 ];
 
 /**
@@ -287,8 +316,23 @@ export function repartirPorFragilidade(
         menorMargem: ordenados.length > 0 ? ordenados[0].queda : null,
         // E o que o log publica como "mais perto" sai da brasa inteira, porque e
         // nela que o bot atira — inclusive nos de prova.
-        menorMargemDaBrasa: [...brasa, ...deProva]
-            .reduce<Decimal | null>((menor, m) => (menor === null || m.queda.lessThan(menor) ? m.queda : menor), null),
+        //
+        // Mas so de quem o PRECO alcanca. `maisPerto` responde "quanto o mercado
+        // precisa cair", e um imune nao responde a essa pergunta com numero
+        // nenhum. A ordenacao acima ja pos os imunes atras, mas isto aqui e um
+        // MINIMO sobre a brasa toda: sem o filtro, o imune de 0,0434% voltava a
+        // ser publicado como o mais perto. Mesma regra, segundo lugar — e foi
+        // ela quem achou.
+        //
+        // Se TODOS forem imunes, o minimo sai deles mesmo, com o numero que
+        // existe: publicar `null` ali viraria "ninguem", que e pior.
+        menorMargemDaBrasa: (() => {
+            const naBrasa = [...brasa, ...deProva];
+            const sensiveis = naBrasa.filter((m) => m.precoCancela !== true);
+            const fonte = sensiveis.length > 0 ? sensiveis : naBrasa;
+            return fonte.reduce<Decimal | null>(
+                (menor, m) => (menor === null || m.queda.lessThan(menor) ? m.queda : menor), null);
+        })(),
         poEmDemasia: medidos.length - cabem.length,
         valemUmTiro: cabem.length,
         vagasDeProva: deProva.length,
@@ -429,7 +473,14 @@ export interface Degrau {
  */
 export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degrau[] {
     return [...degraus].sort((a, b) => a - b).map((quedaPct) => {
-        const alcancados = medidos.filter((m) => m.queda.lessThanOrEqualTo(quedaPct));
+        // Só quem o PREÇO alcança. Uma posição de moeda única não cai porque o
+        // mercado caiu X% — ela nem se mexe. Medido em 2026-09-28: o log dizia
+        // `1%: 3 alcanço` e os três eram dois WETH/WETH e um weETH/WETH, ou
+        // seja ZERO alcançados de verdade. A tabela existe para responder "vale
+        // esperar o mercado?", e contava quem o mercado não move.
+        const alcancados = medidos.filter(
+            (m) => m.precoCancela !== true && m.queda.lessThanOrEqualTo(quedaPct),
+        );
         let dividaUsd = new Decimal(0);
         let lucroUsd = new Decimal(0);
         let quantosValem = 0;
@@ -886,17 +937,26 @@ interface Alvo {
     dividaCrua?: bigint;
 }
 
-async function montarAlvos(
+/**
+ * O par a liquidar de cada devedor, lido das reservas.
+ *
+ * `ler` existe para que `src/mostrarAFila.ts` rode ESTA funcao — a mesma que o
+ * cacador roda — contra a Base, com o proprio transporte dele. Sem isso a
+ * ferramenta que existe para provar o comportamento reimplementaria o
+ * comportamento, e provaria a copia.
+ */
+export async function montarAlvos(
     devedores: string[],
     moedas: string[],
     dataProvider: string,
     precos: Map<string, Decimal>,
     casas: Map<string, number>,
+    ler: (cs: Array<{ alvo: string; dados: string }>) => Promise<Array<string | null>> = lerEmLote,
 ): Promise<Alvo[]> {
     const chamadas = devedores.flatMap((d) =>
         moedas.map((m) => ({ alvo: dataProvider, dados: codificarUserReserveData(m, d) })),
     );
-    const rs = await lerEmLote(chamadas);
+    const rs = await ler(chamadas);
 
     const valorDe = (ativo: string, cru: Decimal): Decimal | null => {
         const preco = precos.get(ativo.toLowerCase());
@@ -1442,6 +1502,41 @@ async function principal(): Promise<'parar' | void> {
      */
     function cobrir(alvo: Alvo): bigint {
         return quantoPedirEmprestado(alvo.dividaCrua!, alvo.dividaUsd, coberturaOtima());
+    }
+
+    /**
+     * Descobre o par (garantia/divida) dos candidatos do TOPO.
+     *
+     * Le so quem AINDA NAO SE SABE e esta dentro do degrau mais largo da tabela
+     * de quedas — nao adianta saber o par de quem precisa cair 40%. O teto
+     * existe porque `montarAlvos` custa uma leitura por reserva por devedor, e
+     * sem ele uma varredura larga viraria uma rajada que o RPC publico barra.
+     */
+    async function resolverPares(medidos: Medida[]): Promise<void> {
+        if (dataProvider === null) return;
+        const TETO = numeroDoAmbiente('CACA_PARES_A_RESOLVER', process.env.CACA_PARES_A_RESOLVER, 150);
+        const ATE_QUEDA = numeroDoAmbiente('CACA_PARES_ATE_QUEDA_PCT', process.env.CACA_PARES_ATE_QUEDA_PCT, 10);
+        const aResolver = medidos
+            .filter((m) => oQueSeSabeDoPreco(m.devedor) === undefined && m.queda.lessThanOrEqualTo(ATE_QUEDA))
+            .sort((a, b) => a.queda.comparedTo(b.queda))
+            .slice(0, Math.max(0, Math.floor(TETO)))
+            .map((m) => m.devedor);
+        if (aResolver.length === 0) return;
+        try {
+            const montados = await montarAlvos(aResolver, moedas, dataProvider, precos, casas);
+            for (const a of montados) lembrarSeOPrecoCancela(a.devedor, oPrecoCancela(a.garantia, a.divida));
+            log.info('[PARES] Descobri de quem o preço derruba e de quem não derruba.', {
+                pedi: aResolver.length,
+                respondeu: montados.length,
+                imunes: montados.filter((a) => oPrecoCancela(a.garantia, a.divida)).length,
+                jaSabia: medidos.length - aResolver.length,
+                porQue: 'sem isto os imunes a preço ocupam a frente da brasa e contaminam o maisPerto',
+            });
+        } catch (e) {
+            // Falhar aqui NAO pode calar a varredura: sem par conhecido a
+            // ordem volta a ser a de antes, que e pior mas nao e mentira.
+            log.warn('[PARES] Não consegui descobrir os pares agora.', { erro: (e as Error).message });
+        }
     }
 
     /**
@@ -2302,6 +2397,26 @@ async function principal(): Promise<'parar' | void> {
                         // Sem vagas RESERVADAS: com o piso ja em US$ 0,50 nao ha
                         // grupo cortado a resgatar, e reservar vagas agora
                         // tiraria lugar de quem o piso deixou entrar.
+                        // O PAR DE CADA CANDIDATO, ANTES DE ORDENAR.
+                        //
+                        // Ovo e galinha, achado por ela no log das 17:25:
+                        // `precoCancela` so era preenchido DEPOIS de
+                        // `montarAlvos`, que so roda em alvo caido ou quando a
+                        // postura fica urgente. Com a postura "dormindo" ele
+                        // nunca rodava, entao TODO alvo tinha par desconhecido,
+                        // e "desconhecido conta como sensivel" punha os imunes
+                        // na frente da fila. O `[EM SECO]` mirou `0x034a3304`,
+                        // que e weETH contra WETH.
+                        //
+                        // Agora o par e resolvido para os candidatos do TOPO
+                        // antes de qualquer publicacao. So na varredura
+                        // completa — e ela ja gasta 34 multicalls, entao mais
+                        // alguns nao mudam o ritmo — e so para quem ainda nao se
+                        // sabe, entao o custo cai a zero depois das primeiras
+                        // voltas.
+                        await resolverPares(medidos);
+                        for (const m of medidos) m.precoCancela = oQueSeSabeDoPreco(m.devedor);
+
                         const camadas = repartirPorFragilidade(
                             medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida, 0,
                         );
@@ -2335,7 +2450,15 @@ async function principal(): Promise<'parar' | void> {
                         // do piso de tamanho, qualquer devedor nao-liquidavel
                         // serve. Sem esta saida o piso calaria justamente o
                         // unico teste que prova que o tiro sai.
-                        const paraEnsaiar = brasa[0]
+                        //
+                        // E o alvo do ensaio TEM de ser um que o preço derruba.
+                        // Ensaiar num weETH/WETH exercita o caminho, sim, mas
+                        // publica `margemDoAlvo: precisa cair 0.0434%` sobre uma
+                        // posição que nenhuma queda alcança — e é essa linha que
+                        // ela lê para saber o quanto falta.
+                        const sensiveis = brasa.filter((d) => oQueSeSabeDoPreco(d) === false);
+                        const paraEnsaiar = sensiveis[0]
+                            ?? brasa[0]
                             ?? [...medidos].sort((a, b) => a.queda.comparedTo(b.queda))[0]?.devedor;
                         if (!jaEnsaiou && paraEnsaiar) {
                             jaEnsaiou = true;
@@ -2349,9 +2472,22 @@ async function principal(): Promise<'parar' | void> {
                             // A resposta para "por que 23h sem nada": nao e o
                             // bot que esta cego, e a lista que e de po. Sem
                             // este numero "naBrasa 234" parecia 234 alvos.
-                            vagasDeProva: camadas.vagasDeProva === 0
-                                ? 'nenhuma (modo prova desligado)'
-                                : `${camadas.vagasDeProva} das ${brasa.length} vagas da brasa estão vigiando alvos de PROVA (abaixo do piso)`,
+                            // A etiqueta tem de dizer o ESTADO, e não supor o
+                            // motivo. Em 2026-09-28 esta linha imprimiu
+                            // `nenhuma (modo prova desligado)` 100ms antes de o
+                            // `[EM SECO]` imprimir `tiroDeProva: ARMADO` — duas
+                            // linhas do mesmo log se contradizendo sobre o mesmo
+                            // estado. Zero vagas RESERVADAS passou a querer
+                            // dizer o contrário do que a frase dizia: no modo
+                            // prova o piso já é US$ 0,50 e a brasa INTEIRA é
+                            // dos alvos de prova, então não há o que reservar.
+                            vagasDeProva: provaAgora().armado
+                                ? `nenhuma RESERVADA — e não precisa: o modo prova está ARMADO, o piso é `
+                                  + `US$ ${pisoDeDivida?.toFixed(2) ?? '?'} e as ${brasa.length} vagas da brasa `
+                                  + 'já são todas de alvos que ele atira'
+                                : camadas.vagasDeProva === 0
+                                    ? 'nenhuma (modo prova desligado)'
+                                    : `${camadas.vagasDeProva} das ${brasa.length} vagas da brasa estão vigiando alvos de PROVA (abaixo do piso)`,
                             valemUmTiro: pisoDeDivida === null
                                 ? `${medidos.length} (sem cotação do ETH: não filtrei por tamanho)`
                                 : `${camadas.valemUmTiro} de ${medidos.length} — ${camadas.poEmDemasia} devem menos de US$ ${pisoDeDivida.toFixed(2)} e não pagariam o próprio gás`,

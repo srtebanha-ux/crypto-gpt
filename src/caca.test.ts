@@ -960,3 +960,73 @@ test('o que o preço cancela: mesma moeda e mesma família', () => {
     // Caixa alta não pode quebrar a comparação.
     assert.equal(oPrecoCancela(WETH.toUpperCase().replace('0X', '0x'), WETH), true);
 });
+
+test('o ovo e a galinha: o imune não pode contaminar o maisPerto', () => {
+    // O log das 17:25, achado por ela. `precoCancela` só era preenchido DEPOIS
+    // de `montarAlvos`, que com a postura "dormindo" nunca rodava — então TODO
+    // alvo tinha par desconhecido, "desconhecido conta como sensível" punha os
+    // imunes na frente, e o `[EM SECO]` mirou 0x034a3304, que é weETH contra
+    // WETH: `margemDoAlvo: precisa cair 0.0434%` numa posição que nenhuma queda
+    // alcança.
+    const m = (d: string, q: number, cancela?: boolean) =>
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), precoCancela: cancela });
+    const c = repartirPorFragilidade(
+        [m('0x034a3304', 0.0434, true), m('0x43ec917e', 1.90, true), m('0xsensivel', 2.51, false)],
+        10, 100, new Decimal(0.5), 0,
+    );
+    assert.equal(c.menorMargemDaBrasa!.toFixed(2), '2.51', 'o maisPerto é do sensível, não do imune de 0.0434%');
+    assert.equal(c.brasa[0], '0xsensivel', 'e ele ocupa a frente da fila');
+});
+
+test('brasa toda imune: o maisPerto sai deles, e não vira "ninguém"', () => {
+    // A ponta oposta do mesmo conserto: filtrar sempre transformaria uma brasa
+    // inteira de imunes em ausência publicada como resposta.
+    const m = (d: string, q: number) =>
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), precoCancela: true });
+    const c = repartirPorFragilidade([m('0xa', 0.98), m('0xb', 1.90)], 10, 100, new Decimal(0.5), 0);
+    assert.equal(c.menorMargemDaBrasa!.toFixed(2), '0.98');
+});
+
+test('a tabela de quedas conta só quem o preço alcança', () => {
+    // O log dizia `1%: 3 alcanço` e os três eram dois WETH/WETH e um weETH/WETH:
+    // zero alcançados de verdade. A tabela existe para responder "vale esperar
+    // o mercado?", e contava quem o mercado não move.
+    const m = (d: string, q: number, cancela: boolean) =>
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(5000), precoCancela: cancela });
+    const t = oQueUmaQuedaRenderia(
+        [m('0xa', 0.04, true), m('0xb', 0.98, true), m('0xc', 0.99, true), m('0xd', 2.5, false)],
+        [1, 3],
+    );
+    assert.equal(t[0]!.quantos, 0, 'os três de 1% eram todos imunes');
+    assert.equal(t[1]!.quantos, 1, 'em 3% entra o único que o preço derruba');
+});
+
+test('as famílias saem da lista REAL de reservas da Base, lida da rede', () => {
+    // A lista anterior tinha um endereço que eu inventei (0x80d1e0f4…). Estes
+    // são os que `getReservesList()` + `symbol()` devolveram em 2026-09-28.
+    const WETH = '0x4200000000000000000000000000000000000006';
+    const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+    for (const derivado of [
+        '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22', // cbETH
+        '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452', // wstETH
+        '0x04c0599ae5a44757c0af6f9ec3b93da8976c150a', // weETH
+        '0x2416092f143378750bb29b79ed961ab195cceea5', // ezETH
+        '0xedfa23602d0ec14714057867a78d01e94176bea0', // wrsETH
+    ]) assert.equal(oPrecoCancela(derivado, WETH), true, `${derivado} é família do WETH`);
+
+    for (const dolar of [
+        '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca', // USDbC
+        '0x6bb7a212910682dcfdbd5bcbb3e28fb4e8da10ee', // GHO
+        '0x660975730059246a68521a3e2fbd4740173100f5', // syrupUSDC
+    ]) assert.equal(oPrecoCancela(dolar, USDC), true, `${dolar} é família do USDC`);
+
+    // cbBTC, LBTC e tBTC entre si.
+    assert.equal(oPrecoCancela('0xecac9c5f704e954931349da37f60e39f515c11c1',
+        '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf'), true, 'LBTC e cbBTC');
+
+    // EURC é EURO: contra dólar tem risco de câmbio DE VERDADE. Medido em
+    // 2026-09-28: 0x675c8697 tem garantia USDC e dívida EURC, e o piso deu ZERO.
+    assert.equal(oPrecoCancela('0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42', USDC), false);
+    // E família de ETH contra família de dólar continua sendo par de verdade.
+    assert.equal(oPrecoCancela('0x04c0599ae5a44757c0af6f9ec3b93da8976c150a', USDC), false);
+});
