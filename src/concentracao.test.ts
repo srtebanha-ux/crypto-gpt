@@ -46,12 +46,43 @@ test('SEIS liquidações entre DOIS endereços não têm dono — tinham, no log
     // A de 0.05 ETH: 9 entre 4, maior levou 4. Aqui há campo e a amostra teria
     // força para ver domínio total, então "sem dono" é honesto — e a frase carrega
     // a chance para ela poder julgar sozinha.
+    //
+    // A de 0.05 ETH: 9 entre 4, maior levou 4 (44%). Esta também não decide, e o
+    // motivo é o mais importante de todos: com 9 liquidações entre 4 endereços, até
+    // um endereço levando METADE teria 19,6% de chance pelo acaso. A amostra não
+    // responde à pergunta. Mesmo assim o log das 10:44 publicou "fatia sem dono: o
+    // gás compra oportunidade de verdade" — empurrando dinheiro com base em nada.
     const nove = quemTemDono(contarPorEndereco(
         ['0xA', '0xA', '0xA', '0xA', '0xB', '0xB', '0xC', '0xC', '0xD'],
     ));
-    assert.equal(nove.veredicto, 'sem dono');
-    assert.ok(nove.chance > 0.5, 'e a chance sai escrita: 66% de acaso não é prova de nada');
-    assert.match(nove.porque, /não é domínio/);
+    assert.equal(nove.veredicto, 'não dá para dizer');
+    assert.match(nove.porque, /levando METADE teria 19\.6% de chance/);
+    assert.match(nove.porque, /não distingue domínio de sorte/);
+});
+
+test('a faixa DELA com 45% em 11 liquidações: não dá para dizer, nem "sem dono"', () => {
+    // O log das 10:44 de 2026-09-28: `naSuaFaixa: 11 entre 6 endereços; o maior
+    // levou 5 de 11 (45%)` e o veredicto saiu SEM DONO. Errado: 45,5% não chega à
+    // metade (domínio) nem fica abaixo de um terço com dez endereços (aberto). O
+    // fallback antigo devolvia "sem dono" sem olhar a fração nenhuma.
+    const d = quemTemDono(contarPorEndereco(
+        ['0xA', '0xA', '0xA', '0xA', '0xA', '0xB', '0xB', '0xC', '0xD', '0xE', '0xF'],
+    ));
+    assert.equal(d.veredicto, 'não dá para dizer');
+    assert.match(d.porque, /Não chega a metade/);
+    assert.match(d.porque, /45\.5%/);
+});
+
+test('83% entre três endereços É domínio — o portão de força não pode barrar isso', () => {
+    // 25 de 30 entre 3 endereços. Um teste meu pegou a inversão: o portão que
+    // impede afirmar AUSÊNCIA com amostra fraca estava barrando uma constatação
+    // POSITIVA que a própria amostra mostrava. Com três jogadores a fatia justa é
+    // 33%, então "metade" não seria distinguível — mas 83% é.
+    const d = quemTemDono(contarPorEndereco([
+        ...Array(25).fill('0xA'), ...Array(3).fill('0xB'), ...Array(2).fill('0xC'),
+    ]));
+    assert.equal(d.veredicto, 'tem dono');
+    assert.match(d.porque, /Metade ou mais é domínio/);
 });
 
 test('a faixa DELA não tem dono comprovado — o log das 22:12 afirmou que tinha', () => {
@@ -224,5 +255,5 @@ test('entre um terço e metade eu não escolho um lado', () => {
     assert.ok(c.fatiaDoMaior > 1 / 3 && c.fatiaDoMaior < 0.5, `fatia ${c.fatiaDoMaior}`);
     const d = quemTemDono(c);
     assert.equal(d.veredicto, 'não dá para dizer');
-    assert.match(d.porque, /nem um terço nem metade/);
+    assert.match(d.porque, /Não chega a metade/);
 });

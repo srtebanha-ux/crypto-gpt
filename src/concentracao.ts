@@ -200,14 +200,19 @@ export const CAMPO_QUE_E_ABERTO = 10;
 export function quemTemDono(c: Contagem, limiar = CHANCE_QUE_CONVENCE): Dono {
     if (c.total === 0) return { veredicto: 'não dá para dizer', chance: 1, porque: 'nenhuma liquidação aqui' };
     const chance = chanceDoAcaso(c.total, c.jogadores, c.doMaior);
-    // Um endereco sozinho em toda a faixa: ninguem mais apareceu para disputar.
-    // A conta do acaso nao enxerga isso (sem alternativa, o sorteio e certo),
-    // entao quem decide e a amostra: com poucos eventos pode ser coincidencia de
-    // quem estava online; com muitos, e a faixa dele.
-    // "Campo estabelecido" quer dizer: se houvesse um concorrente a mais, ele
-    // provavelmente teria aparecido. A conta esta em `chanceDeCampoMaior`, e o
-    // limiar e o MESMO 5% do dominio — um padrao so, nao dois.
+    const emPct = (x: number) => `${(x * 100).toFixed(x < 0.01 ? 2 : 1)}%`;
+    const vezesAJusta = c.fatiaDoMaior * c.jogadores;
+    const quanto = `o maior levou ${c.doMaior} de ${c.total} (${emPct(c.fatiaDoMaior)}) entre ${c.jogadores} `
+        + `endereços — ${vezesAJusta.toFixed(1)}x a fatia justa`;
+    // "Campo estabelecido": se houvesse um concorrente a mais, ele provavelmente
+    // teria aparecido. O limiar e o MESMO 5% — um padrao so, nao dois.
     const campoEstabelecido = chanceDeCampoMaior(c.total, c.jogadores) <= limiar;
+
+    // A ordem abaixo e explicita de proposito. A versao anterior tinha os casos
+    // espalhados e foi assim que dois defeitos entraram de uma vez.
+
+    // 1) Um endereco sozinho. A conta do acaso nao enxerga este caso (sem
+    //    alternativa, o sorteio e certo), entao quem decide e o campo.
     if (c.jogadores === 1) {
         return campoEstabelecido
             ? {
@@ -222,45 +227,10 @@ export function quemTemDono(c: Contagem, limiar = CHANCE_QUE_CONVENCE): Dono {
                 porque: `só ${c.total} liquidações, todas do mesmo endereço: pode ser quem estava online`,
             };
     }
-    const emPct = (x: number) => `${(x * 100).toFixed(x < 0.01 ? 2 : 1)}%`;
-    const vezesAJusta = c.fatiaDoMaior * c.jogadores;
-    const quanto = `o maior levou ${c.doMaior} de ${c.total} (${emPct(c.fatiaDoMaior)}) entre ${c.jogadores} `
-        + `endereços — ${vezesAJusta.toFixed(1)}x a fatia justa`;
-    if (chance <= limiar) {
-        // O desvio e real. Agora a OUTRA pergunta: ele e grande o bastante para
-        // atrapalhar? 22% entre 17 enderecos e desvio real e mercado aberto ao
-        // mesmo tempo, e confundir os dois foi o erro nº 9 deste projeto.
-        if (c.fatiaDoMaior >= FATIA_QUE_E_DOMINIO) {
-            return {
-                veredicto: 'tem dono',
-                chance,
-                porque: `${quanto}. Metade ou mais é domínio, e o acaso daria isso em no máximo ${emPct(chance)}`,
-            };
-        }
-        if (c.fatiaDoMaior < FATIA_QUE_E_ABERTO && c.jogadores >= CAMPO_QUE_E_ABERTO) {
-            return {
-                veredicto: 'sem dono',
-                chance,
-                porque: `${quanto}. O desequilíbrio é real (o acaso daria em ${emPct(chance)}), mas ninguém está `
-                    + `acima de um terço com ${c.jogadores} endereços na mesa: é mercado aberto, não domínio`,
-            };
-        }
-        return {
-            veredicto: 'não dá para dizer',
-            chance,
-            porque: `${quanto}. É mais que o acaso (${emPct(chance)}), mas está entre "aberto" e "domínio" — `
-                + 'nem um terço nem metade, e com este campo eu não escolho um lado',
-        };
-    }
-    // Acima do limiar nao ha prova de dominio. Mas "sem dominador" NAO e a mesma
-    // coisa que "aberta", e a diferenca custou um teste para aparecer: SEIS
-    // liquidacoes repartidas 3 e 3 entre DOIS enderecos nao tem dominador nenhum
-    // — e sao dois bots dividindo a fatia igualmente. Entrar ali nao e entrar num
-    // mercado aberto, e virar o terceiro numa corrida de dois.
-    //
-    // Entao "sem dono" exige que exista campo: com um ou dois enderecos vistos, a
-    // resposta honesta e que nao se sabe se o campo e estreito por natureza ou por
-    // falta de amostra.
+
+    // 2) Campo de dois. "Ninguem domina" NAO e "aberta": dois bots dividindo
+    //    igualmente e duopolio, e entrar ali e virar o terceiro numa corrida de
+    //    dois. Um teste pegou isto.
     if (c.jogadores <= 2) {
         return campoEstabelecido
             ? {
@@ -278,22 +248,63 @@ export function quemTemDono(c: Contagem, limiar = CHANCE_QUE_CONVENCE): Dono {
                     + 'duopólio de coincidência',
             };
     }
-    // E a amostra tem de ter FORCA: se mesmo um endereco levando TODAS seria comum
-    // por acaso, ela nao poderia ter detectado dominio nem se existisse, e dizer
-    // "sem dono" seria confundir "nao vi" com "nao tem".
-    const piorPossivel = chanceDoAcaso(c.total, c.jogadores, c.total);
-    if (piorPossivel > limiar) {
+
+    // 3) EVIDENCIA POSITIVA primeiro: metade ou mais, e nao por acaso. Isto vem
+    //    antes do portao de forca de proposito. Um teste meu pegou a inversao: 25
+    //    de 30 liquidacoes entre TRES enderecos — 83%, domínio obvio — saia como
+    //    "nao da para dizer", porque com tres jogadores a fatia justa e 33% e o
+    //    portao julgava que metade nao seria distinguivel. O portao existe para
+    //    impedir afirmar AUSENCIA com amostra fraca, nao para barrar uma
+    //    constatacao que a propria amostra ja mostrou.
+    if (c.fatiaDoMaior >= FATIA_QUE_E_DOMINIO && chance <= limiar) {
+        return {
+            veredicto: 'tem dono',
+            chance,
+            porque: `${quanto}. Metade ou mais é domínio, e o acaso daria isso em no máximo ${emPct(chance)}`,
+        };
+    }
+
+    // 4) A amostra tem FORCA para dizer que NAO tem dono?
+    //
+    // O limiar que importa nao e o extremo ("um levando TODAS"), e METADE, que e
+    // onde comeca o dominio. Medido em 2026-09-28, na fatia que 0.05 ETH abre: 9
+    // liquidacoes entre 4 enderecos. Um levando TODAS seria detectavel (0,0015%),
+    // mas um levando METADE teria 19,57% de chance pelo acaso. Aquela amostra nao
+    // distingue dominio de sorte — e mesmo assim o log publicou "fatia sem dono: o
+    // gas compra oportunidade de verdade", empurrando dinheiro com base em nada.
+    const metade = Math.ceil(c.total * FATIA_QUE_E_DOMINIO);
+    const poder = chanceDoAcaso(c.total, c.jogadores, metade);
+    if (poder > limiar) {
         return {
             veredicto: 'não dá para dizer',
             chance,
-            porque: `só ${c.total} liquidações entre ${c.jogadores} endereços: mesmo um endereço levando TODAS `
-                + `seria comum por acaso (${emPct(piorPossivel)}), então esta amostra não decide nada`,
+            porque: `${quanto}. Mas com ${c.total} liquidações entre ${c.jogadores} endereços, até um endereço `
+                + `levando METADE teria ${emPct(poder)} de chance pelo acaso: esta amostra não distingue `
+                + 'domínio de sorte, em nenhuma direção',
         };
     }
+
+    // 5) Nao tem dono: fatia abaixo de um terco com campo largo. O padrao esta
+    //    medido no CLAUDE.md, do caso de 17 liquidantes.
+    if (c.fatiaDoMaior < FATIA_QUE_E_ABERTO && c.jogadores >= CAMPO_QUE_E_ABERTO) {
+        return {
+            veredicto: 'sem dono',
+            chance,
+            porque: `${quanto}. ${chance <= limiar
+                ? `O desequilíbrio é real (o acaso daria em ${emPct(chance)}), mas ` : ''}`
+                + `ninguém está acima de um terço com ${c.jogadores} endereços na mesa: `
+                + 'é mercado aberto, não domínio',
+        };
+    }
+    // Entre um terco e metade, ou com campo pequeno: nao se escolhe um lado. Esta
+    // era a saida que faltava. O fallback antigo dizia "sem dono" sem olhar a
+    // fracao, e por isso chamou de "sem dono" um maior com 45,5% em 11
+    // liquidacoes — a faixa dela no log das 10:44 de 2026-09-28.
     return {
-        veredicto: 'sem dono',
+        veredicto: 'não dá para dizer',
         chance,
-        porque: `${quanto}. O acaso daria isso em ${emPct(chance)} das vezes — não é domínio`,
+        porque: `${quanto}. Não chega a metade (domínio) nem fica abaixo de um terço com dez endereços `
+            + `(aberto), e o acaso daria isso em ${emPct(chance)}: com este campo eu não escolho um lado`,
     };
 }
 

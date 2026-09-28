@@ -200,6 +200,43 @@ terço e metade, não se escolhe um lado.
 Se uma quarta versão desta regra aparecer, o teste que a barra é
 `src/concentracao.test.ts`, no caso "17 endereços com o maior levando 22%".
 
+### E teve QUARTA e QUINTA versão, no mesmo dia
+
+O log das 10:44 de 2026-09-28, com o conserto já em produção, imprimiu dois
+veredictos errados — um em cada direção:
+
+1. **`naSuaFaixa: 11 entre 6 endereços, maior 5 de 11 (45%) >>> SEM DONO`.** O
+   fallback da função não olhava a fração nenhuma: 45,5% não chega à metade
+   (domínio) nem fica abaixo de um terço com dez endereços (aberto). O certo é
+   "não dá para dizer".
+
+2. **`0.05 ETH ... >>> fatia sem dono: o gás compra oportunidade de verdade`**,
+   sobre 9 liquidações entre 4 endereços. Este é o perigoso: estava empurrando
+   dinheiro. Medido: com 9 liquidações entre 4 endereços, **até um endereço
+   levando METADE teria 19,6% de chance pelo acaso.** A amostra não responde à
+   pergunta, em nenhuma direção. O meu teste de força olhava o caso extremo ("um
+   levando TODAS"), que passa quase sempre — e não o limiar que importa, que é
+   metade.
+
+E a correção disso criou a quinta: o portão de força passou a barrar **25 de 30
+liquidações entre 3 endereços** — 83%, domínio óbvio — porque com três jogadores
+a fatia justa é 33% e "metade" não seria distinguível. O portão existe para
+impedir afirmar AUSÊNCIA com amostra fraca, não para barrar uma constatação que a
+própria amostra já mostrou. Então evidência positiva vem ANTES do portão.
+
+A ordem final de `quemTemDono`, e ela está escrita no código na mesma sequência:
+
+    1. um endereço só            -> o campo decide
+    2. campo de dois             -> duopólio ou amostra curta
+    3. fatia >= metade e não é acaso -> TEM DONO  (evidência positiva primeiro)
+    4. nem metade seria distinguível -> NÃO DÁ PARA DIZER
+    5. fatia < um terço, campo >= 10 -> SEM DONO
+    6. o resto                   -> NÃO DÁ PARA DIZER
+
+Cinco versões desta mesma regra em dois dias. O que cada uma errou não foi a
+matemática: foi confundir três perguntas diferentes — "o desvio é real?", "a
+fatia é grande?" e "esta amostra consegue responder?". Elas precisam das três.
+
 ## A varredura independente de 2026-09-28: o censo do bot confere
 
 Varri a Base por fora, com o RPC público, 205 janelas de 2.000 blocos, cobertura
