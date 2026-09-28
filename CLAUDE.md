@@ -660,3 +660,44 @@ Agora a pergunta é feita inteira, com os números do tiro normal
 rótulo**, em vez de um dos motivos dele. Antes ela só saía quando `mata.pula`,
 então um tiro marcado `soPassouPorSerProva` podia ser publicado com a frase de
 um tiro normal: a etiqueta e o texto discordando sobre o mesmo tiro.
+
+## 2026-09-28, 17:41: a REGRA 0 funcionou na primeira vez que foi usada
+
+Previsão feita no terminal às 17:34 (bloco 51913776) contra o log de produção
+das 17:41 (bloco 51913980), sete minutos depois:
+
+    terminal   maisPerto "precisa cair 2.4747%"   alvo 0xe2031ff0  cbBTC/USDC
+    produção   maisPerto "precisa cair 2.4746%"   alvo 0xe2031ff0  cbBTC/USDC
+
+Mesmo endereço, mesmo par, 0,0001 ponto de diferença. **É a primeira vez neste
+projeto que o comportamento de produção foi previsto antes do deploy em vez de
+descoberto depois.**
+
+E os três consertos apareceram no log dela:
+
+    maisPerto         0.0434%  ->  2.4746%
+    seOMercadoCair    1%: 3 alcanço  ->  1%: 0 alcanço
+    [EM SECO]         weETH/WETH (imune)  ->  cbBTC/USDC (sensível)
+    vagasDeProva      "nenhuma (modo prova desligado)" com o modo ARMADO
+                      ->  "nenhuma RESERVADA — e não precisa: está ARMADO…"
+
+O `[PARES]` mediu: **121 candidatos, 65 imunes — 54%.** Era essa massa que
+furava a fila.
+
+### E o defeito que eu publiquei no log que criei para consertar defeitos
+
+A linha `[PARES]` saiu com `jaSabia: 6575`, afirmando conhecer o par de 6.575
+devedores quando conhecia 121. O número era `medidos.length - aResolver.length`
+— "todo o resto" —, e a maior parte do resto está FORA do corte de 10%: nunca
+foi perguntado, não é sabido.
+
+Etiqueta que não descreve o conjunto, no log recém-nascido cujo propósito é
+justamente esse. Agora são três contas separadas, porque respondem perguntas
+diferentes: `jaSabia` (dentro do corte, já conhecido), `naoCoubeNoTeto` (dentro
+do corte, ficou para a próxima volta) e `foraDoCorte` (acima de 10%, **não foram
+perguntados**).
+
+E `src/mostrarAFila.ts` rodou com `margemQuente = 15` enquanto o caçador usa 25
+(`CACA_MARGEM_QUENTE`), publicando `naListaQuente: 35` contra os `323` do
+Railway — um número meu que não confere com produção, na ferramenta que existe
+para conferir com produção. Agora lê a mesma constante.

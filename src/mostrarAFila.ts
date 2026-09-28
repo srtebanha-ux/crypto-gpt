@@ -180,7 +180,12 @@ async function lerParaMontar(cs: Array<{ alvo: string; dados: string }>): Promis
 
     // 4. As camadas, com as funções reais.
     const piso = new Decimal(process.env.FILA_PISO ?? '0.5');
-    const camadas = repartirPorFragilidade(medidos, 233, 15, piso, 0);
+    // A MESMA margem quente do caçador (CACA_MARGEM_QUENTE, padrão 25). Rodar
+    // com 15 aqui fez esta ferramenta publicar `naListaQuente: 35` contra os
+    // `323` do Railway — um número meu que não confere com produção, na
+    // ferramenta que existe para conferir com produção.
+    const MARGEM_QUENTE = Number(process.env.CACA_MARGEM_QUENTE ?? '25');
+    const camadas = repartirPorFragilidade(medidos, 233, MARGEM_QUENTE, piso, 0);
     const tabela = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1, 2, 3, 5, 10]));
 
     console.log('=== O QUE O LOG IMPRIMIRIA ===');

@@ -1522,6 +1522,18 @@ async function principal(): Promise<'parar' | void> {
             .slice(0, Math.max(0, Math.floor(TETO)))
             .map((m) => m.devedor);
         if (aResolver.length === 0) return;
+        // As TRÊS contas separadas, porque elas respondem coisas diferentes.
+        //
+        // A primeira versão publicou `jaSabia: medidos.length - aResolver.length`
+        // e imprimiu `jaSabia: 6575` no log de produção das 17:41 — afirmando
+        // conhecer o par de 6.575 devedores quando conhecia 121. Aquele número
+        // é "todo o resto", e a maior parte do resto está simplesmente FORA do
+        // corte de 10%: nunca foi perguntado, não é sabido. Etiqueta que não
+        // descreve o conjunto, no log que eu tinha acabado de criar para
+        // consertar exatamente esse tipo de erro.
+        const dentroDoCorte = medidos.filter((m) => m.queda.lessThanOrEqualTo(ATE_QUEDA));
+        const jaSabia = dentroDoCorte.filter((m) => oQueSeSabeDoPreco(m.devedor) !== undefined).length;
+        const naoCoubeNoTeto = dentroDoCorte.length - jaSabia - aResolver.length;
         try {
             const montados = await montarAlvos(aResolver, moedas, dataProvider, precos, casas);
             for (const a of montados) lembrarSeOPrecoCancela(a.devedor, oPrecoCancela(a.garantia, a.divida));
@@ -1529,7 +1541,11 @@ async function principal(): Promise<'parar' | void> {
                 pedi: aResolver.length,
                 respondeu: montados.length,
                 imunes: montados.filter((a) => oPrecoCancela(a.garantia, a.divida)).length,
-                jaSabia: medidos.length - aResolver.length,
+                jaSabia: `${jaSabia} de ${dentroDoCorte.length} dentro do corte de ${ATE_QUEDA}%`,
+                naoCoubeNoTeto: naoCoubeNoTeto > 0
+                    ? `${naoCoubeNoTeto} ficaram para a próxima volta (teto de ${TETO} por varredura)`
+                    : 'nenhum: o corte inteiro foi resolvido',
+                foraDoCorte: `${medidos.length - dentroDoCorte.length} estão acima de ${ATE_QUEDA}% e NÃO foram perguntados`,
                 porQue: 'sem isto os imunes a preço ocupam a frente da brasa e contaminam o maisPerto',
             });
         } catch (e) {
