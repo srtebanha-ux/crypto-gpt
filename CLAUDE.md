@@ -258,6 +258,67 @@ Duas coisas que essa varredura mostrou e que o censo do bot não diz:
    levado 1 de 51 em 9,5 dias.** Não é bot dedicado. Ela não perdeu para uma
    máquina: perdeu para alguém que aparece uma vez a cada dez dias.
 
+## POR QUE O BOT NUNCA ATIROU — medido em 2026-09-28, e não é defeito dele
+
+Depois de dias consertando medições, a dona do bot perguntou: "por que você erra
+tanto?". A resposta honesta era: eu estava consertando o termômetro em vez de
+procurar a febre. Uma consulta de arquivo respondeu o que uma semana de logs não
+respondeu.
+
+A liquidação que o bot "perdeu" em 2026-09-28 (`0xe03754a8`, US$ 23,11, o alvo
+estava NA BRASA, nonce nunca saiu de 4):
+
+    bloco 51885442 (2 segundos antes): saúde 1.00330 — precisa cair 0,3291%
+    bloco 51885443:                    LIQUIDADA
+
+Ela passou de "falta 0,33%" para "liquidada" DENTRO DO MESMO BLOCO. Não existiu
+nenhum bloco em que estivesse liquidável e disponível. O bot não chegou tarde:
+não houve instante nenhum em que ele pudesse ter chegado.
+
+Então varri as 51 liquidações dos últimos 9,5 dias (205 janelas, cobertura 100%
+dos eventos) e conferi, para cada uma, a saúde UM BLOCO ANTES:
+
+    32  levadas no MESMO bloco em que ficaram liquidáveis — janela ZERO
+    11  tinham janela de pelo menos um bloco
+     8  sem arquivo no RPC público para dizer (16% da amostra)
+
+E as 11 com janela, medidas pela dívida em dólar que a própria Aave devolve
+(`totalDebtBase`, sem mapa de preços meu):
+
+    dívidas de US$ 0,20, US$ 0,26, US$ 0,31 … todas poeira
+    lucro do bot: de -US$ 0,25 a -US$ 0,30 — TODAS abaixo do gás
+
+**Zero liquidações em 9,5 dias foram ao mesmo tempo legíveis a tempo E valiosas o
+bastante para pagar o próprio gás.** Conferido caso a caso com os números crus e
+os links do basescan.
+
+E a lógica é limpa, não é azar: **se vale dinheiro, é levada no mesmo bloco da
+escrita do oráculo; se sobra tempo, é porque não vale nada.** É assim que um
+mercado eficiente se parece por dentro.
+
+### O que isto significa para a arquitetura
+
+O bot lê o estado DEPOIS que o bloco foi minerado, detecta `queda.isZero()` e
+então atira. Esse desenho só pode ganhar as que ficam liquidáveis por um bloco ou
+mais — e essas, medido, valem menos que o gás. Não é lentidão de rede, de RPC nem
+de código: é o desenho.
+
+Para ganhar as outras 32 seria preciso estar NO MESMO BLOCO da atualização do
+oráculo: prever a escrita da Chainlink pelo preço de fora e atirar
+especulativamente (pagando gás nas erradas), ou ter acesso a bundle/mempool. É
+outro bot. O caminho do `adiantar.ts` e da postura "dedo no gatilho" existe para
+isso, mas nunca foi exercitado porque o mercado não se moveu o bastante.
+
+### O que NÃO está provado aqui
+
+- 8 das 51 (16%) não puderam ser medidas, por falta de arquivo no RPC público.
+- É uma janela de 9,5 dias, e os últimos 1,9 dias tiveram só 3 liquidações.
+- Isto não diz "o bot é inútil". Diz que o caminho de ler-e-reagir não ganha, e
+  POR QUE. A decisão do que fazer com isso é dela.
+
+Antes de reabrir esta conclusão, refaça a varredura: o script está descrito aqui
+e leva uns oito minutos com o RPC público.
+
 ## Como este projeto mede o próprio erro
 
 O defeito que mais aparece aqui tem nome: **ausência com cara de resposta** —
