@@ -14,7 +14,7 @@ import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodifica
 import { MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { lucroEstimado } from './perdidas';
 import { faixaQueAtira, politicaDoTiro, comoLerAPolitica } from './prontidao';
-import { compararLeituras, naoForamLidos, comoLerOMovimento, resumir, comoLerACobertura, type Alvo, type Leitura } from './olhoNosAlvos';
+import { compararLeituras, naoForamLidos, leituraDeAgora, comoLerOMovimento, resumir, comoLerACobertura, type Alvo, type Leitura } from './olhoNosAlvos';
 
 const RPC = process.env.OLHO_RPC ?? 'https://mainnet.base.org';
 const ONDE = process.env.OLHO_ARQUIVO ?? '.olho/alvos.json';
@@ -184,14 +184,18 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
     console.log(`  com: ${comoLerAPolitica(politica)}`);
     console.log('  >>> confira com o `atiroNaFaixaDe` do log: se não bater, o Railway tem outros valores\n');
 
-    const vivos = alvos.filter((a) => a.queda !== null).sort((a, b) => a.queda!.comparedTo(b.queda!));
-    const movs = compararLeituras(antes, { em: agora.em, alvos: vivos });
+    // UMA lista para os dois: montar `vivos` aqui e passar so eles matava o
+    // ramo `saiu` de `compararLeituras` e jogava quem pagou a divida em
+    // `naoForamLidos`, que anuncia o contrario. Ver `leituraDeAgora`.
+    const lidosAgora = leituraDeAgora(agora.em, alvos);
+    const vivos = lidosAgora.alvos.filter((a) => a.queda !== null);
+    const movs = compararLeituras(antes, lidosAgora);
     for (const m of movs) {
         const alvo = m.tipo === 'saiu' ? null : m.alvo;
         const dentro = alvo && alvo.lucroUsd.greaterThan(0) && (teto === null || alvo.lucroUsd.lessThanOrEqualTo(teto));
         console.log(`${dentro ? '>> ATIRA  ' : '   fora   '}${comoLerOMovimento(m)}`);
     }
-    const faltaram = naoForamLidos(antes, { em: agora.em, alvos: vivos });
+    const faltaram = naoForamLidos(antes, lidosAgora);
     if (faltaram.length > 0) console.log(`\n${faltaram.length} não foram lidos agora (NÃO quer dizer que sumiram): ${faltaram.slice(0, 5).map((d) => d.slice(0, 10) + '…').join(', ')}`);
 
     // O resumo, porque a lista ordenada por PROXIMIDADE enterra a resposta:

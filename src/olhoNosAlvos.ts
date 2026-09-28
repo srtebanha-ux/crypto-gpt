@@ -73,6 +73,35 @@ export function compararLeituras(antes: Leitura | null, agora: Leitura): Movimen
     return movimentos;
 }
 
+/**
+ * A leitura de AGORA, na ordem em que se le: os vivos por proximidade, e
+ * depois quem foi lido e nao tem mais divida.
+ *
+ * Existe porque quem chama precisa de UMA lista, e nao de duas. Em 2026-09-28
+ * `olharAgora` montava `vivos` (com o filtro `queda !== null`) e passava so
+ * eles para `compararLeituras` e para `naoForamLidos`. Com isso:
+ *
+ *   - o ramo `saiu` de `compararLeituras` ficava inalcancavel — ele so dispara
+ *     para um alvo com `queda === null` na lista de agora, e o filtro tirava
+ *     exatamente esses. O ramo tinha teste e nao tinha caminho.
+ *   - e o mesmo alvo caia em `naoForamLidos`, que o anunciava como "nao lido",
+ *     com a ressalva "NAO quer dizer que sumiu" — sobre alguem que foi lido e
+ *     sumiu. Duas linhas antes, o cabecalho dizia "li 37 de 37 (100,0%)".
+ *
+ * Medido as 14:45 UTC de 2026-09-28, com `eth_call` direto no pool: a liquidada
+ * do dia `0xe03754a8` devolveu colateral US$ 165,83 e divida US$ 0,00, e
+ * `0x4a51443b` devolveu zero dos dois. Foram lidas, pagaram, e o olho disse que
+ * nao tinham sido lidas.
+ *
+ * Quem NAO veio na resposta do multicall continua fora da lista, e continua
+ * sendo o que `naoForamLidos` reporta — que e o que aquele nome quer dizer.
+ */
+export function leituraDeAgora(em: number, alvos: Alvo[]): Leitura {
+    const vivos = alvos.filter((a) => a.queda !== null).sort((a, b) => a.queda!.comparedTo(b.queda!));
+    const semDivida = alvos.filter((a) => a.queda === null);
+    return { em, alvos: [...vivos, ...semDivida] };
+}
+
 /** Quem foi lido antes e nao veio agora. Falta de leitura NAO e desaparecimento. */
 export function naoForamLidos(antes: Leitura | null, agora: Leitura): string[] {
     if (!antes) return [];

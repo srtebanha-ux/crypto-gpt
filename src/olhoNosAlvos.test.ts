@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
-import { compararLeituras, naoForamLidos, comoLerOMovimento, emQuantoTempoHumano, resumir, comoLerACobertura, type Alvo, type Leitura } from './olhoNosAlvos';
+import { compararLeituras, naoForamLidos, leituraDeAgora, comoLerOMovimento, emQuantoTempoHumano, resumir, comoLerACobertura, type Alvo, type Leitura } from './olhoNosAlvos';
 
 const alvo = (d: string, queda: number | null, divida = 3053, lucro = 66.44): Alvo => ({
     devedor: d, queda: queda === null ? null : new Decimal(queda),
@@ -201,4 +201,48 @@ test('janela que falhou não pode virar 100% de cobertura', () => {
     });
     assert.doesNotMatch(limpa, /falharam/);
     assert.match(limpa, /últimos 320000 blocos \(~7\.4 dias\)/);
+});
+
+test('quem pagou a dívida SAIU — e não pode ser chamado de "não lido"', () => {
+    // O caso real de 2026-09-28. Às 14:30 UTC a varredura viu `0x4a51443b` a
+    // 4,926% com US$ 29.662 de dívida. Às 15:40 o multicall respondeu por ele
+    // normalmente, e a resposta era dívida ZERO — conferido com `eth_call`
+    // direto no pool: colateral e dívida zerados, saúde = uint256 máximo.
+    //
+    // O olho imprimiu, nessa ordem, duas frases que não podem ser verdade
+    // juntas:
+    //
+    //     li 37 de 37 endereços (100.0%)
+    //     2 não foram lidos agora (NÃO quer dizer que sumiram)
+    //
+    // A de cima estava certa. A de baixo aparecia porque quem chama filtrava
+    // `queda !== null` ANTES de comparar, e com isso o ramo `saiu` — que tem
+    // teste logo acima neste arquivo — não tinha caminho até aqui.
+    const antes = leitura(0, [alvo('0x4a51443b', 4.926, 29662, 598.93), alvo('0xc4d36f95', 1.427)]);
+    const lido = [alvo('0xc4d36f95', 1.428), alvo('0x4a51443b', null, 0, 0)];
+
+    const agora = leituraDeAgora(70 * 60_000, lido);
+    const movs = compararLeituras(antes, agora);
+
+    assert.deepEqual(movs.map((m) => m.tipo), ['andou', 'saiu']);
+    const saiu = movs.find((m) => m.tipo === 'saiu')!;
+    assert.match(comoLerOMovimento(saiu), /0x4a51443b… SAIU da lista \(estava a 4\.926%\) — pagou ou foi liquidado/);
+    assert.deepEqual(naoForamLidos(antes, agora), [],
+        'foi lido: chamar isso de falta de leitura é o oposto do que aconteceu');
+});
+
+test('leituraDeAgora põe os vivos por proximidade e os sem dívida no fim', () => {
+    const r = leituraDeAgora(1000, [alvo('0xLonge', 4.9), alvo('0xPagou', null), alvo('0xPerto', 1.4)]);
+    assert.deepEqual(r.alvos.map((a) => a.devedor), ['0xPerto', '0xLonge', '0xPagou']);
+    assert.equal(r.em, 1000);
+});
+
+test('quem o multicall não respondeu continua sendo "não lido", não "saiu"', () => {
+    // A outra ponta da mesma regra: o conserto acima não pode transformar um
+    // buraco de cobertura em fato. Quem não veio na resposta não está na lista,
+    // e por isso não vira `saiu` — vira falta de leitura, que é o que é.
+    const antes = leitura(0, [alvo('0xA', 1.4), alvo('0xPedacoQueFalhou', 2.2)]);
+    const agora = leituraDeAgora(60_000, [alvo('0xA', 1.3)]);
+    assert.deepEqual(compararLeituras(antes, agora).map((m) => m.tipo), ['andou']);
+    assert.deepEqual(naoForamLidos(antes, agora), ['0xPedacoQueFalhou']);
 });
