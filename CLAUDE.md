@@ -554,3 +554,74 @@ reversão opaca e terminei a função aceitando. No segundo escrevi "vende a
 garantia" sem perguntar o que acontece quando a garantia é a própria dívida.
 
 Os dois estavam a um `console.log` de distância.
+
+## 2026-09-28, 17h: os quatro consertos que ela mandou fazer
+
+### 1. O V2 nunca esteve quebrado — ele era INMENSURÁVEL
+
+`0x42301c23` é **`InsufficientOutputAmount()` do router da Aerodrome**, e a
+causa é nossa: `CacadorV2._venderGarantia` passa `aDevolver + minProfit` como
+`amountOutMin` **para o router**. Com o piso impossível da medição, o router
+recusa **antes de executar qualquer coisa**.
+
+Como o bot só atira em cima de medição, e a medição do V2 sempre revertia, **o
+V2 estava morto para a decisão** — e quase todo alvo que cai por preço é
+multi-ativo, ou seja, dele.
+
+Medido com o oráculo forçado, bloco 51912429:
+
+    V2 com piso 0 ....... passou
+    V2 por bisseção ..... 323.009.925 unidades
+    V1 no mesmo bloco ... 323.009.946 unidades
+
+21 unidades de diferença em 323 milhões. É o mesmo caminho.
+
+O conserto é `pisoParaMedirV2`: medir o V2 no **limiar da decisão** em vez do
+piso impossível. A resposta vira sim/não no único ponto que importa — "o lucro
+cobre o que o tiro custa" — e quem julga continua sendo `decidirTiro`, com o
+mesmo custo. Não precisa de deploy de contrato.
+
+### 2. O piso de US$ 22,13 e as 10 vagas, no modo prova
+
+O censo mediu que **31 das 52 liquidações (60%)** acontecem abaixo do piso
+normal. Com as 10 vagas reservadas, o bot vigiava dez desses e deixava 2.374
+fora da patrulha rápida — justamente o grupo onde a prova tem chance.
+
+No modo prova o piso cai para US$ 0,50 (`CACA_PISO_DA_PROVA_USD`) e as 233 vagas
+ficam todas disponíveis. Fora do modo prova nada muda: o piso existe porque uma
+dívida de US$ 1 não paga o próprio gás.
+
+### 3. Os imunes a preço saem da FRENTE da brasa
+
+No log das 16:58 o `[EM SECO]` mirava `0x43ec917e`, que é USDC contra USDC e
+nunca cai com o mercado, enquanto os sensíveis esperavam atrás.
+
+`oPrecoCancela` é o corte barato do laço quente: mesma moeda, ou as duas na
+mesma família (ETH de staking contra ETH, dólar contra dólar). Quem é imune vai
+para o **fim** da fila, não para fora dela — o dono ainda pode sacar garantia e
+derrubar a posição num bloco.
+
+`precoCancela === undefined` conta como sensível: o par só é conhecido depois de
+`montarAlvos`, e **quem não se sabe fica na frente**. O custo de vigiar um imune
+por engano é uma vaga; o de deixar um sensível de fora é o tiro.
+
+### 4. Modo kamikaze na gorjeta do tiro de prova
+
+O log media `gorjeta 2.49 gwei (AMORDAÇADA — queria 7.02)` num prêmio de
+migalha: desvantagem no leilão justamente no único tiro que precisa ser ganho.
+No modo prova a gorjeta desejada passa a ser o **teto da carteira**, e quem corta
+é só `gorjetaQueCabeNoSaldo`. Fora do modo prova nada muda.
+
+### E o defeito que esse conserto criou, achado pelos testes
+
+Com o kamikaze, `soPassouPorSerProva` passou a avaliar a regra normal **com a
+gorjeta kamikaze**: o prêmio de US$ 1.986 aparecia como "passaria normal"
+(1986 > 2 × 4,76) enquanto a regra normal, com a gorjeta dela, recusava. O rótulo
+que existe para impedir o primeiro acerto de parecer lucro legítimo apagava-se
+sozinho.
+
+Agora a pergunta é feita inteira, com os números do tiro normal
+(`prioridadeNormalWei`, `custoNormalUsd`, `mataNormal`) — e a **frase segue o
+rótulo**, em vez de um dos motivos dele. Antes ela só saía quando `mata.pula`,
+então um tiro marcado `soPassouPorSerProva` podia ser publicado com a frase de
+um tiro normal: a etiqueta e o texto discordando sobre o mesmo tiro.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
-import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, poolParaVender, SEM_VENDA, oQueUmaQuedaRenderia, comoLerAsQuedas } from './cacarAoVivo';
+import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, poolParaVender, SEM_VENDA, pisoDoLucroEmUnidadesCruas, oPrecoCancela, oQueUmaQuedaRenderia, comoLerAsQuedas } from './cacarAoVivo';
 import { dividaMinimaQueVale, lucroEstimado, lucroDaCobertura, coberturaOtima, lucroMaximo } from './perdidas';
 import { custoDoTiroUsd, PISO_DA_GORJETA_WEI } from './prontidao';
 
@@ -908,4 +908,55 @@ test('a comparação de moeda única não depende de caixa alta', () => {
         garantia: '0x4200000000000000000000000000000000000006',
         divida: '0x4200000000000000000000000000000000000006'.toUpperCase().replace('0X', '0x'),
     }, AERO), SEM_VENDA);
+});
+
+test('o V2 não pode ser medido com piso impossível — 0x42301c23 é do router', () => {
+    // Medido em 2026-09-28 com o oráculo forçado, bloco 51912429: o V2 passa
+    // `aDevolver + minProfit` como `amountOutMin` PARA O ROUTER da Aerodrome,
+    // que recusa antes de executar com InsufficientOutputAmount(). Com piso 0
+    // ele executou e a bisseção deu 323.009.925 unidades — o V1, no mesmo
+    // bloco, deu 323.009.946. Diferença de 21 unidades em 323 milhões.
+    assert.equal(id('InsufficientOutputAmount()').slice(0, 10), '0x42301c23');
+
+    // Dívida de US$ 3.490,06 em USDC (6 casas) = 3490060000 unidades cruas.
+    const alvo = { dividaCrua: 3490060000n, dividaUsd: new Decimal('3490.06') };
+    // Um piso de US$ 0,22 (o custo do tiro mais barato medido) vira:
+    assert.equal(pisoDoLucroEmUnidadesCruas(alvo, new Decimal('0.22')), 220000n);
+    // E o modo prova pede ZERO: só que o empréstimo seja pago.
+    assert.equal(pisoDoLucroEmUnidadesCruas(alvo, new Decimal(0)), 0n);
+});
+
+test('sem dívida conhecida o piso do V2 é ZERO, não um palpite', () => {
+    assert.equal(pisoDoLucroEmUnidadesCruas({ dividaCrua: undefined, dividaUsd: new Decimal(10) }, new Decimal(1)), 0n);
+    assert.equal(pisoDoLucroEmUnidadesCruas({ dividaCrua: 100n, dividaUsd: null }, new Decimal(1)), 0n);
+    assert.equal(pisoDoLucroEmUnidadesCruas({ dividaCrua: 100n, dividaUsd: new Decimal(0) }, new Decimal(1)), 0n);
+});
+
+test('os imunes a preço vão para o FIM da brasa, não para fora dela', () => {
+    // O log das 16:58: o `[EM SECO]` mirava 0x43ec917e, que é USDC contra USDC
+    // e nunca cai com o mercado, enquanto os sensíveis esperavam atrás.
+    const m = (d: string, q: number, cancela?: boolean) =>
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), precoCancela: cancela });
+    const c = repartirPorFragilidade(
+        [m('0x43ec917e', 1.9, true), m('0xsensivel', 4.0, false), m('0xnaoSei', 5.0, undefined)],
+        3, 100, new Decimal(0.5), 0,
+    );
+    // O imune é o mais próximo de todos e mesmo assim vai por último.
+    assert.deepEqual(c.brasa, ['0xsensivel', '0xnaoSei', '0x43ec917e']);
+    // E quem não se sabe conta como sensível: fica na frente do imune.
+    assert.equal(c.brasa.indexOf('0xnaoSei') < c.brasa.indexOf('0x43ec917e'), true);
+});
+
+test('o que o preço cancela: mesma moeda e mesma família', () => {
+    const WETH = '0x4200000000000000000000000000000000000006';
+    const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+    const weETH = '0x04c0599ae5a44757c0af6f9ec3b93da8976c150a';
+    const cbBTC = '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf';
+    assert.equal(oPrecoCancela(WETH, WETH), true, 'mesma moeda');
+    assert.equal(oPrecoCancela(USDC, USDC), true);
+    assert.equal(oPrecoCancela(weETH, WETH), true, '0x034a3304 é weETH contra WETH: só cai num depeg');
+    assert.equal(oPrecoCancela(cbBTC, USDC), false, 'este cai por preço de verdade');
+    assert.equal(oPrecoCancela(WETH, USDC), false);
+    // Caixa alta não pode quebrar a comparação.
+    assert.equal(oPrecoCancela(WETH.toUpperCase().replace('0X', '0x'), WETH), true);
 });

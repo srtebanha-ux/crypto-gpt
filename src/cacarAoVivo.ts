@@ -102,7 +102,57 @@ export function maiorQuedaDesdeABase(base: Map<string, Decimal>, agora: Map<stri
  * prioridade do bot nao sabe distinguir uma divida de US$ 0,65 de uma de
  * US$ 4.000. `null` quando a resposta nao trouxe o campo.
  */
-export interface Medida { devedor: string; queda: Decimal; dividaUsd: Decimal | null }
+export interface Medida {
+    devedor: string;
+    queda: Decimal;
+    dividaUsd: Decimal | null;
+    /**
+     * O PRECO nao derruba esta posicao — garantia e divida sao a mesma moeda,
+     * ou da mesma familia (ETH de staking contra ETH, dolar contra dolar).
+     *
+     * `undefined` quer dizer "ainda nao sei", e e diferente de `false`: o par
+     * so e conhecido depois que `montarAlvos` leu as reservas do devedor, e
+     * isso so acontece para quem entra na brasa. Quem nao se sabe entra na
+     * frente, porque o custo de vigiar um imune por engano e uma vaga, e o
+     * custo de deixar um sensivel de fora e o tiro.
+     */
+    precoCancela?: boolean;
+}
+
+/**
+ * Moedas que andam JUNTAS o bastante para o preco nao derrubar a posicao.
+ *
+ * `pisoDaSaudePorPreco` mede isso exatamente, mas precisa das reservas todas.
+ * Aqui e o corte barato do laco quente: mesma moeda nos dois lados, ou as duas
+ * na mesma familia. Medido em 2026-09-28 — `0x034a3304` e weETH contra WETH e
+ * aparecia como "precisa cair 0,044%", quando so um depeg o derruba.
+ */
+const FAMILIAS: string[][] = [
+    // ETH e seus derivados de staking na Base.
+    ['0x4200000000000000000000000000000000000006', '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22',
+     '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452', '0x04c0599ae5a44757c0af6f9ec3b93da8976c150a'],
+    // Dolar e seus vizinhos.
+    ['0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca',
+     '0x80d1e0f4a26e5f4da0a2d3d4c8e2e7f5b4c3a2d1'],
+];
+
+/**
+ * O que ja se sabe sobre cada devedor. Preenchida por `montarAlvos`, que e o
+ * unico lugar que le o par — e lida pela ordenacao da brasa no ciclo seguinte.
+ */
+const precoCancelaPorDevedor = new Map<string, boolean>();
+export function lembrarSeOPrecoCancela(devedor: string, cancela: boolean): void {
+    precoCancelaPorDevedor.set(devedor.toLowerCase(), cancela);
+}
+export function oQueSeSabeDoPreco(devedor: string): boolean | undefined {
+    return precoCancelaPorDevedor.get(devedor.toLowerCase());
+}
+
+export function oPrecoCancela(garantia: string, divida: string): boolean {
+    const g = garantia.toLowerCase(), d = divida.toLowerCase();
+    if (g === d) return true;
+    return FAMILIAS.some((f) => f.includes(g) && f.includes(d));
+}
 
 /** As tres camadas, e a regua do gatilho que separa a primeira da segunda. */
 export interface Camadas {
@@ -196,7 +246,21 @@ export function repartirPorFragilidade(
     const cabem = pisoDeDividaUsd === null
         ? medidos
         : medidos.filter((m) => m.dividaUsd === null || m.dividaUsd.greaterThanOrEqualTo(pisoDeDividaUsd));
-    const ordenados = [...cabem].sort((a, b) => a.queda.comparedTo(b.queda));
+    // Os IMUNES A PRECO vao para o fim da fila, e nao para fora dela.
+    //
+    // Eles continuam sendo vigiados — o dono deles pode sacar garantia e
+    // derrubar a posicao num bloco, medido em 2026-09-28 no `0x43ec917e`. Mas
+    // nao podem ocupar as vagas da FRENTE, porque a frente e a fila do preco:
+    // no log das 16:58 o `[EM SECO]` mirava `0x43ec917e`, que e USDC contra
+    // USDC e nunca cai com o mercado, enquanto os sensiveis esperavam atras.
+    //
+    // `precoCancela === undefined` conta como sensivel: nao se sabe, e quem nao
+    // se sabe fica na frente.
+    const ordenados = [...cabem].sort((a, b) => {
+        const ia = a.precoCancela === true ? 1 : 0;
+        const ib = b.precoCancela === true ? 1 : 0;
+        return ia !== ib ? ia - ib : a.queda.comparedTo(b.queda);
+    });
 
     // Os alvos de prova: os mais frageis entre os que o piso cortou.
     const deProva = vagasParaProva <= 0 || pisoDeDividaUsd === null
@@ -268,6 +332,29 @@ export function poolParaVender(
     poolPadrao: string,
 ): string {
     return alvo.garantia.toLowerCase() === alvo.divida.toLowerCase() ? SEM_VENDA : poolPadrao;
+}
+
+/**
+ * Um piso de lucro em DOLARES, convertido para as unidades cruas da divida.
+ *
+ * A razao `dividaCrua/dividaUsd` ja carrega as casas decimais e a cotacao do
+ * ativo, entao nao e preciso mapa de precos nenhum aqui — e o mesmo truque de
+ * regra de tres que `quantoPedirEmprestado` usa, pelo mesmo motivo.
+ *
+ * Devolve `0n` quando falta dado ou quando o piso nao e positivo: na duvida,
+ * exigir ZERO e pedir so que o emprestimo seja pago, que e o minimo honesto.
+ */
+export function pisoDoLucroEmUnidadesCruas(
+    alvo: { dividaCrua?: bigint; dividaUsd?: Decimal | null },
+    pisoUsd: Decimal | null,
+): bigint {
+    if (alvo.dividaCrua === undefined || alvo.dividaCrua <= 0n) return 0n;
+    if (pisoUsd === null || !pisoUsd.isFinite() || pisoUsd.lessThanOrEqualTo(0)) return 0n;
+    const d = alvo.dividaUsd;
+    if (d === null || d === undefined || !d.isFinite() || d.lessThanOrEqualTo(0)) return 0n;
+    const cru = pisoUsd.dividedBy(d).mul(new Decimal(alvo.dividaCrua.toString()));
+    if (!cru.isFinite() || cru.lessThanOrEqualTo(0)) return 0n;
+    return BigInt(cru.toFixed(0));
 }
 
 /**
@@ -1221,6 +1308,7 @@ async function principal(): Promise<'parar' | void> {
         armando = true;
         try {
             const prontos = await montarAlvos(quem, moedas, dataProvider!, precos, casas);
+            for (const a of prontos) lembrarSeOPrecoCancela(a.devedor, oPrecoCancela(a.garantia, a.divida));
             alvosArmados.clear();
             for (const a of prontos) alvosArmados.set(a.devedor.toLowerCase(), a);
             armadoEm = Date.now();
@@ -1354,6 +1442,22 @@ async function principal(): Promise<'parar' | void> {
      */
     function cobrir(alvo: Alvo): bigint {
         return quantoPedirEmprestado(alvo.dividaCrua!, alvo.dividaUsd, coberturaOtima());
+    }
+
+    /**
+     * Com que piso MEDIR o V2 — e nunca com o piso impossivel.
+     *
+     * Ver o comentario na chamada: o V2 repassa o piso ao router da Aerodrome,
+     * que recusa antes de executar. No modo prova o piso e ZERO, que pede
+     * apenas que o emprestimo seja pago; fora dele, o custo do tiro mais
+     * barato, que e o limiar que `decidirTiro` vai comparar depois.
+     */
+    function pisoParaMedirV2(alvo: Alvo): bigint {
+        if (provaAgora().armado) return 0n;
+        return pisoDoLucroEmUnidadesCruas(
+            alvo,
+            custoDoTiroUsd(PISO_DA_GORJETA_WEI, baseFeeAtual ?? 0n, precoDoEth()),
+        );
     }
 
     async function tiroEmSeco(alvoPedido?: string): Promise<void> {
@@ -2146,6 +2250,7 @@ async function principal(): Promise<'parar' | void> {
                                 devedor: aLer[i],
                                 queda,
                                 dividaUsd: conta.dividaBase.dividedBy(1e8),
+                                precoCancela: oQueSeSabeDoPreco(aLer[i]),
                             });
                         } catch {}
                     }
@@ -2174,16 +2279,31 @@ async function principal(): Promise<'parar' | void> {
                         // proporcional ao premio, entao migalha se persegue com
                         // lance de migalha. Usar o custo do lance atual
                         // excluiria exatamente as migalhas que sao o alvo.
-                        const pisoDeDivida = dividaMinimaQueVale(
+                        // MODO PROVA: o piso de tamanho cai para poeira e a
+                        // brasa INTEIRA fica disponivel.
+                        //
+                        // O censo mediu que 31 das 52 liquidacoes da Base — 60%
+                        // — acontecem abaixo do piso normal de US$ 22,13. Com
+                        // as 10 vagas reservadas de antes, o bot vigiava dez
+                        // desses e deixava 2.374 de fora da patrulha rapida:
+                        // justamente o grupo onde a prova tem chance de
+                        // acontecer.
+                        //
+                        // O piso normal NAO esta errado para operar: ele existe
+                        // porque uma divida de US$ 1 nao paga o proprio gas. Mas
+                        // a prova nao esta atras de lucro, e ela escolheu pagar
+                        // por isso.
+                        const pisoNormal = dividaMinimaQueVale(
                             custoDoTiroUsd(PISO_DA_GORJETA_WEI, baseFeeAtual ?? 0n, precoDoEth()),
                         );
-                        // Com a prova armada, algumas vagas da brasa vao para
-                        // os alvos que o piso cortou — sem isso o modo prova
-                        // solta o portao do tiro e deixa seus proprios alvos
-                        // fora da vigilancia de cada ciclo.
+                        const pisoDeDivida = provaAgora().armado
+                            ? new Decimal(numeroDoAmbiente('CACA_PISO_DA_PROVA_USD', process.env.CACA_PISO_DA_PROVA_USD, 0.5))
+                            : pisoNormal;
+                        // Sem vagas RESERVADAS: com o piso ja em US$ 0,50 nao ha
+                        // grupo cortado a resgatar, e reservar vagas agora
+                        // tiraria lugar de quem o piso deixou entrar.
                         const camadas = repartirPorFragilidade(
-                            medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida,
-                            provaAgora().armado ? Number(process.env.CACA_VAGAS_DE_PROVA ?? '10') : 0,
+                            medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida, 0,
                         );
                         brasa = camadas.brasa;
                         quentes = camadas.quentes;
@@ -2312,6 +2432,10 @@ async function principal(): Promise<'parar' | void> {
             const alvos = faltando.length === 0
                 ? jaArmados
                 : [...jaArmados, ...await montarAlvos(faltando, moedas, dataProvider, precos, casas)];
+            // O par so e conhecido aqui, depois de ler as reservas. Guardar o
+            // veredicto alimenta a ordenacao da brasa no proximo ciclo: quem se
+            // sabe imune vai para tras, quem se sabe sensivel vem para a frente.
+            for (const a of alvos) lembrarSeOPrecoCancela(a.devedor, oPrecoCancela(a.garantia, a.divida));
             if (jaArmados.length > 0) {
                 log.info('[PRONTO] Cheguei com o alvo já montado.', {
                     jaArmados: jaArmados.length,
@@ -2348,15 +2472,36 @@ async function principal(): Promise<'parar' | void> {
                             devedor: alvo.devedor,
                             quantoCobrir: cobrir(alvo),
                             isStablePool: false,
-                            lucroMinimo: PISO_IMPOSSIVEL,
+                            // O V2 NAO pode ser medido com piso impossivel.
+                            // Medido em 2026-09-28 com o oraculo forcado: ele
+                            // empurra `aDevolver + minProfit` como
+                            // `amountOutMin` PARA O ROUTER da Aerodrome, que
+                            // recusa antes de executar qualquer coisa com
+                            // `InsufficientOutputAmount()` (0x42301c23). O piso
+                            // impossivel garantia a recusa SEMPRE — entao o V2
+                            // nunca devolvia medicao, e como o bot so atira em
+                            // cima de medicao, o V2 estava morto para a decisao.
+                            //
+                            // Com o piso no LIMIAR DA DECISAO a resposta vira
+                            // sim/nao no unico ponto que importa: passou quer
+                            // dizer "o lucro cobre o que o tiro custa". Nao da
+                            // o valor exato, e nao precisa — quem julga e
+                            // `decidirTiro`, e ele compara com este mesmo custo.
+                            lucroMinimo: pisoParaMedirV2(alvo),
                           });
-                
+
                     const r = await chamarCruComPaciencia([{ from: donoCarteira ?? undefined, to: contrato.endereco, data: dados }, 'latest']);
-                    const leitura = lerRespostaDaCaca({
-                        ok: r.ok,
-                        dados: r.dados ?? '0x',
-                        mensagem: 'mensagem' in r ? r.mensagem : undefined
-                    });
+                    // O V2 que PASSA e uma medicao: o lucro e pelo menos o piso
+                    // que foi exigido dele. Lido como sucesso comum,
+                    // `lerRespostaDaCaca` devolveria `lucroCru: 0n` (resposta
+                    // vazia), que e o oposto do que acabou de ser provado.
+                    const leitura = contrato.tipo === 'V2' && r.ok
+                        ? { desfecho: 'mediu' as const, lucroCru: pisoParaMedirV2(alvo), erro: undefined, dadosCrus: undefined }
+                        : lerRespostaDaCaca({
+                            ok: r.ok,
+                            dados: r.dados ?? '0x',
+                            mensagem: 'mensagem' in r ? r.mensagem : undefined
+                        });
 
                     log.info(`[ALERTA] Simulação executada para alvo caído (${contrato.nome}).`, {
                         bloco: blocoAtual,

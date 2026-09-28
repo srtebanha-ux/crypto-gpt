@@ -670,7 +670,19 @@ test('o modo prova atira até na baleia, porque é isso que ela pediu', () => {
     assert.equal(prova.atira, true, 'ela escolheu pagar com o gás inteiro pela informação');
     assert.match(prova.porque, /SÓ SAI PORQUE É PROVA/);
     assert.equal(prova.soPassouPorSerProva, true);
-    assert.equal(prova.amordaca.amordacado, true, 'sai amordaçado, e o log tem de dizer isso');
+    // MUDOU em 2026-09-28, e é o MODO KAMIKAZE: o tiro de prova não sai mais
+    // amordaçado. Antes a gorjeta era uma fração do prêmio, e o log media
+    // `gorjeta 2.49 gwei (AMORDAÇADA — queria 7.02)` — uma desvantagem no
+    // leilão justamente no único tiro que precisa ser ganho. Agora a desejada é
+    // o teto da carteira, então desejada e conseguida coincidem e não há
+    // mordaça. Ela pediu assim: "nem que eu gaste todo o meu saldo de gás".
+    assert.equal(prova.amordaca.amordacado, false, 'no modo prova a gorjeta não é mais cortada pelo prêmio');
+    // Num prêmio GRANDE o kamikaze empata com a regra normal, e tem de empatar:
+    // a fração do prêmio já bate no teto da carteira, e os dois são cortados
+    // pelo mesmo `gorjetaQueCabeNoSaldo`. A diferença aparece na migalha, que é
+    // onde a proporcional some — está medido no teste do prêmio de US$ 0,05.
+    assert.equal(prova.prioridadeWei >= decidirTiro({ ...AMBIENTE_REAL, lucroUsd: new Decimal(1986) }).prioridadeWei, true,
+        'nunca MENOR que a do tiro normal');
 });
 
 test('um tiro que só passa PORQUE é prova vem marcado', () => {
@@ -1014,4 +1026,50 @@ test('comoLerAPolitica imprime TODOS os botões, inclusive o que decide se atira
     for (const pedaco of ['gás', 'gorjeta', 'risco', 'margem', 'mordida', 'amordaçado', 'aceita prejuízo']) {
         assert.ok(linha.includes(pedaco), `faltou "${pedaco}" na linha: ${linha}`);
     }
+});
+
+test('MODO KAMIKAZE: a gorjeta do tiro de prova não é amordaçada pelo prêmio', () => {
+    // Ela pediu com todas as letras: "nem que eu gaste todo o meu saldo de gás
+    // de bribe num alvo que dê US$ 0.05 de prêmio bruto". O log das 16:58 media
+    // `gorjeta 2.49 gwei (AMORDAÇADA — queria 7.02)` num prêmio de migalha.
+    const comum = {
+        lucroUsd: new Decimal('0.05'),
+        precoDoEthUsd: new Decimal('2686.53'),
+        saldoWei: 3341111191761470n,
+        baseFeeWei: 20000000n,
+    };
+    const normal = decidirTiro({ ...comum });
+    const prova = decidirTiro({ ...comum, tiroDeProva: true, aceitaPrejuizo: true });
+    assert.equal(prova.prioridadeWei > normal.prioridadeWei, true,
+        'no modo prova a gorjeta tem de ser MAIOR que a proporcional ao prêmio');
+    assert.equal(prova.atira, true, 'e o tiro sai');
+});
+
+test('o kamikaze pode ser desligado para medir o comportamento normal', () => {
+    const comum = {
+        lucroUsd: new Decimal('0.05'),
+        precoDoEthUsd: new Decimal('2686.53'),
+        saldoWei: 3341111191761470n,
+        baseFeeWei: 20000000n,
+        tiroDeProva: true as const,
+        aceitaPrejuizo: true as const,
+    };
+    const com = decidirTiro({ ...comum });
+    const sem = decidirTiro({ ...comum, gorjetaKamikaze: false });
+    assert.equal(com.prioridadeWei > sem.prioridadeWei, true);
+});
+
+test('o kamikaze NÃO vale fora do modo prova, por mais que o saldo caiba', () => {
+    // A trava: gorjeta de banca inteira num alvo de migalha, em operação
+    // normal, queima a banca. O modo prova é UM tiro e se desarma pelo nonce.
+    const comum = {
+        lucroUsd: new Decimal('0.05'),
+        precoDoEthUsd: new Decimal('2686.53'),
+        saldoWei: 3341111191761470n,
+        baseFeeWei: 20000000n,
+        gorjetaKamikaze: true,
+    };
+    const semProva = decidirTiro({ ...comum });
+    const comProva = decidirTiro({ ...comum, tiroDeProva: true, aceitaPrejuizo: true });
+    assert.equal(semProva.prioridadeWei < comProva.prioridadeWei, true);
 });

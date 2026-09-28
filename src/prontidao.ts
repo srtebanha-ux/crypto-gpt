@@ -651,18 +651,44 @@ export function decidirTiro(e: {
      * modo se desarma sozinho pelo nonce.
      */
     aceitaPrejuizo?: boolean;
+    /**
+     * No modo prova, NAO amordacar a gorjeta pelo tamanho do premio.
+     *
+     * Ligado por padrao junto com `tiroDeProva`: o modo prova existe para ver a
+     * liquidacao acontecer, e uma gorjeta proporcional a uma migalha perde a
+     * corrida por desenho. Desligar so faz sentido para medir o comportamento
+     * normal com a prova armada.
+     */
+    gorjetaKamikaze?: boolean;
 }): DecisaoDoTiro {
     const limiteGas = e.limiteGas ?? LIMITE_DE_GAS;
     const fracaoDoLucro = fracaoAdaptativa({
         base: e.fracaoBaseDoLucro ?? FRACAO_DO_LUCRO,
         perdasSeguidas: e.perdasSeguidas ?? 0,
     });
-    const desejadaWei = gorjetaPorGas({
+    // MODO KAMIKAZE, e ela pediu com todas as letras: "nem que eu gaste todo o
+    // meu saldo de gas de bribe num alvo que de US$ 0,05 de premio bruto".
+    //
+    // Fora do modo prova a gorjeta e uma FRACAO DO PREMIO, e tem de ser: pagar
+    // US$ 9 de gorjeta por US$ 0,05 de premio e queimar a banca. Mas no modo
+    // prova o premio nao e o ponto — o ponto e GANHAR a corrida uma vez, para
+    // ver a liquidacao acontecer de ponta a ponta. Ai a gorjeta proporcional e
+    // exatamente o que faz perder: o log mediu `gorjeta 2.49 gwei (AMORDACADA
+    // — queria 7.02)` num premio de migalha.
+    //
+    // Entao no modo prova a desejada e o TETO DA CARTEIRA, e quem corta passa a
+    // ser so `gorjetaQueCabeNoSaldo` com a fracao de risco. UM tiro, e o modo
+    // se desarma sozinho pelo nonce.
+    const kamikaze = (e.tiroDeProva ?? false) && (e.gorjetaKamikaze ?? true);
+    const desejadaProporcionalWei = gorjetaPorGas({
         lucroUsd: e.lucroUsd ?? new Decimal(0),
         precoDoEthUsd: e.precoDoEthUsd ?? new Decimal(0),
         limiteGas: GAS_TIPICO_DE_UMA_CACADA,
         fracaoDoLucro,
     });
+    const desejadaWei = kamikaze
+        ? maxFeeQueOSaldoAdianta(e.saldoWei, limiteGas)
+        : desejadaProporcionalWei;
     const saldoUsd = e.precoDoEthUsd === null
         ? null
         : new Decimal(e.saldoWei.toString()).dividedBy(1e18).mul(e.precoDoEthUsd);
@@ -735,15 +761,50 @@ export function decidirTiro(e: {
     // Se o tiro passa NA PROVA mas nao passaria na regra normal, a pessoa tem
     // de ver isso escrito: senao o primeiro acerto vira "ele funciona e da
     // lucro" quando foi "ele funciona e deu prejuizo de proposito".
-    const passariaNormal = valeATentativa(e.lucroUsd, custoUsd, e.margemMinima ?? 2).vale;
+    // A REGRA NORMAL tem de ser avaliada com a GORJETA NORMAL.
+    //
+    // Com o kamikaze ligado, `custoUsd` e `mata` ja sao do tiro de prova — uma
+    // gorjeta de carteira inteira. Perguntar "passaria na regra normal?" com
+    // esses numeros compara coisas diferentes: em 2026-09-28 isso fez o premio
+    // de US$ 1.986 aparecer como "passaria normal" (1986 > 2 x 4,76) enquanto a
+    // regra normal, com a gorjeta dela, recusava. O rotulo que existe para
+    // impedir o primeiro acerto de parecer lucro legitimo apagava-se sozinho.
+    //
+    // Entao a pergunta e feita inteira, com os numeros do tiro normal.
+    const prioridadeNormalWei = kamikaze
+        ? gorjetaQueCabeNoSaldo({
+            gorjetaDesejadaWei: desejadaProporcionalWei,
+            saldoWei: e.saldoWei,
+            baseFeeWei: e.baseFeeWei,
+            fracaoMaximaDoSaldo: risco,
+        })
+        : prioridadeWei;
+    const custoNormalUsd = kamikaze
+        ? custoDoTiroUsd(prioridadeNormalWei, e.baseFeeWei, e.precoDoEthUsd)
+        : custoUsd;
+    const mataNormal = kamikaze
+        ? mataACacaDeMigalhas({
+            amordacado: lanceAmordacado({
+                desejadaWei: desejadaProporcionalWei,
+                conseguidaWei: prioridadeNormalWei,
+                limiteGas,
+                baseFeeWei: e.baseFeeWei,
+            }).amordacado,
+            custoDaDerrotaWei: custoDeUmaDerrota(prioridadeNormalWei, e.baseFeeWei),
+            saldoWei: e.saldoWei,
+            tetoDaMordida: e.tetoDaMordida,
+            atirarAmordacado: e.atirarAmordacado,
+        })
+        : mata;
+    const passariaNormal = valeATentativa(e.lucroUsd, custoNormalUsd, e.margemMinima ?? 2).vale
+        && !mataNormal.pula;
     const comum = {
         prioridadeWei, maxFeeWei, desejadaWei, amordaca, risco, fracaoDoLucro,
         custoUsd, custoSePerderWei, aguentaDerrotas,
         // "So passou por ser prova" vale para as DUAS pontas: o piso de lucro e
         // o teto que protege a caca. Cobrir so o piso deixaria o primeiro tiro
         // grande aparecer como tiro normal.
-        soPassouPorSerProva: (e.tiroDeProva ?? false) && veredicto.vale
-            && (!passariaNormal || mata.pula || aceitaPrejuizo),
+        soPassouPorSerProva: (e.tiroDeProva ?? false) && veredicto.vale && !passariaNormal,
         adiantadoWei: adiantadoExigido(limiteGas, maxFeeWei),
         adiantavelWei,
     };
@@ -780,8 +841,15 @@ export function decidirTiro(e: {
     return {
         ...comum,
         atira: true,
-        porque: mata.pula
-            ? `${veredicto.porque} — E SÓ SAI PORQUE É PROVA: ${mata.porque}`
+        // A frase segue o ROTULO, e nao um dos motivos dele. Antes ela só saía
+        // quando `mata.pula`, então um tiro marcado `soPassouPorSerProva` podia
+        // ser publicado com a frase de um tiro normal — a etiqueta e o texto
+        // discordando sobre o mesmo tiro.
+        porque: comum.soPassouPorSerProva
+            ? `${veredicto.porque} — E SÓ SAI PORQUE É PROVA: ${
+                mataNormal.pula ? mataNormal.porque
+                : aceitaPrejuizo ? 'a regra normal recusa prejuízo'
+                : `na regra normal o custo seria US$ ${custoNormalUsd?.toFixed(2) ?? '?'} e a margem exigida não fecha`}`
             : veredicto.porque,
     };
 }

@@ -16,13 +16,28 @@
 //
 //     saude com o stub .... 0,968010  -> LIQUIDAVEL
 //     V1 0x9066b0ba…    ... desfecho `mediu`, lucro 322759236 (US$ 322,74)
-//     V2 0xb91c634f…    ... revertido, seletor 0x42301c23 NAO IDENTIFICADO
+//     V2 0xb91c634f…    ... revertido, seletor 0x42301c23
 //
 // O `mediu` do V1 e a prova: `cacar` com piso impossivel faz o contrato rodar a
 // cacada INTEIRA — flash loan tomado na Aave, `liquidationCall` aceito, garantia
 // vendida no pool da Aerodrome, emprestimo pago — e reverter no fim com
 // `LucroInsuficiente(obtido, exigido)` carregando o lucro real. Sem esse
 // desfecho nao ha numero.
+//
+// `0x42301c23` E `InsufficientOutputAmount()` DO ROUTER DA AERODROME, e a
+// causa e nossa: o V2 passa `aDevolver + minProfit` como `amountOutMin` PARA O
+// ROUTER, entao o piso impossivel da medicao faz o router recusar ANTES de
+// executar qualquer coisa. O V2 nunca esteve quebrado — ele e INMENSURAVEL com
+// o piso impossivel, e como o bot so atira em cima de medicao, ele estava morto
+// para a decisao. Medindo por bissecao no mesmo bloco:
+//
+//     V2 com piso 0 ...... passou
+//     V2 por bissecao .... 323009925 unidades  (o V1 deu 323009946)
+//
+// 21 unidades de diferenca em 323 milhoes. Sao o mesmo caminho.
+//
+// O conserto no bot esta em `pisoParaMedirV2`: medir o V2 no LIMIAR DA DECISAO
+// em vez do piso impossivel. A resposta vira sim/nao no unico ponto que importa.
 //
 // O LUCRO SAI INFLADO, E ISSO E DO TRUQUE, NAO DO CONTRATO. A Aave entrega a
 // garantia avaliada pelo preco FALSO (baixo) e a Aerodrome compra pelo preco
@@ -210,6 +225,20 @@ ${ramos}
     console.log(`  cobrindo ....... ${quantoCobrir} unidades cruas de ${simbolo.get(divida)} (metade da dívida)`);
     console.log(`  pool de venda .. ${pool}${pool === POOLS.aerodrome.endereco ? '' : '  (ZERO: moeda única, não vende)'}`);
 
+    // O V2 nao pode ser medido com piso impossivel: ele empurra
+    // `aDevolver + minProfit` como `amountOutMin` PARA O ROUTER, que recusa
+    // antes de executar com InsufficientOutputAmount() (0x42301c23). Entao o
+    // lucro dele sai por BISSECAO: o maior piso que ainda passa.
+    const tentarV2 = async (piso: bigint): Promise<'passou' | 'recusou' | string> => {
+        const dados = codificarCacaV2({ garantia, divida, devedor: DEVEDOR, quantoCobrir, isStablePool: false, lucroMinimo: piso });
+        const r = await rpc<string>('eth_call', [{ from: CONTA_BOT, to: V2, data: dados }, 'latest', override]);
+        if (r.error === undefined) return 'passou';
+        const cru = typeof r.error.data === 'string' ? r.error.data
+            : (r.error.data as { data?: string } | undefined)?.data ?? '0x';
+        if (cru.startsWith('0x42301c23') || cru.startsWith(id('LucroInsuficiente(uint256,uint256)').slice(0, 10))) return 'recusou';
+        return `${r.error.message} ${cru.slice(0, 10)}`;
+    };
+
     for (const [nome, endereco, tipo] of [['V1', V1, 'V1'], ['V2', V2, 'V2']] as const) {
         const dados = tipo === 'V1'
             ? codificarCacaV1({ garantia, divida, devedor: DEVEDOR, quantoCobrir, poolDeVenda: pool, lucroMinimo: PISO_IMPOSSIVEL })
@@ -240,6 +269,27 @@ ${ramos}
                 '0x08c379a0': 'Error(string)',
             };
             if (cru !== '0x') console.log(`    seletor ...... ${sel} ${nomes[sel] ?? '(não reconhecido)'}`);
+            if (tipo === 'V2' && sel === '0x42301c23') {
+                console.log(`    CAUSA ........ InsufficientOutputAmount() do router da Aerodrome.`);
+                console.log(`                   O V2 passa aDevolver+minProfit como amountOutMin PARA O`);
+                console.log(`                   ROUTER, e o piso impossível da medição faz o router`);
+                console.log(`                   recusar ANTES de executar. Medindo por bisseção:`);
+                const zero = await tentarV2(0n);
+                console.log(`    piso 0 ....... ${zero}`);
+                if (zero === 'passou') {
+                    let baixo = 0n, alto = 1n;
+                    while (await tentarV2(alto) === 'passou') { baixo = alto; alto *= 4n; if (alto > 10n ** 24n) break; }
+                    for (let i = 0; i < 40 && alto - baixo > 1n; i++) {
+                        const meio = (baixo + alto) / 2n;
+                        if (await tentarV2(meio) === 'passou') baixo = meio; else alto = meio;
+                    }
+                    const dec2 = casas.get(divida)!;
+                    const preco2 = forcados.find((p) => p.ativo === divida)!.preco;
+                    const usd2 = new Decimal(baixo.toString()).div(new Decimal(10).pow(dec2)).mul(new Decimal(preco2.toString())).div(1e8);
+                    console.log(`    >>> O V2 EXECUTA. Flash loan, liquidação, swap pelo router, pago.`);
+                    console.log(`    LUCRO (bisseção) ${baixo} unidades cruas = US$ ${usd2.toFixed(2)}`);
+                }
+            }
         }
     }
 })().catch((e) => { console.error('ERRO', e.message); process.exit(1); });
