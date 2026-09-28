@@ -57,6 +57,8 @@ export function lerRespostaDaCaca(r: { ok: boolean; dados: string; mensagem?: st
     desfecho: 'mediu' | 'revertido' | 'falhaDeRede';
     lucroCru?: bigint;
     erro?: string;
+    /** Os bytes crus da reversao. E ai que mora a IDENTIDADE do erro. */
+    dadosCrus?: string;
 } {
     if (!r.ok) {
         if (r.dados && r.dados !== '0x') {
@@ -81,10 +83,23 @@ export function lerRespostaDaCaca(r: { ok: boolean; dados: string; mensagem?: st
                 if (r.dados.startsWith('0x08c379a0')) {
                     const decoded = '0x' + r.dados.substring(138);
                     const motivo = Buffer.from(decoded.replace(/^0x/, ''), 'hex').toString('utf8').replace(/\0/g, '').trim();
-                    return { desfecho: 'revertido', erro: motivo || 'revertido sem mensagem' };
+                    return { desfecho: 'revertido', erro: motivo || 'revertido sem mensagem', dadosCrus: r.dados };
                 }
             } catch {}
-            return { desfecho: 'revertido', erro: r.mensagem ?? 'revertido' };
+            // Os DADOS vao junto, e nao so a prosa.
+            //
+            // A identidade do erro mora no seletor, nunca na mensagem. Medido
+            // contra o contrato V1 na Base em 2026-09-28: o RPC devolve
+            // `message: "execution reverted"`, sem motivo nenhum, e
+            // `data: "0x930bb771"` — que e `HealthFactorNotBelowThreshold()`,
+            // exatamente a recusa que o tiro antes do cruzamento precisa
+            // reconhecer.
+            //
+            // Jogar `dados` fora aqui obrigava `naoCruzouAinda` a decidir pela
+            // prosa, e toda prosa construida nesta funcao contem a palavra
+            // "revert" — ate a literal 'revertido sem mensagem'. O portao que
+            // autoriza mandar dinheiro de verdade virava sempre-verdadeiro.
+            return { desfecho: 'revertido', erro: r.mensagem ?? 'revertido', dadosCrus: r.dados };
         }
         return { desfecho: 'falhaDeRede', erro: r.mensagem ?? 'erro de rede' };
     }

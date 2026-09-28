@@ -236,6 +236,40 @@ function vagesNaBrasaSegura(n: number): number {
     return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
 }
 
+/** O endereco zero: para o contrato, "nao venda nada". */
+export const SEM_VENDA = '0x0000000000000000000000000000000000000000';
+
+/**
+ * Em qual pool vender a garantia — e ZERO quando nao ha nada a vender.
+ *
+ * Quando a garantia tomada JA E a moeda que se deve, vender e o erro. Medido em
+ * 2026-09-28, e vale para os 8 alvos de moeda unica que o censo achou:
+ *
+ * O alvo `0xc4d36f95` e WETH contra WETH. O pool de venda configurado e
+ * `0xcdac0d6c…` — conferido na rede: token0 = WETH, token1 = USDC. Com o pool
+ * passado, `executeOperation` faz:
+ *
+ *     liquidationCall(WETH, WETH, devedor, quantia)   -> recebe WETH tomado
+ *     _venderGarantia(WETH, poolWETH/USDC, TODO o WETH) -> devolve USDC
+ *     emCaixa = balanceOf(WETH) ~ 0
+ *     lucro = 0  ->  revert LucroInsuficiente(0, piso)
+ *
+ * Ou seja: ele vende inclusive o WETH que precisa para pagar o emprestimo, fica
+ * sem com que pagar, e a transacao inteira reverte. O tiro nunca pode acertar
+ * uma posicao de moeda unica, e a MEDICAO desses alvos sai como lucro zero —
+ * o que faz `decidirTiro` recusar um alvo que talvez valesse.
+ *
+ * O contrato ja sabe fazer certo e nao precisa de novo deploy: ele tem
+ * `if (poolDeVenda != address(0))`. Com o endereco zero ele pula a venda, e ai
+ * `emCaixa` e a garantia tomada, na moeda certa, e o lucro sai correto.
+ */
+export function poolParaVender(
+    alvo: { garantia: string; divida: string },
+    poolPadrao: string,
+): string {
+    return alvo.garantia.toLowerCase() === alvo.divida.toLowerCase() ? SEM_VENDA : poolPadrao;
+}
+
 /**
  * A margem que decide o RITMO — e o numero que o log chama de `maisFragilA`.
  *
@@ -1346,7 +1380,7 @@ async function principal(): Promise<'parar' | void> {
             const contrato = contratos[0];
             const dados = contrato.tipo === 'V1'
                 ? codificarCacaV1({ garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
-                    quantoCobrir: cobrir(alvo), poolDeVenda: poolDeVendaV1, lucroMinimo: PISO_IMPOSSIVEL })
+                    quantoCobrir: cobrir(alvo), poolDeVenda: poolParaVender(alvo, poolDeVendaV1), lucroMinimo: PISO_IMPOSSIVEL })
                 : codificarCacaV2({ garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
                     quantoCobrir: cobrir(alvo), isStablePool: false, lucroMinimo: PISO_IMPOSSIVEL });
             const r = await chamarCruComPaciencia([{ from: donoCarteira ?? undefined, to: contrato.endereco, data: dados }, 'latest']);
@@ -2305,7 +2339,7 @@ async function principal(): Promise<'parar' | void> {
                             divida: alvo.divida,
                             devedor: alvo.devedor,
                             quantoCobrir: cobrir(alvo),
-                            poolDeVenda: poolDeVendaV1,
+                            poolDeVenda: poolParaVender(alvo, poolDeVendaV1),
                             lucroMinimo: PISO_IMPOSSIVEL,
                           })
                         : codificarCacaV2({
@@ -2346,7 +2380,10 @@ async function principal(): Promise<'parar' | void> {
                         medicoes.push({ contrato, lucroCru: leitura.lucroCru });
                     } else if (vaoCruzar.has(alvo.devedor.toLowerCase())
                         && leitura.desfecho === 'revertido'
-                        && naoCruzouAinda(leitura.erro)) {
+                        // Os DADOS crus vao junto: a identidade do erro está no
+                        // seletor, nunca na mensagem. Medido na Base: o RPC diz
+                        // só "execution reverted" e manda `0x930bb771` nos dados.
+                        && naoCruzouAinda(leitura.erro, leitura.dadosCrus)) {
                         // Alvo escolhido para atirar ANTES do cruzamento: a medicao
                         // TEM de reverter, porque a Aave recusa uma posicao que
                         // ainda esta saudavel. Barrar aqui seria exigir que o alvo
@@ -2432,7 +2469,7 @@ async function principal(): Promise<'parar' | void> {
                             divida: alvo.divida,
                             devedor: alvo.devedor,
                             quantoCobrir: cobrir(alvo),
-                            poolDeVenda: poolDeVendaV1,
+                            poolDeVenda: poolParaVender(alvo, poolDeVendaV1),
                             lucroMinimo: piso,
                           })
                         : codificarCacaV2({

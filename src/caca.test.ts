@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
-import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, oQueUmaQuedaRenderia, comoLerAsQuedas } from './cacarAoVivo';
+import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, poolParaVender, SEM_VENDA, oQueUmaQuedaRenderia, comoLerAsQuedas } from './cacarAoVivo';
 import { dividaMinimaQueVale, lucroEstimado, lucroDaCobertura, coberturaOtima, lucroMaximo } from './perdidas';
 import { custoDoTiroUsd, PISO_DA_GORJETA_WEI } from './prontidao';
 
@@ -878,4 +878,34 @@ test('brasa vazia no modo prova não vira "não há ninguém"', () => {
 test('sem alvo nenhum, as duas camadas nulas continuam nulas', () => {
     assert.equal(margemQueDecideORitmo({ menorMargem: null, menorMargemDaBrasa: null }, true), null);
     assert.equal(margemQueDecideORitmo({ menorMargem: null, menorMargemDaBrasa: null }, false), null);
+});
+
+test('moeda única: não se vende a garantia, porque ela JÁ é o que se deve', () => {
+    // O caso real de 2026-09-28. `0xc4d36f95` é WETH contra WETH, e o pool de
+    // venda configurado (0xcdac0d6c…) é WETH/USDC — conferido na rede:
+    // token0 = 0x4200…0006 (WETH), token1 = 0x8335…2913 (USDC).
+    //
+    // Com o pool passado, `executeOperation` vende TODO o WETH tomado por USDC,
+    // incluindo o que precisa para pagar o flash loan, e a transação inteira
+    // reverte com LucroInsuficiente(0, piso). O tiro nunca pode acertar, e a
+    // medição sai como lucro ZERO — fazendo `decidirTiro` recusar o alvo.
+    const WETH = '0x4200000000000000000000000000000000000006';
+    const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+    const AERO = '0xcdac0d6c6c59727a65f871236188350531885c43';
+
+    assert.equal(poolParaVender({ garantia: WETH, divida: WETH }, AERO), SEM_VENDA);
+    assert.equal(poolParaVender({ garantia: USDC, divida: USDC }, AERO), SEM_VENDA);
+    // E o caso normal continua vendendo.
+    assert.equal(poolParaVender({ garantia: WETH, divida: USDC }, AERO), AERO);
+});
+
+test('a comparação de moeda única não depende de caixa alta', () => {
+    // Endereços chegam da rede em minúscula e de constantes em checksum. Comparar
+    // cru deixaria o par WETH/WETH passar como se fosse par de moedas diferentes,
+    // e o defeito voltaria sem nenhum sinal.
+    const AERO = '0xcdac0d6c6c59727a65f871236188350531885c43';
+    assert.equal(poolParaVender({
+        garantia: '0x4200000000000000000000000000000000000006',
+        divida: '0x4200000000000000000000000000000000000006'.toUpperCase().replace('0X', '0x'),
+    }, AERO), SEM_VENDA);
 });

@@ -484,3 +484,73 @@ acumuladores independentes; devolveu WETH/WETH porque a posição **é** WETH/WE
 E a receita dele para o teste em fork se contradiz: derrubar o oráculo do ETH em
 3% para liquidar `0xc4d36f95` não funciona — pelo achado dele mesmo, derrubar o
 ETH deixa aquela posição MAIS SEGURA.
+
+## 2026-09-28, 16h: o log dela mostrou DOIS defeitos que matavam o tiro
+
+O log de produção trouxe `[EM SECO]` com `medicao: "revertido (execution
+reverted)"` e o alvo `0xc4d36f950cdb…` com `garantia 0x4200…0006 / dívida
+0x4200…0006`. As duas linhas esconderam um defeito cada.
+
+### 1. O portão que autoriza gastar dinheiro estava sempre aberto
+
+`naoCruzouAinda` existe para responder *"a recusa foi 'ainda não cruzou' ou foi
+'minha configuração quebrou'?"* — e é ela que libera o tiro ANTES do cruzamento,
+que manda transação real. **Rodado, e é o inverso do que o comentário dela
+prometia:**
+
+    naoCruzouAinda('execution reverted')        -> true
+    naoCruzouAinda('revertido sem mensagem')    -> true
+    naoCruzouAinda(undefined)                   -> true    <- ausência autoriza
+    naoCruzouAinda('HealthFactorNotBelowThreshold()') -> FALSE  <- a resposta certa
+
+Ela terminava em `/revert/i.test(mensagem)`. E **toda** prosa que
+`lerRespostaDaCaca` monta para um desfecho `revertido` contém a palavra "revert":
+`r.mensagem` do RPC é `"execution reverted"`, o padrão é a literal `'revertido'`,
+e o caso sem motivo vira `'revertido sem mensagem'`. O portão era
+sempre-verdadeiro, inclusive para erro do NOSSO contrato.
+
+A identidade nunca esteve na prosa. Medido com `eth_call` no contrato V1 da Base,
+no alvo real:
+
+    message : "execution reverted"     <- nenhuma identidade
+    data    : 0x930bb771               <- HealthFactorNotBelowThreshold()
+
+`lerRespostaDaCaca` recebia esse `data` e o **descartava**, guardando só a
+mensagem. Agora ele viaja em `dadosCrus`, e `naoCruzouAinda(mensagem, dados)`
+decide pelo SELETOR. Sem identificação positiva não se manda dinheiro: reversão
+opaca não se distingue de contrato quebrado.
+
+**E não havia UM teste.** Escrevi a função e não a exercitei — foi exatamente por
+isso que saiu invertida. Agora tem sete.
+
+### 2. O tiro em moeda única não podia acertar, nunca
+
+O pool de venda configurado, `0xcdac0d6c…`, é **WETH/USDC** — conferido na rede:
+token0 = `0x4200…0006`, token1 = `0x8335…2913`. Numa posição WETH contra WETH,
+`executeOperation` faz:
+
+    liquidationCall(WETH, WETH, devedor, quantia)     -> recebe WETH tomado
+    _venderGarantia(WETH, pool WETH/USDC, TODO o WETH) -> devolve USDC
+    emCaixa = balanceOf(WETH) ~ 0
+    lucro = 0  ->  revert LucroInsuficiente(0, piso)
+
+Ele vende inclusive o WETH que precisa para pagar o empréstimo. A transação
+inteira reverte. E a MEDIÇÃO desses alvos sai como lucro **zero**, então
+`decidirTiro` recusa um alvo que talvez valesse.
+
+Vale para os 8 alvos de moeda única que o censo achou — e o alvo do ensaio em
+seco é justamente um deles.
+
+**Não precisa de deploy novo.** O contrato já tem `if (poolDeVenda != address(0))`:
+com o endereço zero ele pula a venda, e aí `emCaixa` é a garantia tomada, na
+moeda certa. `poolParaVender` decide isso num lugar só — o pool era passado em
+TRÊS (ensaio, medição e tiro), a regra em dois lugares de novo.
+
+### A lição, e é a mesma de sempre
+
+Os dois defeitos são a mesma forma: **eu afirmei o mecanismo sem seguir o valor
+até o fim.** No primeiro escrevi um comentário longo dizendo para não aceitar
+reversão opaca e terminei a função aceitando. No segundo escrevi "vende a
+garantia" sem perguntar o que acontece quando a garantia é a própria dívida.
+
+Os dois estavam a um `console.log` de distância.

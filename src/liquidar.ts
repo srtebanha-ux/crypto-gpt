@@ -231,30 +231,49 @@ export function lerRespostaDaAave(mensagem: string): LeituraDaResposta {
  * `0x930bb771` na Aave nova e como o codigo `45` na antiga — conferido contra a
  * Base, e esta escrito acima neste arquivo. Nao ha por que inventar de novo.
  *
- * LIMITE HONESTO, dito em voz alta: uma reversao OPACA ("execution reverted", sem
- * motivo) nao pode ser distinguida de configuracao quebrada. Aqui ela conta como
- * "ainda nao cruzou" por dois motivos, e so por eles: a leitura da brasa JA
- * estabeleceu que a saude esta acima de 1 naquele instante, e o boot confere
- * `cofre()` e `dono()` dos contratos. Se essas duas coisas deixarem de ser
- * verdade, este `true` passa a ser um tiro no escuro.
+ * A PRIMEIRA VERSAO DESTA FUNCAO FAZIA EXATAMENTE O QUE ESTE COMENTARIO DIZIA
+ * PARA NAO FAZER, e foi medido em 2026-09-28. Ela terminava em
+ * `/revert/i.test(mensagem)` — decidia pela PROSA. E toda prosa que
+ * `lerRespostaDaCaca` constroi para um desfecho `revertido` contem a palavra
+ * "revert": `r.mensagem` do RPC e "execution reverted", o padrao e a literal
+ * `'revertido'`, e ate o caso sem motivo vira `'revertido sem mensagem'`.
+ * Resultado: o portao que autoriza mandar dinheiro de verdade devolvia `true`
+ * para toda reversao nao identificada — inclusive uma do NOSSO contrato —, e
+ * devolvia `true` ate para mensagem vazia. Ele tambem devolvia `false` para a
+ * string `'HealthFactorNotBelowThreshold()'`, que e a unica resposta certa.
+ *
+ * A identidade do erro nunca esteve na prosa: esta no SELETOR. Medido com
+ * `eth_call` no contrato V1 da Base, no alvo `0xc4d36f95`:
+ *
+ *     message : "execution reverted"     <- sem identidade nenhuma
+ *     data    : 0x930bb771               <- HealthFactorNotBelowThreshold()
+ *
+ * Entao decide-se pelos DADOS, e a prosa e so o ultimo recurso. Sem
+ * identificacao POSITIVA nao se manda dinheiro: uma reversao opaca pode ser a
+ * Aave recusando posicao saudavel ou pode ser o nosso contrato quebrado, e as
+ * duas sao indistinguiveis de fora. Na duvida, nao atira.
  */
-export function naoCruzouAinda(mensagem: string | undefined): boolean {
+export const SELETOR_SAUDE_ACIMA_DO_LIMIAR = '0x930bb771';
+
+export function naoCruzouAinda(mensagem: string | undefined, dados?: string): boolean {
+    const d = (dados ?? '').trim().toLowerCase();
+    // 1. Os DADOS mandam, porque sao a identidade.
+    if (d !== '' && d !== '0x') {
+        if (d.startsWith(SELETOR_SAUDE_ACIMA_DO_LIMIAR)) return true;
+        // `Error(string)` carrega o dialeto antigo, onde a mesma recusa e '45'.
+        if (!d.startsWith('0x08c379a0')) return false;
+        // Cai na prosa abaixo, que e onde o texto do `Error(string)` chega.
+    }
     const m = (mensagem ?? '').trim();
     // Falha de provedor nao e recusa da Aave: e a rede, e mandar aqui seria
     // atirar sem ter medido nada.
-    if (m !== '' && ehLimiteDoProvedor(m)) return false;
-    if (m === '') return true;
+    if (m === '' || ehLimiteDoProvedor(m)) return false;
     const lida = lerRespostaDaAave(m);
     if (lida.naoDeuParaTestar) return false;
-    if (lida.codigo !== null) {
-        // A recusa certa, nos dois dialetos.
-        if (lida.codigo === 'HealthFactorNotBelowThreshold()' || lida.codigo === '45') return true;
-        // Qualquer OUTRO erro identificado da Aave e um motivo diferente —
-        // garantia errada, reserva pausada, par de divida trocado. Nao e "espere".
-        return false;
-    }
-    // Sem codigo nenhum: opaca. Ver o LIMITE HONESTO acima.
-    return /revert/i.test(m);
+    // So identificacao POSITIVA autoriza. Qualquer outro erro identificado da
+    // Aave e motivo diferente — garantia errada, reserva pausada, par trocado —
+    // e uma reversao opaca nao se distingue de configuracao quebrada.
+    return lida.codigo === 'HealthFactorNotBelowThreshold()' || lida.codigo === '45';
 }
 
 /** Os dados de uma reserva para um usuário — o que ele deve e o que deu. */

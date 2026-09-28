@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
+import { lerRespostaDaCaca } from './caca';
 import {
     COBRIR_O_MAXIMO,
     ERROS_DA_AAVE,
@@ -10,6 +11,7 @@ import {
     codificarLiquidacao,
     ehLimiteDoProvedor,
     codificarUserReserveData,
+    naoCruzouAinda,
     decodificarUserReserveData,
     escolherPar,
     lerRespostaDaAave,
@@ -242,4 +244,63 @@ test('recusa reconhecida da Aave nunca é confundida com limite de provedor', ()
     const r = lerRespostaDaAave('execution reverted | 0x930bb771');
     assert.equal(r.naoDeuParaTestar, false);
     assert.equal(r.entendeu, true);
+});
+
+// ---------------------------------------------------------------------------
+// `naoCruzouAinda` — o portão que autoriza MANDAR DINHEIRO DE VERDADE antes do
+// cruzamento. A primeira versão não tinha teste nenhum, e saiu invertida.
+// ---------------------------------------------------------------------------
+
+test('o caso real medido na Base: prosa vazia de sentido, identidade nos dados', () => {
+    // eth_call no contrato V1, alvo 0xc4d36f95, 2026-09-28:
+    //     message : "execution reverted"
+    //     data    : 0x930bb771   = HealthFactorNotBelowThreshold()
+    // A mensagem não identifica nada; o seletor identifica tudo.
+    assert.equal(naoCruzouAinda('execution reverted', '0x930bb771'), true);
+    assert.equal(id('HealthFactorNotBelowThreshold()').slice(0, 10), '0x930bb771');
+});
+
+test('reversão OPACA não autoriza tiro: sem dados, sem identificação, não atira', () => {
+    // Esta é a inversão que existia. `/revert/i` dava true para tudo, e TODA
+    // prosa que `lerRespostaDaCaca` monta para um `revertido` contém "revert":
+    // "execution reverted" do RPC, o padrão 'revertido', e a literal
+    // 'revertido sem mensagem'. O portão era sempre-verdadeiro.
+    assert.equal(naoCruzouAinda('execution reverted'), false);
+    assert.equal(naoCruzouAinda('revertido'), false);
+    assert.equal(naoCruzouAinda('revertido sem mensagem'), false);
+    assert.equal(naoCruzouAinda(''), false);
+    assert.equal(naoCruzouAinda(undefined), false, 'ausência de erro não é medição');
+});
+
+test('erro do NOSSO contrato não é "ainda não cruzou" — é configuração quebrada', () => {
+    // O perigo concreto: a caçada reverte porque o pool de venda está errado, o
+    // par está trocado ou o swap é degenerado. A prosa continua sendo
+    // "execution reverted", e a versão antiga mandava a transação assim mesmo.
+    const outro = id('PoolDeVendaInvalido()').slice(0, 10);
+    assert.notEqual(outro, '0x930bb771');
+    assert.equal(naoCruzouAinda('execution reverted', outro), false);
+});
+
+test('o dialeto antigo da Aave, o código 45, continua valendo', () => {
+    assert.equal(naoCruzouAinda('execution reverted: 45'), true);
+    assert.equal(naoCruzouAinda('45'), true);
+});
+
+test('outro erro identificado da Aave não vira "espere"', () => {
+    // 43 é COLLATERAL_CANNOT_BE_LIQUIDATED: motivo diferente, não é "ainda não".
+    assert.equal(naoCruzouAinda('execution reverted: 43'), false);
+});
+
+test('falha de provedor nunca autoriza: não mediu nada', () => {
+    assert.equal(naoCruzouAinda('429 Too Many Requests'), false);
+    assert.equal(naoCruzouAinda('rate limit exceeded'), false);
+});
+
+test('lerRespostaDaCaca entrega os dados crus junto, e não só a prosa', () => {
+    // Era aqui que a identidade se perdia: a função ficava com `r.mensagem` e
+    // descartava `r.dados`, que é o único campo que diz QUAL erro foi.
+    const r = lerRespostaDaCaca({ ok: false, dados: '0x930bb771', mensagem: 'execution reverted' });
+    assert.equal(r.desfecho, 'revertido');
+    assert.equal(r.dadosCrus, '0x930bb771');
+    assert.equal(naoCruzouAinda(r.erro, r.dadosCrus), true, 'o par completo identifica');
 });
