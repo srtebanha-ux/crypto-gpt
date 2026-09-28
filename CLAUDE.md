@@ -137,6 +137,46 @@ Se alguma sessão futura quiser reabrir isso, o teste é rodar o censo de novo e
 olhar `oQueCadaSaldoAlcancaria`: se alguma fatia passar a dizer "fatia sem
 dono", a conta muda. Até lá, não muda.
 
+### ATENÇÃO, 2026-09-27 à noite: a EVIDÊNCIA acima está sob revisão
+
+A decisão é dela e continua valendo por enquanto. Mas a tabela acima não prova o
+que eu disse que provava, e a próxima sessão precisa saber disso antes de citá-la.
+
+Dois defeitos meus, achados no mesmo dia:
+
+1. **A linha "faixa dela (até US$ 45) 51 liquidações entre 15 endereços, maior
+   18% ABERTA" foi medida com piso ZERO.** Ela contava liquidações de poeira que
+   não pagam o próprio gás. Com o piso verdadeiro (US$ 0,45, o lucro mínimo que
+   cobre o gás), são **10** liquidações em 9,3 dias entre **5** endereços. A
+   afirmação "a faixa dela é aberta" não se sustenta nessa medição.
+
+2. **Pior: todos os veredictos `>>> ESSA FATIA TEM DONO` estavam medindo
+   barulho.** A regra era `total >= 5 && fatiaDoMaior >= 0.5` — inventada, como a
+   anterior que este arquivo já registra. Calculei a chance do acaso produzir cada
+   uma daquelas concentrações, com endereços igualmente bons sorteando entre si:
+
+       6 eventos, 2 endereços, maior levou 3  ->  100%   (era "TEM DONO")
+       9 eventos, 4 endereços, maior levou 4  ->   63%   (era "TEM DONO")
+      10 eventos, 5 endereços, maior levou 5  ->   16%   (era "a SUA faixa tem dono")
+      57 eventos, 17 endereços, maior levou 11 ->  0,73%
+      20 eventos, 5 endereços, maior levou 10  ->  1,3%  (os MESMOS 50%)
+
+   Nenhum dos três primeiros prova nada. E os dois últimos mostram por que a
+   fração sozinha engana: 50% de 10 o acaso dá em 16% das vezes, 50% de 20 em
+   1,3%.
+
+O conserto está em `src/concentracao.ts`: o veredicto agora sai da **chance do
+acaso** (limiar 5%), tem uma terceira resposta — "não dá para dizer" — e exige
+campo, porque dois endereços dividindo igualmente não é mercado aberto, é
+duopólio. Os limiares de amostra também são calculados (`chanceDeCampoMaior`),
+não escolhidos.
+
+**O que isto NÃO quer dizer:** não quer dizer "coloque dinheiro". Quer dizer que
+o argumento "todas as fatias que o gás abre têm dono" está sem prova, nas duas
+direções — e que 9,3 dias de história não bastam para decidir isso. O próximo
+passo honesto é acumular mais janela de censo e reler, não inverter a decisão com
+os mesmos dados.
+
 ## Como este projeto mede o próprio erro
 
 O defeito que mais aparece aqui tem nome: **ausência com cara de resposta** —

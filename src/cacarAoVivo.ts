@@ -4,6 +4,7 @@ import { Wallet, JsonRpcProvider } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
+import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
@@ -1477,35 +1478,24 @@ async function principal(): Promise<'parar' | void> {
             saldoWei: saldoDeGasWei,
             baseFeeWei: baseFeeAtual ?? 20_000_000n,
             ...POLITICA,
-        // O CENSO mede a faixa SUSTENTAVEL, nunca a do tiro de prova.
-        //
-        // O tiro de prova e UM tiro, pago com o gas inteiro se preciso, para
-        // comprar a informacao "o caminho funciona". Nao e como o bot vive.
-        // Quando o teto do modo prova entrou aqui, em 2026-09-27, o censo
-        // passou a dizer `naSUAFaixa: 57 de 57`, `ABRE 0 novas` em toda fatia
-        // de gas, `nenhuma das duas faixas tem dono` e
-        // `US$ 1835 em 9,3 dias (~US$ 5946/mes)`.
-        //
-        // Aquele numero e falso e e o pior tipo de falso: otimista, com cara
-        // de medicao, e justificando colocar dinheiro. As 57 incluem as 9
-        // grandes, que o bot so pega gastando todo o gas num tiro — pode uma
-        // vez, nao 185 por mes — e que o proprio censo mediu como tendo dono
-        // (4 endereços, o maior com 44%). O numero sustentavel e o de antes:
-        // 48 de 57, US$ 102 em 9,3 dias, ~US$ 330/mes.
-        //
-        // E a decisao do gas que o CLAUDE.md registra nasce DESTA faixa. Medir
-        // com o teto do tiro unico apagava a medicao que a produziu.
+            // O CENSO mede a faixa SUSTENTAVEL, nunca a do tiro de prova. O tiro
+            // de prova e UM tiro, pago com o gas inteiro se preciso, para comprar
+            // a informacao "o caminho funciona" — nao e como o bot vive. Quando o
+            // teto do modo prova entrou aqui, em 2026-09-27, o censo passou a
+            // dizer `naSUAFaixa: 57 de 57` e `~US$ 5946/mes`: o dinheiro da faixa
+            // de cima, apresentado como renda dela. E a decisao do gas que o
+            // CLAUDE.md registra nasce DESTA faixa, entao medir com o teto do tiro
+            // unico apagava a medicao que a produziu.
             tiroDeProva: false,
         });
 
-        const dentroDaFaixa = comLucro.filter((a) => {
-            if (a.lucroUsd === null) return false;
-            if (faixa === null) return a.lucroUsd.greaterThan(0);
-            if (faixa.de !== null && a.lucroUsd.lessThan(faixa.de)) return false;
-            return faixa.ate === null || a.lucroUsd.lessThanOrEqualTo(faixa.ate);
-        });
+        // Tres grupos, uma implementacao, e uma soma que tem de fechar. A versao
+        // anterior tinha o filtro aqui e a NEGACAO dele lá embaixo chamada de
+        // "acima da sua faixa" — e a negacao passou a conter a poeira de baixo.
+        const partes = repartirPorFaixa(comLucro, faixa);
+        const dentroDaFaixa = partes.dentro;
         const somaDaFaixa = dentroDaFaixa.reduce((acc, a) => acc.plus(a.lucroUsd!), new Decimal(0));
-        const semCotacao = comLucro.filter((a) => a.lucroUsd === null).length;
+        const semCotacao = partes.semCotacao.length;
         const maisRecente = comLucro.reduce((a, b) => (b.bloco > a.bloco ? b : a));
         const horasDaUltima = ((topo - maisRecente.bloco) * 2) / 3600;
         const porDia = diasOlhados > 0 ? achadas.length / diasOlhados : 0;
@@ -1515,32 +1505,15 @@ async function principal(): Promise<'parar' | void> {
         // Contar e descrever a concentracao vive UMA vez e serve os dois
         // campos que precisam dela. Duas copias da mesma regra e o defeito que
         // este projeto achou oito vezes num dia — inclusive em mim.
-        const contarLiquidantes = (lista: typeof comLucro) => {
-            const por = new Map<string, number>();
-            for (const a of lista) {
-                const k = a.liquidante.toLowerCase();
-                por.set(k, (por.get(k) ?? 0) + 1);
-            }
-            const ordenado = [...por.entries()].sort((a, b) => b[1] - a[1]);
-            const total = lista.length;
-            const fatia = (n: number) => (total === 0 ? 0 : n / total);
-            return {
-                total,
-                jogadores: por.size,
-                fatiaDoMaior: ordenado[0] ? fatia(ordenado[0][1]) : 0,
-                fatiaDoTop3: fatia(ordenado.slice(0, 3).reduce((acc, e) => acc + e[1], 0)),
-            };
-        };
-        type Contagem = ReturnType<typeof contarLiquidantes>;
-        const descreverLiquidantes = (c: Contagem) => c.total === 0
-            ? 'nenhuma'
-            : `${c.total} entre ${c.jogadores} endereços; o maior levou ${
-                Math.round(c.fatiaDoMaior * 100)}%, os três maiores ${Math.round(c.fatiaDoTop3 * 100)}%`;
-        // Dominado e um endereco levando metade, ou tres levando quase tudo com
-        // pouquissimos jogadores. Com menos de cinco liquidacoes nao se afirma
-        // nada: amostra pequena demais para chamar de dono.
-        const dominado = (c: Contagem) =>
-            c.total >= 5 && (c.fatiaDoMaior >= 0.5 || (c.fatiaDoTop3 >= 0.8 && c.jogadores <= 4));
+        const contarLiquidantes = (lista: typeof comLucro) =>
+            contarPorEndereco(lista.map((a) => a.liquidante));
+        // O veredicto vive em `src/concentracao.ts` e sai da CHANCE DO ACASO, nao
+        // de uma fracao escolhida a mao. A regra que morava aqui —
+        // `total >= 5 && fatiaDoMaior >= 0.5` — imprimia ">>> ESSA FATIA TEM DONO"
+        // para SEIS liquidacoes repartidas 3 e 3 entre DOIS enderecos, que o
+        // acaso produz em 100% das vezes. Era esse veredicto que sustentava o
+        // argumento "todas as fatias que o gas abre tem dono".
+        const descreverLiquidantes = comoLerAContagem;
 
         log.info('[MERCADO] Censo das liquidações da Aave na Base.', {
             olhei: `${diasOlhados.toFixed(1)} dias (${janelasLidas} janelas, ${janelasQueFalharam} falharam)`,
@@ -1559,6 +1532,16 @@ async function principal(): Promise<'parar' | void> {
                 : `${dentroDaFaixa.length} de ${achadas.length} — entre ${
                     faixa.de === null ? 'qualquer lucro' : `US$ ${faixa.de.toFixed(2)}`} e ${
                     faixa.ate === null ? 'SEM TETO' : `US$ ${faixa.ate.toFixed(2)}`}`,
+            // A soma tem de FECHAR na tela. Quando o piso saiu de zero para
+            // US$ 0,45, `naSUAFaixa` caiu de 48 para 10 e nada no log dizia para
+            // onde as outras 38 foram — o número apareceu mudado, sem explicação.
+            // Ver as três partes somando o total é o que torna a queda legível.
+            ondeCairamAsOutras: `${partes.abaixoDoPiso.length} abaixo do piso (não pagam o próprio gás)`
+                + ` + ${partes.dentro.length} na faixa`
+                + ` + ${partes.acimaDoTeto.length} acima do teto`
+                + `${semCotacao === 0 ? '' : ` + ${semCotacao} sem cotação`}`
+                + ` = ${partes.abaixoDoPiso.length + partes.dentro.length + partes.acimaDoTeto.length + semCotacao}`
+                + ` de ${achadas.length}`,
             lucroQuePassouNaFaixa: `US$ ${somaDaFaixa.toFixed(2)} em ${diasOlhados.toFixed(1)} dias ` +
                 `(~US$ ${somaDaFaixa.dividedBy(Math.max(diasOlhados, 0.01)).mul(30).toFixed(2)}/mês, ${Math.round(naFaixaPorMes)} migalhas/mês)`,
             semCotacao: semCotacao === 0 ? 'nenhuma' : `${semCotacao} não consegui precificar (moeda fora do meu mapa)`,
@@ -1599,12 +1582,20 @@ async function principal(): Promise<'parar' | void> {
                         `alcança ${dentro.length} valendo US$ ${soma.toFixed(2)} ` +
                         `(~US$ ${soma.dividedBy(Math.max(diasOlhados, 0.01)).mul(30).toFixed(0)}/mês) | ` +
                         `ABRE ${novas.length} novas valendo US$ ${somaNova.toFixed(2)} — ${
-                            descreverLiquidantes(cNovas)}${
-                            novas.length === 0 ? '' : dominado(cNovas)
-                                ? ' >>> ESSA FATIA TEM DONO: o gás compra acesso a uma briga'
-                                : cNovas.total < 5
-                                    ? ' >>> poucas demais para dizer se tem dono'
-                                    : ' >>> fatia sem dono: o gás compra oportunidade de verdade'}`;
+                            descreverLiquidantes(cNovas)}${(() => {
+                            if (novas.length === 0) return '';
+                            // ESTE veredicto e a espinha da decisao de nao colocar
+                            // dinheiro, e era ele que estava medindo barulho: com
+                            // a regra antiga, SEIS liquidacoes repartidas 3 e 3
+                            // entre DOIS enderecos saiam como ">>> TEM DONO", e o
+                            // acaso produz exatamente isso em 100% das vezes.
+                            const d = quemTemDono(cNovas);
+                            return d.veredicto === 'tem dono'
+                                ? ` >>> ESSA FATIA TEM DONO: o gás compra acesso a uma briga (${d.porque})`
+                                : d.veredicto === 'sem dono'
+                                    ? ` >>> fatia sem dono: o gás compra oportunidade de verdade (${d.porque})`
+                                    : ` >>> NÃO DÁ PARA DIZER se tem dono: ${d.porque}`;
+                        })()}`;
                 });
             })(),
             // Quem esta levando, e quao concentrado. E o melhor palpite que os
@@ -1629,20 +1620,29 @@ async function principal(): Promise<'parar' | void> {
             // bot dedicado. Medir os dois juntos mistura duas corridas
             // diferentes numa media que nao descreve nenhuma.
             quemEstaLevando: (() => {
-                const naFaixa = contarLiquidantes(comLucro.filter((a) => dentroDaFaixa.includes(a)));
-                const acima = contarLiquidantes(comLucro.filter((a) => !dentroDaFaixa.includes(a) && a.lucroUsd !== null));
+                const naFaixa = contarLiquidantes(partes.dentro);
+                const acima = contarLiquidantes(partes.acimaDoTeto);
+                const poeira = contarLiquidantes(partes.abaixoDoPiso);
+                const dSua = quemTemDono(naFaixa);
+                const dAcima = quemTemDono(acima);
                 return {
                     tudo: descreverLiquidantes(contarLiquidantes(comLucro)),
-                    naSuaFaixa: descreverLiquidantes(naFaixa),
-                    acimaDaSuaFaixa: descreverLiquidantes(acima),
-                    leitura: dominado(naFaixa)
+                    naSuaFaixa: `${descreverLiquidantes(naFaixa)} >>> ${dSua.veredicto.toUpperCase()}: ${dSua.porque}`,
+                    acimaDaSuaFaixa: `${descreverLiquidantes(acima)} >>> ${dAcima.veredicto.toUpperCase()}: ${dAcima.porque}`,
+                    abaixoDoPiso: `${descreverLiquidantes(poeira)} — não pagam o próprio gás, o bot não atira nelas`,
+                    leitura: dSua.veredicto === 'tem dono'
                         ? 'a SUA faixa tem dono: um endereço leva a maior parte das migalhas, e entrar é briga'
-                        : dominado(acima)
-                            ? 'a sua faixa é aberta, mas a de cima tem dono: catar migalhas é plausível, '
-                              + 'disputar as grandes provavelmente não'
-                            : 'nenhuma das duas faixas tem dono. Não é um mercado fechado, e entrar é plausível',
-                    comoLerIsto: 'fatia do maior perto de 50% é domínio; com dez ou mais endereços e ninguém '
-                        + 'acima de um terço, é mercado aberto. A média das duas faixas juntas não descreve nenhuma',
+                        : dSua.veredicto === 'não dá para dizer'
+                            ? 'NÃO DÁ PARA DIZER se a sua faixa tem dono: são poucas liquidações para separar '
+                              + 'domínio de sorte. Isto não é "está aberta" — é "ainda não sei"'
+                            : dAcima.veredicto === 'tem dono'
+                                ? 'a sua faixa é aberta, mas a de cima tem dono: catar migalhas é plausível, '
+                                  + 'disputar as grandes provavelmente não'
+                                : 'a sua faixa é aberta pelos dados que tenho, e a de cima não dá para afirmar',
+                    comoLerIsto: 'o veredicto sai da CHANCE DO ACASO: se endereços igualmente bons sorteassem '
+                        + 'estas liquidações entre si, com que frequência o maior levaria tanto? Abaixo de 5% eu '
+                        + 'afirmo; acima, digo que não sei. A fração sozinha engana: 50% de 10 o acaso dá em 16% '
+                        + 'das vezes, 50% de 20 em 1,3%',
                 };
             })(),
             ATENCAO: 'isto é OPORTUNIDADE que passou, não renda perdida: para cada uma dessas eu ainda teria de ' +
