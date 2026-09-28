@@ -44,10 +44,36 @@ export interface Amostra {
     saude: Decimal;
 }
 
-/** Nao adianta amostrar a cada 8 segundos: o juro nao mexe nada nesse prazo. */
-export const INTERVALO_DA_AMOSTRA_MS = 600_000; // 10 minutos
-/** Quantas guardar por devedor. Seis a 10 minutos cobrem uma hora. */
-export const MAX_AMOSTRAS = 6;
+/**
+ * De quanto em quanto tempo guardar uma leitura.
+ *
+ * Era 600.000 ms — dez minutos — com o comentario "nao adianta amostrar a cada 8
+ * segundos: o juro nao mexe nada nesse prazo". MEDIDO EM 2026-09-28, e e falso.
+ *
+ * A posicao `0x4015e52c` foi lida em varios blocos antes de ser liquidada, com a
+ * saude crua de 18 casas:
+ *
+ *     -60 blocos (120s): 1000000023644295459
+ *     -30 blocos  (60s): 1000000011592022699
+ *     -10 blocos  (20s): 1000000003629135045
+ *      -8 blocos  (16s): 1000000002834062669
+ *
+ * Entre -60 e -30 a deriva e 4,02e-10 de saude por bloco. Entre -10 e -8 — dois
+ * blocos, QUATRO SEGUNDOS — e 3,97e-10. **Diferenca de 1%.** Com 18 casas, quatro
+ * segundos de juro sao 1,6e-9, ou 1.600.000.000 de unidades cruas: nao e ruido, e
+ * sinal limpo.
+ *
+ * O custo daquele numero: com tres amostras minimas a dez minutos, o previsor
+ * ficava CEGO por vinte minutos depois de cada reinicio do container — e o
+ * container reinicia varias vezes por dia. O log registrou "nao projetavel: so 1
+ * amostra(s)" em boot depois de boot.
+ *
+ * A memoria nao era o motivo: `MAX_AMOSTRAS` ja limita por devedor, qualquer que
+ * seja o intervalo.
+ */
+export const INTERVALO_DA_AMOSTRA_MS = Number(process.env.CACA_AMOSTRA_MS ?? '8000');
+/** Quantas guardar por devedor. Doze a 8 segundos cobrem uns 96 segundos. */
+export const MAX_AMOSTRAS = Number(process.env.CACA_MAX_AMOSTRAS ?? '12');
 /** Duas amostras nao mostram tendencia: mostram uma diferenca. */
 export const MINIMO_DE_AMOSTRAS = 3;
 
@@ -177,6 +203,31 @@ export function projetar(
         return { cruza: false, porque: 'cruzaria em mais tempo que a idade do universo útil' };
     }
     return { cruza: true, emMs: ms.toNumber(), taxaAnual, amostras: amostras.length, spanMs };
+}
+
+/**
+ * Em quantos BLOCOS a saude cruza 1 — a pergunta que decide se da para atirar.
+ *
+ * `projetar` devolve milissegundos, que servem para escolher o ritmo. Mas quem
+ * decide um tiro nao conta em minutos: conta em blocos, porque a transacao tem de
+ * estar DENTRO do bloco em que a saude cruza.
+ *
+ * Por que isso importa, medido em 2026-09-28: a posicao `0x4015e52c` ficou a
+ * 0,0000024% de liquidar por mais de dois minutos e foi levada no bloco exato em
+ * que cruzou. O bot le o estado DEPOIS do bloco minerado, entao no instante em que
+ * ele ve "liquidavel" a posicao ja foi. Reagir nao alcanca; so chegar antes.
+ *
+ * Devolve `null` quando nao se pode responder — nunca um numero inventado.
+ */
+export function blocosAteCruzar(
+    amostras: Amostra[],
+    msPorBloco = 2000,
+    minimo = MINIMO_DE_AMOSTRAS,
+): { blocos: number; taxaAnual: Decimal } | null {
+    if (msPorBloco <= 0) return null;
+    const p = projetar(amostras, minimo);
+    if (!p.cruza) return null;
+    return { blocos: p.emMs / msPorBloco, taxaAnual: p.taxaAnual };
 }
 
 export interface Chegada {

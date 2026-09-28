@@ -188,6 +188,15 @@ export const CHANCE_QUE_CONVENCE = 0.05;
 export const FATIA_QUE_E_DOMINIO = 0.5;
 export const FATIA_QUE_E_ABERTO = 1 / 3;
 export const CAMPO_QUE_E_ABERTO = 10;
+/**
+ * Cartel: tres levando quase tudo com pouquissimos jogadores.
+ *
+ * Os valores vem da regra antiga (`fatiaDoTop3 >= 0.8 && jogadores <= 4`), que
+ * acertava NESTE caso e errava nos outros. Perder um criterio bom junto com os
+ * ruins foi o meu erro na reescrita de 2026-09-28.
+ */
+export const FATIA_QUE_E_CARTEL = 0.8;
+export const CAMPO_QUE_E_CARTEL = 4;
 
 /**
  * Tem dono, nao tem, ou nao da para dizer.
@@ -284,6 +293,29 @@ export function quemTemDono(c: Contagem, limiar = CHANCE_QUE_CONVENCE): Dono {
         };
     }
 
+    // 4b) CARTEL: tres enderecos levando quase tudo, com pouquissimos jogadores.
+    //
+    // Este criterio existia na regra antiga — `fatiaDoTop3 >= 0.8 && jogadores <= 4`
+    // — e eu o perdi na reescrita: `quemTemDono` passou a nunca ler `doTop3`. O
+    // resultado, medido: 30 liquidacoes repartidas 12/10/8 entre TRES enderecos
+    // (top3 = 100%) saiam como "nao da para dizer". Uma faixa cortada em tres e o
+    // caso que a decisao do gas mais precisa detectar, e ele ficou indistinguivel
+    // de amostra fraca.
+    //
+    // A chance do acaso guarda a afirmacao, como no dominio de um so.
+    if (c.fatiaDoTop3 >= FATIA_QUE_E_CARTEL && c.jogadores <= CAMPO_QUE_E_CARTEL) {
+        const chanceDoTrio = chanceDoAcaso(c.total, c.jogadores, c.doTop3);
+        if (chanceDoTrio <= limiar || c.jogadores <= 3) {
+            return {
+                veredicto: 'tem dono',
+                chance,
+                porque: `os três maiores levaram ${c.doTop3} de ${c.total} `
+                    + `(${emPct(c.fatiaDoTop3)}) entre só ${c.jogadores} endereços: é cartel, `
+                    + 'não domínio de um só — e entrar é disputar com todos eles',
+            };
+        }
+    }
+
     // 5) Nao tem dono: fatia abaixo de um terco com campo largo. O padrao esta
     //    medido no CLAUDE.md, do caso de 17 liquidantes.
     if (c.fatiaDoMaior < FATIA_QUE_E_ABERTO && c.jogadores >= CAMPO_QUE_E_ABERTO) {
@@ -360,7 +392,15 @@ export function repartirPorFaixa<T extends { lucroUsd: Decimal | null }>(
             (a.lucroUsd.greaterThan(0) ? r.dentro : r.abaixoDoPiso).push(a);
             continue;
         }
-        if (faixa.de !== null && a.lucroUsd.lessThan(faixa.de)) { r.abaixoDoPiso.push(a); continue; }
+        // Piso desconhecido (`de === null`) NAO e piso zero. Sem esta linha um
+        // lucro de -US$ 0,29 caia em `dentro` quando a faixa tinha teto mas nao
+        // piso — e o censo contava poeira como "naSUAFaixa", medindo os
+        // liquidantes DELA como a concorrencia dela. Tres linhas abaixo, o caso
+        // `faixa === null` ja mandava os mesmos valores para `abaixoDoPiso`,
+        // chamando isso de "aritmetica, nao chute": a mesma regra, dois lugares.
+        const piso = faixa.de ?? new Decimal(0);
+        if (a.lucroUsd.lessThanOrEqualTo(piso) && piso.isZero()) { r.abaixoDoPiso.push(a); continue; }
+        if (a.lucroUsd.lessThan(piso)) { r.abaixoDoPiso.push(a); continue; }
         if (faixa.ate !== null && a.lucroUsd.greaterThan(faixa.ate)) { r.acimaDoTeto.push(a); continue; }
         r.dentro.push(a);
     }

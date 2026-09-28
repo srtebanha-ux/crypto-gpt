@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import { SAUDE_UM } from './posicoes';
 import {
-    registrar, esquecerQuemSaiu, projetar, oQueVemPorAi, emQuantoTempo,
-    INTERVALO_DA_AMOSTRA_MS, MINIMO_DE_AMOSTRAS, type Amostra,
+    registrar, esquecerQuemSaiu, projetar, oQueVemPorAi, emQuantoTempo, blocosAteCruzar,
+    INTERVALO_DA_AMOSTRA_MS, MINIMO_DE_AMOSTRAS, MAX_AMOSTRAS, type Amostra,
 } from './deriva';
-import { posturaPorChegada, posturaMaisForte, posturaPorMargem, valeArmar } from './adiantar';
+import { posturaPorChegada, posturaMaisForte, posturaPorMargem, valeArmar,
+    atirarAntesDoCruzamento } from './adiantar';
 
 const MIN = 60_000;
 const HORA = 3_600_000;
@@ -187,21 +188,79 @@ test('saúde zero não explode no logaritmo', () => {
 // O histórico: amostrar sem encher a memória, e esquecer o que saiu.
 // ---------------------------------------------------------------------------
 
-test('não guarda duas amostras dentro do intervalo: 8s de ciclo não move juro', () => {
+test('o intervalo é respeitado, e agora ele é de segundos e não de dez minutos', () => {
+    // O título deste teste dizia "8s de ciclo não move juro". MEDIDO em
+    // 2026-09-28 e é falso: a deriva da posição 0x4015e52c foi 4,02e-10 de saúde
+    // por bloco medida em 60 segundos, e 3,97e-10 medida em QUATRO segundos —
+    // diferença de 1%. Com 18 casas, quatro segundos de juro são 1,6e-9, ou
+    // 1.600.000.000 de unidades cruas. Não é ruído.
+    //
+    // O custo daquela suposição: três amostras a dez minutos deixavam o previsor
+    // cego por vinte minutos depois de cada reinício do container.
     const h = new Map<string, Amostra[]>();
-    for (let t = 0; t < 10 * MIN; t += 8000) registrar(h, '0xA', saude(1.05), t);
-    assert.equal(h.get('0xa')!.length, 1, 'mais de uma amostra em dez minutos é lixo');
-    registrar(h, '0xA', saude(1.049), INTERVALO_DA_AMOSTRA_MS);
+    // Dentro do intervalo, ainda não guarda: a regra continua de pé.
+    registrar(h, '0xA', saude(1.05), 0);
+    registrar(h, '0xA', saude(1.0499), INTERVALO_DA_AMOSTRA_MS - 1);
+    assert.equal(h.get('0xa')!.length, 1);
+    // Completado o intervalo, guarda.
+    registrar(h, '0xA', saude(1.0498), INTERVALO_DA_AMOSTRA_MS);
     assert.equal(h.get('0xa')!.length, 2);
+    // E o intervalo é de segundos, não de dez minutos — é isso que torna a
+    // primeira projeção possível em menos de meio minuto.
+    assert.ok(INTERVALO_DA_AMOSTRA_MS <= 30_000,
+        `o intervalo é ${INTERVALO_DA_AMOSTRA_MS}ms: com 3 amostras isso é `
+        + `${(3 * INTERVALO_DA_AMOSTRA_MS) / 1000}s de cegueira depois de cada reinício`);
 });
 
 test('o histórico é limitado: não cresce para sempre', () => {
     const h = new Map<string, Amostra[]>();
-    for (let i = 0; i < 50; i++) registrar(h, '0xA', saude(1.05 - i * 0.0001), i * 10 * MIN);
-    assert.equal(h.get('0xa')!.length, 6);
-    // E o que sobrou são as SEIS MAIS NOVAS, não as seis primeiras.
-    assert.equal(h.get('0xa')![5]!.em, 49 * 10 * MIN);
-    assert.equal(h.get('0xa')![0]!.em, 44 * 10 * MIN);
+    const passo = INTERVALO_DA_AMOSTRA_MS;
+    for (let i = 0; i < 50; i++) registrar(h, '0xA', saude(1.05 - i * 0.0001), i * passo);
+    assert.equal(h.get('0xa')!.length, MAX_AMOSTRAS);
+    // E o que sobrou são as MAIS NOVAS, não as primeiras.
+    assert.equal(h.get('0xa')![MAX_AMOSTRAS - 1]!.em, 49 * passo);
+    assert.equal(h.get('0xa')![0]!.em, (50 - MAX_AMOSTRAS) * passo);
+});
+
+test('a deriva REAL de 2026-09-28 é projetável em quatro segundos', () => {
+    // Os números crus lidos na Base, blocos antes de 0x4015e52c ser liquidada.
+    // Este teste existe para provar que a amostragem rápida enxerga o que a de
+    // dez minutos enxergava — e enxerga vinte minutos mais cedo.
+    const cru = (n: string) => new Decimal(n);
+    const amostras: Amostra[] = [
+        { em: 0,    saude: cru('1000000002834062669') },  // -8 blocos
+        { em: 4000, saude: cru('1000000002023820565') },  // -6 blocos
+        { em: 8000, saude: cru('1000000001213578466') },  // -4 blocos
+    ];
+    const b = blocosAteCruzar(amostras, 2000);
+    assert.ok(b !== null, 'três amostras de 4s têm de dar projeção');
+    // Ela cruzou entre 3 e 4 blocos depois da última amostra. A conta tem de
+    // cair nessa vizinhança, não em minutos nem em dias.
+    assert.ok(b!.blocos > 1 && b!.blocos < 6, `projetou ${b!.blocos} blocos`);
+    // E a taxa sai como juro plausível, não como preço: as guardas não barram.
+    assert.ok(b!.taxaAnual.greaterThan(0), `taxa ${b!.taxaAnual}`);
+    assert.ok(b!.taxaAnual.lessThan(1), 'abaixo do teto de 100%/ano, senão seria preço');
+});
+
+test('blocosAteCruzar devolve null quando não pode responder', () => {
+    const cru = (n: string) => new Decimal(n);
+    // Duas amostras não bastam.
+    assert.equal(blocosAteCruzar([
+        { em: 0, saude: cru('1000000002834062669') },
+        { em: 4000, saude: cru('1000000002023820565') },
+    ], 2000), null);
+    // Saúde subindo não cruza nada.
+    assert.equal(blocosAteCruzar([
+        { em: 0, saude: cru('1000000001213578466') },
+        { em: 4000, saude: cru('1000000002023820565') },
+        { em: 8000, saude: cru('1000000002834062669') },
+    ], 2000), null);
+    // Bloco de duração zero ou negativa não é resposta, é divisão por zero.
+    assert.equal(blocosAteCruzar([
+        { em: 0,    saude: cru('1000000002834062669') },
+        { em: 4000, saude: cru('1000000002023820565') },
+        { em: 8000, saude: cru('1000000001213578466') },
+    ], 0), null);
 });
 
 test('o devedor é normalizado: maiúscula e minúscula são a mesma pessoa', () => {
@@ -332,4 +391,54 @@ test('a conta de CU de uma chegada: generoso e ainda assim desprezível', () => 
     assert.equal(cus, 171_600);
     // Contra um teto de 38 milhões por mês, e chegadas separadas por MESES.
     assert.ok(cus < 38_000_000 * 0.005, `${cus} CUs é meio por cento do teto`);
+});
+
+test('atirar antes do cruzamento: a única forma de ganhar uma de juro', () => {
+    // Medido em 2026-09-28: a posição 0x4015e52c ficou a 0,0000024% de liquidar
+    // por mais de dois minutos e foi levada no bloco EXATO em que cruzou. O bot lê
+    // o estado depois do bloco minerado, então quando ele vê "liquidável" já foi.
+    const base = { modoProva: true, aceitaPrejuizo: true };
+
+    // Dentro da janela: manda.
+    const perto = atirarAntesDoCruzamento({ ...base, blocosAteCruzar: 1.4 });
+    assert.equal(perto.atira, true);
+    assert.match(perto.porque, /mando AGORA/);
+    assert.match(perto.porque, /o gás é perdido/, 'o preço tem de sair escrito');
+
+    // Longe: não manda.
+    assert.equal(atirarAntesDoCruzamento({ ...base, blocosAteCruzar: 50 }).atira, false);
+
+    // "Não sei" NÃO é "está perto" — é o defeito que este projeto mais comete.
+    const naoSei = atirarAntesDoCruzamento({ ...base, blocosAteCruzar: null });
+    assert.equal(naoSei.atira, false);
+    assert.match(naoSei.porque, /"não sei" não é "está perto"/);
+
+    // Sem modo prova a chave é inerte: é lá que mora a trava de um tiro só.
+    assert.equal(atirarAntesDoCruzamento({ ...base, modoProva: false, blocosAteCruzar: 1 }).atira, false);
+    // E sem ela ter aceitado pagar por um tiro que pode reverter, não sai.
+    assert.equal(atirarAntesDoCruzamento({ ...base, aceitaPrejuizo: false, blocosAteCruzar: 1 }).atira, false);
+
+    // Projeção inválida não vira tiro.
+    for (const b of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        assert.equal(atirarAntesDoCruzamento({ ...base, blocosAteCruzar: b }).atira, false, `blocos ${b}`);
+    }
+    // Janela zero não pode virar "atira sempre".
+    assert.equal(atirarAntesDoCruzamento({ ...base, blocosAteCruzar: 0, janelaDeBlocos: 0 }).atira, false);
+});
+
+test('o caso real inteiro: da leitura crua até a decisão de atirar', () => {
+    // As três amostras de 4 segundos que a amostragem rápida agora consegue tirar,
+    // com os números crus lidos na Base.
+    const cru = (n: string) => new Decimal(n);
+    const b = blocosAteCruzar([
+        { em: 0,    saude: cru('1000000002834062669') },
+        { em: 4000, saude: cru('1000000002023820565') },
+        { em: 8000, saude: cru('1000000001213578466') },
+    ], 2000);
+    assert.ok(b !== null);
+    // E com a janela de 2 blocos que é o padrão, isso vira tiro.
+    const d = atirarAntesDoCruzamento({
+        blocosAteCruzar: b!.blocos, modoProva: true, aceitaPrejuizo: true, janelaDeBlocos: 4,
+    });
+    assert.equal(d.atira, true, `${b!.blocos} blocos: ${d.porque}`);
 });

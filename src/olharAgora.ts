@@ -69,9 +69,12 @@ function sementes(pasta: string): string[] {
 
 /** Varre a Base atras de quem esta perto de cair. Declara a cobertura. */
 async function varrer(topo: number, ateQuedaPct: number, semente: string[]): Promise<
-    { alvos: Alvo[]; lidos: number; daJanela: number; daMemoria: number; blocos: number }> {
+    { alvos: Alvo[]; lidos: number; daJanela: number; daMemoria: number; blocos: number;
+      janelas: number; janelasQueFalharam: number }> {
     // O RPC publico recusa eth_getLogs acima de 2.000 blocos. Medido.
     const JANELA = 2_000, QUANTAS = Number(process.env.OLHO_JANELAS ?? '160');
+    // Contadas, nao engolidas: uma varredura que falhou inteira dizia 100%.
+    let falharam = 0;
     const vistos = new Set<string>();
     for (let i = 0; i < QUANTAS; i++) {
         const ate = topo - i * JANELA;
@@ -81,7 +84,7 @@ async function varrer(topo: number, ateQuedaPct: number, semente: string[]): Pro
                 topics: [TOPIC_BORROW],
             }]);
             for (const d of devedoresDosEventos(logs)) vistos.add(d.toLowerCase());
-        } catch { /* declarado na cobertura abaixo */ }
+        } catch { falharam++; }
         if (i % 40 === 39) process.stderr.write(`.${vistos.size}`);
         await dormir(150);
     }
@@ -91,7 +94,8 @@ async function varrer(topo: number, ateQuedaPct: number, semente: string[]): Pro
     for (const d of semente) vistos.add(d.toLowerCase());
     const lista = [...vistos];
     const { alvos, lidos } = await lerContas(lista, ateQuedaPct);
-    return { alvos, lidos, daJanela, daMemoria: lista.length - daJanela, blocos: JANELA * QUANTAS };
+    return { alvos, lidos, daJanela, daMemoria: lista.length - daJanela, blocos: JANELA * QUANTAS,
+        janelas: QUANTAS, janelasQueFalharam: falharam };
 }
 
 async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos: Alvo[]; lidos: number }> {
@@ -132,8 +136,10 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
 
     const ATE = Number(process.env.OLHO_ATE_PCT ?? '5');
     let alvos: Alvo[], lidos: number, daJanela: number, daMemoria: number, blocos: number;
+    let janelas = 0, janelasQueFalharam = 0;
     if (varreu || antes === null) {
-        ({ alvos, lidos, daJanela, daMemoria, blocos } = await varrer(topo, ATE, sementes(dirname(ONDE))));
+        ({ alvos, lidos, daJanela, daMemoria, blocos, janelas, janelasQueFalharam } =
+            await varrer(topo, ATE, sementes(dirname(ONDE))));
     } else {
         // Releitura: a lista guardada AQUI mais tudo que outras leituras viram.
         const lista = [...new Set([...antes.alvos.map((a) => a.devedor.toLowerCase()), ...sementes(dirname(ONDE))])];
@@ -144,7 +150,8 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
     }
 
     const agora: Leitura = { em: Date.now(), alvos };
-    console.log(`\nbloco ${topo}  |  ${comoLerACobertura({ lidos, daJanela, daMemoria, blocos })}`);
+    console.log(`\nbloco ${topo}  |  ${comoLerACobertura({
+        lidos, daJanela, daMemoria, blocos, janelas, janelasQueFalharam })}`);
 
     // A MESMA politica do cacador, dos MESMOS nomes de ambiente. Passar cinco
     // campos dos nove fez esta ferramenta publicar "faixa do bot: até US$ 66,78"
@@ -195,9 +202,24 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
         console.log(`  para alcançar esse, o teto teria de ir de ${teto === null ? 'sem teto' : `US$ ${teto.toFixed(2)}`} para US$ ${f.lucroUsd.toFixed(2)}`);
     }
 
+    // A MEMORIA nao pode ser apagada pelo filtro de distancia. `varrer` le os
+    // semeados com o corte de OLHO_ATE_PCT, e depois so os sobreviventes eram
+    // gravados — no unico arquivo que `sementes()` tem para ler. Resultado: a
+    // baleia `0x67d0938f`, semeada justamente porque a janela de `Borrow` nao a
+    // enxerga, sumia da memoria na primeira vez que ficasse a 5,1%, e a proxima
+    // varredura voltava ao estado que a semente existe para evitar.
+    //
+    // Entao quem ja foi semeado continua guardado, mesmo fora do corte.
+    const jaConhecidos = new Set(sementes(dirname(ONDE)));
+    const guardar = [
+        ...vivos,
+        ...alvos.filter((a) => !vivos.includes(a) && jaConhecidos.has(a.devedor.toLowerCase())),
+    ];
     mkdirSync(dirname(ONDE), { recursive: true });
-    writeFileSync(ONDE, JSON.stringify({ em: agora.em, alvos: vivos.map((a) => ({
+    writeFileSync(ONDE, JSON.stringify({ em: agora.em, alvos: guardar.map((a) => ({
         devedor: a.devedor, queda: a.queda?.toString() ?? null, dividaUsd: a.dividaUsd.toString(), lucroUsd: a.lucroUsd.toString(),
     })) }, null, 1));
-    console.log(`\n${vivos.length} alvos guardados em ${ONDE}. Rode de novo para ver o quanto andaram.`);
+    console.log(`\n${guardar.length} alvos guardados em ${ONDE}`
+        + `${guardar.length > vivos.length ? ` (${guardar.length - vivos.length} fora do corte, mantidos porque já eram conhecidos)` : ''}`
+        + '. Rode de novo para ver o quanto andaram.');
 })().catch((e) => { console.error('ERRO:', e.message); process.exit(1); });

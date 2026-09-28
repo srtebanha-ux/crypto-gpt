@@ -318,3 +318,82 @@ export function valeArmar(
     if (postura === 'dormindo') return false;
     return armadoHaMs >= validadeMs;
 }
+
+/**
+ * ATIRAR ANTES DO CRUZAMENTO — a unica forma de ganhar uma liquidacao de juro.
+ *
+ * Isto existe por uma medicao de 2026-09-28, e e a resposta para "por que o bot
+ * nunca atira".
+ *
+ * A posicao `0x4015e52c` (divida US$ 112, lucro US$ 2,17 — dentro da faixa dela)
+ * foi lida na Base, bloco por bloco, antes de ser liquidada:
+ *
+ *     -60 blocos (120s): saude 1.000000023644295459
+ *     -30 blocos  (60s): saude 1.000000011592022699
+ *     -10 blocos  (20s): saude 1.000000003629135045
+ *      -2 blocos   (4s): saude 1.000000000403336371
+ *      bloco 0:          LIQUIDADA por outro
+ *
+ * Ela ficou a dois milionesimos de por cento de liquidar, por mais de dois
+ * minutos, descendo sozinha por juro a 4,0e-10 por bloco — taxa constante,
+ * conferida em 60 segundos e em 4 segundos com 1% de diferenca.
+ *
+ * O bot le o estado DEPOIS do bloco minerado. O bloco em que a saude cruza 1 e o
+ * MESMO bloco em que a transacao do vencedor executa. Entao no instante em que o
+ * bot le "liquidavel", a posicao ja foi. Isso nao e lentidao: reagir nao alcanca,
+ * porque a informacao nao existe antes do evento.
+ *
+ * Das 51 liquidacoes de 9,5 dias, 32 foram assim. As 11 que ficaram disponiveis
+ * por um bloco ou mais eram poeira de US$ 0,20 a US$ 0,31: quem espera para
+ * reagir so pega o que ninguem quis.
+ *
+ * O que ALCANCA: mandar a transacao antes, mirando o bloco do cruzamento. Para
+ * alvos de juro isso e aritmetica, nao adivinhacao de preco — a taxa e constante e
+ * medivel em quatro segundos.
+ *
+ * O PRECO, dito em voz alta: se o tiro chegar antes do cruzamento, a Aave recusa e
+ * o gas e perdido. E por isso que isto so vale no modo prova, que tem trava de
+ * nonce — UM tiro — e so quando ela ligou `CACA_ACEITA_PREJUIZO`. Ela pediu
+ * assim, em palavras: "eu quero que ele atire o mais rapido possivel a qualquer
+ * custo".
+ */
+export function atirarAntesDoCruzamento(entrada: {
+    /** De `blocosAteCruzar`. `null` quer dizer "nao sei", e nao "longe". */
+    blocosAteCruzar: number | null;
+    /** So no modo prova: e ele que tem a trava de nonce. */
+    modoProva: boolean;
+    /** E so quando ela aceitou pagar por um tiro que pode reverter. */
+    aceitaPrejuizo: boolean;
+    /** Quantos blocos antes do cruzamento vale mandar. */
+    janelaDeBlocos?: number;
+}): { atira: boolean; porque: string } {
+    const janela = entrada.janelaDeBlocos ?? 2;
+    if (!entrada.modoProva) {
+        return { atira: false, porque: 'só no modo prova: é ele que tem a trava de nonce de um tiro só' };
+    }
+    if (!entrada.aceitaPrejuizo) {
+        return {
+            atira: false,
+            porque: 'CACA_ACEITA_PREJUIZO não está ligado, e um tiro antes do cruzamento pode reverter',
+        };
+    }
+    if (entrada.blocosAteCruzar === null) {
+        return { atira: false, porque: 'não sei quando esta posição cruza — e "não sei" não é "está perto"' };
+    }
+    if (!Number.isFinite(entrada.blocosAteCruzar) || entrada.blocosAteCruzar < 0) {
+        return { atira: false, porque: `projeção inválida (${entrada.blocosAteCruzar} blocos)` };
+    }
+    if (janela <= 0) return { atira: false, porque: `janela de ${janela} blocos não deixa atirar nunca` };
+    if (entrada.blocosAteCruzar > janela) {
+        return {
+            atira: false,
+            porque: `cruza em ${entrada.blocosAteCruzar.toFixed(1)} blocos, e eu mando com ${janela} de antecedência`,
+        };
+    }
+    return {
+        atira: true,
+        porque: `cruza em ${entrada.blocosAteCruzar.toFixed(1)} blocos (${
+            (entrada.blocosAteCruzar * 2).toFixed(0)}s): mando AGORA para chegar no bloco do cruzamento. `
+            + 'Se eu chegar antes, a Aave recusa e o gás é perdido — é o preço combinado',
+    };
+}

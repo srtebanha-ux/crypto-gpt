@@ -300,7 +300,20 @@ export interface PlacarDasPerdidas {
  * errado ele responde a pergunta de outro bot. Quem chama passa o piso de
  * verdade, tirado da faixa que o bot atira hoje.
  */
-export function montarPlacar(perdidas: Perdida[], pisoDeLucroUsd = new Decimal(20)): PlacarDasPerdidas {
+/**
+ * O piso aceita `null`, e `null` quer dizer SEM PISO — nao piso zero.
+ *
+ * A diferenca custou o placar mentir sobre o proprio tiro. No modo prova o bot
+ * atira em qualquer lucro bruto acima de zero, e `lucroEstimado` e LIQUIDO do
+ * gas: um alvo de poeira que o bot atiraria tem lucro liquido negativo. Com piso
+ * zero, `lucroUsd.lessThan(0)` descartava exatamente a liquidacao que o bot
+ * queria — e `oQueIssoQuerDizer` imprimia "nao teve" sobre ela. Medido em
+ * 2026-09-28, e e a falha que o cabecalho desta funcao existe para evitar.
+ */
+export function montarPlacar(
+    perdidas: Perdida[],
+    pisoDeLucroUsd: Decimal | null = new Decimal(20),
+): PlacarDasPerdidas {
     const porCobertura: Record<Cobertura, number> = { brasa: 0, quente: 0, 'na lista': 0, 'nem sabia': 0 };
     const valiam: Perdida[] = [];
     let soma = new Decimal(0);
@@ -308,7 +321,7 @@ export function montarPlacar(perdidas: Perdida[], pisoDeLucroUsd = new Decimal(2
     for (const p of perdidas) {
         if (p.lucroUsd === null) continue;
         comCotacao += 1;
-        if (p.lucroUsd.lessThan(pisoDeLucroUsd)) continue;
+        if (pisoDeLucroUsd !== null && p.lucroUsd.lessThan(pisoDeLucroUsd)) continue;
         valiam.push(p);
         soma = soma.plus(p.lucroUsd);
         porCobertura[p.cobertura] += 1;

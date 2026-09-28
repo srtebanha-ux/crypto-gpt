@@ -155,6 +155,18 @@ export interface Cobertura {
     daMemoria: number;
     /** Tamanho da janela varrida, em blocos. Zero quando nao varreu. */
     blocos: number;
+    /**
+     * Quantas janelas de `eth_getLogs` falharam, e quantas eram.
+     *
+     * Sem estes dois campos a linha dizia "li 24 de 24 endereços (100.0%): 0 que
+     * pediram emprestado nos últimos 320000 blocos (~7.4 dias)" com TODAS as
+     * janelas falhadas — uma varredura que nao aconteceu, publicada como censo
+     * completo de 7,4 dias. A porcentagem e `lidos / (daJanela + daMemoria)`, e
+     * perder janelas encolhe o denominador: o 100% fica intacto justamente quando
+     * a medicao morreu.
+     */
+    janelasQueFalharam?: number;
+    janelas?: number;
     /** Segundos por bloco da rede, para virar dias. Base: 2s. */
     segundosPorBloco?: number;
 }
@@ -181,15 +193,27 @@ export function comoLerACobertura(c: Cobertura): string {
     const total = c.daJanela + c.daMemoria;
     const pct = total === 0 ? 100 : (c.lidos / total) * 100;
     const dias = c.blocos === 0 ? null : (c.blocos * (c.segundosPorBloco ?? 2)) / 86_400;
+    const falharam = c.janelasQueFalharam ?? 0;
     const partes = [
         `li ${c.lidos} de ${total} endereços (${pct.toFixed(1)}%)`,
         dias === null
             ? `${c.daMemoria} guardados de leituras anteriores`
             : `${c.daJanela} que pediram emprestado nos últimos ${c.blocos} blocos (~${dias.toFixed(1)} dias)`
+                + (falharam > 0
+                    ? `, mas só ${(c.janelas ?? 0) - falharam} das ${c.janelas} janelas deram certo`
+                    : '')
                 + (c.daMemoria > 0 ? ` + ${c.daMemoria} guardados de leituras anteriores` : ''),
     ];
     const avisos: string[] = [];
     if (pct < 99) avisos.push('COBERTURA BAIXA: não conclua daqui');
+    if (falharam > 0) {
+        const total = c.janelas ?? 0;
+        avisos.push(total > 0 && falharam >= total
+            ? `TODAS as ${total} janelas falharam: esta varredura NÃO aconteceu. `
+              + 'O que está aqui vem só da memória'
+            : `${falharam}${total > 0 ? ` de ${total}` : ''} janelas falharam: `
+              + 'a lista está incompleta e não sei de quanto');
+    }
     // O aviso vale SEMPRE que houve varredura, inclusive a 100%: foi justamente
     // com 100% que a lista perdeu a baleia.
     if (c.blocos > 0) avisos.push('este total é quem eu ACHEI, não quem existe: empréstimo mais antigo que a janela só entra se já estiver guardado');

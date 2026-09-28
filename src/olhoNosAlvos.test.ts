@@ -171,3 +171,34 @@ test('a cobertura diz de onde veio o universo, e avisa até a 100%', () => {
     // Cobertura baixa continua gritando.
     assert.match(comoLerACobertura({ lidos: 86, daJanela: 100, daMemoria: 0, blocos: 2000 }), /COBERTURA BAIXA/);
 });
+
+test('janela que falhou não pode virar 100% de cobertura', () => {
+    // Antes: com TODAS as janelas falhadas a linha dizia "li 24 de 24 endereços
+    // (100.0%): 0 que pediram emprestado nos últimos 320000 blocos (~7.4 dias)" —
+    // uma varredura que não aconteceu, publicada como censo completo. A
+    // porcentagem é lidos/(daJanela+daMemoria), e perder janelas encolhe o
+    // denominador: o 100% fica intacto justamente quando a medição morreu.
+    const tudoFalhou = comoLerACobertura({
+        lidos: 24, daJanela: 0, daMemoria: 24, blocos: 320_000,
+        janelas: 160, janelasQueFalharam: 160,
+    });
+    assert.match(tudoFalhou, /TODAS as 160 janelas falharam/);
+    assert.match(tudoFalhou, /esta varredura NÃO aconteceu/);
+
+    // Falha parcial: diz quantas, e não finge saber o tamanho do buraco.
+    const parcial = comoLerACobertura({
+        lidos: 3000, daJanela: 3000, daMemoria: 0, blocos: 320_000,
+        janelas: 160, janelasQueFalharam: 12,
+    });
+    assert.match(parcial, /12 de 160 janelas falharam/);
+    assert.match(parcial, /não sei de quanto/);
+    assert.match(parcial, /só 148 das 160 janelas deram certo/);
+
+    // Sem falha nenhuma, a linha continua como era.
+    const limpa = comoLerACobertura({
+        lidos: 3290, daJanela: 3290, daMemoria: 0, blocos: 320_000,
+        janelas: 160, janelasQueFalharam: 0,
+    });
+    assert.doesNotMatch(limpa, /falharam/);
+    assert.match(limpa, /últimos 320000 blocos \(~7\.4 dias\)/);
+});

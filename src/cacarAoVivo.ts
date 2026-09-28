@@ -6,11 +6,11 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
-import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
+import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
-import { registrar as registrarDeriva, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
+import { registrar as registrarDeriva, blocosAteCruzar, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDeQualquerFonte, quedaDoMercado } from './precoDeMercado';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
@@ -109,8 +109,23 @@ export interface Camadas {
     brasa: string[];
     quentes: string[];
     margemDaBrasa: Decimal;
-    /** A menor distancia ate liquidar de TODAS: quem cai primeiro no mundo. */
+    /**
+     * A menor distancia ate liquidar entre os que PASSAM o piso de tamanho.
+     *
+     * E ela que decide o ritmo, de proposito: acelerar o bot inteiro por um alvo
+     * de 22 centavos seria trocar um furo por outro.
+     */
     menorMargem: Decimal | null;
+    /**
+     * A menor distancia da BRASA INTEIRA, contando os alvos de PROVA.
+     *
+     * Existe porque o log publicava `maisPerto` a partir de `menorMargem`, que
+     * ignora os de prova — e no modo prova o bot ATIRA neles. Em 2026-09-28 o log
+     * dizia `maisPerto: 1.4260%` enquanto uma posicao de poeira estava a 0,98%, e
+     * a dona do bot le esse numero para saber o quanto falta. Numero certo para
+     * uma pergunta, publicado como resposta de outra.
+     */
+    menorMargemDaBrasa: Decimal | null;
     /** Quantas foram descartadas por serem pequenas demais para pagar o gas. */
     poEmDemasia: number;
     /** Quantas vagas da brasa foram para alvos de PROVA (abaixo do piso). */
@@ -204,8 +219,12 @@ export function repartirPorFragilidade(
         brasa: [...brasa.map((m) => m.devedor), ...deProva.map((m) => m.devedor)],
         quentes: quentes.map((m) => m.devedor),
         margemDaBrasa,
-        // As reguas continuam saindo dos alvos de VERDADE.
+        // As reguas do RITMO continuam saindo dos alvos de verdade.
         menorMargem: ordenados.length > 0 ? ordenados[0].queda : null,
+        // E o que o log publica como "mais perto" sai da brasa inteira, porque e
+        // nela que o bot atira — inclusive nos de prova.
+        menorMargemDaBrasa: [...brasa, ...deProva]
+            .reduce<Decimal | null>((menor, m) => (menor === null || m.queda.lessThan(menor) ? m.queda : menor), null),
         poEmDemasia: medidos.length - cabem.length,
         valemUmTiro: cabem.length,
         vagasDeProva: deProva.length,
@@ -1119,6 +1138,11 @@ async function principal(): Promise<'parar' | void> {
     let tentouArmarEm = 0;
     /** Impede armar em cima de armar: `void armar()` nao espera o anterior. */
     let armando = false;
+    // Base faz um bloco a cada 2 segundos. E daqui que sai "em quantos blocos".
+    const MS_POR_BLOCO = Number(process.env.CACA_MS_POR_BLOCO ?? '2000');
+    // Com quantos blocos de antecedencia mandar. Dois blocos sao 4 segundos: o
+    // tempo de a transacao entrar. Mais que isso aumenta a chance de reverter.
+    const JANELA_DE_BLOCOS = Number(process.env.CACA_JANELA_DE_BLOCOS ?? '2');
     const QUANTOS_ARMAR = Number(process.env.CACA_QUANTOS_ARMAR ?? '8');
     const VALIDADE_ARMADO_MS = Number(process.env.CACA_VALIDADE_ARMADO_MS ?? '5000');
 
@@ -1337,6 +1361,21 @@ async function principal(): Promise<'parar' | void> {
             // Sem isto ela nao tem como saber, olhando o log, se o bot vai ou nao
             // atirar quando o alvo de poeira aparecer — e a medicao de 2026-09-28
             // diz que poeira e o unico alvo que ele consegue ler a tempo.
+            // O que decide se ele atira ANTES do cruzamento, que e a unica forma de
+            // ganhar uma liquidacao de juro. Sem esta linha ela nao tem como saber,
+            // olhando o log, se o bot vai esperar (e chegar depois, sempre) ou
+            // mandar antes.
+            passos.antesDoCruzamento = (() => {
+                const d = atirarAntesDoCruzamento({
+                    blocosAteCruzar: 1, modoProva: provaAgora().armado,
+                    aceitaPrejuizo: POLITICA.aceitaPrejuizo, janelaDeBlocos: JANELA_DE_BLOCOS,
+                });
+                return d.atira
+                    ? `LIGADO: mando com até ${JANELA_DE_BLOCOS} blocos de antecedência, mirando o bloco do `
+                      + 'cruzamento. Se eu chegar antes, a Aave recusa e o gás é perdido'
+                    : `desligado — ${d.porque}. Esperando a saúde cruzar 1 é chegar depois: o bloco do `
+                      + 'cruzamento é o mesmo em que o vencedor executa (medido em 32 de 43 liquidações)';
+            })();
             passos.aceitaPrejuizo = POLITICA.aceitaPrejuizo
                 ? 'LIGADO: atira mesmo dando prejuízo. É o único alvo legível a tempo (medido em 2026-09-28)'
                 : 'desligado: só atira com lucro acima de zero — e nenhum alvo legível a tempo tem isso';
@@ -1732,8 +1771,15 @@ async function principal(): Promise<'parar' | void> {
         // Sem faixa (sem cotacao, sem saldo) o piso volta ao default: nesse caso
         // nao se sabe o que o bot atiraria, e inventar zero encheria o placar de
         // poeira com cara de oportunidade perdida.
-        const pisoDoPlacar = faixaAgora === null ? new Decimal(20) : faixaAgora.de;
-        const placar = montarPlacar(perdidas, pisoDoPlacar ?? new Decimal(0));
+        // No modo prova NAO existe piso, e `null` aqui quer dizer isso — nao zero.
+        // O bot atira em qualquer lucro bruto acima de zero, e o lucro do placar e
+        // LIQUIDO do gas: com piso zero, a liquidacao de poeira que o bot atiraria
+        // era descartada e o placar dizia "nao teve" sobre ela.
+        const semPisoNenhum = provaAgora().armado;
+        const pisoDoPlacar = semPisoNenhum
+            ? null
+            : faixaAgora === null ? new Decimal(20) : (faixaAgora.de ?? new Decimal(0));
+        const placar = montarPlacar(perdidas, pisoDoPlacar);
         desdeOBoot.blocos += ate - de + 1;
         desdeOBoot.aconteceram += placar.total;
         desdeOBoot.valiamAPena += placar.valiam.length;
@@ -1752,9 +1798,10 @@ async function principal(): Promise<'parar' | void> {
                     : saldoDeGasWei === 0n ? 'a conta_bot está sem gás'
                     : precoDoEth() === null ? 'sem cotação do ETH'
                     : 'algum freio barra qualquer prêmio'}`
-                : pisoDoPlacar === null
-                    ? 'qualquer lucro acima de zero (modo prova)'
-                    : `US$ ${pisoDoPlacar.toFixed(2)}`,
+                : semPisoNenhum
+                    ? 'SEM PISO NENHUM (modo prova): conto tudo, inclusive o que dá prejuízo, '
+                      + 'porque é nisso que ele atira'
+                    : `US$ ${(pisoDoPlacar ?? new Decimal(0)).toFixed(2)}`,
             aconteceram: placar.total,
             valiamAPena: placar.valiam.length,
             // O acumulado e o que responde a pergunta. Uma hora em branco tem
@@ -1910,6 +1957,11 @@ async function principal(): Promise<'parar' | void> {
             // A brasa e conferida em TODO ciclo, sem gatilho nenhum: ela veio
             // nas vagas que sobravam do mesmo `eth_call`.
             const caidos: string[] = [];
+            // Quem ainda NAO cruzou, mas vai cruzar dentro da janela. Estes sao
+            // atirados ANTES, porque o bloco em que a saude cruza 1 e o mesmo em
+            // que a transacao do vencedor executa: quem espera para reagir chega
+            // sempre depois. Medido em 2026-09-28, em 32 de 43 liquidacoes.
+            const vaoCruzar = new Set<string>();
             const inicioDaBrasa = moedas.length + 2;
             for (let i = 0; i < brasa.length; i++) {
                 const dadoConta = resp[inicioDaBrasa + i];
@@ -1918,7 +1970,26 @@ async function principal(): Promise<'parar' | void> {
                     const saude = decodificarContaDoUsuario(dadoConta).saude;
                     registrarDeriva(historicoDeSaude, brasa[i]!, saude, Date.now());
                     const queda = quedaAteLiquidar(saude);
-                    if (queda !== null && queda.isZero()) caidos.push(brasa[i]);
+                    if (queda !== null && queda.isZero()) { caidos.push(brasa[i]); continue; }
+                    const b = blocosAteCruzar(historicoDeSaude.get(brasa[i]!.toLowerCase()) ?? [], MS_POR_BLOCO);
+                    const antes = atirarAntesDoCruzamento({
+                        blocosAteCruzar: b?.blocos ?? null,
+                        modoProva: provaAgora().armado,
+                        aceitaPrejuizo: POLITICA.aceitaPrejuizo,
+                        janelaDeBlocos: JANELA_DE_BLOCOS,
+                    });
+                    if (antes.atira) {
+                        vaoCruzar.add(brasa[i]!.toLowerCase());
+                        caidos.push(brasa[i]);
+                        log.warn('[ANTES DO CRUZAMENTO] Mandando SEM a posição estar liquidável ainda.', {
+                            devedor: brasa[i],
+                            faltaCair: `${queda?.toFixed(8) ?? '—'}%`,
+                            cruzaEm: `${b!.blocos.toFixed(1)} blocos (${(b!.blocos * 2).toFixed(0)}s)`,
+                            juroAoAno: `${b!.taxaAnual.mul(100).toFixed(2)}%`,
+                            porque: antes.porque,
+                            oQuePodeDarErrado: 'se eu chegar antes do cruzamento, a Aave recusa e o gás é perdido',
+                        });
+                    }
                 } catch {}
             }
 
@@ -2074,9 +2145,19 @@ async function principal(): Promise<'parar' | void> {
                                 ? `${medidos.length} (sem cotação do ETH: não filtrei por tamanho)`
                                 : `${camadas.valemUmTiro} de ${medidos.length} — ${camadas.poEmDemasia} devem menos de US$ ${pisoDeDivida.toFixed(2)} e não pagariam o próprio gás`,
                             gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
-                            maisPerto: camadas.menorMargem === null
+                            // `maisPerto` sai da BRASA INTEIRA, porque e nela que
+                            // o bot atira. Sair de `menorMargem` — que ignora os
+                            // alvos de prova — fez o log dizer 1,4260% enquanto
+                            // havia poeira a 0,98%, e e este numero que ela le para
+                            // saber o quanto falta.
+                            maisPerto: camadas.menorMargemDaBrasa === null
                                 ? 'ninguém'
-                                : `precisa cair ${camadas.menorMargem.toFixed(4)}%`,
+                                : `precisa cair ${camadas.menorMargemDaBrasa.toFixed(4)}%`
+                                  + (camadas.menorMargem !== null
+                                      && !camadas.menorMargem.equals(camadas.menorMargemDaBrasa)
+                                      ? ` (o mais perto que passa o piso de tamanho está a ${
+                                          camadas.menorMargem.toFixed(4)}%)`
+                                      : ''),
                             // A pergunta que decide se vale esperar o mercado ou
                             // ir procurar caça em outro lugar. `menorMargem`
                             // sozinha nao dizia se atras do primeiro vem um ou
@@ -2201,6 +2282,24 @@ async function principal(): Promise<'parar' | void> {
                     // se pergunta se houve medicao.
                     if (leitura.desfecho === 'mediu' && leitura.lucroCru !== undefined) {
                         medicoes.push({ contrato, lucroCru: leitura.lucroCru });
+                    } else if (vaoCruzar.has(alvo.devedor.toLowerCase())) {
+                        // Alvo escolhido para atirar ANTES do cruzamento: a medicao
+                        // TEM de reverter, porque a Aave recusa uma posicao que
+                        // ainda esta saudavel. Barrar aqui seria exigir que o alvo
+                        // ja estivesse liquidavel — que e exatamente a espera que
+                        // faz o bot chegar sempre depois.
+                        //
+                        // So vale para quem esta neste conjunto. Aceitar qualquer
+                        // reversao viraria tiro no escuro em cima de configuracao
+                        // quebrada.
+                        log.warn('[ANTES DO CRUZAMENTO] A medição reverteu, como tinha de reverter.', {
+                            devedor: alvo.devedor,
+                            contrato: contrato.nome,
+                            desfecho: leitura.desfecho,
+                            erro: leitura.erro ?? '—',
+                            oQueIssoQuerDizer: 'a posição ainda não cruzou; mando mirando o bloco em que ela cruza',
+                        });
+                        medicoes.push({ contrato, lucroCru: 0n });
                     }
                 }
 
