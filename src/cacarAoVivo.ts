@@ -7,7 +7,7 @@ import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeE
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, blocosAteCruzar, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
@@ -1521,7 +1521,20 @@ async function principal(): Promise<'parar' | void> {
             .sort((a, b) => a.queda.comparedTo(b.queda))
             .slice(0, Math.max(0, Math.floor(TETO)))
             .map((m) => m.devedor);
-        if (aResolver.length === 0) return;
+        if (aResolver.length === 0) {
+            // Silencio NAO e resposta. Sem esta linha, "nada novo para resolver"
+            // fica indistinguivel de "resolverPares nem rodou" ou "estourou" —
+            // e foi exatamente o que aconteceu no log das 18:18, onde a linha
+            // [PARES] simplesmente desapareceu e eu nao tinha como dizer se a
+            // memoria estava funcionando ou se a funcao havia morrido.
+            const dentro = medidos.filter((m) => m.queda.lessThanOrEqualTo(ATE_QUEDA)).length;
+            log.info('[PARES] Nada novo para descobrir.', {
+                dentroDoCorte: `${dentro} com queda até ${ATE_QUEDA}%, e o par de todos já é conhecido`,
+                foraDoCorte: `${medidos.length - dentro} acima de ${ATE_QUEDA}% e NÃO foram perguntados`,
+                porQue: 'a memória dos pares persiste entre varreduras — é isto que prova que ela persiste',
+            });
+            return;
+        }
         // As TRÊS contas separadas, porque elas respondem coisas diferentes.
         //
         // A primeira versão publicou `jaSabia: medidos.length - aResolver.length`
@@ -1677,6 +1690,17 @@ async function principal(): Promise<'parar' | void> {
             // Sem piso NAO e piso zero. O modo prova apaga o piso de lucro, e
             // dizer "US$ 0,00. Abaixo nao paga o gas" era um numero inventado
             // pela propria busca ao lado de uma frase que o contradiz.
+            // OS BOTOES, no log.
+            //
+            // Sem isto a REGRA 0 tem um buraco: o terminal roda `faixaQueAtira`
+            // com os padroes do ambiente DAQUI, e o Railway roda com os valores
+            // dela. Em 2026-09-28 isso deu `inteiroDe` de US$ 34,63 em producao
+            // contra US$ 49,27 no terminal, com o MESMO saldo, MESMO baseFee e
+            // MESMO preco — 30% de diferenca que eu nao tinha como explicar
+            // porque o log nao dizia com que botoes ele decidiu.
+            //
+            // Agora diz. Quem for conferir daqui roda com os mesmos numeros.
+            passos.osBotoes = comoLerAPolitica(POLITICA);
             passos.atiroNaFaixaDe = faixa === null
                 ? 'NENHUM prêmio — algum freio barra tudo'
                 : (() => {

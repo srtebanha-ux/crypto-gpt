@@ -742,3 +742,58 @@ quebrou `jaSabia` (achado no log dela), e agora a monotonicidade de
 
 O padrão é sempre o mesmo: **mudei o mecanismo e não fui reler o que o lia.** É
 a regra 3 deste arquivo, e ela continua me pegando.
+
+## 2026-09-28, 18:03: o buraco da REGRA 0 era o log não dizer com que BOTÕES decidiu
+
+O conserto do `inteiroDe` funcionou em produção — mas com um número diferente
+do meu:
+
+    terminal   inteiroDe US$ 49,27
+    produção   inteiroDe US$ 34,63
+
+Mesmo saldo, mesmo baseFee, mesmo preço do ETH. 30% de diferença que eu não
+tinha como explicar. Medido, varrendo um botão por vez:
+
+    risco máximo 0.6 (padrão daqui) ...... US$ 49,27
+    risco máximo 0.8 ..................... US$ 34,63   <- o Railway dela
+    risco máximo 1.0 ..................... US$ 27,79
+    fração da gorjeta 0.15 ............... US$ 49,27   (não muda nada)
+
+**O Railway dela tem `CACA_RISCO_MAXIMO=0.8`, e o terminal daqui usa 0.6.** O
+código estava certo; o que faltava era o log DIZER com que botões ele decidiu.
+
+Sem isso a REGRA 0 tem um buraco: a ferramenta roda as funções reais contra os
+dados reais, mas com a CONFIGURAÇÃO daqui. Duas máquinas, dois conjuntos de
+botões, e nenhuma linha ligando um ao outro.
+
+Agora o `[EM SECO]` imprime `osBotoes` com `comoLerAPolitica`:
+
+    gás 1200000 | gorjeta 0.4 do lucro | risco 0.25→0.6 do saldo | margem 2x
+    | mordida máx 0.5 | amordaçado não | aceita prejuízo não
+
+Quem conferir daqui roda com os mesmos números. É a diferença entre "previ e
+bateu" e "previ, não bateu, e não sei por quê".
+
+E `CACA_FRACAO_GORJETA` não mexe no `inteiroDe` **no modo kamikaze**, e isso é
+consistente: ali a gorjeta desejada é o teto da carteira, não uma fração do
+prêmio. A fração volta a mandar fora do modo prova.
+
+### O `[PARES]` ficou MUDO, e silêncio não é resposta
+
+Na segunda varredura completa (18:18) a linha `[PARES]` simplesmente não saiu.
+A causa é boa — `aResolver` estava vazio porque os 124 já eram conhecidos, o
+que **prova que a memória dos pares persiste entre varreduras**. Mas a ausência
+da linha é indistinguível de "a função não rodou" ou "estourou".
+
+Eu tinha feito a previsão de que `jaSabia` subiria de `0 de 124` para perto de
+124. Ela falhou na forma: a linha desapareceu. O mecanismo estava certo, o meu
+palpite sobre a forma do log estava errado, e a lição é a mesma — **o log tem de
+dizer que não havia nada, em vez de não dizer nada.**
+
+### E o `seOMercadoCair` sem o 2% e o 3% era corrupção do log, não do código
+
+`comoLerAsQuedas` produz a string inteira — rodado. E o `[EM SECO]` da mesma
+linha do log tinha tudo. O `[BLOCO]` chegou cortado, junto com "suborno sonoro"
+(era dinâmico), "cubo no máximo" (cubro), "2 encontros encontrados" (endereços) e
+o censo repetido três vezes. Antes de caçar o defeito, vale conferir se o log
+chegou inteiro.
