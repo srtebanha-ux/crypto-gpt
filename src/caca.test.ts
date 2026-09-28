@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
-import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, oQueUmaQuedaRenderia, comoLerAsQuedas } from './cacarAoVivo';
+import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, oQueUmaQuedaRenderia, comoLerAsQuedas } from './cacarAoVivo';
 import { dividaMinimaQueVale, lucroEstimado, lucroDaCobertura, coberturaOtima, lucroMaximo } from './perdidas';
 import { custoDoTiroUsd, PISO_DA_GORJETA_WEI } from './prontidao';
 
@@ -849,4 +849,33 @@ test('degrau sem ninguém que valha não inventa um maior', () => {
     assert.equal(d!.quantosValem, 0);
     assert.equal(d!.maior, null);
     assert.equal(comoLerAsQuedas([d!]), '2%: 1 alcanço/0 valem (US$ 0)');
+});
+
+test('modo prova: o RITMO segue o alvo em que o bot atira, não o que passa o piso', () => {
+    // O log de 2026-09-28 dizia, nas suas duas linhas, coisas diferentes sobre
+    // a mesma pergunta:
+    //
+    //   [BLOCO]   maisPerto: precisa cair 0.0441% (o mais perto que passa o
+    //             piso de tamanho está a 1.4278%)
+    //   [POSTURA] maisFragilA: 1.4279%
+    //
+    // E era a segunda que mandava no ritmo — ou seja, a cadência do bot
+    // ignorava justamente o alvo que o modo prova existe para atirar. Terceira
+    // vez que o modo prova solta uma ponta da regra e esquece a gêmea.
+    const camadas = { menorMargem: new Decimal('1.4279'), menorMargemDaBrasa: new Decimal('0.0441') };
+    assert.equal(margemQueDecideORitmo(camadas, true)!.toFixed(4), '0.0441', 'prova armada: manda a brasa inteira');
+    assert.equal(margemQueDecideORitmo(camadas, false)!.toFixed(4), '1.4279', 'fora da prova: manda quem paga o gás');
+});
+
+test('brasa vazia no modo prova não vira "não há ninguém"', () => {
+    // O mesmo cuidado que `maisPerto` já toma: um orçamento de multicall curto
+    // esvazia a brasa, e cair para `null` publicaria ausência com um alvo a
+    // meio ponto de cair.
+    const camadas = { menorMargem: new Decimal('2.5'), menorMargemDaBrasa: null };
+    assert.equal(margemQueDecideORitmo(camadas, true)!.toFixed(1), '2.5');
+});
+
+test('sem alvo nenhum, as duas camadas nulas continuam nulas', () => {
+    assert.equal(margemQueDecideORitmo({ menorMargem: null, menorMargemDaBrasa: null }, true), null);
+    assert.equal(margemQueDecideORitmo({ menorMargem: null, menorMargemDaBrasa: null }, false), null);
 });

@@ -236,6 +236,39 @@ function vagesNaBrasaSegura(n: number): number {
     return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
 }
 
+/**
+ * A margem que decide o RITMO — e o numero que o log chama de `maisFragilA`.
+ *
+ * Quinta vez que a mesma regra aparece em mais de um lugar neste repositorio, e
+ * a terceira vez especificamente com o modo prova: ele soltava o portao do TIRO
+ * (`valeATentativa`), depois passou a soltar o filtro da SELECAO (as vagas de
+ * prova na brasa) — e continuava sem soltar o RITMO.
+ *
+ * `menorMargem` e a menor distancia entre os alvos que PASSAM o piso de
+ * tamanho. Fora do modo prova ela esta certa e a razao esta escrita em
+ * `repartirPorFragilidade`: acelerar o bot inteiro por um alvo de 22 centavos
+ * seria trocar um furo por outro.
+ *
+ * Com o modo prova ARMADO, porem, o bot atira nos de prova — e ai continuar
+ * medindo o ritmo pelos outros e prometer um tiro que a cadencia nao alcanca.
+ * Medido no log de 2026-09-28: `[BLOCO]` dizia `maisPerto: precisa cair
+ * 0.0441% (o mais perto que passa o piso de tamanho esta a 1.4278%)` enquanto
+ * `[POSTURA]` dizia `maisFragilA: 1.4279%`. Duas linhas do mesmo log, a mesma
+ * pergunta, respostas diferentes — e a que mandava no ritmo era a que ignorava
+ * o alvo em que o bot ia atirar.
+ *
+ * Entao: um lugar so, e o modo prova decide de qual camada sai.
+ */
+export function margemQueDecideORitmo(
+    camadas: Pick<Camadas, 'menorMargem' | 'menorMargemDaBrasa'>,
+    tiroDeProvaArmado: boolean,
+): Decimal | null {
+    if (!tiroDeProvaArmado) return camadas.menorMargem;
+    // Brasa vazia nao pode virar "nao ha ninguem": cai de volta no numero com
+    // piso, que e o mesmo cuidado que `maisPerto` ja toma duas telas acima.
+    return camadas.menorMargemDaBrasa ?? camadas.menorMargem;
+}
+
 /** Uma linha da tabela "o que uma queda de X% poria na mesa". */
 export interface Degrau {
     quedaPct: number;
@@ -1891,7 +1924,14 @@ async function principal(): Promise<'parar' | void> {
             log.info(`[POSTURA] ${posturaAnterior} → ${postura}`, {
                 mercadoCaiu: `${queda.toFixed(4)}%`,
                 feedEscreveEm: `${DESVIO_DE_ESCRITA.toFixed(2)}%`,
-                maisFragilA: menorMargem === null ? '—' : `${menorMargem.toFixed(4)}%`,
+                // Diz de QUAL camada saiu. As duas linhas do log respondiam
+                // "o mais frágil está a quanto?" com números diferentes, e
+                // nenhuma das duas dizia sobre qual conjunto estava falando.
+                maisFragilA: menorMargem === null
+                    ? '—'
+                    : `${menorMargem.toFixed(4)}%` + (provaAgora().armado
+                        ? ' (contando os alvos de prova, que é onde ele atira)'
+                        : ' (entre os que pagam o próprio gás)'),
                 proximaLeituraEm: `${ritmoDaPostura(postura, INTERVALO_MS)}ms`,
             });
             posturaAnterior = postura;
@@ -2133,7 +2173,9 @@ async function principal(): Promise<'parar' | void> {
                                 `cubro só a fatia ótima e deixo o resto`;
                         }
                         margemDaBrasa = camadas.margemDaBrasa;
-                        menorMargem = camadas.menorMargem;
+                        // No modo prova o ritmo tem de seguir o alvo em que o
+                        // bot ATIRA, e nao o que passa o piso de tamanho.
+                        menorMargem = margemQueDecideORitmo(camadas, provaAgora().armado);
                         // O ensaio exercita o CAMINHO, nao ganha dinheiro:
                         // se a brasa ficou vazia porque todo mundo esta abaixo
                         // do piso de tamanho, qualquer devedor nao-liquidavel
