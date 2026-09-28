@@ -218,6 +218,45 @@ export function lerRespostaDaAave(mensagem: string): LeituraDaResposta {
     };
 }
 
+/**
+ * A recusa foi "esta posicao AINDA NAO CRUZOU", e nao "minha configuracao quebrou"?
+ *
+ * Esta pergunta existe para o tiro ANTES do cruzamento. Ali a medicao TEM de
+ * reverter — a Aave recusa uma posicao saudavel, e e isso que se espera. Mas
+ * aceitar qualquer reversao como "e a esperada" manda dinheiro de verdade em cima
+ * de contrato mal configurado ou de falha de rede. A primeira versao daquela
+ * ramificacao fazia exatamente isso, contra o que o proprio comentario dela dizia.
+ *
+ * O repositorio ja tinha a medicao: `HealthFactorNotBelowThreshold()` viaja como
+ * `0x930bb771` na Aave nova e como o codigo `45` na antiga — conferido contra a
+ * Base, e esta escrito acima neste arquivo. Nao ha por que inventar de novo.
+ *
+ * LIMITE HONESTO, dito em voz alta: uma reversao OPACA ("execution reverted", sem
+ * motivo) nao pode ser distinguida de configuracao quebrada. Aqui ela conta como
+ * "ainda nao cruzou" por dois motivos, e so por eles: a leitura da brasa JA
+ * estabeleceu que a saude esta acima de 1 naquele instante, e o boot confere
+ * `cofre()` e `dono()` dos contratos. Se essas duas coisas deixarem de ser
+ * verdade, este `true` passa a ser um tiro no escuro.
+ */
+export function naoCruzouAinda(mensagem: string | undefined): boolean {
+    const m = (mensagem ?? '').trim();
+    // Falha de provedor nao e recusa da Aave: e a rede, e mandar aqui seria
+    // atirar sem ter medido nada.
+    if (m !== '' && ehLimiteDoProvedor(m)) return false;
+    if (m === '') return true;
+    const lida = lerRespostaDaAave(m);
+    if (lida.naoDeuParaTestar) return false;
+    if (lida.codigo !== null) {
+        // A recusa certa, nos dois dialetos.
+        if (lida.codigo === 'HealthFactorNotBelowThreshold()' || lida.codigo === '45') return true;
+        // Qualquer OUTRO erro identificado da Aave e um motivo diferente —
+        // garantia errada, reserva pausada, par de divida trocado. Nao e "espere".
+        return false;
+    }
+    // Sem codigo nenhum: opaca. Ver o LIMITE HONESTO acima.
+    return /revert/i.test(m);
+}
+
 /** Os dados de uma reserva para um usuário — o que ele deve e o que deu. */
 export function codificarUserReserveData(ativo: string, usuario: string): string {
     return (

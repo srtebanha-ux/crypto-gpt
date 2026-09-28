@@ -199,11 +199,13 @@ export function comoLerACobertura(c: Cobertura): string {
         dias === null
             ? `${c.daMemoria} guardados de leituras anteriores`
             : `${c.daJanela} que pediram emprestado nos últimos ${c.blocos} blocos (~${dias.toFixed(1)} dias)`
-                + (falharam > 0
+                + (falharam > 0 && (c.janelas ?? 0) > 0
                     ? `, mas só ${(c.janelas ?? 0) - falharam} das ${c.janelas} janelas deram certo`
-                    : '')
+                    : falharam > 0 ? `, com ${falharam} janelas falhadas` : '')
                 + (c.daMemoria > 0 ? ` + ${c.daMemoria} guardados de leituras anteriores` : ''),
     ];
+    // Os avisos vivem FORA do ramo que depende de `dias`: uma varredura que falhou
+    // inteira tem `blocos` zero, e era justamente nela que o aviso sumia.
     const avisos: string[] = [];
     if (pct < 99) avisos.push('COBERTURA BAIXA: não conclua daqui');
     if (falharam > 0) {

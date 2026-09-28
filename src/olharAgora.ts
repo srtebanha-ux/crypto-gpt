@@ -93,7 +93,19 @@ async function varrer(topo: number, ateQuedaPct: number, semente: string[]): Pro
     // janela nao acha continua sendo lido.
     for (const d of semente) vistos.add(d.toLowerCase());
     const lista = [...vistos];
-    const { alvos, lidos } = await lerContas(lista, ateQuedaPct);
+    // Os SEMEADOS sao lidos SEM o corte de distancia. `lerContas` so devolve quem
+    // esta dentro de `ateQuedaPct`, e o arquivo e reescrito so com o que voltou:
+    // a baleia semeada justamente porque a janela de `Borrow` nao a enxerga sumia
+    // da memoria na primeira vez que ficasse a 5,1%, e a varredura seguinte voltava
+    // ao estado que a semente existe para evitar. Filtrar depois nao resolvia,
+    // porque ela nunca chegava a estar na lista.
+    const conhecidos = new Set(semente.map((d) => d.toLowerCase()));
+    const novos = lista.filter((d) => !conhecidos.has(d));
+    const deSemente = lista.filter((d) => conhecidos.has(d));
+    const a = await lerContas(novos, ateQuedaPct);
+    const b = deSemente.length > 0 ? await lerContas(deSemente, 1e9) : { alvos: [], lidos: 0 };
+    const alvos = [...a.alvos, ...b.alvos];
+    const lidos = a.lidos + b.lidos;
     return { alvos, lidos, daJanela, daMemoria: lista.length - daJanela, blocos: JANELA * QUANTAS,
         janelas: QUANTAS, janelasQueFalharam: falharam };
 }
@@ -215,11 +227,12 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
         ...vivos,
         ...alvos.filter((a) => !vivos.includes(a) && jaConhecidos.has(a.devedor.toLowerCase())),
     ];
+    const foraDoCorte = guardar.length - vivos.length;
     mkdirSync(dirname(ONDE), { recursive: true });
     writeFileSync(ONDE, JSON.stringify({ em: agora.em, alvos: guardar.map((a) => ({
         devedor: a.devedor, queda: a.queda?.toString() ?? null, dividaUsd: a.dividaUsd.toString(), lucroUsd: a.lucroUsd.toString(),
     })) }, null, 1));
     console.log(`\n${guardar.length} alvos guardados em ${ONDE}`
-        + `${guardar.length > vivos.length ? ` (${guardar.length - vivos.length} fora do corte, mantidos porque já eram conhecidos)` : ''}`
+        + `${foraDoCorte > 0 ? ` (${foraDoCorte} mantidos porque já eram conhecidos)` : ''}`
         + '. Rode de novo para ver o quanto andaram.');
 })().catch((e) => { console.error('ERRO:', e.message); process.exit(1); });

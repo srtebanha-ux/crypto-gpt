@@ -36,6 +36,7 @@
 // ja achou umas vinte vezes. As tres guardas abaixo existem so para isso.
 import { Decimal } from 'decimal.js';
 import { SAUDE_UM } from './posicoes';
+import { numeroDoAmbiente } from './prontidao';
 
 export interface Amostra {
     /** `Date.now()` de quando a saude foi lida. */
@@ -71,9 +72,14 @@ export interface Amostra {
  * A memoria nao era o motivo: `MAX_AMOSTRAS` ja limita por devedor, qualquer que
  * seja o intervalo.
  */
-export const INTERVALO_DA_AMOSTRA_MS = Number(process.env.CACA_AMOSTRA_MS ?? '8000');
-/** Quantas guardar por devedor. Doze a 8 segundos cobrem uns 96 segundos. */
-export const MAX_AMOSTRAS = Number(process.env.CACA_MAX_AMOSTRAS ?? '12');
+export const INTERVALO_DA_AMOSTRA_MS = numeroDoAmbiente('CACA_AMOSTRA_MS', process.env.CACA_AMOSTRA_MS, 8000);
+/**
+ * Quantas guardar por devedor. Doze a 8 segundos cobrem uns 88 segundos.
+ *
+ * Validado de proposito: com `NaN` aqui o `while (lista.length > NaN)` nunca corta,
+ * e o historico de 233 devedores cresce para sempre ate o container morrer.
+ */
+export const MAX_AMOSTRAS = numeroDoAmbiente('CACA_MAX_AMOSTRAS', process.env.CACA_MAX_AMOSTRAS, 12);
 /** Duas amostras nao mostram tendencia: mostram uma diferenca. */
 export const MINIMO_DE_AMOSTRAS = 3;
 
@@ -99,9 +105,12 @@ export type Projecao =
 /**
  * Guarda uma leitura de saude, se ela adiciona informacao.
  *
- * A brasa e lida a cada ciclo — 8 segundos — e guardar tudo seria encher a
- * memoria com 234 devedores x centenas de leituras identicas. Uma a cada dez
- * minutos e o que o juro leva para mexer um digito.
+ * A brasa e lida a cada ciclo e guardar tudo seria encher a memoria com 234
+ * devedores x centenas de leituras. O intervalo vive em `INTERVALO_DA_AMOSTRA_MS`,
+ * que desde 2026-09-28 e de 8 segundos: a medicao daquele dia mostrou que quatro
+ * segundos de juro sao 1,6e-9 de saude — 1.600.000.000 de unidades cruas —, e que
+ * o intervalo de dez minutos que morava aqui deixava o previsor cego por vinte
+ * minutos depois de cada reinicio.
  */
 export function registrar(
     historico: Map<string, Amostra[]>,
@@ -222,12 +231,30 @@ export function projetar(
 export function blocosAteCruzar(
     amostras: Amostra[],
     msPorBloco = 2000,
+    agora = Date.now(),
     minimo = MINIMO_DE_AMOSTRAS,
 ): { blocos: number; taxaAnual: Decimal } | null {
-    if (msPorBloco <= 0) return null;
+    // NaN nao e pego por `<= 0`: `NaN <= 0` e falso. E com msPorBloco = NaN a
+    // funcao devolvia `{blocos: NaN}` em vez de `null`, o que desliga o tiro em
+    // silencio enquanto o ensaio em seco continua dizendo LIGADO.
+    if (!Number.isFinite(msPorBloco) || msPorBloco <= 0) return null;
+    if (!Number.isFinite(agora)) return null;
     const p = projetar(amostras, minimo);
     if (!p.cruza) return null;
-    return { blocos: p.emMs / msPorBloco, taxaAnual: p.taxaAnual };
+    // `projetar` conta os milissegundos a partir da ULTIMA AMOSTRA, nao de agora.
+    // Sem descontar o tempo decorrido, uma amostra de 8 segundos atras — quatro
+    // blocos da Base — desloca a origem em 2x a janela de disparo: uma posicao que
+    // cruza no proximo bloco lia "cruza em 5 blocos" e nunca era atirada, e uma que
+    // lia "cruza em 2" podia ja ter cruzado. O erro de origem derrotava a unica
+    // coisa que a funcao existe para fazer: cair no bloco exato.
+    const ultima = amostras[amostras.length - 1]!;
+    const desdeAAmostra = agora - ultima.em;
+    if (!Number.isFinite(desdeAAmostra) || desdeAAmostra < 0) return null;
+    const blocos = (p.emMs - desdeAAmostra) / msPorBloco;
+    if (!Number.isFinite(blocos)) return null;
+    // Passou do ponto: a projecao dizia que ja devia ter cruzado. Isso nao e
+    // "cruza agora" — e "a leitura esta velha", e mentir de menos e melhor.
+    return { blocos: Math.max(0, blocos), taxaAnual: p.taxaAnual };
 }
 
 export interface Chegada {

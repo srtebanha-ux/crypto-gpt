@@ -367,7 +367,12 @@ export function atirarAntesDoCruzamento(entrada: {
     /** Quantos blocos antes do cruzamento vale mandar. */
     janelaDeBlocos?: number;
 }): { atira: boolean; porque: string } {
-    const janela = entrada.janelaDeBlocos ?? 2;
+    // `?? 2` NAO substitui NaN, e `NaN <= 0` e falso, e `43200 > NaN` tambem e
+    // falso — entao com `CACA_JANELA_DE_BLOCOS='2,5'` o controle caia direto no
+    // `return { atira: true }` e o bot mandava uma transacao real para uma posicao
+    // que cruza em 24 HORAS, garantida a reverter com o gas pago. O CLAUDE.md
+    // registra esta armadilha; ela me pegou outra vez no mesmo dia.
+    const janela = Number.isFinite(entrada.janelaDeBlocos) ? entrada.janelaDeBlocos! : 2;
     if (!entrada.modoProva) {
         return { atira: false, porque: 'só no modo prova: é ele que tem a trava de nonce de um tiro só' };
     }

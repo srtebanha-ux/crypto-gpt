@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
+import { montarPlacar } from './perdidas';
 import {
     contarPorEndereco, chanceDoAcaso, chanceDeCampoMaior, quemTemDono, comoLerAContagem,
     repartirPorFaixa, CHANCE_QUE_CONVENCE,
@@ -256,4 +257,44 @@ test('entre um terço e metade eu não escolho um lado', () => {
     const d = quemTemDono(c);
     assert.equal(d.veredicto, 'não dá para dizer');
     assert.match(d.porque, /Não chega a metade/);
+});
+
+test('lucro exatamente ZERO concorda com o placar, e o piso null não é piso zero', () => {
+    // Zero é o valor que `lerRespostaDaCaca` devolve de propósito. A primeira
+    // versão deste conserto usava `lessThanOrEqualTo` quando o piso era zero, e aí
+    // um lucro de zero era "inviável" para o censo e "valia a pena" para o placar,
+    // na MESMA linha de log. Uma regra em dois lugares tem de dar a mesma resposta.
+    const d = (x: string) => new Decimal(x);
+    const zero = repartirPorFaixa([{ nome: 'zero', lucroUsd: d('0') }], { de: d('0'), ate: d('100') });
+    assert.deepEqual(zero.dentro.map((a) => a.nome), ['zero']);
+    assert.equal(zero.abaixoDoPiso.length, 0);
+    assert.equal(montarPlacar([{
+        devedor: '0x', bloco: 1, liquidante: '0x',
+        dividaUsd: d('0'), lucroUsd: d('0'), cobertura: 'brasa' as const,
+    }], d('0')).valiam.length, 1, 'o placar conta o zero; o censo tem de concordar');
+
+    // E piso DESCONHECIDO não é piso zero: com teto mas sem piso, prejuízo fica
+    // abaixo do piso, não dentro.
+    const semPiso = repartirPorFaixa([{ nome: 'perda', lucroUsd: d('-0.29') }], { de: null, ate: d('45') });
+    assert.deepEqual(semPiso.abaixoDoPiso.map((a) => a.nome), ['perda']);
+    assert.equal(semPiso.dentro.length, 0);
+});
+
+test('não existe regra de cartel, e isso é deliberado', () => {
+    // Eu perdi o critério dos três maiores ao reescrever, tentei devolvê-lo no
+    // mesmo dia, e a versão nova estava errada nos DOIS sentidos: chamava de
+    // "tem dono" uma divisão PERFEITAMENTE justa de 20/20/20 entre três, e mesmo
+    // assim não consertava o caso que a motivou (12/10/8). Três erros numa
+    // tentativa. Então: "não dá para dizer", que é verdade.
+    const fazer = (dist: number[]) => {
+        const l: string[] = [];
+        dist.forEach((n, i) => { for (let j = 0; j < n; j++) l.push(`0x${i}`); });
+        return quemTemDono(contarPorEndereco(l));
+    };
+    // A divisão mais justa possível entre três NÃO pode sair como domínio.
+    assert.notEqual(fazer([20, 20, 20]).veredicto, 'tem dono');
+    // E o caso que motivava o critério perdido sai como "não sei" — honesto.
+    assert.equal(fazer([12, 10, 8]).veredicto, 'não dá para dizer');
+    // Domínio de um só continua sendo detectado, que é o que não pode se perder.
+    assert.equal(fazer([25, 3, 2]).veredicto, 'tem dono');
 });

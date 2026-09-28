@@ -232,7 +232,10 @@ test('a deriva REAL de 2026-09-28 é projetável em quatro segundos', () => {
         { em: 4000, saude: cru('1000000002023820565') },  // -6 blocos
         { em: 8000, saude: cru('1000000001213578466') },  // -4 blocos
     ];
-    const b = blocosAteCruzar(amostras, 2000);
+    // `agora` = o instante da última amostra: a projeção conta DAQUI, não da
+    // amostra. Sem passar isso, uma leitura de 8s atrás desloca a origem em quatro
+    // blocos da Base — duas vezes a janela de disparo.
+    const b = blocosAteCruzar(amostras, 2000, 8000);
     assert.ok(b !== null, 'três amostras de 4s têm de dar projeção');
     // Ela cruzou entre 3 e 4 blocos depois da última amostra. A conta tem de
     // cair nessa vizinhança, não em minutos nem em dias.
@@ -248,19 +251,26 @@ test('blocosAteCruzar devolve null quando não pode responder', () => {
     assert.equal(blocosAteCruzar([
         { em: 0, saude: cru('1000000002834062669') },
         { em: 4000, saude: cru('1000000002023820565') },
-    ], 2000), null);
+    ], 2000, 4000), null);
     // Saúde subindo não cruza nada.
     assert.equal(blocosAteCruzar([
         { em: 0, saude: cru('1000000001213578466') },
         { em: 4000, saude: cru('1000000002023820565') },
         { em: 8000, saude: cru('1000000002834062669') },
-    ], 2000), null);
+    ], 2000, 8000), null);
     // Bloco de duração zero ou negativa não é resposta, é divisão por zero.
     assert.equal(blocosAteCruzar([
         { em: 0,    saude: cru('1000000002834062669') },
         { em: 4000, saude: cru('1000000002023820565') },
         { em: 8000, saude: cru('1000000001213578466') },
-    ], 0), null);
+    ], 0, 8000), null);
+    // E NaN em msPorBloco não pode virar `{blocos: NaN}`: antes virava, e isso
+    // desligava o tiro em silêncio enquanto o ensaio dizia LIGADO.
+    assert.equal(blocosAteCruzar([
+        { em: 0,    saude: cru('1000000002834062669') },
+        { em: 4000, saude: cru('1000000002023820565') },
+        { em: 8000, saude: cru('1000000001213578466') },
+    ], Number('2,000'), 8000), null);
 });
 
 test('o devedor é normalizado: maiúscula e minúscula são a mesma pessoa', () => {
@@ -434,11 +444,49 @@ test('o caso real inteiro: da leitura crua até a decisão de atirar', () => {
         { em: 0,    saude: cru('1000000002834062669') },
         { em: 4000, saude: cru('1000000002023820565') },
         { em: 8000, saude: cru('1000000001213578466') },
-    ], 2000);
+    ], 2000, 8000);
     assert.ok(b !== null);
     // E com a janela de 2 blocos que é o padrão, isso vira tiro.
     const d = atirarAntesDoCruzamento({
         blocosAteCruzar: b!.blocos, modoProva: true, aceitaPrejuizo: true, janelaDeBlocos: 4,
     });
     assert.equal(d.atira, true, `${b!.blocos} blocos: ${d.porque}`);
+});
+
+test('a projeção conta de AGORA, não da última amostra', () => {
+    // Este era o defeito que derrotava a coisa toda: `projetar` devolve
+    // milissegundos a partir da ÚLTIMA AMOSTRA. Com a amostragem de 8s, a origem
+    // podia estar QUATRO blocos da Base atrasada contra uma janela de disparo de
+    // dois — uma posição que cruzava no próximo bloco lia "cruza em 5" e nunca era
+    // atirada.
+    const cru = (n: string) => new Decimal(n);
+    const amostras: Amostra[] = [
+        { em: 0,    saude: cru('1000000002834062669') },
+        { em: 4000, saude: cru('1000000002023820565') },
+        { em: 8000, saude: cru('1000000001213578466') },
+    ];
+    const naHora = blocosAteCruzar(amostras, 2000, 8000)!;
+    // Ela cruza em ~3 blocos a partir da última amostra. DOIS segundos depois — um
+    // bloco — a mesma série tem de projetar UM BLOCO MENOS.
+    const umBlocoDepois = blocosAteCruzar(amostras, 2000, 10000)!;
+    assert.ok(Math.abs((naHora.blocos - umBlocoDepois.blocos) - 1) < 0.01,
+        `de ${naHora.blocos} para ${umBlocoDepois.blocos}: a diferença devia ser 1 bloco`);
+    // E é isso que decide o tiro: com janela de 2 blocos, a leitura na hora NÃO
+    // dispara (2.99 > 2) e um bloco depois DISPARA (1.99 <= 2). Sem descontar o
+    // tempo, as duas diriam a mesma coisa e o bot atiraria na hora errada.
+    const janelaDeBlocos = 2;
+    assert.equal(atirarAntesDoCruzamento({
+        blocosAteCruzar: naHora.blocos, modoProva: true, aceitaPrejuizo: true, janelaDeBlocos,
+    }).atira, false);
+    assert.equal(atirarAntesDoCruzamento({
+        blocosAteCruzar: umBlocoDepois.blocos, modoProva: true, aceitaPrejuizo: true, janelaDeBlocos,
+    }).atira, true);
+
+    // E quando a projeção já passou, o resultado é zero — não um número negativo
+    // nem "cruza agora" sobre uma leitura velha.
+    const passou = blocosAteCruzar(amostras, 2000, 8000 + 60_000)!;
+    assert.equal(passou.blocos, 0);
+
+    // `agora` inválido não vira projeção.
+    assert.equal(blocosAteCruzar(amostras, 2000, Number.NaN), null);
 });

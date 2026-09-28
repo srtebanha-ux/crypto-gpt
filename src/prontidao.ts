@@ -550,7 +550,7 @@ export interface DecisaoDoTiro {
  * nao sobe e um problema de dez segundos; um bot que decide errado em silencio
  * custou dois dias.
  */
-function numeroDoAmbiente(nome: string, valor: string | undefined, padrao: number): number {
+export function numeroDoAmbiente(nome: string, valor: string | undefined, padrao: number): number {
     if (valor === undefined || valor.trim() === '') return padrao;
     const n = Number(valor);
     if (!Number.isFinite(n)) {
