@@ -1074,7 +1074,7 @@ test('o kamikaze NÃO vale fora do modo prova, por mais que o saldo caiba', () =
     assert.equal(semProva.prioridadeWei < comProva.prioridadeWei, true);
 });
 
-test('o kamikaze INVERTE a mordaça, e a faixa não pode supor a direção', () => {
+test('no kamikaze a gorjeta é a MESMA em qualquer tamanho de prêmio', () => {
     // Medido em 2026-09-28 com o saldo real, e foi ela quem viu a contradição
     // no log das 17:53:
     //     numDeUS$88      "gorjeta 2.49 gwei (inteira)"
@@ -1094,16 +1094,19 @@ test('o kamikaze INVERTE a mordaça, e a faixa não pode supor a direção', () 
     };
     const migalha = decidirTiro({ ...ambiente, lucroUsd: new Decimal('0.05') });
     const grande = decidirTiro({ ...ambiente, lucroUsd: new Decimal('88') });
-    assert.equal(migalha.amordaca.amordacado, true, 'a migalha sai amordaçada');
-    assert.equal(grande.amordaca.amordacado, false, 'US$ 88 sai inteiro — como o log dizia');
+    assert.equal(migalha.amordaca.amordacado, false, 'a migalha TAMBÉM sai inteira agora');
+    assert.equal(grande.amordaca.amordacado, false, 'US$ 88 sai inteiro');
     assert.equal(migalha.desejadaWei, grande.desejadaWei, 'a desejada é CONSTANTE no kamikaze');
-    assert.equal(grande.prioridadeWei > migalha.prioridadeWei, true, 'quem cresce é a conseguida');
+    assert.equal(migalha.prioridadeWei, grande.prioridadeWei,
+        'e a ENVIADA também: a fração de risco não corta mais pelo tamanho do prêmio');
 
+    // MUDOU DE NOVO em 2026-09-28, e foi ela quem mandou: no modo prova a
+    // fração de risco saiu inteira, então não há mais mordaça em tamanho
+    // nenhum — `inteiroDe` volta a ser null porque o lance é inteiro DESDE O
+    // CHÃO. A busca sem direção continua valendo para o caso normal.
     const f = faixaQueAtira({ ...ambiente });
     assert.notEqual(f, null);
-    assert.notEqual(f!.inteiroDe, null, 'tem de achar A PARTIR DE onde sai inteiro');
-    assert.equal(f!.inteiroDe!.greaterThan(20), true, 'e é acima de US$ 20, que ainda sai amordaçado');
-    assert.equal(f!.inteiroDe!.lessThan(88), true, 'e abaixo de US$ 88, que já sai inteiro');
+    assert.equal(f!.inteiroDe, null, 'no modo prova não há ponta de baixo: é inteiro em qualquer tamanho');
 });
 
 test('fora do modo prova a faixa continua respondendo pela ponta de CIMA', () => {
@@ -1121,4 +1124,92 @@ test('fora do modo prova a faixa continua respondendo pela ponta de CIMA', () =>
     assert.notEqual(f, null);
     assert.equal(f!.inteiroDe, null, 'no caso normal não há ponta de baixo');
     assert.notEqual(f!.inteiroAte, null, 'e a de cima continua existindo');
+});
+
+test('no KAMIKAZE a migalha recebe a gorjeta INTEIRA, e não metade', () => {
+    // Ela viu que `inteiroDe` em US$ 34,63 significava que a maioria das
+    // liquidações da Base — 31 das 52 do censo estão abaixo do piso de gás —
+    // iria para a rede com a gorjeta cortada, no único tiro que precisa ser
+    // ganho.
+    //
+    // A causa não era a fração MÁXIMA: `fracaoDoSaldoQueValeArriscar` escala
+    // pelo LUCRO, e prêmio pequeno fica na fração BASE. Medido com o saldo dela
+    // (US$ 8,99) e o risco máximo 0.8 do Railway:
+    //     US$ 0,50 -> fração 0,2500 -> 1,173 gwei de 2,506
+    //     US$ 2    -> fração 0,2500 -> 1,173 gwei de 2,506
+    //     US$ 66   -> fração 0,6373 -> 2,486 gwei (inteira)
+    const ambiente = {
+        precoDoEthUsd: new Decimal('2692.04'),
+        saldoWei: 3341111191761470n,
+        baseFeeWei: 20_000_000n,
+        fracaoBaseDoSaldo: 0.25,
+        fracaoMaximaDoSaldo: 0.8,
+        tiroDeProva: true as const,
+        aceitaPrejuizo: true as const,
+    };
+    const migalha = decidirTiro({ ...ambiente, lucroUsd: new Decimal('2') });
+    const grande = decidirTiro({ ...ambiente, lucroUsd: new Decimal('66') });
+    assert.equal(migalha.prioridadeWei, grande.prioridadeWei,
+        'a migalha tem de sair com a MESMA gorjeta do prêmio grande');
+    assert.equal(migalha.amordaca.amordacado, false, 'e não amordaçada');
+    assert.equal(migalha.atira, true);
+    // O que NÃO se solta, porque é aritmética e não política:
+    assert.equal(migalha.aguentaDerrotas >= 1, true, 'a derrota continua tendo de ser pagável');
+
+    // E a faixa passa a dizer que o lance é inteiro desde o chão.
+    const f = faixaQueAtira({ ...ambiente });
+    assert.equal(f!.inteiroDe, null, 'não há mais ponta de baixo: é inteiro em qualquer tamanho');
+    assert.notEqual(f!.inteiroAte, null);
+});
+
+test('fora do modo prova a fração de risco CONTINUA cortando a migalha', () => {
+    // A ponta gêmea. A escala existe e está certa em operação normal: arriscar
+    // banca grande por prêmio pequeno é como se perde a banca. Só o modo prova
+    // — um tiro, que se desarma pelo nonce — compra essa exceção.
+    const ambiente = {
+        precoDoEthUsd: new Decimal('2692.04'),
+        saldoWei: 3341111191761470n,
+        baseFeeWei: 20_000_000n,
+        fracaoBaseDoSaldo: 0.25,
+        fracaoMaximaDoSaldo: 0.8,
+    };
+    const migalha = decidirTiro({ ...ambiente, lucroUsd: new Decimal('2') });
+    const grande = decidirTiro({ ...ambiente, lucroUsd: new Decimal('66') });
+    assert.equal(migalha.prioridadeWei < grande.prioridadeWei, true,
+        'sem modo prova, prêmio pequeno continua recebendo gorjeta menor');
+});
+
+test('o rótulo de prova segue a regra normal, e US$ 2 ela ACEITA', () => {
+    // Eu escrevi este teste esperando `soPassouPorSerProva: true` para US$ 2, e
+    // o teste me corrigiu. Medido: com a gorjeta NORMAL o tiro de US$ 2 custa
+    // US$ 0,84, e 2 >= 2 x 0,84 — a regra normal aceita. O rótulo existe para
+    // marcar o que só passou POR SER prova, e US$ 2 não é esse caso.
+    //
+    // Quem só passa por ser prova é o prêmio GRANDE, que a caça de migalhas
+    // barra: US$ 66 custa US$ 5,73 na regra normal e é recusado.
+    const d = decidirTiro({
+        precoDoEthUsd: new Decimal('2692.04'),
+        saldoWei: 3341111191761470n,
+        baseFeeWei: 20_000_000n,
+        fracaoBaseDoSaldo: 0.25,
+        fracaoMaximaDoSaldo: 0.8,
+        lucroUsd: new Decimal('2'),
+        tiroDeProva: true,
+        aceitaPrejuizo: true,
+    });
+    assert.equal(d.atira, true);
+    assert.equal(d.soPassouPorSerProva, false, 'a regra normal aceita US$ 2 contra US$ 0,84 de custo');
+
+    const grande = decidirTiro({
+        precoDoEthUsd: new Decimal('2692.04'),
+        saldoWei: 3341111191761470n,
+        baseFeeWei: 20_000_000n,
+        fracaoBaseDoSaldo: 0.25,
+        fracaoMaximaDoSaldo: 0.8,
+        lucroUsd: new Decimal('66'),
+        tiroDeProva: true,
+        aceitaPrejuizo: true,
+    });
+    assert.equal(grande.soPassouPorSerProva, true, 'US$ 66 a regra normal recusa');
+    assert.match(grande.porque, /SÓ SAI PORQUE É PROVA/);
 });

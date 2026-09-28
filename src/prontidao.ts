@@ -703,11 +703,37 @@ export function decidirTiro(e: {
             fracaoBase: fracaoBaseDoSaldo,
             fracaoMaxima: e.fracaoMaximaDoSaldo ?? 0.6,
         });
+    // NO KAMIKAZE A FRACAO DE RISCO SAI INTEIRA.
+    //
+    // `fracaoDoSaldoQueValeArriscar` escala pelo LUCRO: premio pequeno fica na
+    // fracao BASE. Medido em 2026-09-28 com o saldo dela (US$ 8,99) e o risco
+    // maximo 0.8 do Railway:
+    //
+    //     premio US$ 0,50 -> fracao 0,2500 -> gorjeta 1,173 gwei de 2,506
+    //     premio US$ 2    -> fracao 0,2500 -> gorjeta 1,173 gwei de 2,506
+    //     premio US$ 34   -> fracao 0,4199 -> gorjeta 1,984 gwei
+    //     premio US$ 66   -> fracao 0,6373 -> gorjeta 2,486 gwei (inteira)
+    //
+    // Ou seja: o alvo de US$ 2 — que e o formato da MAIORIA das liquidacoes da
+    // Base, 31 das 52 do censo abaixo do piso de gas — ia para a rede com menos
+    // da METADE da gorjeta, no unico tiro que precisa ser ganho. Subir a fracao
+    // MAXIMA nao resolvia: ela nem era alcancada.
+    //
+    // A escala existe e esta certa em operacao normal: arriscar banca grande por
+    // premio pequeno e como se perde a banca. Mas o modo prova nao esta atras de
+    // premio, e ela pediu com todas as letras "nem que eu gaste todo o meu saldo
+    // de gas num alvo que de US$ 0,05".
+    //
+    // O que NAO sai, porque e aritmetica: `aguentaDerrotas` continua tendo de
+    // ser pelo menos 1 e o gas adiantado continua tendo de caber. Medido com a
+    // fracao em 1.0: todo premio de US$ 0,50 para cima recebe 2,486 gwei
+    // inteiros e `aguentaDerrotas` fica em 1 — um tiro, pago.
+    const riscoDoTiro = kamikaze ? 1 : risco;
     let prioridadeWei = gorjetaQueCabeNoSaldo({
         gorjetaDesejadaWei: desejadaWei,
         saldoWei: e.saldoWei,
         baseFeeWei: e.baseFeeWei,
-        fracaoMaximaDoSaldo: risco,
+        fracaoMaximaDoSaldo: riscoDoTiro,
     });
 
     const custoUsd = custoDoTiroUsd(prioridadeWei, e.baseFeeWei, e.precoDoEthUsd);
@@ -799,7 +825,10 @@ export function decidirTiro(e: {
     const passariaNormal = valeATentativa(e.lucroUsd, custoNormalUsd, e.margemMinima ?? 2).vale
         && !mataNormal.pula;
     const comum = {
-        prioridadeWei, maxFeeWei, desejadaWei, amordaca, risco, fracaoDoLucro,
+        // `risco` publicado e o que FOI USADO no tiro, nao o que a regra normal
+        // teria escolhido — senao o log explica a gorjeta com um numero que nao
+        // a produziu.
+        prioridadeWei, maxFeeWei, desejadaWei, amordaca, risco: riscoDoTiro, fracaoDoLucro,
         custoUsd, custoSePerderWei, aguentaDerrotas,
         // "So passou por ser prova" vale para as DUAS pontas: o piso de lucro e
         // o teto que protege a caca. Cobrir so o piso deixaria o primeiro tiro
