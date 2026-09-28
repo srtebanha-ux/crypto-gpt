@@ -543,6 +543,9 @@ export function politicaDoTiro(env: Record<string, string | undefined> = process
         margemMinima: Number(env.CACA_MARGEM_MINIMA ?? '2'),
         tetoDaMordida: Number(env.CACA_MORDIDA_MAXIMA ?? '0.5'),
         atirarAmordacado: env.CACA_ATIRAR_AMORDACADO === '1',
+        // Prejuizo conhecido aceito de proposito. So vale junto com o modo prova,
+        // que tem trava de nonce: UM tiro, uma vez, e desarma sozinho.
+        aceitaPrejuizo: env.CACA_ACEITA_PREJUIZO === '1',
     };
 }
 
@@ -574,9 +577,32 @@ export function decidirTiro(e: {
     atirarAmordacado?: boolean;
     /**
      * Modo prova: aceita qualquer lucro acima de zero em vez de exigir 2x o
-     * custo. NAO desliga a protecao contra baleia amordaçada.
+     * custo, e solta o teto que protege a caca de migalhas.
      */
     tiroDeProva?: boolean;
+    /**
+     * Aceitar PREJUIZO CONHECIDO: atirar sabendo que a conta fecha negativa.
+     *
+     * So tem efeito junto com `tiroDeProva`, e existe por uma medicao de
+     * 2026-09-28. Varri as 51 liquidacoes de 9,5 dias na Aave da Base e conferi a
+     * saude um bloco antes de cada uma: 32 foram levadas no MESMO bloco em que
+     * ficaram liquidaveis — impossiveis de ler a tempo — e as 11 que tinham
+     * janela eram TODAS poeira, com dividas de US$ 0,20 a US$ 0,31, valendo de
+     * -US$ 0,25 a -US$ 0,30 depois do gas.
+     *
+     * Ou seja: em 9,5 dias, NENHUMA liquidacao foi ao mesmo tempo legivel a tempo
+     * e capaz de pagar o proprio gas. O unico alvo que este bot consegue ler e
+     * um que da prejuizo — e `valeATentativa` recusa lucro nao-positivo, mesmo no
+     * modo prova, por um teste que existe de proposito.
+     *
+     * Entao sem esta chave o bot nunca atira, nem quando o alvo aparece. A dona
+     * do bot pediu isso em palavras, duas vezes: "custe o que custar mesmo que
+     * isso va todo nosso gas" e "eu quero que ele atire o mais rapido possivel a
+     * qualquer custo". O prejuizo e o preco da informacao, e a escolha e dela.
+     *
+     * A trava e a mesma de sempre e mora no nonce: UM tiro, e o modo se desarma.
+     */
+    aceitaPrejuizo?: boolean;
 }): DecisaoDoTiro {
     const limiteGas = e.limiteGas ?? LIMITE_DE_GAS;
     const fracaoDoLucro = fracaoAdaptativa({
@@ -613,7 +639,26 @@ export function decidirTiro(e: {
     const custoUsd = custoDoTiroUsd(prioridadeWei, e.baseFeeWei, e.precoDoEthUsd);
     // No modo prova a margem cai para zero: qualquer lucro acima de zero passa.
     // Nao e descuido, e o preco da informacao — e ela escolheu pagar.
-    const veredicto = valeATentativa(e.lucroUsd, custoUsd, e.tiroDeProva ? 0 : (e.margemMinima ?? 2));
+    //
+    // E com `aceitaPrejuizo` o portao do lucro sai inteiro: o tiro sai sabendo
+    // que a conta fecha negativa, porque a medicao de 2026-09-28 mostrou que o
+    // unico alvo legivel a tempo e um que da prejuizo. Sem isto o bot nunca
+    // atira, nem quando o alvo aparece.
+    //
+    // O que NAO sai, nem aqui: atirar sem cotacao. Sem saber o preco do ETH nao
+    // se dimensiona a gorjeta, e sem saber o lucro nao se sabe em QUE se atirou —
+    // e um tiro que nao ensina nada nao vale nem o prejuizo.
+    const aceitaPrejuizo = (e.tiroDeProva ?? false) && (e.aceitaPrejuizo ?? false);
+    const veredicto = !aceitaPrejuizo
+        ? valeATentativa(e.lucroUsd, custoUsd, e.tiroDeProva ? 0 : (e.margemMinima ?? 2))
+        : custoUsd === null || e.lucroUsd === null
+            ? valeATentativa(e.lucroUsd, custoUsd, 0)
+            : {
+                vale: true,
+                porque: `PREJUÍZO ACEITO DE PROPÓSITO: lucro de US$ ${e.lucroUsd.toFixed(2)} contra custo de `
+                    + `US$ ${custoUsd.toFixed(2)}. Isto NÃO é um acerto — é comprar a informação de que o `
+                    + 'caminho funciona, e ela pediu assim',
+            };
 
     let maxFeeWei = tetoPorGas(e.baseFeeWei, prioridadeWei);
     const adiantavelWei = maxFeeQueOSaldoAdianta(e.saldoWei, limiteGas);
@@ -649,7 +694,8 @@ export function decidirTiro(e: {
         // "So passou por ser prova" vale para as DUAS pontas: o piso de lucro e
         // o teto que protege a caca. Cobrir so o piso deixaria o primeiro tiro
         // grande aparecer como tiro normal.
-        soPassouPorSerProva: (e.tiroDeProva ?? false) && veredicto.vale && (!passariaNormal || mata.pula),
+        soPassouPorSerProva: (e.tiroDeProva ?? false) && veredicto.vale
+            && (!passariaNormal || mata.pula || aceitaPrejuizo),
         adiantadoWei: adiantadoExigido(limiteGas, maxFeeWei),
         adiantavelWei,
     };

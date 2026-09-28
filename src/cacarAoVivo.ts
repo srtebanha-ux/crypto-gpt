@@ -1334,6 +1334,12 @@ async function principal(): Promise<'parar' | void> {
                 tiroDeProva: provaAgora().armado,
             };
             passos.tiroDeProva = provaAgora().porque;
+            // Sem isto ela nao tem como saber, olhando o log, se o bot vai ou nao
+            // atirar quando o alvo de poeira aparecer — e a medicao de 2026-09-28
+            // diz que poeira e o unico alvo que ele consegue ler a tempo.
+            passos.aceitaPrejuizo = POLITICA.aceitaPrejuizo
+                ? 'LIGADO: atira mesmo dando prejuízo. É o único alvo legível a tempo (medido em 2026-09-28)'
+                : 'desligado: só atira com lucro acima de zero — e nenhum alvo legível a tempo tem isso';
             const emEth6 = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
             const d88 = decidirTiro({ ...ambiente, lucroUsd: new Decimal(88) });
             passos.numDeUS$88 = `gorjeta ${(Number(d88.prioridadeWei) / 1e9).toFixed(2)} gwei` +

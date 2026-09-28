@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
+import { lucroEstimado } from './perdidas';
 import {
     gorjetaPorGas, tetoPorGas, lerBasefee,
     lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado, tiroEmBrancoArmado,
@@ -885,4 +886,66 @@ test('a faixa do CENSO e a do TIRO respondem perguntas diferentes', () => {
     // A pergunta do TIRO: a baleia entra, porque ela pediu um alvo custe o que custar.
     assert.equal(faixaQueAtira({ ...ambiente, tiroDeProva: true })!.ate, null);
     assert.equal(decidirTiro({ ...ambiente, tiroDeProva: true, lucroUsd: premioDaBaleia }).atira, true);
+});
+
+test('sem aceitar prejuízo o bot NUNCA atira: o único alvo legível a tempo dá prejuízo', () => {
+    // A medição de 2026-09-28: varri as 51 liquidações de 9,5 dias na Aave da Base
+    // e conferi a saúde um bloco antes de cada uma. 32 foram levadas no MESMO
+    // bloco em que ficaram liquidáveis — impossíveis de ler a tempo. As 11 com
+    // janela eram TODAS poeira: dívidas de US$ 0,20 / 0,26 / 0,31, conferidas uma
+    // por uma com os números crus e os links do basescan.
+    //
+    // Então o alvo que este bot consegue ler vale isto:
+    const poeira = lucroEstimado(new Decimal('0.31'));
+    assert.ok(poeira.lessThan(0), `a poeira devia dar prejuízo, deu ${poeira}`);
+
+    const ambiente = {
+        lucroUsd: poeira,
+        precoDoEthUsd: new Decimal('2651.90'),
+        saldoWei: 3341111000000000n,
+        baseFeeWei: 20_000_000n,
+        limiteGas: 1_200_000n,
+        tiroDeProva: true,
+    };
+    // Modo prova ligado, e ainda assim NÃO atira: `valeATentativa` exige lucro
+    // acima de zero. Era este portão que fazia o bot nunca atirar.
+    const semAceitar = decidirTiro(ambiente);
+    assert.equal(semAceitar.atira, false);
+
+    // Com a chave que ela pediu ("a qualquer custo"), atira — e o motivo diz em
+    // voz alta que é prejuízo de propósito, para o primeiro tiro não ser lido
+    // como acerto.
+    const aceitando = decidirTiro({ ...ambiente, aceitaPrejuizo: true });
+    assert.equal(aceitando.atira, true, aceitando.porque);
+    assert.match(aceitando.porque, /PREJUÍZO ACEITO DE PROPÓSITO/);
+    assert.match(aceitando.porque, /NÃO é um acerto/);
+    assert.equal(aceitando.soPassouPorSerProva, true);
+    // A gorjeta não vira zero nem negativa com lucro negativo: cai no piso.
+    assert.ok(aceitando.prioridadeWei >= PISO_DA_GORJETA_WEI);
+});
+
+test('aceitar prejuízo NÃO vale sem o modo prova, e não atira sem cotação', () => {
+    const base = {
+        lucroUsd: lucroEstimado(new Decimal('0.31')),
+        precoDoEthUsd: new Decimal('2651.90'),
+        saldoWei: 3341111000000000n,
+        baseFeeWei: 20_000_000n,
+        limiteGas: 1_200_000n,
+        aceitaPrejuizo: true,
+    };
+    // Sem o modo prova a chave é inerte — a trava do nonce mora no modo prova, e
+    // sem ela um prejuízo aceito repetiria a cada reinício do Railway até o gás
+    // acabar.
+    assert.equal(decidirTiro({ ...base, tiroDeProva: false }).atira, false);
+
+    // E nem aceitando prejuízo se atira às cegas: sem saber o preço do ETH não se
+    // dimensiona a gorjeta, e sem saber o lucro não se sabe em QUE se atirou.
+    assert.equal(decidirTiro({ ...base, tiroDeProva: true, precoDoEthUsd: null }).atira, false);
+    assert.equal(decidirTiro({ ...base, tiroDeProva: true, lucroUsd: null }).atira, false);
+});
+
+test('a política lê CACA_ACEITA_PREJUIZO, e um lugar só', () => {
+    assert.equal(politicaDoTiro({}).aceitaPrejuizo, false, 'desligado por padrão');
+    assert.equal(politicaDoTiro({ CACA_ACEITA_PREJUIZO: '1' }).aceitaPrejuizo, true);
+    assert.equal(politicaDoTiro({ CACA_ACEITA_PREJUIZO: 'sim' }).aceitaPrejuizo, false, 'só "1" liga');
 });
