@@ -575,7 +575,35 @@ export function politicaDoTiro(env: Record<string, string | undefined> = process
         // Prejuizo conhecido aceito de proposito. So vale junto com o modo prova,
         // que tem trava de nonce: UM tiro, uma vez, e desarma sozinho.
         aceitaPrejuizo: env.CACA_ACEITA_PREJUIZO === '1',
+        // A FAIXA DE NEGOCIO, pedida por ela em 2026-09-28: lucro liquido entre
+        // US$ 0,50 e US$ 500. Abaixo e poeira que nao paga o proprio gas; acima
+        // e tubarao, onde o pool da Aerodrome satura o premio em US$ 1.986
+        // (`coberturaOtima`) e quem usa agregador cobre mais da mesma divida e
+        // tem mais incentivo para pagar gorjeta alta. O oceano azul e no meio.
+        //
+        // Diferente de tudo o mais deste objeto, este par vale TAMBEM no modo
+        // prova: e regra de negocio, nao protecao de banca.
+        lucroMinimoUsd: n('CACA_LUCRO_MINIMO_USD', 0.5),
+        lucroMaximoUsd: n('CACA_LUCRO_MAXIMO_USD', 500),
     };
+}
+
+/** O lucro esta na faixa de negocio? Fora dela nao se atira, nem na prova. */
+export function dentroDaFaixaDeNegocio(
+    lucroUsd: Decimal | null,
+    pisoUsd: number,
+    tetoUsd: number,
+): { dentro: boolean; porque: string } {
+    if (lucroUsd === null) {
+        return { dentro: false, porque: 'sem cotação: não sei o lucro, então não sei se está na faixa' };
+    }
+    if (lucroUsd.lessThan(pisoUsd)) {
+        return { dentro: false, porque: `US$ ${lucroUsd.toFixed(2)} está ABAIXO do piso de US$ ${pisoUsd.toFixed(2)}: poeira` };
+    }
+    if (lucroUsd.greaterThan(tetoUsd)) {
+        return { dentro: false, porque: `US$ ${lucroUsd.toFixed(2)} está ACIMA do teto de US$ ${tetoUsd.toFixed(2)}: tubarão, deixo passar` };
+    }
+    return { dentro: true, porque: `US$ ${lucroUsd.toFixed(2)} está na faixa (US$ ${pisoUsd.toFixed(2)}–${tetoUsd.toFixed(2)})` };
 }
 
 /**
@@ -592,7 +620,8 @@ export function comoLerAPolitica(p: ReturnType<typeof politicaDoTiro>): string {
     return `gás ${p.limiteGas} | gorjeta ${p.fracaoBaseDoLucro} do lucro | risco ${p.fracaoBaseDoSaldo}`
         + `→${p.fracaoMaximaDoSaldo} do saldo | margem ${p.margemMinima}x | mordida máx ${p.tetoDaMordida}`
         + ` | amordaçado ${p.atirarAmordacado ? 'sim' : 'não'}`
-        + ` | aceita prejuízo ${p.aceitaPrejuizo ? 'SIM' : 'não'}`;
+        + ` | aceita prejuízo ${p.aceitaPrejuizo ? 'SIM' : 'não'}`
+        + ` | faixa de negócio US$ ${p.lucroMinimoUsd}–${p.lucroMaximoUsd}`;
 }
 
 export function decidirTiro(e: {
@@ -660,6 +689,10 @@ export function decidirTiro(e: {
      * normal com a prova armada.
      */
     gorjetaKamikaze?: boolean;
+    /** Piso da faixa de NEGOCIO, em dolares de lucro liquido. */
+    lucroMinimoUsd?: number;
+    /** Teto da faixa de NEGOCIO. Acima disto e tubarao e se deixa passar. */
+    lucroMaximoUsd?: number;
 }): DecisaoDoTiro {
     const limiteGas = e.limiteGas ?? LIMITE_DE_GAS;
     const fracaoDoLucro = fracaoAdaptativa({
@@ -838,6 +871,24 @@ export function decidirTiro(e: {
         adiantavelWei,
     };
     // A ordem e a do caminho quente. O primeiro freio que barra e o que explica.
+    //
+    // A FAIXA DE NEGOCIO vem primeiro, e vale ATE no modo prova: ela nao protege
+    // a banca, ela escolhe em que mercado a gente joga. Abaixo do piso e poeira
+    // que nao paga o gas; acima do teto e tubarao, onde o premio satura no pool
+    // e quem usa agregador tem mais incentivo para pagar gorjeta alta.
+    // Sem faixa PEDIDA, sem faixa aplicada: o padrao e nao filtrar. Quem impoe
+    // e `politicaDoTiro`, que le `CACA_LUCRO_MINIMO_USD`/`CACA_LUCRO_MAXIMO_USD`
+    // e e o que producao usa. Por um instante eu pus 0,5/500 como default aqui, e
+    // seis testes que nao pedem faixa nenhuma passaram a ser filtrados por ela —
+    // a regra vazando para quem nao a escolheu.
+    if (e.lucroMinimoUsd !== undefined || e.lucroMaximoUsd !== undefined) {
+        const faixa = dentroDaFaixaDeNegocio(
+            e.lucroUsd,
+            e.lucroMinimoUsd ?? 0,
+            e.lucroMaximoUsd ?? Number.POSITIVE_INFINITY,
+        );
+        if (!faixa.dentro) return { ...comum, atira: false, porque: faixa.porque };
+    }
     if (!veredicto.vale) return { ...comum, atira: false, porque: veredicto.porque };
     if (adiantavelWei <= e.baseFeeWei) {
         return { ...comum, atira: false, porque: 'o gás adiantado não cabe no saldo' };

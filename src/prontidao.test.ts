@@ -895,9 +895,24 @@ test('a faixa do CENSO e a do TIRO respondem perguntas diferentes', () => {
     assert.ok(censo.ate !== null, 'a faixa sustentável TEM teto');
     assert.ok(premioDaBaleia.greaterThan(censo.ate!), 'e a baleia está acima dele');
 
-    // A pergunta do TIRO: a baleia entra, porque ela pediu um alvo custe o que custar.
-    assert.equal(faixaQueAtira({ ...ambiente, tiroDeProva: true })!.ate, null);
-    assert.equal(decidirTiro({ ...ambiente, tiroDeProva: true, lucroUsd: premioDaBaleia }).atira, true);
+    // A pergunta do TIRO, e ela MUDOU em 2026-09-28 à noite: a dona do bot pediu
+    // faixa de negócio de US$ 0,50 a US$ 500, "ignorar tubarões acima de US$ 500
+    // por enquanto, para focar no oceano azul onde há menos concorrência
+    // institucional e construir caixa para gás futuro".
+    //
+    // Antes deste pedido o modo prova aceitava a baleia de US$ 1.985,95 ("custe o
+    // que custar"). Agora não: o teto de negócio vale ATÉ na prova, porque não é
+    // proteção de banca, é escolha de mercado. As duas instruções são dela e a
+    // nova ganha — fica escrito aqui para a próxima sessão não achar que foi
+    // descuido.
+    const comFaixa = { ...ambiente, tiroDeProva: true as const };
+    assert.equal(faixaQueAtira(comFaixa)!.ate!.toFixed(0), '500', 'o teto agora é o de negócio');
+    const naBaleia = decidirTiro({ ...comFaixa, lucroUsd: premioDaBaleia });
+    assert.equal(naBaleia.atira, false, 'a baleia passa a ser recusada, e por ESCOLHA dela');
+    assert.match(naBaleia.porque, /tubarão/);
+    // E o que sobrou da pergunta antiga: dentro da faixa, a prova continua
+    // atirando em qualquer coisa que a regra normal recusaria.
+    assert.equal(decidirTiro({ ...comFaixa, lucroUsd: new Decimal('499') }).atira, true);
 });
 
 test('sem aceitar prejuízo o bot NUNCA atira: o único alvo legível a tempo dá prejuízo', () => {
@@ -1212,4 +1227,26 @@ test('o rótulo de prova segue a regra normal, e US$ 2 ela ACEITA', () => {
     });
     assert.equal(grande.soPassouPorSerProva, true, 'US$ 66 a regra normal recusa');
     assert.match(grande.porque, /SÓ SAI PORQUE É PROVA/);
+});
+
+test('a faixa de negócio: US$ 0,50 a US$ 500, e vale ATÉ no modo prova', () => {
+    // Pedida por ela em 2026-09-28: poeira abaixo não paga o gás; tubarão acima
+    // satura no pool da Aerodrome (US$ 1.986) e perde o leilão para quem usa
+    // agregador. O oceano azul é no meio.
+    const amb = {
+        precoDoEthUsd: new Decimal('2692.04'),
+        saldoWei: 3341111191761470n,
+        baseFeeWei: 20_000_000n,
+        ...politicaDoTiro(),
+        tiroDeProva: true as const,
+        aceitaPrejuizo: true as const,
+    };
+    assert.equal(decidirTiro({ ...amb, lucroUsd: new Decimal('0.49') }).atira, false);
+    assert.match(decidirTiro({ ...amb, lucroUsd: new Decimal('0.49') }).porque, /ABAIXO do piso/);
+    assert.equal(decidirTiro({ ...amb, lucroUsd: new Decimal('0.50') }).atira, true);
+    assert.equal(decidirTiro({ ...amb, lucroUsd: new Decimal('500') }).atira, true);
+    assert.equal(decidirTiro({ ...amb, lucroUsd: new Decimal('500.01') }).atira, false);
+    assert.match(decidirTiro({ ...amb, lucroUsd: new Decimal('1986') }).porque, /tubarão/);
+    // Sem cotação não se atira: não dá para saber se está na faixa.
+    assert.equal(decidirTiro({ ...amb, lucroUsd: null }).atira, false);
 });
