@@ -398,3 +398,89 @@ esquecido, um piso desatualizado) publicado como se fosse medição.
 Todo conserto vira teste com o caso real que o expôs, e o comentário diz o
 número medido e a data. Não é zelo: é o único jeito de a próxima sessão não
 repetir. Em 2026-09-27 os testes foram de 949 para 1.214 por causa disso.
+
+## 2026-09-28, fim de tarde: "precisa cair X%" é falso para 8 dos 35 alvos
+
+Um aviso do Gemini sobre o log — o alvo `0xc4d36f95` aparecer com garantia e
+dívida na MESMA moeda — levou à medição que segue. **Dois dos três pontos dele
+estavam certos**, e o primeiro é maior do que ele descreveu.
+
+`quedaAteLiquidar` responde uma pergunta só: *"quanto a GARANTIA pode cair com a
+dívida parada?"*. Isso é certo para garantia em WETH e dívida em USDC. Quando os
+dois lados são a mesma moeda, o preço aparece em cima e embaixo da conta da saúde
+e **se cancela** — a queda pedida não chega, por preço nenhum.
+
+Medido na Base, com as funções deste repositório, cobertura 100% (35 de 35):
+
+    8 IMUNES a preço, somando US$ 462,47 de "lucro" que o preço não entrega
+    27 derrubáveis
+
+E dentro do teto de tiro de US$ 66,78, nos 15 alvos da faixa:
+
+    4 NUNCA caem por preço        US$ 136,71
+    3 só num extremo de preço     US$  51,77   (piso entre 0,85 e 1)
+    8 caem por preço de verdade   US$ 161,85
+
+O caso que abriu tudo, `0xc4d36f95`, com LT 93% do E-Mode e 78% do cbBTC — os
+dois **conferidos contra o limiar misturado que a própria Aave devolve**:
+
+    ETH  -50%  ->  saúde 1,025110    <- CAIR deixa a posição MAIS SEGURA
+    ETH    0%  ->  saúde 1,014448    (a Aave diz 1,014468)
+    ETH +1000% ->  saúde 1,004756
+    piso:          1,003785          <- e a ferramenta mediu 1,003785 depois
+
+A conta está em `src/pisoDaSaude.ts` e é exata: uma razão de duas formas
+lineares positivas tem ínfimo num vértice, então
+
+    piso = MENOR, entre os ativos k com dívida, de
+           (garantia em k) x (limiar de k) / (dívida em k)
+
+`src/pisoAgora.ts` roda isso nos alvos guardados.
+
+### Duas armadilhas, e cortam para lados opostos
+
+1. **O piso é limite INFERIOR** (supõe preços independentes). Para par da mesma
+   família — cbETH contra WETH, wstETH contra WETH, syrupUSDC contra USDC — ele
+   sai ZERO e está formalmente certo, mas só se realiza num depeg. A baleia
+   `0x67d0938f` (US$ 1,9M em WETH contra cbETH) lê como "cai" e na prática está
+   muito mais perto de imune. **`piso >= 1` é conclusão; `piso = 0` não é
+   promessa.**
+
+2. **O preço não é a única causa, e havia uma terceira que eu não conhecia.**
+   `0x43ec917e` é USDC contra USDC — imune — e mesmo assim andou 2,41 pontos de
+   saúde em 70 minutos:
+
+        14:30        15:40      variação
+        saúde      1,044539    1,019343   -2,41%
+        dívida US$   10.360      10.310   -0,48%
+        garantia     13.874      13.474   -2,88%
+        o juro explicaria:                 0,000266%   (9.000x pequeno demais)
+
+   **O dono sacou US$ 400 de garantia.** Não foi mercado nem juro: foi a pessoa.
+   E quando o dono age, a posição atravessa numa transação, num bloco — a
+   "janela zero" que este arquivo já mediu em 32 das 51 liquidações, e que o
+   desenho de ler-e-reagir estruturalmente não alcança.
+
+   São TRÊS causas, e o bot só enxerga uma: **preço** (ele persegue), **juro**
+   (`src/deriva.ts` calcula dias antes), **dono** (sem aviso).
+
+### E o defeito que eu cometi medindo isto
+
+A primeira rodada devolveu "10 de 35 não deu para medir". Não era propriedade
+dos dados: eu lia a **palavra 1** do `getEModeCategoryData`, que é o LTV, no
+lugar da palavra 2, que é o limiar de liquidação. A palavra 0 é o offset do
+tuple dinâmico. E eu só sondei as categorias 1 a 4 quando existem 15.
+
+O que salvou foi `limiaresConferem`: sem bater com o limiar da Aave, o piso não
+é publicado. **O portão recusou 10 medições erradas em vez de imprimi-las.** É
+para isso que ele existe — e é a diferença entre um buraco declarado e uma
+ausência com cara de resposta.
+
+### O que o Gemini errou
+
+Não há erro de índice em `montarAlvos`. `escolherParPorValor` tem dois
+acumuladores independentes; devolveu WETH/WETH porque a posição **é** WETH/WETH.
+
+E a receita dele para o teste em fork se contradiz: derrubar o oráculo do ETH em
+3% para liquidar `0xc4d36f95` não funciona — pelo achado dele mesmo, derrubar o
+ETH deixa aquela posição MAIS SEGURA.
