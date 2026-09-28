@@ -177,6 +177,50 @@ direções — e que 9,3 dias de história não bastam para decidir isso. O pró
 passo honesto é acumular mais janela de censo e reler, não inverter a decisão com
 os mesmos dados.
 
+### O erro nº 9 tem TRÊS versões, não duas. A terceira foi minha
+
+Em 2026-09-28 o teste de chance do acaso que eu tinha acabado de escrever olhou os
+dados reais — 51 liquidações entre 17 endereços, o maior com 22% — e imprimiu
+**TEM DONO**. Exatamente o veredicto que este arquivo registra como errado.
+
+A chance do acaso ali é 0,26%: o desvio **é** real. E mesmo assim não é dono. As
+duas perguntas não são a mesma:
+
+- *"o desvio é maior que o acaso?"* — com muitos eventos, qualquer
+  desequilíbrio mínimo passa a ser detectável. Responde se é ruído.
+- *"alguém está levando a maior parte?"* — é a FRAÇÃO, e é ela que decide se
+  vale entrar, porque é ela que diz quanto sobra.
+
+Trocar a primeira pela segunda é o mesmo erro com matemática melhor. `quemTemDono`
+agora exige as duas: desvio real **e** fatia grande. E o padrão de força não foi
+inventado outra vez — é o que já estava escrito aqui: metade ou mais é domínio;
+com dez ou mais endereços e ninguém acima de um terço, é mercado aberto; entre um
+terço e metade, não se escolhe um lado.
+
+Se uma quarta versão desta regra aparecer, o teste que a barra é
+`src/concentracao.test.ts`, no caso "17 endereços com o maior levando 22%".
+
+## A varredura independente de 2026-09-28: o censo do bot confere
+
+Varri a Base por fora, com o RPC público, 205 janelas de 2.000 blocos, cobertura
+100%, 9,5 dias:
+
+    por fora (meu)   51 liquidações entre 17 endereços, maior 11 (21,6%)
+    o bot (censo)    57 liquidações entre 17 endereços, maior      19%
+
+Janelas ligeiramente diferentes (9,5 contra 9,3 dias), 10% de diferença na
+contagem, **mesmo número de endereços e mesma fatia do maior**. É a segunda vez
+que os números do bot são conferidos por um caminho independente, e passaram.
+
+Duas coisas que essa varredura mostrou e que o censo do bot não diz:
+
+1. **Os últimos 1,9 dias tiveram 3 liquidações, não ~12.** A 6,2/dia do censo é a
+   média dos 9,3 dias; o mercado ficou quieto no fim. Média não é o que vai
+   acontecer amanhã.
+2. **Quem levou a liquidação que o bot perdeu em 2026-09-28 (`0x111eda48…`) tinha
+   levado 1 de 51 em 9,5 dias.** Não é bot dedicado. Ela não perdeu para uma
+   máquina: perdeu para alguém que aparece uma vez a cada dez dias.
+
 ## Como este projeto mede o próprio erro
 
 O defeito que mais aparece aqui tem nome: **ausência com cara de resposta** —

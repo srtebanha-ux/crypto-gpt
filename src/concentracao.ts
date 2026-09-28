@@ -163,6 +163,33 @@ export interface Dono {
 export const CHANCE_QUE_CONVENCE = 0.05;
 
 /**
+ * E o limiar de FORCA, que e uma pergunta diferente da de ruido — e esquecer
+ * isso me fez cometer o mesmo erro tres vezes neste projeto.
+ *
+ * A primeira versao usou `liquidantes < liquidacoes/2`: inventada.
+ * A segunda usou `fatiaDoMaior >= 0.5 && total >= 5`: inventada tambem, e
+ * chamou de dono seis liquidacoes repartidas 3 e 3 entre dois enderecos.
+ * A terceira — minha, em 2026-09-28 — trocou as duas por um teste de chance do
+ * acaso, e ai chamou de dono 51 liquidacoes entre 17 enderecos com o maior
+ * levando 22%. Medido: a chance do acaso ali e 0,26%, entao o desvio E real. E
+ * mesmo assim NAO e dono.
+ *
+ * Porque as duas perguntas nao sao a mesma:
+ *   - "o desvio e maior que o acaso?"   -> `chanceDoAcaso`. Com muitos eventos,
+ *     qualquer desequilibrio minimo passa a ser detectavel.
+ *   - "alguem esta levando a maior parte?" -> a FRACAO. E essa que decide se vale
+ *     entrar, porque e ela que diz quanto sobra.
+ *
+ * O padrao de forca ja estava medido neste projeto e escrito no CLAUDE.md, do
+ * caso real de 17 liquidantes: "fatia do maior perto de 50% e dominio; com dez
+ * ou mais enderecos e ninguem acima de um terco, e mercado aberto. O maior tem
+ * 3,3x a fatia media, nao 30x." Entao nao se inventa de novo: usa-se esse.
+ */
+export const FATIA_QUE_E_DOMINIO = 0.5;
+export const FATIA_QUE_E_ABERTO = 1 / 3;
+export const CAMPO_QUE_E_ABERTO = 10;
+
+/**
  * Tem dono, nao tem, ou nao da para dizer.
  *
  * As tres respostas existem de proposito. O log antigo tinha duas, e por isso
@@ -196,12 +223,33 @@ export function quemTemDono(c: Contagem, limiar = CHANCE_QUE_CONVENCE): Dono {
             };
     }
     const emPct = (x: number) => `${(x * 100).toFixed(x < 0.01 ? 2 : 1)}%`;
+    const vezesAJusta = c.fatiaDoMaior * c.jogadores;
+    const quanto = `o maior levou ${c.doMaior} de ${c.total} (${emPct(c.fatiaDoMaior)}) entre ${c.jogadores} `
+        + `endereços — ${vezesAJusta.toFixed(1)}x a fatia justa`;
     if (chance <= limiar) {
+        // O desvio e real. Agora a OUTRA pergunta: ele e grande o bastante para
+        // atrapalhar? 22% entre 17 enderecos e desvio real e mercado aberto ao
+        // mesmo tempo, e confundir os dois foi o erro nº 9 deste projeto.
+        if (c.fatiaDoMaior >= FATIA_QUE_E_DOMINIO) {
+            return {
+                veredicto: 'tem dono',
+                chance,
+                porque: `${quanto}. Metade ou mais é domínio, e o acaso daria isso em no máximo ${emPct(chance)}`,
+            };
+        }
+        if (c.fatiaDoMaior < FATIA_QUE_E_ABERTO && c.jogadores >= CAMPO_QUE_E_ABERTO) {
+            return {
+                veredicto: 'sem dono',
+                chance,
+                porque: `${quanto}. O desequilíbrio é real (o acaso daria em ${emPct(chance)}), mas ninguém está `
+                    + `acima de um terço com ${c.jogadores} endereços na mesa: é mercado aberto, não domínio`,
+            };
+        }
         return {
-            veredicto: 'tem dono',
+            veredicto: 'não dá para dizer',
             chance,
-            porque: `o maior levou ${c.doMaior} de ${c.total} entre ${c.jogadores} endereços, `
-                + `e o acaso daria isso em no máximo ${emPct(chance)} das vezes`,
+            porque: `${quanto}. É mais que o acaso (${emPct(chance)}), mas está entre "aberto" e "domínio" — `
+                + 'nem um terço nem metade, e com este campo eu não escolho um lado',
         };
     }
     // Acima do limiar nao ha prova de dominio. Mas "sem dominador" NAO e a mesma
@@ -245,8 +293,7 @@ export function quemTemDono(c: Contagem, limiar = CHANCE_QUE_CONVENCE): Dono {
     return {
         veredicto: 'sem dono',
         chance,
-        porque: `o maior levou ${c.doMaior} de ${c.total} entre ${c.jogadores} endereços, `
-            + `e o acaso daria isso em ${emPct(chance)} das vezes — não é domínio`,
+        porque: `${quanto}. O acaso daria isso em ${emPct(chance)} das vezes — não é domínio`,
     };
 }
 

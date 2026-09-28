@@ -167,3 +167,62 @@ test('duopólio comprovado é dono, duopólio de amostra curta não é', () => {
     assert.equal(muitos.veredicto, 'tem dono');
     assert.match(muitos.porque, /duopólio de verdade/);
 });
+
+test('17 endereços com o maior levando 22% é mercado ABERTO — eu errei isto três vezes', () => {
+    // Medido POR FORA em 2026-09-28: varredura própria da Base, 205 janelas,
+    // cobertura 100%, 9,5 dias. 51 liquidações entre 17 endereços, distribuição
+    // real 11/8/7/4/4/4/2/2 e nove com uma.
+    //
+    // O CLAUDE.md registra este exato caso como o erro nº 9: "17 jogadores,
+    // nenhum acima de 20%, e um mercado ABERTO. O maior tem 3,3x a fatia média,
+    // não 30x." A primeira regra chamou de concentrado, a segunda também, e a
+    // minha — o teste de chance do acaso — chamou de TEM DONO, porque com 51
+    // eventos um desvio de 3,7x é estatisticamente real.
+    //
+    // Real e dono não são a mesma coisa. Este teste existe para a quarta versão
+    // desta regra não repetir a terceira.
+    const dist = [11, 8, 7, 4, 4, 4, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+    const lista: string[] = [];
+    dist.forEach((n, i) => { for (let j = 0; j < n; j++) lista.push(`0x${i}`); });
+    assert.equal(lista.length, 51);
+
+    const c = contarPorEndereco(lista);
+    assert.equal(c.jogadores, 17);
+    assert.equal(c.doMaior, 11);
+
+    // O desvio É real: o acaso daria isso em 0,26% das vezes.
+    const d = quemTemDono(c);
+    assert.ok(d.chance < 0.01, `a chance devia ser pequena, veio ${d.chance}`);
+    // E mesmo assim NÃO é dono.
+    assert.equal(d.veredicto, 'sem dono');
+    assert.match(d.porque, /mercado aberto, não domínio/);
+    // A frase carrega as duas coisas: o desvio é real E a fatia é pequena.
+    assert.match(d.porque, /3\.7x a fatia justa/);
+});
+
+test('metade continua sendo domínio, com desvio real', () => {
+    // O padrão de força vem do CLAUDE.md: metade ou mais é domínio. Se a conta
+    // nova não afirmasse nem isso, ela seria inútil na outra direção.
+    const lista = [
+        ...Array(20).fill('0xA'), ...Array(5).fill('0xB'), ...Array(5).fill('0xC'),
+        ...Array(4).fill('0xD'), ...Array(3).fill('0xE'), ...Array(3).fill('0xF'),
+    ];
+    const d = quemTemDono(contarPorEndereco(lista));
+    assert.equal(d.veredicto, 'tem dono');
+    assert.match(d.porque, /Metade ou mais é domínio/);
+});
+
+test('entre um terço e metade eu não escolho um lado', () => {
+    // 40% com desvio real não é nem "aberto" nem "domínio". Dizer qualquer um
+    // dos dois seria inventar de novo.
+    const lista = [
+        ...Array(16).fill('0xA'), ...Array(6).fill('0xB'), ...Array(6).fill('0xC'),
+        ...Array(4).fill('0xD'), ...Array(4).fill('0xE'), ...Array(2).fill('0xF'),
+        '0xG', '0xH', '0xI', '0xJ', '0xK',
+    ];
+    const c = contarPorEndereco(lista);
+    assert.ok(c.fatiaDoMaior > 1 / 3 && c.fatiaDoMaior < 0.5, `fatia ${c.fatiaDoMaior}`);
+    const d = quemTemDono(c);
+    assert.equal(d.veredicto, 'não dá para dizer');
+    assert.match(d.porque, /nem um terço nem metade/);
+});
