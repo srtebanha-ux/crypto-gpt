@@ -1073,3 +1073,52 @@ test('o kamikaze NÃO vale fora do modo prova, por mais que o saldo caiba', () =
     const comProva = decidirTiro({ ...comum, tiroDeProva: true, aceitaPrejuizo: true });
     assert.equal(semProva.prioridadeWei < comProva.prioridadeWei, true);
 });
+
+test('o kamikaze INVERTE a mordaça, e a faixa não pode supor a direção', () => {
+    // Medido em 2026-09-28 com o saldo real, e foi ela quem viu a contradição
+    // no log das 17:53:
+    //     numDeUS$88      "gorjeta 2.49 gwei (inteira)"
+    //     lanceInteiroAte "nenhum prêmio com lance inteiro"
+    //
+    // Duas linhas do mesmo [EM SECO]. A causa: fora do modo prova a gorjeta
+    // desejada CRESCE com o prêmio, então uma vez amordaçado é para sempre e
+    // `faixaQueAtira` podia testar o chão e desistir. No kamikaze a desejada é
+    // CONSTANTE (teto da carteira) e quem cresce é a conseguida, pela fração de
+    // risco — a região inteira é [X, ∞), não [chão, Y].
+    const ambiente = {
+        precoDoEthUsd: new Decimal('2697.19'),
+        saldoWei: 3341111191761470n,
+        baseFeeWei: 20_000_000n,
+        tiroDeProva: true as const,
+        aceitaPrejuizo: true as const,
+    };
+    const migalha = decidirTiro({ ...ambiente, lucroUsd: new Decimal('0.05') });
+    const grande = decidirTiro({ ...ambiente, lucroUsd: new Decimal('88') });
+    assert.equal(migalha.amordaca.amordacado, true, 'a migalha sai amordaçada');
+    assert.equal(grande.amordaca.amordacado, false, 'US$ 88 sai inteiro — como o log dizia');
+    assert.equal(migalha.desejadaWei, grande.desejadaWei, 'a desejada é CONSTANTE no kamikaze');
+    assert.equal(grande.prioridadeWei > migalha.prioridadeWei, true, 'quem cresce é a conseguida');
+
+    const f = faixaQueAtira({ ...ambiente });
+    assert.notEqual(f, null);
+    assert.notEqual(f!.inteiroDe, null, 'tem de achar A PARTIR DE onde sai inteiro');
+    assert.equal(f!.inteiroDe!.greaterThan(20), true, 'e é acima de US$ 20, que ainda sai amordaçado');
+    assert.equal(f!.inteiroDe!.lessThan(88), true, 'e abaixo de US$ 88, que já sai inteiro');
+});
+
+test('fora do modo prova a faixa continua respondendo pela ponta de CIMA', () => {
+    // A ponta gêmea: o conserto não pode quebrar o caso normal, onde a mordaça
+    // chega quando o prêmio cresce.
+    const f = faixaQueAtira({
+        precoDoEthUsd: new Decimal('2692.43'),
+        saldoWei: 3341111000000000n,
+        baseFeeWei: 20_000_000n,
+        limiteGas: 1_200_000n,
+        fracaoBaseDoLucro: 0.15,
+        fracaoMaximaDoSaldo: 0.8,
+        tiroDeProva: false,
+    });
+    assert.notEqual(f, null);
+    assert.equal(f!.inteiroDe, null, 'no caso normal não há ponta de baixo');
+    assert.notEqual(f!.inteiroAte, null, 'e a de cima continua existindo');
+});

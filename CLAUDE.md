@@ -701,3 +701,44 @@ E `src/mostrarAFila.ts` rodou com `margemQuente = 15` enquanto o caçador usa 25
 (`CACA_MARGEM_QUENTE`), publicando `naListaQuente: 35` contra os `323` do
 Railway — um número meu que não confere com produção, na ferramenta que existe
 para conferir com produção. Agora lê a mesma constante.
+
+## 2026-09-28, 17:53: o KAMIKAZE inverteu a mordaça, e a faixa supunha a direção
+
+Ela viu no log, duas linhas do mesmo `[EM SECO]`:
+
+    numDeUS$88       "gorjeta 2.49 gwei (inteira)"
+    lanceInteiroAte  "nenhum prêmio com lance inteiro"
+
+Medido com o saldo real (0,003341 ETH, baseFee 0,005 gwei, bloco 51914502):
+
+    prêmio      desejada  conseguida  amordaçado?
+    US$ 0,05      2,506      1,188        sim
+    US$ 20        2,506      1,414        sim
+    US$ 66        2,506      2,362        NÃO
+    US$ 1986      2,506      2,501        NÃO
+
+**Fora do modo prova** a gorjeta desejada CRESCE com o prêmio e o teto do saldo
+para de crescer: uma vez amordaçado, amordaçado para sempre, e `faixaQueAtira`
+podia testar o chão e desistir. Era isso que o comentário dela dizia, e estava
+certo.
+
+**No kamikaze** a desejada é CONSTANTE (o teto da carteira) e quem cresce é a
+conseguida, pela fração de risco. A região do lance inteiro vira **[X, ∞)** em
+vez de **[chão, Y]** — e a busca, que testava o chão primeiro, via mordaça e
+desistia.
+
+A busca agora não supõe direção: testa as duas pontas e encontra a fronteira do
+lado em que ela estiver. `inteiroDe` é a ponta nova, e a frase do log segue a
+FORMA da região:
+
+    A PARTIR de US$ 48,65 (R$ 262,70) o lance sai inteiro. ABAIXO disso eu
+    atiro amordaçada — a gorjeta é o teto da carteira, mas a fração de risco
+    corta quando o prêmio é pequeno
+
+É a terceira vez em dois dias que um conserto meu cria um defeito na etiqueta ao
+lado: o kamikaze quebrou `soPassouPorSerProva` (achado pelos testes), a REGRA 0
+quebrou `jaSabia` (achado no log dela), e agora a monotonicidade de
+`faixaQueAtira` (achado por ela, na contradição entre duas linhas vizinhas).
+
+O padrão é sempre o mesmo: **mudei o mecanismo e não fui reler o que o lia.** É
+a regra 3 deste arquivo, e ela continua me pegando.

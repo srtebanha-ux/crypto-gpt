@@ -907,6 +907,29 @@ export interface FaixaDeTiro {
      * diferentes e a resposta de uma nao serve para a outra.
      */
     inteiroAte: Decimal | null;
+    /**
+     * A PARTIR de onde o lance sai inteiro — a ponta oposta de `inteiroAte`.
+     *
+     * Existe porque o MODO KAMIKAZE inverteu a mordaça, e isso foi medido em
+     * 2026-09-28 com o saldo real (0,003341 ETH, baseFee 0,02 gwei):
+     *
+     *     prêmio    desejada  conseguida  amordaçado?
+     *     US$ 0,01    2,506      1,173       sim
+     *     US$ 20      2,506      1,399       sim
+     *     US$ 66      2,506      2,347       NÃO
+     *     US$ 1986    2,506      2,486       NÃO
+     *
+     * Fora do modo prova a gorjeta desejada CRESCE com o prêmio e o teto do
+     * saldo para de crescer: uma vez amordaçado, amordaçado para sempre, e
+     * `inteiroAte` responde tudo. No kamikaze a desejada é CONSTANTE (o teto da
+     * carteira) e quem cresce é a conseguida, pela fração de risco — então a
+     * região inteira é [X, infinito), e não [chão, Y].
+     *
+     * Sem isto, `faixaQueAtira` testava o chão, via mordaça e desistia,
+     * publicando `lanceInteiroAte: "nenhum prêmio com lance inteiro"` na MESMA
+     * tela em que `numDeUS$88` dizia `gorjeta 2.49 gwei (inteira)`.
+     */
+    inteiroDe: Decimal | null;
 }
 
 export function faixaQueAtira(
@@ -948,30 +971,44 @@ export function faixaQueAtira(
         ate = dentro;
     }
 
-    // Ate onde o lance sai INTEIRO. Monotono no premio: a gorjeta desejada
-    // cresce com o premio e o teto do saldo para de crescer, entao uma vez
-    // amordaçado, amordaçado para sempre.
+    // Onde o lance sai INTEIRO — e a busca NAO supoe a direcao.
+    //
+    // A versao anterior supunha: "a gorjeta desejada cresce com o premio e o
+    // teto do saldo para de crescer, entao uma vez amordaçado, amordaçado para
+    // sempre". Isso vale fora do modo prova. O MODO KAMIKAZE inverte: a
+    // desejada vira o teto da carteira (constante) e quem cresce e a
+    // conseguida, pela fracao de risco. Ver `inteiroDe`.
     const inteiro = (usd: Decimal) => {
         const d = decidirTiro({ ...e, lucroUsd: usd });
         return d.atira && !d.amordaca.amordacado;
     };
     const chao = de ?? PROBE;
     const teto = ate ?? tetoDaBusca;
-    let inteiroAte: Decimal | null = null;
-    if (inteiro(chao)) {
-        if (inteiro(teto)) {
-            inteiroAte = teto;
-        } else {
-            let dentro = chao;
-            let fora = teto;
-            for (let i = 0; i < passos; i++) {
-                const meio = dentro.plus(fora).dividedBy(2);
-                if (inteiro(meio)) dentro = meio; else fora = meio;
-            }
-            inteiroAte = dentro;
+    /** A fronteira entre `a` e `b`, onde `inteiro` muda de resposta. */
+    const fronteira = (dentro: Decimal, fora: Decimal): Decimal => {
+        let d = dentro, f = fora;
+        for (let i = 0; i < passos; i++) {
+            const meio = d.plus(f).dividedBy(2);
+            if (inteiro(meio)) d = meio; else f = meio;
         }
+        return d;
+    };
+    let inteiroAte: Decimal | null = null;
+    let inteiroDe: Decimal | null = null;
+    const noChao = inteiro(chao);
+    const noTeto = inteiro(teto);
+    if (noChao && noTeto) {
+        inteiroAte = teto;
+    } else if (noChao) {
+        // Cresce e perde a forca: o caso normal, fora do modo prova.
+        inteiroAte = fronteira(chao, teto);
+    } else if (noTeto) {
+        // GANHA forca com o premio: o caso do kamikaze. A fronteira e onde ele
+        // PASSA a sair inteiro, entao a busca anda do teto para baixo.
+        inteiroDe = fronteira(teto, chao);
+        inteiroAte = teto;
     }
-    return { de, ate, inteiroAte };
+    return { de, ate, inteiroAte, inteiroDe };
 }
 
 /**

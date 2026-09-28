@@ -1689,10 +1689,22 @@ async function principal(): Promise<'parar' | void> {
                         : `de US$ ${faixa.de.toFixed(2)} (R$ ${faixa.de.mul(5.4).toFixed(2)}) até ${topo}. ` +
                           'Abaixo não paga o gás; acima uma derrota mata a caça';
                 })();
-            passos.lanceInteiroAte = faixa === null || faixa.inteiroAte === null
+            // A frase segue a FORMA da região, e não supõe uma delas.
+            //
+            // Com o kamikaze a mordaça inverte: amordaçado nas migalhas e
+            // inteiro dos ~US$ 66 para cima. Dizer "nenhum prêmio com lance
+            // inteiro" na mesma tela em que `numDeUS$88` diz "(inteira)" é a
+            // etiqueta contradizendo o número ao lado dela.
+            passos.lanceInteiroAte = faixa === null
                 ? 'nenhum prêmio com lance inteiro'
-                : `US$ ${faixa.inteiroAte.toFixed(2)} (R$ ${faixa.inteiroAte.mul(5.4).toFixed(2)}). ` +
-                  'Entre este e o topo da faixa eu atiro, mas amordaçada — com desvantagem no leilão'
+                : faixa.inteiroDe !== null
+                    ? `A PARTIR de US$ ${faixa.inteiroDe.toFixed(2)} (R$ ${faixa.inteiroDe.mul(5.4).toFixed(2)}) o lance sai `
+                      + 'inteiro. ABAIXO disso eu atiro amordaçada — a gorjeta é o teto da carteira, mas a fração '
+                      + 'de risco corta quando o prêmio é pequeno'
+                    : faixa.inteiroAte !== null
+                        ? `US$ ${faixa.inteiroAte.toFixed(2)} (R$ ${faixa.inteiroAte.mul(5.4).toFixed(2)}). `
+                          + 'Entre este e o topo da faixa eu atiro, mas amordaçada — com desvantagem no leilão'
+                        : 'nenhum prêmio com lance inteiro'
             // O ensaio NAO consome nonce. Antes ele chamava `getNextNonce()`,
             // que adianta o contador, e devolvia com um `sync()` sem protecao: se
             // esse `sync()` falhasse — limite de RPC, soluco de rede — o contador
