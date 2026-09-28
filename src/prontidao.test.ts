@@ -949,3 +949,69 @@ test('a política lê CACA_ACEITA_PREJUIZO, e um lugar só', () => {
     assert.equal(politicaDoTiro({ CACA_ACEITA_PREJUIZO: '1' }).aceitaPrejuizo, true);
     assert.equal(politicaDoTiro({ CACA_ACEITA_PREJUIZO: 'sim' }).aceitaPrejuizo, false, 'só "1" liga');
 });
+
+test('lucro do contrato é SEM SINAL: o que aceitaPrejuizo solta é o ZERO', () => {
+    // Correção de 2026-09-28, achada por revisão horas depois de eu mandar ela
+    // ligar a chave. Eu escrevi que sem `aceitaPrejuizo` o bot nunca atiraria,
+    // porque o alvo legível vale -US$ 0,30. Errado: o lucro que chega em
+    // `decidirTiro` pelo caminho quente vem do contrato via
+    // `BigInt('0x'+...)` — inteiro SEM SINAL, nunca negativo.
+    //
+    // O que a chave solta de verdade é o lucro BRUTO igual a zero, e o bruto
+    // positivo que o gás come.
+    const ambiente = {
+        precoDoEthUsd: new Decimal('2665.33'),
+        saldoWei: 3341111000000000n,
+        baseFeeWei: 20_000_000n,
+        limiteGas: 1_200_000n,
+        tiroDeProva: true,
+    };
+    // Lucro bruto ZERO: é o que `lerRespostaDaCaca` devolve de propósito.
+    const zero = new Decimal(0);
+    assert.equal(decidirTiro({ ...ambiente, lucroUsd: zero }).atira, false,
+        'com margem zero `valeATentativa` ainda exige lucro ACIMA de zero');
+    const comChave = decidirTiro({ ...ambiente, lucroUsd: zero, aceitaPrejuizo: true });
+    assert.equal(comChave.atira, true, comChave.porque);
+    assert.match(comChave.porque, /PREJUÍZO ACEITO DE PROPÓSITO/);
+
+    // E aqui este teste me corrigiu outra vez, e a verdade é mais estreita ainda:
+    // o modo prova JÁ aceitava prejuízo. Com margem zero, `valeATentativa` só
+    // exige lucro acima de zero — então US$ 0,01 de lucro bruto contra US$ 0,22 de
+    // gás já passava, sem chave nenhuma.
+    const migalha = new Decimal('0.01');
+    const so = decidirTiro({ ...ambiente, lucroUsd: migalha });
+    assert.ok(so.custoUsd!.greaterThan(migalha), 'o gás tem de comer o lucro, senão não é prejuízo');
+    assert.equal(so.atira, true, 'o modo prova sozinho já atira num lucro que o gás come');
+
+    // Ou seja: `CACA_ACEITA_PREJUIZO=1` muda o comportamento em UM caso só — o
+    // lucro bruto exatamente zero. Está escrito aqui para ninguém (eu inclusive)
+    // voltar a dizer que ela é o que faz o bot atirar.
+    assert.equal(decidirTiro({ ...ambiente, lucroUsd: new Decimal('0.000001') }).atira, true);
+});
+
+test('a política MORRE em número torto, em vez de decidir errado calada', () => {
+    // `Number('0,5')` — vírgula decimal, natural em português — devolve NaN em
+    // silêncio, e NaN atravessa a conta inteira. Medido: com
+    // CACA_MORDIDA_MAXIMA='0,5', `mataACacaDeMigalhas` chama
+    // BigInt(Math.round(NaN * 1e6)) e estoura RangeError, que o laço do caçador
+    // engole como "tropeço rápido na rede" — o bot nunca mais atira e o log culpa
+    // a rede.
+    assert.throws(() => politicaDoTiro({ CACA_MORDIDA_MAXIMA: '0,5' }), /CACA_MORDIDA_MAXIMA="0,5"/);
+    assert.throws(() => politicaDoTiro({ CACA_FRACAO_GORJETA: '15%' }), /ponto decimal, não vírgula/);
+    assert.throws(() => politicaDoTiro({ CACA_RISCO_MAXIMO: 'oito décimos' }), /CACA_RISCO_MAXIMO/);
+    // Vazio e ausente caem no padrão, que é o comportamento de sempre.
+    assert.equal(politicaDoTiro({ CACA_RISCO_MAXIMO: '' }).fracaoMaximaDoSaldo, 0.6);
+    assert.equal(politicaDoTiro({}).fracaoMaximaDoSaldo, 0.6);
+    assert.equal(politicaDoTiro({ CACA_RISCO_MAXIMO: '0.8' }).fracaoMaximaDoSaldo, 0.8);
+});
+
+test('comoLerAPolitica imprime TODOS os botões, inclusive o que decide se atira', () => {
+    const linha = comoLerAPolitica(politicaDoTiro({ CACA_ACEITA_PREJUIZO: '1' }));
+    assert.match(linha, /aceita prejuízo SIM/);
+    assert.match(comoLerAPolitica(politicaDoTiro({})), /aceita prejuízo não/);
+    // A linha existe para conferir daqui contra o Railway. Um botão que não
+    // aparece não pode ser conferido — faltava justamente esse.
+    for (const pedaco of ['gás', 'gorjeta', 'risco', 'margem', 'mordida', 'amordaçado', 'aceita prejuízo']) {
+        assert.ok(linha.includes(pedaco), `faltou "${pedaco}" na linha: ${linha}`);
+    }
+});

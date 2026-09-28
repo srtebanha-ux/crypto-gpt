@@ -534,14 +534,43 @@ export interface DecisaoDoTiro {
  * ambiente como argumento: assim o de fora acerta quando os valores batem, e
  * `comoLerAPolitica` deixa ver na hora quando nao batem.
  */
+/**
+ * Le um numero do ambiente, ou MORRE dizendo qual variavel esta torta.
+ *
+ * `Number('0,5')` — virgula decimal, que e o natural para quem escreve em
+ * portugues — devolve `NaN` em silencio. E `NaN` aqui nao para o bot: ele
+ * atravessa a conta inteira e sai do outro lado como decisao errada. Medido:
+ * `CACA_MORDIDA_MAXIMA='0,5'` faz `mataACacaDeMigalhas` chamar
+ * `BigInt(Math.round(NaN * 1e6))` e estourar `RangeError`, que o laco do cacador
+ * engole como "tropeço rápido na rede" — o bot nunca mais atira e o log culpa a
+ * rede. E `CACA_FRACAO_GORJETA='15%'` faz a gorjeta cair no piso para qualquer
+ * premio, o que apaga a mordaça e libera tiros que a politica correta recusa.
+ *
+ * Entao a variavel torta para o boot, com o nome dela na mensagem. Um bot que
+ * nao sobe e um problema de dez segundos; um bot que decide errado em silencio
+ * custou dois dias.
+ */
+function numeroDoAmbiente(nome: string, valor: string | undefined, padrao: number): number {
+    if (valor === undefined || valor.trim() === '') return padrao;
+    const n = Number(valor);
+    if (!Number.isFinite(n)) {
+        throw new Error(
+            `${nome}="${valor}" não é um número que eu consiga usar. `
+            + 'Use ponto decimal, não vírgula (0.5, não 0,5), e sem "%" nem espaço.',
+        );
+    }
+    return n;
+}
+
 export function politicaDoTiro(env: Record<string, string | undefined> = process.env) {
+    const n = (nome: string, padrao: number) => numeroDoAmbiente(nome, env[nome], padrao);
     return {
         limiteGas: env.CACA_LIMITE_GAS ? BigInt(env.CACA_LIMITE_GAS) : LIMITE_DE_GAS,
-        fracaoBaseDoLucro: Number(env.CACA_FRACAO_GORJETA ?? '0.4'),
-        fracaoBaseDoSaldo: Number(env.CACA_RISCO_POR_TIRO ?? '0.25'),
-        fracaoMaximaDoSaldo: Number(env.CACA_RISCO_MAXIMO ?? '0.6'),
-        margemMinima: Number(env.CACA_MARGEM_MINIMA ?? '2'),
-        tetoDaMordida: Number(env.CACA_MORDIDA_MAXIMA ?? '0.5'),
+        fracaoBaseDoLucro: n('CACA_FRACAO_GORJETA', 0.4),
+        fracaoBaseDoSaldo: n('CACA_RISCO_POR_TIRO', 0.25),
+        fracaoMaximaDoSaldo: n('CACA_RISCO_MAXIMO', 0.6),
+        margemMinima: n('CACA_MARGEM_MINIMA', 2),
+        tetoDaMordida: n('CACA_MORDIDA_MAXIMA', 0.5),
         atirarAmordacado: env.CACA_ATIRAR_AMORDACADO === '1',
         // Prejuizo conhecido aceito de proposito. So vale junto com o modo prova,
         // que tem trava de nonce: UM tiro, uma vez, e desarma sozinho.
@@ -557,9 +586,13 @@ export function politicaDoTiro(env: Record<string, string | undefined> = process
  * medicao.
  */
 export function comoLerAPolitica(p: ReturnType<typeof politicaDoTiro>): string {
+    // Esta linha imprimia SETE dos oito botoes, e o que faltava era justamente o
+    // que decide se o bot atira. Ela existe para permitir conferir os valores
+    // daqui contra os do Railway; um botao que nao aparece nao pode ser conferido.
     return `gás ${p.limiteGas} | gorjeta ${p.fracaoBaseDoLucro} do lucro | risco ${p.fracaoBaseDoSaldo}`
         + `→${p.fracaoMaximaDoSaldo} do saldo | margem ${p.margemMinima}x | mordida máx ${p.tetoDaMordida}`
-        + ` | amordaçado ${p.atirarAmordacado ? 'sim' : 'não'}`;
+        + ` | amordaçado ${p.atirarAmordacado ? 'sim' : 'não'}`
+        + ` | aceita prejuízo ${p.aceitaPrejuizo ? 'SIM' : 'não'}`;
 }
 
 export function decidirTiro(e: {
@@ -581,26 +614,41 @@ export function decidirTiro(e: {
      */
     tiroDeProva?: boolean;
     /**
-     * Aceitar PREJUIZO CONHECIDO: atirar sabendo que a conta fecha negativa.
+     * Aceitar PREJUIZO: atirar sabendo que a conta fecha negativa.
      *
-     * So tem efeito junto com `tiroDeProva`, e existe por uma medicao de
-     * 2026-09-28. Varri as 51 liquidacoes de 9,5 dias na Aave da Base e conferi a
-     * saude um bloco antes de cada uma: 32 foram levadas no MESMO bloco em que
-     * ficaram liquidaveis — impossiveis de ler a tempo — e as 11 que tinham
-     * janela eram TODAS poeira, com dividas de US$ 0,20 a US$ 0,31, valendo de
-     * -US$ 0,25 a -US$ 0,30 depois do gas.
+     * CORRECAO de 2026-09-28, achada por revisao horas depois de eu mandar a dona
+     * do bot ligar a chave: eu escrevi aqui que sem ela "o bot nunca atira", e
+     * isso estava ERRADO. O lucro que chega em `decidirTiro` pelo caminho quente
+     * vem do contrato, decodificado com `BigInt('0x'+...)` em
+     * `lerRespostaDaCaca` — e um inteiro SEM SINAL, entao nunca e negativo. A
+     * porta que eu disse que estava trancada nunca teve como ser usada.
      *
-     * Ou seja: em 9,5 dias, NENHUMA liquidacao foi ao mesmo tempo legivel a tempo
-     * e capaz de pagar o proprio gas. O unico alvo que este bot consegue ler e
-     * um que da prejuizo — e `valeATentativa` recusa lucro nao-positivo, mesmo no
-     * modo prova, por um teste que existe de proposito.
+     * O que esta chave faz DE VERDADE, e um teste me corrigiu de novo aqui: o modo
+     * prova JA aceitava prejuizo. Com margem zero, `valeATentativa` so exige lucro
+     * ACIMA de zero — entao um lucro bruto de US$ 0,01 contra um gas de US$ 0,22
+     * ja passava, sem chave nenhuma.
      *
-     * Entao sem esta chave o bot nunca atira, nem quando o alvo aparece. A dona
-     * do bot pediu isso em palavras, duas vezes: "custe o que custar mesmo que
-     * isso va todo nosso gas" e "eu quero que ele atire o mais rapido possivel a
-     * qualquer custo". O prejuizo e o preco da informacao, e a escolha e dela.
+     * Esta chave muda o comportamento em UM caso: lucro bruto exatamente ZERO, que
+     * e o que `lerRespostaDaCaca` devolve de proposito quando a resposta vem vazia
+     * ou curta. So isso. Nao e ela que faz o bot atirar.
      *
-     * A trava e a mesma de sempre e mora no nonce: UM tiro, e o modo se desarma.
+     * (E ela so passou a alcancar o caso do zero junto com outro conserto do mesmo
+     * dia: `leitura.lucroCru` era testado por veracidade, e `0n` e falso em
+     * JavaScript, entao uma medicao de lucro exatamente zero era descartada antes
+     * de chegar aqui.)
+     *
+     * Por que isso importa, medido no mesmo dia: das 51 liquidacoes de 9,5 dias na
+     * Aave da Base, 32 foram levadas no MESMO bloco em que ficaram liquidaveis, e
+     * as 11 com janela de leitura eram todas poeira — dividas de US$ 0,20 a
+     * US$ 0,31, que o gas de US$ 0,22 nao deixa lucrar. O alvo que este bot
+     * consegue ler e um que nao paga o proprio gas.
+     *
+     * A dona do bot pediu isso em palavras, duas vezes: "custe o que custar mesmo
+     * que isso va todo nosso gas" e "eu quero que ele atire o mais rapido possivel
+     * a qualquer custo". O prejuizo e o preco da informacao, e a escolha e dela.
+     *
+     * So tem efeito junto com `tiroDeProva`, que e onde mora a trava: UM tiro, e o
+     * modo se desarma sozinho pelo nonce.
      */
     aceitaPrejuizo?: boolean;
 }): DecisaoDoTiro {

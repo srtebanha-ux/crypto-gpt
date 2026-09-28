@@ -1371,8 +1371,15 @@ async function principal(): Promise<'parar' | void> {
                 ? 'nenhum prêmio com lance inteiro'
                 : `US$ ${faixa.inteiroAte.toFixed(2)} (R$ ${faixa.inteiroAte.mul(5.4).toFixed(2)}). ` +
                   'Entre este e o topo da faixa eu atiro, mas amordaçada — com desvantagem no leilão'
-            passos.nonce = String(await nonceManager!.getNextNonce());
-            await nonceManager!.sync(); // devolve o contador ao valor da rede
+            // O ensaio NAO consome nonce. Antes ele chamava `getNextNonce()`,
+            // que adianta o contador, e devolvia com um `sync()` sem protecao: se
+            // esse `sync()` falhasse — limite de RPC, soluco de rede — o contador
+            // ficava em N+1 para sempre, `provaAgora()` passava a responder "ja
+            // saiu tiro: nonce N+1 passou de N. A prova foi feita", e o bot
+            // desarmava o unico tiro que ele esta configurado para dar, sem nunca
+            // ter atirado. Um diagnostico nao pode gastar a municao que ele existe
+            // para conferir.
+            passos.nonce = String(nonceManager!.nonceConhecido() ?? -1);
             // A pergunta que o log nao respondia: QUANTO FALTA para este alvo.
             // Sai de graca — a varredura acabou de medir a margem dele, e o
             // ensaio mira justamente o primeiro da brasa.
@@ -2181,7 +2188,18 @@ async function principal(): Promise<'parar' | void> {
                         lucroCru: leitura.lucroCru?.toString() ?? '-',
                     });
 
-                    if (leitura.desfecho === 'mediu' && leitura.lucroCru) {
+                    // `leitura.lucroCru` e um bigint, e `0n` e FALSO em
+                    // JavaScript. Com o teste de veracidade, uma medicao de lucro
+                    // exatamente zero — que `lerRespostaDaCaca` devolve de
+                    // proposito, com `desfecho: 'mediu'` — era jogada fora como
+                    // "nao mediu": o alvo era pulado com um `continue` seco e a
+                    // linha de recusa, a unica que explica por que o bot nao
+                    // atirou, nunca saia. Ausencia com cara de resposta no lugar
+                    // mais caro do codigo.
+                    //
+                    // Quem julga o numero e `decidirTiro`, num lugar so. Aqui so
+                    // se pergunta se houve medicao.
+                    if (leitura.desfecho === 'mediu' && leitura.lucroCru !== undefined) {
                         medicoes.push({ contrato, lucroCru: leitura.lucroCru });
                     }
                 }

@@ -319,6 +319,76 @@ isso, mas nunca foi exercitado porque o mercado não se moveu o bastante.
 Antes de reabrir esta conclusão, refaça a varredura: o script está descrito aqui
 e leva uns oito minutos com o RPC público.
 
+## 2026-09-28: eu mandei ela ligar uma chave que não fazia nada
+
+Ela perguntou "tem certeza que não tem mais nenhum erro?". Eu respondi que não
+tinha como ter certeza e rodei uma revisão no diff dos dois dias. Ela achou **15
+defeitos**. O pior era sobre o que eu tinha acabado de mandar ela fazer.
+
+Eu disse a ela: ligue `CACA_ACEITA_PREJUIZO=1`, porque o único alvo legível a
+tempo vale -US$ 0,30 e `valeATentativa` recusa lucro não-positivo. **Errado.**
+
+O lucro que chega em `decidirTiro` pelo caminho quente vem do contrato,
+decodificado com `BigInt('0x'+...)` em `lerRespostaDaCaca`: é um inteiro **sem
+sinal**, nunca negativo. A porta que eu disse que estava trancada nunca teve como
+ser usada. Os -US$ 0,30 vêm de `lucroEstimado`, que é líquido do gás e serve o
+censo — e nunca chega perto da decisão do tiro.
+
+E quando escrevi o teste para provar o conserto, o teste me corrigiu outra vez: o
+modo prova **já aceitava prejuízo**. Com margem zero, `valeATentativa` só exige
+lucro acima de zero, então US$ 0,01 de lucro bruto contra US$ 0,22 de gás já
+passava. `CACA_ACEITA_PREJUIZO=1` muda o comportamento em **um** caso: lucro bruto
+exatamente zero.
+
+### O que de verdade estava barrando
+
+`if (leitura.desfecho === 'mediu' && leitura.lucroCru)` — `leitura.lucroCru` é um
+bigint, e **`0n` é falso em JavaScript.** Uma medição de lucro exatamente zero,
+que `lerRespostaDaCaca` devolve de propósito com `desfecho: 'mediu'`, era jogada
+fora como "não mediu": o alvo era pulado com um `continue` seco e a linha de
+recusa — a única que explica por que o bot não atirou — nunca saía.
+
+Ausência com cara de resposta, no lugar mais caro do código.
+
+### Outros dois que podiam custar o tiro
+
+- **O ensaio em seco gastava um nonce.** Chamava `getNextNonce()`, que adianta o
+  contador, e devolvia com um `sync()` sem proteção. Se esse `sync()` falhasse —
+  limite de RPC, soluço de rede — o contador ficava em N+1 para sempre,
+  `provaAgora()` passava a responder "já saiu tiro: a prova foi feita", e o bot
+  desarmava o único tiro que está configurado para dar, sem nunca ter atirado. Um
+  diagnóstico não pode gastar a munição que ele existe para conferir. Agora lê com
+  `nonceConhecido()`.
+- **`Number('0,5')` é `NaN`, em silêncio.** Vírgula decimal é o natural para quem
+  escreve em português. Medido: `CACA_MORDIDA_MAXIMA='0,5'` faz
+  `mataACacaDeMigalhas` chamar `BigInt(Math.round(NaN * 1e6))` e estourar
+  `RangeError`, que o laço do caçador engole como "tropeço rápido na rede" — o bot
+  nunca mais atira e o log culpa a rede. E `CACA_FRACAO_GORJETA='15%'` faz a
+  gorjeta cair no piso para qualquer prêmio, apagando a mordaça e liberando tiros
+  que a política correta recusa. Agora `politicaDoTiro` **morre no boot** dizendo
+  o nome da variável torta.
+
+### A lição, que é sobre mim e não sobre o código
+
+Cinco versões de uma regra, uma chave que não fazia nada, e uma docstring que eu
+tive de estreitar duas vezes na mesma hora. O padrão não é falta de cuidado: é eu
+**afirmar o mecanismo sem seguir o valor até o fim do caminho**. Eu li
+`valeATentativa`, vi o portão, e não fui ver de onde vinha o número que passa por
+ele.
+
+Antes de dizer "é este portão que barra", siga o valor: de onde ele nasce, por
+quais funções passa, e que tipo ele tem. `lucroCru` é `bigint` sem sinal — isso
+estava a um `grep` de distância.
+
+Ainda restam defeitos da mesma revisão sem conserto, anotados para não se
+perderem: o placar conta como "não teve" a liquidação que o bot atiraria
+(`piso 0` contra tiro em prejuízo); `repartirPorFaixa` manda lucro não-positivo
+para `dentro` quando `faixa.de` é `null`; o critério dos três maiores
+(`fatiaDoTop3`) foi perdido na reescrita de `quemTemDono`, então um cartel de três
+endereços lê como "não dá para dizer"; a cobertura do `olharAgora` diz 100% mesmo
+com todas as janelas falhando; e `--varrer` apaga da memória o alvo semeado que
+passou do corte.
+
 ## Como este projeto mede o próprio erro
 
 O defeito que mais aparece aqui tem nome: **ausência com cara de resposta** —
