@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
-import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, poolParaVender, SEM_VENDA, pisoDoLucroEmUnidadesCruas, oPrecoCancela, oQueUmaQuedaRenderia, comoLerAsQuedas } from './cacarAoVivo';
+import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, poolParaVender, SEM_VENDA, pisoDoLucroEmUnidadesCruas, oPrecoCancela, oQueUmaQuedaRenderia, comoLerAsQuedas,
+    viaDeQuebra, oQueUmaAltaRenderia, altaEquivalente, contarVias, comoLerABussola, familiaDoAtivo } from './cacarAoVivo';
+import type { Via } from './cacarAoVivo';
+import { SAUDE_UM, quedaAteLiquidar, altaDaDividaAteLiquidar } from './posicoes';
 import { dividaMinimaQueVale, lucroEstimado, lucroDaCobertura, coberturaOtima, lucroMaximo } from './perdidas';
 import { custoDoTiroUsd, PISO_DA_GORJETA_WEI } from './prontidao';
 
@@ -935,10 +938,10 @@ test('sem dívida conhecida o piso do V2 é ZERO, não um palpite', () => {
 test('os imunes a preço vão para o FIM da brasa, não para fora dela', () => {
     // O log das 16:58: o `[EM SECO]` mirava 0x43ec917e, que é USDC contra USDC
     // e nunca cai com o mercado, enquanto os sensíveis esperavam atrás.
-    const m = (d: string, q: number, cancela?: boolean) =>
-        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), precoCancela: cancela });
+    const m = (d: string, q: number, via?: Via) =>
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), via });
     const c = repartirPorFragilidade(
-        [m('0x43ec917e', 1.9, true), m('0xsensivel', 4.0, false), m('0xnaoSei', 5.0, undefined)],
+        [m('0x43ec917e', 1.9, 'imune'), m('0xsensivel', 4.0, 'long'), m('0xnaoSei', 5.0, undefined)],
         3, 100, new Decimal(0.5), 0,
     );
     // O imune é o mais próximo de todos e mesmo assim vai por último.
@@ -968,10 +971,10 @@ test('o ovo e a galinha: o imune não pode contaminar o maisPerto', () => {
     // imunes na frente, e o `[EM SECO]` mirou 0x034a3304, que é weETH contra
     // WETH: `margemDoAlvo: precisa cair 0.0434%` numa posição que nenhuma queda
     // alcança.
-    const m = (d: string, q: number, cancela?: boolean) =>
-        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), precoCancela: cancela });
+    const m = (d: string, q: number, via?: Via) =>
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), via });
     const c = repartirPorFragilidade(
-        [m('0x034a3304', 0.0434, true), m('0x43ec917e', 1.90, true), m('0xsensivel', 2.51, false)],
+        [m('0x034a3304', 0.0434, 'imune'), m('0x43ec917e', 1.90, 'imune'), m('0xsensivel', 2.51, 'long')],
         10, 100, new Decimal(0.5), 0,
     );
     assert.equal(c.menorMargemDaBrasa!.toFixed(2), '2.51', 'o maisPerto é do sensível, não do imune de 0.0434%');
@@ -982,7 +985,7 @@ test('brasa toda imune: o maisPerto sai deles, e não vira "ninguém"', () => {
     // A ponta oposta do mesmo conserto: filtrar sempre transformaria uma brasa
     // inteira de imunes em ausência publicada como resposta.
     const m = (d: string, q: number) =>
-        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), precoCancela: true });
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), via: 'imune' as Via });
     const c = repartirPorFragilidade([m('0xa', 0.98), m('0xb', 1.90)], 10, 100, new Decimal(0.5), 0);
     assert.equal(c.menorMargemDaBrasa!.toFixed(2), '0.98');
 });
@@ -991,10 +994,10 @@ test('a tabela de quedas conta só quem o preço alcança', () => {
     // O log dizia `1%: 3 alcanço` e os três eram dois WETH/WETH e um weETH/WETH:
     // zero alcançados de verdade. A tabela existe para responder "vale esperar
     // o mercado?", e contava quem o mercado não move.
-    const m = (d: string, q: number, cancela: boolean) =>
-        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(5000), precoCancela: cancela });
+    const m = (d: string, q: number, via: Via) =>
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(5000), via });
     const t = oQueUmaQuedaRenderia(
-        [m('0xa', 0.04, true), m('0xb', 0.98, true), m('0xc', 0.99, true), m('0xd', 2.5, false)],
+        [m('0xa', 0.04, 'imune'), m('0xb', 0.98, 'imune'), m('0xc', 0.99, 'imune'), m('0xd', 2.5, 'long')],
         [1, 3],
     );
     assert.equal(t[0]!.quantos, 0, 'os três de 1% eram todos imunes');
@@ -1029,4 +1032,133 @@ test('as famílias saem da lista REAL de reservas da Base, lida da rede', () => 
     assert.equal(oPrecoCancela('0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42', USDC), false);
     // E família de ETH contra família de dólar continua sendo par de verdade.
     assert.equal(oPrecoCancela('0x04c0599ae5a44757c0af6f9ec3b93da8976c150a', USDC), false);
+});
+
+// ===================================================================
+// A CORREÇÃO DA BÚSSOLA — medida em 2026-09-29, cobertura 100%
+// (205 janelas de 2.000 blocos, 9,5 dias, 60 liquidações, 60 com arquivo):
+//
+//     22 já estavam liquidáveis em N-1
+//     38 cruzaram exatamente em N: 28 por PREÇO, 4 por juro, 0 pelo dono
+//     nas 28 por preço, o preço da DÍVIDA subiu em 28 de 28
+//     em 20 das 28 a garantia ficou COMPLETAMENTE parada (+0,0000%)
+//
+// O bot só modelava a garantia caindo. Montamos o exército no norte e o
+// inimigo entrou pelo sul.
+// ===================================================================
+
+test('a bússola: cada par vai para a sua via', () => {
+    const WETH = '0x4200000000000000000000000000000000000006';
+    const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+    const weETH = '0x04c0599ae5a44757c0af6f9ec3b93da8976c150a';
+    const cbBTC = '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf';
+    const EURC = '0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42';
+    assert.equal(viaDeQuebra(WETH, WETH), 'imune', 'mesma moeda: o preço cancela');
+    assert.equal(viaDeQuebra(weETH, WETH), 'imune', 'mesma família: só um depeg derruba');
+    assert.equal(viaDeQuebra(WETH, USDC), 'long', 'garantia volátil, dívida estável');
+    assert.equal(viaDeQuebra(cbBTC, USDC), 'long');
+    // ESTE é o caso que o bot não via: 20 das 28 liquidações por preço são assim.
+    assert.equal(viaDeQuebra(USDC, WETH), 'short', 'garantia estável, dívida volátil');
+    assert.equal(viaDeQuebra(USDC, cbBTC), 'short');
+    assert.equal(viaDeQuebra(cbBTC, WETH), 'ambas', 'as duas voláteis: quebra a razão');
+    // EURC é euro: risco de câmbio de verdade. Medido em 2026-09-28 no
+    // `0x675c8697` (USDC contra EURC), piso ZERO — o preço derruba aquilo.
+    assert.equal(viaDeQuebra(USDC, EURC), 'short', 'dívida em euro contra garantia em dólar');
+    assert.equal(familiaDoAtivo(EURC), 'outro', 'euro não é família do dólar');
+    // Caixa alta não pode quebrar a comparação.
+    assert.equal(viaDeQuebra(WETH.toUpperCase().replace('0X', '0x'), USDC), 'long');
+});
+
+test('dois desconhecidos não são família por serem ambos desconhecidos', () => {
+    // Inventar correlação é o defeito que este projeto persegue. `outro` contra
+    // `outro` tem de sair `ambas`, e nunca `imune`.
+    const a = '0x1111111111111111111111111111111111111111';
+    const b = '0x2222222222222222222222222222222222222222';
+    assert.equal(familiaDoAtivo(a), 'outro');
+    assert.equal(viaDeQuebra(a, b), 'ambas');
+    assert.equal(oPrecoCancela(a, b), false);
+});
+
+test('oPrecoCancela é DERIVADO de viaDeQuebra — uma regra, um lugar', () => {
+    // A regra 3 do CLAUDE.md: uma regra em dois lugares é a mesma regra, e três
+    // dos dez erros originais foram consertar uma ponta e deixar a gêmea.
+    const enderecos = [
+        '0x4200000000000000000000000000000000000006', '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+        '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf', '0x04c0599ae5a44757c0af6f9ec3b93da8976c150a',
+        '0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42', '0x3333333333333333333333333333333333333333',
+    ];
+    for (const g of enderecos) for (const d of enderecos) {
+        assert.equal(oPrecoCancela(g, d), viaDeQuebra(g, d) === 'imune', `${g} contra ${d}`);
+    }
+});
+
+test('a alta da dívida que liquida: os dois caminhos dão o mesmo número', () => {
+    // `altaDaDividaAteLiquidar` sai da saúde crua; `altaEquivalente` sai da queda
+    // já calculada. Se discordarem, uma das duas está inventando.
+    for (const vezes of ['1.02', '1.0001', '1.5', '1.000000001', '2']) {
+        const saude = new Decimal(vezes).mul(SAUDE_UM);
+        const q = quedaAteLiquidar(saude)!;
+        const direto = altaDaDividaAteLiquidar(saude)!;
+        const convertido = altaEquivalente(q)!;
+        assert.equal(convertido.minus(direto).abs().lessThan(1e-9), true,
+            `saúde ${vezes}: direto ${direto.toFixed(9)} contra convertido ${convertido.toFixed(9)}`);
+    }
+    // O número medido: com saúde 1,02 a garantia cai 1,9608% e a dívida sobe
+    // 2,0000%. Parecidos, não iguais — e é a DIREÇÃO que importa, não o número.
+    const s = new Decimal('1.02').mul(SAUDE_UM);
+    assert.equal(quedaAteLiquidar(s)!.toFixed(4), '1.9608');
+    assert.equal(altaDaDividaAteLiquidar(s)!.toFixed(4), '2.0000');
+    // Sem dívida: `null` nos dois, nunca zero.
+    assert.equal(altaDaDividaAteLiquidar(new Decimal(2000).mul(SAUDE_UM)), null);
+    // Já liquidável: zero nos dois.
+    assert.equal(altaDaDividaAteLiquidar(new Decimal('0.9').mul(SAUDE_UM))!.toFixed(0), '0');
+});
+
+test('uma QUEDA não alcança um SHORT, e uma ALTA não alcança um LONG', () => {
+    // O defeito exato: a tabela contava um `short` como alcançado por uma queda
+    // de mercado. 20 das 28 liquidações por preço têm garantia estável — uma
+    // queda não move nenhuma delas.
+    const m = (d: string, q: number, via: Via) =>
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(5000), via });
+    const lista = [m('0xlong', 1.0, 'long'), m('0xshort', 1.0, 'short'), m('0xambas', 1.0, 'ambas'), m('0ximune', 1.0, 'imune')];
+    const caiu = oQueUmaQuedaRenderia(lista, [2]);
+    const subiu = oQueUmaAltaRenderia(lista, [2]);
+    assert.equal(caiu[0]!.quantos, 2, 'uma queda alcança long e ambas — não o short, não o imune');
+    assert.equal(subiu[0]!.quantos, 2, 'uma alta alcança short e ambas — não o long, não o imune');
+});
+
+test('a régua da tabela de ALTA é a alta da dívida, não a queda da garantia', () => {
+    // Com queda 1,9608% a alta equivalente é 2,0000%: num degrau de 1,99% o
+    // alvo entra pela queda e NÃO entra pela alta. Se a tabela de alta usasse a
+    // régua da queda, os dois dariam o mesmo — e a etiqueta mentiria.
+    const m = { devedor: '0xshort', queda: new Decimal('1.9608'), dividaUsd: new Decimal(5000), via: 'ambas' as Via };
+    assert.equal(oQueUmaQuedaRenderia([m], [1.99])[0]!.quantos, 1, 'a queda de 1,9608% cabe em 1,99%');
+    assert.equal(oQueUmaAltaRenderia([m], [1.99])[0]!.quantos, 0, 'a alta de 2,0000% NÃO cabe em 1,99%');
+    assert.equal(oQueUmaAltaRenderia([m], [2.01])[0]!.quantos, 1, 'e cabe em 2,01%');
+});
+
+test('a bússola conta os cinco estados e não perde ninguém', () => {
+    const m = (d: string, via?: Via) => ({ devedor: d, queda: new Decimal(1), dividaUsd: null, via });
+    const lista = [m('0xa', 'long'), m('0xb', 'short'), m('0xc', 'short'), m('0xd', 'ambas'), m('0xe', 'imune'), m('0xf', undefined)];
+    const c = contarVias(lista);
+    assert.deepEqual(c, { long: 1, short: 2, ambas: 1, imune: 1, naoSeSabe: 1 });
+    // A soma tem de fechar: é isso que impede a próxima etiqueta de mentir sobre
+    // o conjunto, o defeito que o `jaSabia: 6575` publicou em produção.
+    assert.equal(Object.values(c).reduce((s, x) => s + x, 0), lista.length);
+    assert.match(comoLerABussola(c), /1 LONG \(cai a garantia\) \| 2 SHORT \(sobe a dívida\)/);
+});
+
+test('o alvo do ensaio pode ser SHORT, e não só LONG', () => {
+    // Antes o filtro era `oQueSeSabeDoPreco(d) === false` — um booleano que
+    // significava "não é imune". Agora "não é imune" tem TRÊS formas, e um
+    // `short` é alvo legítimo: é o caso mais comum das liquidações reais.
+    const m = (d: string, q: number, via: Via) =>
+        ({ devedor: d, queda: new Decimal(q), dividaUsd: new Decimal(1000), via });
+    const c = repartirPorFragilidade(
+        [m('0ximune', 0.1, 'imune'), m('0xshort', 1.5, 'short'), m('0xlong', 2.0, 'long')],
+        3, 100, new Decimal(0.5), 0,
+    );
+    assert.equal(c.brasa[0], '0xshort', 'o short entra na frente, e o imune vai para o fim');
+    assert.equal(c.brasa[2], '0ximune');
+    assert.equal(c.menorMargemDaBrasa!.toFixed(1), '1.5', 'e o maisPerto sai dele');
 });

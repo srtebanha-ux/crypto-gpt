@@ -107,16 +107,16 @@ export interface Medida {
     queda: Decimal;
     dividaUsd: Decimal | null;
     /**
-     * O PRECO nao derruba esta posicao — garantia e divida sao a mesma moeda,
-     * ou da mesma familia (ETH de staking contra ETH, dolar contra dolar).
+     * POR QUAL LADO esta posicao quebra: `imune`, `long`, `short` ou `ambas`.
+     * Ver `viaDeQuebra`.
      *
-     * `undefined` quer dizer "ainda nao sei", e e diferente de `false`: o par
+     * `undefined` quer dizer "ainda nao sei", e e diferente de `imune`: o par
      * so e conhecido depois que `montarAlvos` leu as reservas do devedor, e
      * isso so acontece para quem entra na brasa. Quem nao se sabe entra na
      * frente, porque o custo de vigiar um imune por engano e uma vaga, e o
      * custo de deixar um sensivel de fora e o tiro.
      */
-    precoCancela?: boolean;
+    via?: Via;
 }
 
 /**
@@ -131,8 +131,8 @@ export interface Medida {
 // `getReservesList()` e `symbol()` de cada uma. A lista anterior tinha um
 // endereco que eu INVENTEI — `0x80d1e0f4…`, que nao existe. Endereco escrito de
 // cabeca e o mesmo defeito que este projeto persegue, so que em hexadecimal.
-const FAMILIAS: string[][] = [
-    [
+const FAMILIAS_POR_NOME = {
+    ETH: [
         '0x4200000000000000000000000000000000000006', // WETH
         '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22', // cbETH
         '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452', // wstETH
@@ -140,12 +140,12 @@ const FAMILIAS: string[][] = [
         '0x2416092f143378750bb29b79ed961ab195cceea5', // ezETH
         '0xedfa23602d0ec14714057867a78d01e94176bea0', // wrsETH
     ],
-    [
+    BTC: [
         '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf', // cbBTC
         '0xecac9c5f704e954931349da37f60e39f515c11c1', // LBTC
         '0x236aa50979d5f3de3bd1eeb40e81137f22ab794b', // tBTC
     ],
-    [
+    USD: [
         '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', // USDC
         '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca', // USDbC
         '0x6bb7a212910682dcfdbd5bcbb3e28fb4e8da10ee', // GHO
@@ -163,24 +163,109 @@ const FAMILIAS: string[][] = [
     //
     // USDT nao entra porque NAO E reserva da Aave na Base: a lista de 15 lida
     // da rede nao tem USDT.
-];
+} as const;
+
+export type Familia = keyof typeof FAMILIAS_POR_NOME | 'outro';
+
+/**
+ * De que familia e o ativo. `outro` para quem nao esta em nenhuma — EURC, AAVE,
+ * e qualquer endereco que este arquivo nao conheca.
+ *
+ * `outro` conta como VOLATIL de proposito: o euro tem risco de cambio contra o
+ * dolar (medido em 2026-09-28 no `0x675c8697`, piso ZERO), o AAVE e volatil, e
+ * um endereco desconhecido no lado seguro e o que mantem o alvo na fila do
+ * preco em vez de arquiva-lo como imune sem prova.
+ */
+export function familiaDoAtivo(endereco: string): Familia {
+    const e = endereco.toLowerCase();
+    for (const [nome, lista] of Object.entries(FAMILIAS_POR_NOME)) {
+        if ((lista as readonly string[]).includes(e)) return nome as Familia;
+    }
+    return 'outro';
+}
+
+/** Anda com o dolar? So a familia USD. Todo o resto se move contra ele. */
+function ehEstavel(f: Familia): boolean {
+    return f === 'USD';
+}
+
+/**
+ * POR QUAL LADO DA RUA esta posicao quebra.
+ *
+ * Medido em 2026-09-29, cobertura 100% (205 janelas, 9,5 dias, 60 liquidacoes,
+ * 60 com arquivo): das 38 que cruzaram no bloco exato, 28 foram por preco — e
+ * em 28 de 28 o preco que se moveu foi o da DIVIDA, para CIMA. Em 20 delas a
+ * garantia nao andou nada (+0,0000%).
+ *
+ * O bot vigiava so a garantia caindo. Montamos o exercito no norte e o inimigo
+ * entrou pelo sul.
+ *
+ *   `imune`  mesma moeda, ou mesma familia conhecida: o preco aparece em cima e
+ *            embaixo da conta da saude e se cancela. Nenhum preco derruba.
+ *   `long`   garantia volatil contra divida estavel. Quebra quando o oraculo da
+ *            GARANTIA CAI. E o unico caso que o codigo antigo modelava.
+ *   `short`  garantia estavel contra divida volatil. Quebra quando o oraculo da
+ *            DIVIDA SOBE. Era este o caso da maioria das liquidacoes reais, e o
+ *            bot publicava "precisa cair X%" sobre ele — um numero que a
+ *            garantia, sendo dolar, nunca entrega.
+ *   `ambas`  as duas volatis e de familias diferentes (cbBTC contra WETH). O que
+ *            quebra e a RAZAO entre as duas, e ela se move pelos dois lados.
+ *
+ * `outro` contra `outro` NAO e imune: dois ativos desconhecidos nao andam
+ * juntos por serem ambos desconhecidos. Isso seria inventar correlacao.
+ */
+export type Via = 'imune' | 'long' | 'short' | 'ambas';
+
+export function viaDeQuebra(garantia: string, divida: string): Via {
+    const g = garantia.toLowerCase(), d = divida.toLowerCase();
+    if (g === d) return 'imune';
+    const fg = familiaDoAtivo(g), fd = familiaDoAtivo(d);
+    if (fg === fd && fg !== 'outro') return 'imune';
+    const gVolatil = !ehEstavel(fg), dVolatil = !ehEstavel(fd);
+    if (gVolatil && dVolatil) return 'ambas';
+    return gVolatil ? 'long' : 'short';
+}
+
+/**
+ * A alta da DIVIDA que liquida, a partir da queda da GARANTIA que liquida.
+ *
+ * Exato, e nao precisa reler a saude: com H = (garantia x limiar) / divida,
+ *
+ *     queda que liquida  q = 1 - 1/H   =>   H = 1/(1-q)
+ *     alta que liquida   y = H - 1     =>   y = q / (1-q)
+ *
+ * Conferido contra `altaDaDividaAteLiquidar`, que faz a conta a partir da saude
+ * crua: os dois caminhos tem de dar o mesmo numero, e um teste exige isso.
+ * Devolve `null` quando q >= 100%, onde a conversao nao significa nada.
+ */
+export function altaEquivalente(quedaPct: Decimal): Decimal | null {
+    if (!quedaPct.isFinite() || quedaPct.lessThan(0)) return null;
+    const q = quedaPct.dividedBy(100);
+    if (q.greaterThanOrEqualTo(1)) return null;
+    return q.dividedBy(new Decimal(1).minus(q)).mul(100);
+}
 
 /**
  * O que ja se sabe sobre cada devedor. Preenchida por `montarAlvos`, que e o
  * unico lugar que le o par — e lida pela ordenacao da brasa no ciclo seguinte.
  */
-const precoCancelaPorDevedor = new Map<string, boolean>();
-export function lembrarSeOPrecoCancela(devedor: string, cancela: boolean): void {
-    precoCancelaPorDevedor.set(devedor.toLowerCase(), cancela);
+const viaPorDevedor = new Map<string, Via>();
+export function lembrarAVia(devedor: string, via: Via): void {
+    viaPorDevedor.set(devedor.toLowerCase(), via);
 }
-export function oQueSeSabeDoPreco(devedor: string): boolean | undefined {
-    return precoCancelaPorDevedor.get(devedor.toLowerCase());
+export function oQueSeSabeDaVia(devedor: string): Via | undefined {
+    return viaPorDevedor.get(devedor.toLowerCase());
 }
 
+/**
+ * O preco derruba esta posicao?
+ *
+ * DERIVADO de `viaDeQuebra`, e nao uma segunda implementacao: a regra 3 deste
+ * projeto e que uma regra em dois lugares e a mesma regra, e tres dos dez erros
+ * que originaram o CLAUDE.md foram eu consertar uma ponta e deixar a gemea.
+ */
 export function oPrecoCancela(garantia: string, divida: string): boolean {
-    const g = garantia.toLowerCase(), d = divida.toLowerCase();
-    if (g === d) return true;
-    return FAMILIAS.some((f) => f.includes(g) && f.includes(d));
+    return viaDeQuebra(garantia, divida) === 'imune';
 }
 
 /** As tres camadas, e a regua do gatilho que separa a primeira da segunda. */
@@ -283,11 +368,17 @@ export function repartirPorFragilidade(
     // no log das 16:58 o `[EM SECO]` mirava `0x43ec917e`, que e USDC contra
     // USDC e nunca cai com o mercado, enquanto os sensiveis esperavam atras.
     //
-    // `precoCancela === undefined` conta como sensivel: nao se sabe, e quem nao
-    // se sabe fica na frente.
+    // `via === undefined` conta como sensivel: nao se sabe, e quem nao se sabe
+    // fica na frente.
+    //
+    // `long`, `short` e `ambas` ficam TODOS na frente, em pe de igualdade. Era
+    // aqui que a bussola estava torta: nada distinguia os dois lados, e a fila
+    // era ordenada por um numero — `queda` — que so faz sentido para `long`.
+    // Medido em 2026-09-29: 28 de 28 liquidacoes por preco foram a DIVIDA
+    // subindo, e em 20 delas a garantia nao andou nada.
     const ordenados = [...cabem].sort((a, b) => {
-        const ia = a.precoCancela === true ? 1 : 0;
-        const ib = b.precoCancela === true ? 1 : 0;
+        const ia = a.via === 'imune' ? 1 : 0;
+        const ib = b.via === 'imune' ? 1 : 0;
         return ia !== ib ? ia - ib : a.queda.comparedTo(b.queda);
     });
 
@@ -328,7 +419,7 @@ export function repartirPorFragilidade(
         // existe: publicar `null` ali viraria "ninguem", que e pior.
         menorMargemDaBrasa: (() => {
             const naBrasa = [...brasa, ...deProva];
-            const sensiveis = naBrasa.filter((m) => m.precoCancela !== true);
+            const sensiveis = naBrasa.filter((m) => m.via !== 'imune');
             const fonte = sensiveis.length > 0 ? sensiveis : naBrasa;
             return fonte.reduce<Decimal | null>(
                 (menor, m) => (menor === null || m.queda.lessThan(menor) ? m.queda : menor), null);
@@ -471,16 +562,45 @@ export interface Degrau {
  * menos o custo de vender. Confundir os dois e o erro que este projeto ja
  * cometeu duas vezes, sempre no mesmo sentido: otimista.
  */
-export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degrau[] {
+export type Direcao = 'queda' | 'alta';
+
+/**
+ * Quem um movimento de X% alcança NA DIREÇÃO pedida.
+ *
+ * `undefined` conta como alcançado, igual ao resto do bot: quem não se sabe
+ * fica na frente, porque o custo de contar um imune por engano é uma linha de
+ * log e o de deixar um sensível de fora é o tiro.
+ */
+function alcancaNaDirecao(via: Via | undefined, direcao: Direcao): boolean {
+    if (via === undefined) return true;
+    if (via === 'imune') return false;
+    if (via === 'ambas') return true;
+    return direcao === 'queda' ? via === 'long' : via === 'short';
+}
+
+/**
+ * O que um movimento de X% renderia, para CADA LADO da rua.
+ *
+ * `queda` alcança `long` e `ambas`; `alta` alcança `short` e `ambas`. E a régua
+ * muda com a direção: para `queda` é `m.queda`, para `alta` é a alta da dívida
+ * que liquida — `altaEquivalente(m.queda)`, que é exata, não uma aproximação.
+ *
+ * Antes desta função a tabela contava um `short` como alcançado por uma QUEDA.
+ * Medido em 2026-09-29: 20 das 28 liquidações por preço tinham garantia estável,
+ * e uma queda de mercado não move nenhuma delas — o número existia, estava na
+ * tela, e apontava para o lado errado da rua.
+ */
+export function oQueUmMovimentoRenderia(medidos: Medida[], degraus: number[], direcao: Direcao): Degrau[] {
     return [...degraus].sort((a, b) => a - b).map((quedaPct) => {
-        // Só quem o PREÇO alcança. Uma posição de moeda única não cai porque o
-        // mercado caiu X% — ela nem se mexe. Medido em 2026-09-28: o log dizia
-        // `1%: 3 alcanço` e os três eram dois WETH/WETH e um weETH/WETH, ou
-        // seja ZERO alcançados de verdade. A tabela existe para responder "vale
-        // esperar o mercado?", e contava quem o mercado não move.
-        const alcancados = medidos.filter(
-            (m) => m.precoCancela !== true && m.queda.lessThanOrEqualTo(quedaPct),
-        );
+        // Só quem o PREÇO alcança, e só na direção pedida. Uma posição de moeda
+        // única não cai porque o mercado caiu X% — ela nem se mexe. Medido em
+        // 2026-09-28: o log dizia `1%: 3 alcanço` e os três eram dois WETH/WETH
+        // e um weETH/WETH, ou seja ZERO alcançados de verdade.
+        const alcancados = medidos.filter((m) => {
+            if (!alcancaNaDirecao(m.via, direcao)) return false;
+            const regua = direcao === 'queda' ? m.queda : altaEquivalente(m.queda);
+            return regua !== null && regua.lessThanOrEqualTo(quedaPct);
+        });
         let dividaUsd = new Decimal(0);
         let lucroUsd = new Decimal(0);
         let quantosValem = 0;
@@ -495,7 +615,11 @@ export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degr
             if (lucro.greaterThan(0)) {
                 lucroUsd = lucroUsd.plus(lucro);
                 quantosValem++;
-                const candidato = { lucroUsd: lucro, quedaPct: m.queda };
+                // A margem publicada segue a DIREÇÃO, senão a etiqueta discorda
+                // do conjunto: numa linha de `alta`, dizer "a 1.44%" com o
+                // número da queda seria publicar a régua do outro lado da rua.
+                const regua = direcao === 'queda' ? m.queda : altaEquivalente(m.queda);
+                const candidato = { lucroUsd: lucro, quedaPct: regua ?? m.queda };
                 // O desempate vive em `comparaPremio` porque o lucro satura no
                 // teto do pool: duas baleias empatam ate a ultima casa, e com
                 // `>` estrito quem ganhava era a ordem do multicall.
@@ -504,6 +628,34 @@ export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degr
         }
         return { quedaPct, quantos: alcancados.length, quantosValem, dividaUsd, lucroUsd, maior };
     });
+}
+
+/** A via LONG: o que uma QUEDA da garantia renderia. O nome antigo, intacto. */
+export function oQueUmaQuedaRenderia(medidos: Medida[], degraus: number[]): Degrau[] {
+    return oQueUmMovimentoRenderia(medidos, degraus, 'queda');
+}
+
+/** A via SHORT: o que uma ALTA da dívida renderia — o lado que faltava. */
+export function oQueUmaAltaRenderia(medidos: Medida[], degraus: number[]): Degrau[] {
+    return oQueUmMovimentoRenderia(medidos, degraus, 'alta');
+}
+
+/**
+ * Quantos de cada via, para a linha `[BUSSOLA]` do log.
+ *
+ * Existe porque a medição de 2026-09-29 mostrou que o bot vigiava um lado do
+ * mercado e era liquidado o outro, e não havia UMA linha no log que dissesse de
+ * que lado estavam os alvos. Sem esta contagem o conserto é invisível.
+ */
+export function contarVias(medidos: Medida[]): Record<Via | 'naoSeSabe', number> {
+    const conta: Record<Via | 'naoSeSabe', number> = { imune: 0, long: 0, short: 0, ambas: 0, naoSeSabe: 0 };
+    for (const m of medidos) conta[m.via ?? 'naoSeSabe']++;
+    return conta;
+}
+
+export function comoLerABussola(c: Record<Via | 'naoSeSabe', number>): string {
+    return `${c.long} LONG (cai a garantia) | ${c.short} SHORT (sobe a dívida)`
+        + ` | ${c.ambas} AMBAS | ${c.imune} imunes | ${c.naoSeSabe} ainda não sei`;
 }
 
 /**
@@ -1203,6 +1355,10 @@ async function principal(): Promise<'parar' | void> {
      * nada, mesmo estando correto.
      */
     let tabelaDeQuedas = 'ainda não medida';
+    /** A gêmea: o que uma ALTA da dívida renderia — a via SHORT, medida em 2026-09-29. */
+    let tabelaDeAltas = 'ainda não medida';
+    /** De que lado da rua estão os alvos. Sem esta linha o conserto é invisível. */
+    let bussola = 'ainda não medida';
     /** Calculado uma vez: depende so da profundidade medida, que nao muda em memoria. */
     let tetoDoPool = '';
     let chegadaEmMs: number | null = null;
@@ -1368,7 +1524,7 @@ async function principal(): Promise<'parar' | void> {
         armando = true;
         try {
             const prontos = await montarAlvos(quem, moedas, dataProvider!, precos, casas);
-            for (const a of prontos) lembrarSeOPrecoCancela(a.devedor, oPrecoCancela(a.garantia, a.divida));
+            for (const a of prontos) lembrarAVia(a.devedor, viaDeQuebra(a.garantia, a.divida));
             alvosArmados.clear();
             for (const a of prontos) alvosArmados.set(a.devedor.toLowerCase(), a);
             armadoEm = Date.now();
@@ -1517,7 +1673,7 @@ async function principal(): Promise<'parar' | void> {
         const TETO = numeroDoAmbiente('CACA_PARES_A_RESOLVER', process.env.CACA_PARES_A_RESOLVER, 150);
         const ATE_QUEDA = numeroDoAmbiente('CACA_PARES_ATE_QUEDA_PCT', process.env.CACA_PARES_ATE_QUEDA_PCT, 10);
         const aResolver = medidos
-            .filter((m) => oQueSeSabeDoPreco(m.devedor) === undefined && m.queda.lessThanOrEqualTo(ATE_QUEDA))
+            .filter((m) => oQueSeSabeDaVia(m.devedor) === undefined && m.queda.lessThanOrEqualTo(ATE_QUEDA))
             .sort((a, b) => a.queda.comparedTo(b.queda))
             .slice(0, Math.max(0, Math.floor(TETO)))
             .map((m) => m.devedor);
@@ -1545,15 +1701,18 @@ async function principal(): Promise<'parar' | void> {
         // descreve o conjunto, no log que eu tinha acabado de criar para
         // consertar exatamente esse tipo de erro.
         const dentroDoCorte = medidos.filter((m) => m.queda.lessThanOrEqualTo(ATE_QUEDA));
-        const jaSabia = dentroDoCorte.filter((m) => oQueSeSabeDoPreco(m.devedor) !== undefined).length;
+        const jaSabia = dentroDoCorte.filter((m) => oQueSeSabeDaVia(m.devedor) !== undefined).length;
         const naoCoubeNoTeto = dentroDoCorte.length - jaSabia - aResolver.length;
         try {
             const montados = await montarAlvos(aResolver, moedas, dataProvider, precos, casas);
-            for (const a of montados) lembrarSeOPrecoCancela(a.devedor, oPrecoCancela(a.garantia, a.divida));
+            for (const a of montados) lembrarAVia(a.devedor, viaDeQuebra(a.garantia, a.divida));
             log.info('[PARES] Descobri de quem o preço derruba e de quem não derruba.', {
                 pedi: aResolver.length,
                 respondeu: montados.length,
-                imunes: montados.filter((a) => oPrecoCancela(a.garantia, a.divida)).length,
+                bussola: comoLerABussola(contarVias(montados.map((a) => ({
+                    devedor: a.devedor, queda: new Decimal(0), dividaUsd: null,
+                    via: viaDeQuebra(a.garantia, a.divida),
+                })))),
                 jaSabia: `${jaSabia} de ${dentroDoCorte.length} dentro do corte de ${ATE_QUEDA}%`,
                 naoCoubeNoTeto: naoCoubeNoTeto > 0
                     ? `${naoCoubeNoTeto} ficaram para a próxima volta (teto de ${TETO} por varredura)`
@@ -1746,6 +1905,8 @@ async function principal(): Promise<'parar' | void> {
                 : `precisa cair ${menorMargem.toFixed(4)}% para virar alvo`;
             const projecao = projetar(historicoDeSaude.get(alvoDoEnsaio.toLowerCase()) ?? []);
             passos.seOMercadoCair = tabelaDeQuedas;
+            passos.seADividaSubir = tabelaDeAltas;
+            passos.bussola = bussola;
             passos.tetoDoPool = tetoDoPool;
             passos.chegaPorJuro = projecao.cruza
                 ? `em ${emQuantoTempo(projecao.emMs)} (${projecao.taxaAnual.mul(100).toFixed(2)}%/ano, ${projecao.amostras} amostras)`
@@ -2362,6 +2523,8 @@ async function principal(): Promise<'parar' | void> {
                             return ms === null ? 'nenhuma projetável' : `a mais próxima em ${emQuantoTempo(ms)}`;
                         })(),
                         seOMercadoCair: tabelaDeQuedas,
+                        seADividaSubir: tabelaDeAltas,
+                        bussola,
                         gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
                         naListaQuente: quentes.length,
                         custou: `${Date.now() - inicioDoCiclo}ms`,
@@ -2397,7 +2560,7 @@ async function principal(): Promise<'parar' | void> {
                                 devedor: aLer[i],
                                 queda,
                                 dividaUsd: conta.dividaBase.dividedBy(1e8),
-                                precoCancela: oQueSeSabeDoPreco(aLer[i]),
+                                via: oQueSeSabeDaVia(aLer[i]),
                             });
                         } catch {}
                     }
@@ -2467,7 +2630,7 @@ async function principal(): Promise<'parar' | void> {
                         // sabe, entao o custo cai a zero depois das primeiras
                         // voltas.
                         await resolverPares(medidos);
-                        for (const m of medidos) m.precoCancela = oQueSeSabeDoPreco(m.devedor);
+                        for (const m of medidos) m.via = oQueSeSabeDaVia(m.devedor);
 
                         const camadas = repartirPorFragilidade(
                             medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida, 0,
@@ -2480,6 +2643,8 @@ async function principal(): Promise<'parar' | void> {
                         // uma previsao.
                         esquecerQuemSaiu(historicoDeSaude, brasa);
                         tabelaDeQuedas = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1, 2, 3, 5, 10]));
+                        tabelaDeAltas = comoLerAsQuedas(oQueUmaAltaRenderia(medidos, [1, 2, 3, 5, 10]));
+                        bussola = comoLerABussola(contarVias(medidos));
                         // O teto era IMPLICITO: o bot sabia recusar uma baleia
                         // (a simulacao reverte, o piso de lucro barra), mas
                         // nada no log dizia que existe um tamanho acima do qual
@@ -2508,7 +2673,14 @@ async function principal(): Promise<'parar' | void> {
                         // publica `margemDoAlvo: precisa cair 0.0434%` sobre uma
                         // posição que nenhuma queda alcança — e é essa linha que
                         // ela lê para saber o quanto falta.
-                        const sensiveis = brasa.filter((d) => oQueSeSabeDoPreco(d) === false);
+                        // O alvo do ensaio tem de ser um que o PRECO derruba,
+                        // por qualquer das duas vias: `long`, `short` ou `ambas`.
+                        // Antes so `false` passava, e `false` era "nao e imune" —
+                        // que agora tem tres formas, nao uma.
+                        const sensiveis = brasa.filter((d) => {
+                            const v = oQueSeSabeDaVia(d);
+                            return v !== undefined && v !== 'imune';
+                        });
                         const paraEnsaiar = sensiveis[0]
                             ?? brasa[0]
                             ?? [...medidos].sort((a, b) => a.queda.comparedTo(b.queda))[0]?.devedor;
@@ -2567,6 +2739,8 @@ async function principal(): Promise<'parar' | void> {
                             // sozinha nao dizia se atras do primeiro vem um ou
                             // vem cinquenta.
                             seOMercadoCair: tabelaDeQuedas,
+                            seADividaSubir: tabelaDeAltas,
+                            bussola,
                             tetoDoPool,
                             // Para os alvos cujo preco CANCELA na conta da saude
                             // (garantia e divida na mesma moeda), a chegada e
@@ -2623,7 +2797,7 @@ async function principal(): Promise<'parar' | void> {
             // O par so e conhecido aqui, depois de ler as reservas. Guardar o
             // veredicto alimenta a ordenacao da brasa no proximo ciclo: quem se
             // sabe imune vai para tras, quem se sabe sensivel vem para a frente.
-            for (const a of alvos) lembrarSeOPrecoCancela(a.devedor, oPrecoCancela(a.garantia, a.divida));
+            for (const a of alvos) lembrarAVia(a.devedor, viaDeQuebra(a.garantia, a.divida));
             if (jaArmados.length > 0) {
                 log.info('[PRONTO] Cheguei com o alvo já montado.', {
                     jaArmados: jaArmados.length,

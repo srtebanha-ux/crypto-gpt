@@ -76,6 +76,44 @@ export function quedaAteLiquidar(saude: Decimal): Decimal | null {
     return new Decimal(1).minus(new Decimal(1).dividedBy(emVezes)).mul(100);
 }
 
+/**
+ * Quanto a DÍVIDA ainda pode encarecer antes de liquidar, em porcentagem.
+ *
+ * A gêmea de `quedaAteLiquidar`, e ela existe porque a medição de 2026-09-29
+ * mostrou que era ESTA a pergunta certa na maioria dos casos. Varredura de
+ * 9,5 dias, cobertura 205/205 janelas, 60 liquidações, 60 com arquivo:
+ *
+ *     22 já estavam liquidáveis em N-1
+ *     38 cruzaram exatamente em N — dessas 28 por PREÇO, 4 por juro, 0 pelo dono
+ *     nas 28 por preço, o preço da DÍVIDA subiu em 28 de 28 (+0,125% a +0,787%)
+ *     em 20 das 28 a garantia ficou COMPLETAMENTE parada (+0,0000%)
+ *
+ * Ou seja: o gatilho real é a dívida encarecendo — gente short em ETH/BTC
+ * contra garantia estável. `quedaAteLiquidar` pergunta "quanto a garantia pode
+ * cair", que nessas posições é INALCANÇÁVEL: a garantia é dólar e não cai.
+ * Publicar "precisa cair 2%" ali é a mesma família de defeito do fantasma
+ * `0xc4d36f95`, que ficava MAIS SEGURO quando o ETH caía.
+ *
+ * A conta, com saúde H = (garantia x limiar) / dívida:
+ *
+ *     a garantia cai x  ->  H(1-x),   cruza 1 em  x = 1 - 1/H
+ *     a dívida sobe y   ->  H/(1+y),  cruza 1 em  y = H - 1
+ *
+ * E os dois números são PARECIDOS, não iguais: com H = 1,02 a garantia precisa
+ * cair 1,9608% e a dívida precisa subir 2,0000%. O valor deste conserto não é
+ * mudar o número — é dizer QUAL preço olhar e para QUE LADO.
+ */
+export function altaDaDividaAteLiquidar(saude: Decimal): Decimal | null {
+    if (saude.lessThanOrEqualTo(0)) return null;
+    const emVezes = saude.dividedBy(SAUDE_UM);
+    // Mesmo corte de `quedaAteLiquidar`, pelo mesmo motivo: sem dívida a Aave
+    // manda o maior uint256 possível, e tratar isso como saúde altíssima
+    // encheria a lista de quem não deve nada.
+    if (emVezes.greaterThan(1000)) return null;
+    if (emVezes.lessThanOrEqualTo(1)) return new Decimal(0);
+    return emVezes.minus(1).mul(100);
+}
+
 /** As faixas de vigilância, da mais urgente para a mais folgada. */
 export const FAIXAS_DE_RISCO = [
     { ate: 0, nome: 'JÁ LIQUIDÁVEL' },

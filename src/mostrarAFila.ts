@@ -27,7 +27,8 @@ import { codificarUserReserveData, decodificarUserReserveData, ehLimiteDoProvedo
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL } from './caca';
 import { lucroEstimado, coberturaOtima } from './perdidas';
 import {
-    repartirPorFragilidade, oPrecoCancela, oQueUmaQuedaRenderia, comoLerAsQuedas,
+    repartirPorFragilidade, oPrecoCancela, oQueUmaQuedaRenderia, oQueUmaAltaRenderia, comoLerAsQuedas,
+    viaDeQuebra, contarVias, comoLerABussola, altaEquivalente,
     quantoPedirEmprestado, poolParaVender, pisoDoLucroEmUnidadesCruas,
     margemQueDecideORitmo, montarAlvos, type Medida,
 } from './cacarAoVivo';
@@ -172,11 +173,10 @@ async function lerParaMontar(cs: Array<{ alvo: string; dados: string }>): Promis
     }
     for (const m of medidos) {
         const p = pares.get(m.devedor.toLowerCase());
-        m.precoCancela = p === undefined ? undefined : oPrecoCancela(p.garantia, p.divida);
+        m.via = p === undefined ? undefined : viaDeQuebra(p.garantia, p.divida);
     }
-    const imunes = [...pares.values()].filter((p) => oPrecoCancela(p.garantia, p.divida)).length;
-    console.log(`PARES RESOLVIDOS: ${pares.size} de ${candidatos.length} candidatos (queda <= ${ATE}%). `
-        + `${imunes} são IMUNES a preço e vão para o fim da fila.\n`);
+    console.log(`PARES RESOLVIDOS: ${pares.size} de ${candidatos.length} candidatos (queda <= ${ATE}%).`);
+    console.log(`BUSSOLA: ${comoLerABussola(contarVias(medidos))}\n`);
 
     // 4. As camadas, com as funções reais.
     const piso = new Decimal(process.env.FILA_PISO ?? '0.5');
@@ -187,6 +187,7 @@ async function lerParaMontar(cs: Array<{ alvo: string; dados: string }>): Promis
     const MARGEM_QUENTE = Number(process.env.CACA_MARGEM_QUENTE ?? '25');
     const camadas = repartirPorFragilidade(medidos, 233, MARGEM_QUENTE, piso, 0);
     const tabela = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1, 2, 3, 5, 10]));
+    const tabelaAlta = comoLerAsQuedas(oQueUmaAltaRenderia(medidos, [1, 2, 3, 5, 10]));
 
     console.log('=== O QUE O LOG IMPRIMIRIA ===');
     console.log(j({
@@ -196,6 +197,8 @@ async function lerParaMontar(cs: Array<{ alvo: string; dados: string }>): Promis
         maisPerto: camadas.menorMargemDaBrasa === null ? 'ninguém' : `precisa cair ${camadas.menorMargemDaBrasa.toFixed(4)}%`,
         maisFragilA: margemQueDecideORitmo(camadas, true)?.toFixed(4) + '%',
         seOMercadoCair: tabela,
+        seADividaSubir: tabelaAlta,
+        bussola: comoLerABussola(contarVias(medidos)),
     }));
 
     // 5. O NÚMERO 1 DA FILA, e ele tem de ser sensível a preço.
@@ -208,9 +211,10 @@ async function lerParaMontar(cs: Array<{ alvo: string; dados: string }>): Promis
         devedor: primeiro,
         garantia: par ? `${simbolo.get(par.garantia.toLowerCase())} (${par.garantia})` : 'não resolvido',
         divida: par ? `${simbolo.get(par.divida.toLowerCase())} (${par.divida})` : 'não resolvido',
-        precoCancela: m1.precoCancela,
+        via: m1.via ?? 'não resolvido',
         familiasDiferentes: par ? !oPrecoCancela(par.garantia, par.divida) : null,
-        precisaCair: `${m1.queda.toFixed(4)}%`,
+        precisaCair: `${m1.queda.toFixed(4)}%` + (m1.via === 'short' ? ' (INALCANÇÁVEL: a garantia é estável)' : ''),
+        ouADividaSubir: `${altaEquivalente(m1.queda)?.toFixed(4) ?? '?'}%`,
         dividaUsd: `US$ ${m1.dividaUsd?.toFixed(2) ?? '?'}`,
         lucroEstimado: `US$ ${lucroEstimado(m1.dividaUsd ?? new Decimal(0)).toFixed(2)}`,
     }));
