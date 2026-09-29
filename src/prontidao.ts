@@ -32,8 +32,14 @@ export const SELETOR_BASEFEE = '0x3e64a696';
  * 1,2M da 71% de folga sobre os ~700k que uma cacada usa, e quase DOBRA o
  * lance possivel. Apertado demais seria pior: morrer sem gas custa a
  * transacao inteira, depois de pagar.
+ *
+ * ATUALIZADO 2026-09-29, a pedido dela: 700k, adensamento de gwei. O no
+ * congela `gasLimit × maxFeePerGas` adiantado, entao cortar o teto de 1,2M
+ * para 700k libera poder de lance na mesma carteira. O custo e que a folga
+ * sobre os ~700k tipicos vai a ZERO: uma cacada que use 1 unidade a mais
+ * morre sem gas e paga a transacao inteira mesmo assim.
  */
-export const LIMITE_DE_GAS = BigInt(process.env.CACA_LIMITE_GAS ?? '1200000');
+export const LIMITE_DE_GAS = BigInt(process.env.CACA_LIMITE_GAS ?? '700000');
 
 /**
  * O gas que uma cacada REALMENTE usa.
@@ -45,8 +51,15 @@ export const LIMITE_DE_GAS = BigInt(process.env.CACA_LIMITE_GAS ?? '1200000');
  */
 export const GAS_TIPICO_DE_UMA_CACADA = 700_000n;
 
-/** Nunca ofereca menos que isso, ou a transacao pode nem ser considerada. */
-export const PISO_DA_GORJETA_WEI = 100_000_000n; // 0,1 gwei
+/**
+ * Nunca ofereca menos que isso, ou a transacao pode nem ser considerada.
+ *
+ * ATUALIZADO 2026-09-29, a pedido dela: 0,25 gwei. Medido em 2026-09-29 nas 19
+ * liquidacoes da faixa US$ 0,50–224,64 dos ultimos 9,5 dias: a gorjeta MEDIA
+ * do lider (`0xd12810b1`, 9 de 19) foi 0,1529 gwei e a maior de todas as 19
+ * foi 0,4002 gwei. 0,25 cobre a media de todos os concorrentes, nao o topo.
+ */
+export const PISO_DA_GORJETA_WEI = 250_000_000n; // 0,25 gwei
 /** Nem mais que isso, ou um lucro mal medido vira um gasto absurdo. */
 export const TETO_DA_GORJETA_WEI = 50_000_000_000n; // 50 gwei
 
