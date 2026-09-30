@@ -3162,7 +3162,13 @@ async function principal(): Promise<'parar' | void> {
                     // o gas inteiro sem liquidar e pior, e foi ela quem escolheu
                     // essa ordem ("nao aceito um codigo que va atirar com risco
                     // de capotar no meio").
-                    const MS_PARA_ESTIMAR = numeroDoAmbiente('CACA_MS_ESTIMAR', process.env.CACA_MS_ESTIMAR, 400);
+                    // 800ms, subido de 400 a pedido dela em 2026-09-30. A escolha
+                    // e dela e tem lado: 800ms de espera custam meio bloco da
+                    // Base (2s por bloco), mas perder a estimativa significa NAO
+                    // atirar — e ela preferiu esperar mais a perder o alvo por um
+                    // RPC lento. Nada abaixo disto muda de comportamento: quem
+                    // responde em 300ms continua respondendo em 300ms.
+                    const MS_PARA_ESTIMAR = numeroDoAmbiente('CACA_MS_ESTIMAR', process.env.CACA_MS_ESTIMAR, 800);
                     const estimado = await (async (): Promise<bigint | null> => {
                         try {
                             const resposta = await Promise.race([
