@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import { AbiCoder } from 'ethers';
-import { simboloDaBinance, lerSymbol, lerCotacoes, quedaDoMercado } from './precoDeMercado';
+import { simboloDaBinance, lerSymbol, lerCotacoes, quedaDoMercado,
+    cotacoesDeQualquerFonte, ORCAMENTO_DO_MERCADO_MS } from './precoDeMercado';
 
 const D = (n: number | string) => new Decimal(n);
 
@@ -127,4 +128,69 @@ test('cada par da Binance tem equivalente nas duas outras casas', () => {
         assert.ok(EQUIVALENTES[par].coinbase.includes('-'), 'Coinbase usa ETH-USD');
     }
     assert.equal(EQUIVALENTES.BTCUSDT.kraken, 'XBTUSD');
+});
+
+// ===================================================================
+// O ORÇAMENTO DO MERCADO — 2026-09-30, e é a causa do ciclo de 11,4s.
+//
+// A versão anterior era sequencial em dois níveis: a Binance inteira,
+// depois cada casa, e dentro de cada casa um `await` por par. Com 3
+// pares e 2s de timeout o teto era
+//     binance 2s + coinbase 3x2s + kraken 3x2s = 14.000 ms
+// e na Railway a Binance bloqueia IP de nuvem, então TODO ciclo pagava
+// a falha dela antes de começar.
+// ===================================================================
+
+test('as três casas e todos os pares saem JUNTOS, não em fila', async () => {
+    // Cada chamada dorme 300ms. Sequencial em dois níveis seriam 7 chamadas
+    // (1 binance + 3 coinbase + 3 kraken) = 2100ms. Em paralelo, ~300ms.
+    const pares = ['ETHUSDT', 'BTCUSDT', 'USDCUSDT'];
+    let chamadas = 0;
+    type Buscar = Parameters<typeof cotacoesDeQualquerFonte>[3];
+    const lento = (async () => {
+        chamadas++;
+        await new Promise((r) => setTimeout(r, 300));
+        return { json: async () => ({ price: '4000.00' }) };
+    }) as unknown as Buscar;
+    const t0 = Date.now();
+    const r = await cotacoesDeQualquerFonte(pares, 2000, 2500, lento);
+    const gasto = Date.now() - t0;
+    assert.equal(chamadas >= pares.length, true, 'pediu ao menos um por par');
+    assert.equal(gasto < 1200, true, `paralelo: ${gasto}ms, e sequencial daria ~2100ms`);
+    assert.equal(r.precos.size > 0, true);
+});
+
+test('o orçamento é um TETO, e uma casa pendurada não segura o ciclo', async () => {
+    // Uma casa que nunca responde. Antes, isso custava um timeout por par.
+    // Respeita o `signal`, como um `fetch` de verdade: é isso que prova que o
+    // podão ABORTA em vez de só desistir de esperar e deixar a promessa viva.
+    const pendurado = ((_u: string, o?: { signal?: AbortSignal }) => new Promise((_ok, falha) => {
+        o?.signal?.addEventListener('abort', () => falha(new Error('abortado')));
+    })) as unknown as Parameters<typeof cotacoesDeQualquerFonte>[3];
+    const t0 = Date.now();
+    const r = await cotacoesDeQualquerFonte(['ETHUSDT', 'BTCUSDT'], 2000, 400, pendurado);
+    const gasto = Date.now() - t0;
+    assert.equal(gasto < 900, true, `o teto tem de valer: gastou ${gasto}ms para um orçamento de 400ms`);
+    // E o motivo tem de aparecer: "nenhuma" e "estourou o orçamento" são
+    // coisas diferentes, e publicar as duas como a mesma é ausência com cara
+    // de resposta.
+    assert.equal(r.fonte, 'estourou o orçamento');
+    assert.equal(r.precos.size, 0);
+});
+
+test('timeout maior que o orçamento não pode tornar o teto letra morta', async () => {
+    const pendurado = ((_u: string, o?: { signal?: AbortSignal }) => new Promise((_ok, falha) => {
+        o?.signal?.addEventListener('abort', () => falha(new Error('abortado')));
+    })) as unknown as Parameters<typeof cotacoesDeQualquerFonte>[3];
+    const t0 = Date.now();
+    await cotacoesDeQualquerFonte(['ETHUSDT'], 30_000, 300, pendurado);
+    assert.equal(Date.now() - t0 < 900, true, 'o orçamento manda, não o timeout por chamada');
+});
+
+test('lista de pares vazia não chama ninguém', async () => {
+    let chamadas = 0;
+    const contar = (async () => { chamadas++; return { json: async () => ({}) }; }) as unknown as Parameters<typeof cotacoesDeQualquerFonte>[3];
+    const r = await cotacoesDeQualquerFonte([], 2000, 2500, contar);
+    assert.equal(chamadas, 0);
+    assert.equal(r.fonte, 'nenhuma');
 });

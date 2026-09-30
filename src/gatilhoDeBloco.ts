@@ -118,6 +118,21 @@ export function esperarBlocoOuTempo(
 export const SILENCIO_QUE_MATA_MS = 15_000;
 
 /**
+ * De quanto em quanto tempo bater o ping.
+ *
+ * 7,5 s, metade do silencio — o padrao que a QuickNode documenta para WSS
+ * (`PING` a cada 7,5 s, `EXPECTED_PONG_BACK` de 15 s), e que ela pediu
+ * explicitamente. Dois pings perdidos derrubam a conexao: um sozinho pode ser
+ * soluco de rede, dois seguidos nao.
+ *
+ * A primeira versao batia a cada `silencioMs / 3` (5 s), o que dava tres
+ * chances. Duas bastam e gastam menos: com 2 s por bloco da Base, 15 s de
+ * silencio sao ~7 blocos perdidos, e esse ja e um prejuizo que nao vale
+ * esticar.
+ */
+export const PING_A_CADA_MS = 7_500;
+
+/**
  * O batimento que faltava, e o defeito que ele conserta.
  *
  * `close` e `error` so chegam quando a queda e LIMPA. Um socket meio-aberto —
@@ -159,6 +174,7 @@ export class OuvinteDeBlocos {
         /** Injetaveis para o teste poder correr o relogio sem esperar 15s. */
         private readonly silencioMs = SILENCIO_QUE_MATA_MS,
         private readonly agora: () => number = () => Date.now(),
+        private readonly pingMs = PING_A_CADA_MS,
     ) {}
 
     /** Ha quanto tempo nao chega aviso. `null` quando nenhum chegou ainda. */
@@ -191,9 +207,8 @@ export class OuvinteDeBlocos {
 
     private comecarBatimento(): void {
         this.pararBatimento();
-        // Bater a cada terco do limite: tres chances de perceber antes de
-        // derrubar, e sem acordar o processo com frequencia que custe algo.
-        const t = setInterval(() => { this.baterUmaVez(); }, Math.max(1000, Math.floor(this.silencioMs / 3)));
+        // 7,5 s: o padrao da QuickNode. Duas batidas perdidas derrubam.
+        const t = setInterval(() => { this.baterUmaVez(); }, this.pingMs);
         t.unref?.();
         this.batimento = t;
     }

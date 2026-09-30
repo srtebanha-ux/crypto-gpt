@@ -99,11 +99,16 @@ export function quedaDoMercado(
 }
 
 /** Busca as cotacoes dos pares pedidos. Devolve mapa vazio se falhar. */
-export async function cotacoesDaBinance(pares: string[], timeoutMs = 2000): Promise<Map<string, Decimal>> {
+export async function cotacoesDaBinance(
+    pares: string[],
+    timeoutMs = 2000,
+    /** Injetavel para o teste nao bater na rede real. */
+    pedir: typeof buscar = buscar,
+): Promise<Map<string, Decimal>> {
     if (pares.length === 0) return new Map();
     const lista = encodeURIComponent(JSON.stringify([...new Set(pares)]));
     try {
-        const r = await buscar(`${BINANCE}/api/v3/ticker/price?symbols=${lista}`, {
+        const r = await pedir(`${BINANCE}/api/v3/ticker/price?symbols=${lista}`, {
             signal: AbortSignal.timeout(timeoutMs),
         });
         return lerCotacoes(await r.json());
@@ -158,45 +163,123 @@ export const COINBASE = process.env.CACA_COINBASE_REST ?? 'https://api.exchange.
 export const KRAKEN = process.env.CACA_KRAKEN_REST ?? 'https://api.kraken.com';
 
 /**
- * As cotacoes, de onde der.
+ * O ORCAMENTO total desta funcao, em milissegundos.
  *
- * Tenta a Binance (uma chamada para todos os pares), e so cai para as outras
- * se ela nao responder. Coinbase e Kraken pedem uma chamada por par, entao sao
- * o plano B de proposito — e mesmo assim custam zero em Unidades de
- * Computacao, porque nada disso passa pela blockchain.
+ * Ela roda no `finally` de TODO ciclo do cacador, entao o tempo dela entra
+ * inteiro na latencia do bot. Um teto aqui e a unica coisa que impede uma casa
+ * lenta de segurar a cacada.
+ */
+export const ORCAMENTO_DO_MERCADO_MS = 2500;
+
+/**
+ * As cotacoes, de onde der — TODAS as casas ao mesmo tempo.
  *
- * Devolve tambem de ONDE veio, para o log poder dizer. Fonte silenciosa que
- * troca sozinha e a mesma armadilha de sempre: funciona e ninguem sabe como.
+ * MEDIDO EM 2026-09-30, e e a causa de um ciclo de 11,4 segundos que ela viu em
+ * producao e eu tinha atribuido ao RPC.
+ *
+ * A versao anterior era sequencial em DOIS niveis: primeiro a Binance inteira,
+ * depois cada casa, e dentro de cada casa um `await` por par. Com 3 pares e
+ * timeout de 2s por chamada o teto era
+ *
+ *     binance 2s + coinbase 3x2s + kraken 3x2s = 14.000 ms
+ *
+ * e na Railway a Binance bloqueia IP de nuvem (o comentario acima ja
+ * registrava isso), entao TODO ciclo pagava a falha dela antes de comecar. Os
+ * 11,4 s medidos caem exatamente dentro dessa escada.
+ *
+ * Agora as tres casas e todos os pares saem JUNTOS, e o teto passa a ser UM
+ * timeout em vez da soma de sete. A preferencia continua sendo binance ->
+ * coinbase -> kraken, mas entre as que RESPONDERAM: preferir uma casa nao pode
+ * custar o tempo de esperar por ela.
+ *
+ *     antes, pior caso .... 14.000 ms
+ *     agora, pior caso .....  2.500 ms (o orcamento)
+ *
+ * `Promise.allSettled` e nao `Promise.all`: uma casa que estoura nao pode
+ * derrubar as outras duas, e a diferenca entre "ninguem respondeu" e "uma
+ * falhou" e o que o log precisa dizer.
  */
 export async function cotacoesDeQualquerFonte(
     pares: string[],
     timeoutMs = 2000,
+    orcamentoMs = ORCAMENTO_DO_MERCADO_MS,
+    /**
+     * Injetavel para o teste poder provar o PARALELISMO e o TETO sem rede.
+     * Sem isto os dois consertos deste commit seriam indemonstraveis, e
+     * "otimizei a latencia" ficaria sendo uma afirmacao minha em vez de um
+     * numero — que e exatamente o que a regra 1 deste projeto proibe.
+     */
+    pedir: typeof buscar = buscar,
 ): Promise<{ precos: Map<string, Decimal>; fonte: string }> {
-    const daBinance = await cotacoesDaBinance(pares, timeoutMs);
-    if (daBinance.size > 0) return { precos: daBinance, fonte: 'binance' };
+    if (pares.length === 0) return { precos: new Map(), fonte: 'nenhuma' };
+    // Nenhuma chamada pode durar mais que o orcamento inteiro: sem este corte,
+    // `timeoutMs` maior que o orcamento faria o teto ser letra morta.
+    const porChamada = Math.max(1, Math.min(timeoutMs, orcamentoMs));
 
-    for (const [nome, buscarUm] of [
-        ['coinbase', async (par: string) => {
-            const eq = EQUIVALENTES[par]?.coinbase;
-            if (!eq) return null;
-            const r = await buscar(`${COINBASE}/products/${eq}/ticker`, { signal: AbortSignal.timeout(timeoutMs) });
-            return lerCoinbase(await r.json());
-        }],
-        ['kraken', async (par: string) => {
-            const eq = EQUIVALENTES[par]?.kraken;
-            if (!eq) return null;
-            const r = await buscar(`${KRAKEN}/0/public/Ticker?pair=${eq}`, { signal: AbortSignal.timeout(timeoutMs) });
-            return lerKraken(await r.json());
-        }],
-    ] as const) {
-        const fora = new Map<string, Decimal>();
-        for (const par of pares) {
-            try {
-                const p = await buscarUm(par);
-                if (p) fora.set(par, p);
-            } catch { /* proxima casa */ }
+    /**
+     * O corte do orcamento ABORTA as chamadas, nao so desiste de esperar.
+     *
+     * A primeira versao deste conserto cortava com `Promise.race` contra um
+     * `setTimeout` e seguia em frente — e o TESTE pegou: as promessas das casas
+     * ficavam PENDURADAS para sempre. Em producao isso vaza a cada ciclo que
+     * estoura o orcamento: tres promessas e os sockets debaixo delas, de 200ms
+     * em 200ms, por horas.
+     *
+     * Trocar espera por vazamento nao e otimizar latencia. Agora o orcamento
+     * derruba o `fetch` de verdade, e toda promessa resolve.
+     */
+    const podao = new AbortController();
+    // SEM `unref`, de proposito. Um timer sem ref nao segura o event loop, e o
+    // abort simplesmente NAO DISPARAVA quando nada mais estava pendente — o
+    // teste do orcamento acusou "Promise resolution is still pending". O
+    // `clearTimeout` no `finally` abaixo e que garante que ele nao sobrevive a
+    // chamada, entao manter a ref e seguro e e o que faz o teto existir.
+    const relogio = setTimeout(() => podao.abort(new Error('estourou o orçamento do mercado')), orcamentoMs);
+    /** O sinal de cada chamada: o teto dela OU o podão, o que vier primeiro. */
+    const sinal = (): AbortSignal => AbortSignal.any([podao.signal, AbortSignal.timeout(porChamada)]);
+
+    const umaCasa = async (
+        nome: string,
+        buscarUm: (par: string) => Promise<Decimal | null>,
+    ): Promise<{ nome: string; precos: Map<string, Decimal> }> => {
+        // Os pares em PARALELO. Era aqui que cada par custava um timeout.
+        const resultados = await Promise.allSettled(pares.map(async (par) => [par, await buscarUm(par)] as const));
+        const precos = new Map<string, Decimal>();
+        for (const r of resultados) {
+            if (r.status === 'fulfilled' && r.value[1] !== null) precos.set(r.value[0], r.value[1]);
         }
-        if (fora.size > 0) return { precos: fora, fonte: nome };
+        return { nome, precos };
+    };
+
+    try {
+        // A ORDEM desta lista e a preferencia, e ela vale entre as que
+        // RESPONDERAM: preferir uma casa nao pode custar o tempo de esperar
+        // por ela, que era o defeito.
+        const assentados = await Promise.allSettled([
+            umaCasa('binance', async (par) => (await cotacoesDaBinance([par], porChamada, pedir)).get(par) ?? null),
+            umaCasa('coinbase', async (par) => {
+                const eq = EQUIVALENTES[par]?.coinbase;
+                if (!eq) return null;
+                const r = await pedir(`${COINBASE}/products/${eq}/ticker`, { signal: sinal() });
+                return lerCoinbase(await r.json());
+            }),
+            umaCasa('kraken', async (par) => {
+                const eq = EQUIVALENTES[par]?.kraken;
+                if (!eq) return null;
+                const r = await pedir(`${KRAKEN}/0/public/Ticker?pair=${eq}`, { signal: sinal() });
+                return lerKraken(await r.json());
+            }),
+        ]);
+        for (const r of assentados) {
+            if (r.status === 'fulfilled' && r.value.precos.size > 0) {
+                return { precos: r.value.precos, fonte: r.value.nome };
+            }
+        }
+        // "ninguem respondeu" e "o orcamento cortou" sao coisas diferentes, e
+        // publicar as duas com a mesma etiqueta seria ausencia com cara de
+        // resposta na linha que o log usa para decidir o ritmo.
+        return { precos: new Map(), fonte: podao.signal.aborted ? 'estourou o orçamento' : 'nenhuma' };
+    } finally {
+        clearTimeout(relogio);
     }
-    return { precos: new Map(), fonte: 'nenhuma' };
 }
