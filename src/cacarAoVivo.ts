@@ -873,6 +873,46 @@ async function chamarCru(
     return { ok: true, dados: corpo.result ?? '0x' };
 }
 
+/**
+ * O que a espera por limite do provedor CUSTOU neste ciclo.
+ *
+ * Medido/derivado em 2026-09-30, e e a resposta para "por que o ciclo levou
+ * 11,4 segundos": a escada de espera abaixo comeca em 1.000ms e DOBRA.
+ *
+ *     1 recusa .... 1s        3 recusas ... 1+2+4  =  7s
+ *     2 recusas ... 1+2 = 3s  4 recusas ... 1+2+4+8 = 15s
+ *
+ * 11,4s cai exatamente entre a terceira e a quarta. Não foi CPU, não foram os
+ * 233 alvos e não foram os logs: foi o provedor pedindo calma três vezes.
+ *
+ * A linha de aviso existia, mas por chamada e no meio de centenas de outras —
+ * ninguém somava. Agora o ciclo publica o TOTAL, ao lado do `custou`, e aí
+ * "11.4s" deixa de ser um mistério e passa a ser um número com dono.
+ */
+let msEsperandoOProvedor = 0;
+let recusasDoProvedor = 0;
+export function zerarContaDaPaciencia(): void { msEsperandoOProvedor = 0; recusasDoProvedor = 0; }
+
+/**
+ * O host do RPC, SEM a chave.
+ *
+ * A chave da Alchemy mora no CAMINHO da URL
+ * (`base-mainnet.g.alchemy.com/v2/<CHAVE>`), e log vira print, print vira
+ * conversa: a regra deste projeto e que a chave nunca sai do Railway. So o
+ * host, e mais nada — nem caminho, nem query, nem usuario.
+ *
+ * Existe porque o log nao dizia CONTRA QUEM o bot estava falando. Sem isso,
+ * "o ciclo levou 11,4s" nao se distingue de "o RPC publico esta estrangulando o
+ * bot", que e o mesmo buraco do `osBotoes`: duas maquinas, dois provedores, e
+ * nenhuma linha ligando um ao outro.
+ */
+export function hostDoRpc(url: string): string {
+    try { return new URL(url).host; } catch { return 'não consegui ler a URL'; }
+}
+export function contaDaPaciencia(): { ms: number; recusas: number } {
+    return { ms: msEsperandoOProvedor, recusas: recusasDoProvedor };
+}
+
 async function chamarCruComPaciencia(
     params: unknown[],
     tentativas = 4,
@@ -881,10 +921,59 @@ async function chamarCruComPaciencia(
     for (let i = 0; ; i += 1) {
         const r = await chamarCru(params);
         if (r.ok || r.dados || i >= tentativas - 1 || !ehLimiteDoProvedor(r.mensagem)) return r;
+        recusasDoProvedor += 1;
+        msEsperandoOProvedor += espera;
         log.warn('O provedor pediu calma no meio da caçada; esperando.', { esperandoMs: espera });
         await dormir(espera);
         espera *= 2;
     }
+}
+
+/**
+ * O TETO da lista quente lida por ciclo — o adensamento de latencia.
+ *
+ * Medido em 2026-09-30 contra `mainnet.base.org`, DUAS vezes — e as duas
+ * discordam, o que e a parte que importa:
+ *
+ *     conexao FRIA    233 alvos  559,5 ms   |   50 alvos   98,4 ms   (-461 ms)
+ *     conexao QUENTE  166 alvos  241,3 ms   |   50 alvos  160,8 ms   (-80,5 ms)
+ *     1 eth_blockNumber vazio, so o round trip ........... 457,8 ms
+ *
+ * A primeira medicao pegou aperto de conexao e TLS e atribuiu ao tamanho do
+ * lote um custo que nao era dele. O numero honesto e o de conexao quente:
+ * **80,5 ms, 33% menos**. Util, e longe de resolver um ciclo de 11,4 s.
+ *
+ * Isso mantem o teto valendo a pena e mata a ilusao de que ele e a cura: o
+ * gargalo medido e o ROUND TRIP do RPC publico (457,8 ms para uma chamada
+ * vazia) e a espera por limite do provedor, que dobra de 1 s em 1 s. Nenhum
+ * corte de lista conserta nenhum dos dois.
+ *
+ * O custo e real e esta declarado: quem fica de fora do teto nao e visto NESTE
+ * ciclo.
+ *
+ * O corte e seguro para as DUAS vias: a lista chega ordenada por `queda`, e a
+ * regua do `short` — `altaEquivalente(queda)` — e monotona crescente em
+ * `queda`, entao os 50 mais proximos por queda sao os mesmos 50 mais proximos
+ * por alta. Cortar aqui nao esconde um short que estava na frente.
+ *
+ * `0` ou negativo desliga o teto. O log SEMPRE imprime os dois numeros — quem
+ * havia e quantos foram lidos —, porque um corte silencioso que publica
+ * `naListaQuente: 166` enquanto le 50 e a etiqueta que nao descreve o conjunto,
+ * o defeito mais repetido deste projeto.
+ */
+export const TETO_DA_LISTA_QUENTE = Math.floor(numeroDoAmbiente('CACA_TETO_QUENTE', process.env.CACA_TETO_QUENTE, 50));
+
+/**
+ * Os que cabem no teto, e quantos ficaram fora.
+ *
+ * Pura e exportada para poder ser testada: um `slice` solto no meio do laco
+ * quente e o tipo de corte que ninguem revisa depois.
+ */
+export function cabemNoCiclo(quentes: string[], teto = TETO_DA_LISTA_QUENTE): { lidos: string[]; ficaramFora: number } {
+    if (!Number.isFinite(teto) || teto <= 0 || quentes.length <= teto) {
+        return { lidos: quentes, ficaramFora: 0 };
+    }
+    return { lidos: quentes.slice(0, teto), ficaramFora: quentes.length - teto };
 }
 
 /** Quantos multicalls voam juntos. O mesmo numero que a varredura ja usa. */
@@ -2387,6 +2476,10 @@ async function principal(): Promise<'parar' | void> {
 
     for (;;) {
         const inicioDoCiclo = Date.now();
+        // A conta da paciencia e POR CICLO: somar entre ciclos publicaria um
+        // total que nao descreve o ciclo que o `custou` mede, e duas etiquetas
+        // discordando sobre a mesma linha e o defeito que este projeto persegue.
+        zerarContaDaPaciencia();
         try {
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 const novoTopo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
@@ -2526,12 +2619,26 @@ async function principal(): Promise<'parar' | void> {
                         seADividaSubir: tabelaDeAltas,
                         bussola,
                         gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
-                        naListaQuente: quentes.length,
-                        custou: `${Date.now() - inicioDoCiclo}ms`,
+                        naListaQuente: TETO_DA_LISTA_QUENTE > 0 && quentes.length > TETO_DA_LISTA_QUENTE
+                            ? `${quentes.length}, mas LI SÓ ${TETO_DA_LISTA_QUENTE} (teto CACA_TETO_QUENTE) — ${quentes.length - TETO_DA_LISTA_QUENTE} não foram vistos neste ciclo`
+                            : `${quentes.length} (todos lidos)`,
+                        custou: (() => {
+                            const pac = contaDaPaciencia();
+                            return `${Date.now() - inicioDoCiclo}ms`
+                                + (pac.recusas > 0
+                                    ? ` — dos quais ${pac.ms}ms PARADO esperando o provedor (${pac.recusas} recusas). O gargalo é o RPC, não o código.`
+                                    : '');
+                        })(),
+                        rpc: hostDoRpc(rpc),
                     });
                 }
             } else {
-                const aLer = varredura === 'completa' ? devedores : quentes;
+                // O TETO so vale para a patrulha rapida. Numa varredura
+                // completa cortar seria perder o censo, que e outra coisa.
+                const corte = varredura === 'completa'
+                    ? { lidos: devedores, ficaramFora: 0 }
+                    : cabemNoCiclo(quentes);
+                const aLer = corte.lidos;
                 if (aLer.length > 0) {
                     const loteGigante = await lerEmLote(aLer.map((d) => ({
                         alvo: REDE.pool,
@@ -2692,7 +2799,9 @@ async function principal(): Promise<'parar' | void> {
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
                             alvosChecados: aLer.length,
                             naBrasa: brasa.length,
-                            naListaQuente: quentes.length,
+                            naListaQuente: TETO_DA_LISTA_QUENTE > 0 && quentes.length > TETO_DA_LISTA_QUENTE
+                            ? `${quentes.length}, mas LI SÓ ${TETO_DA_LISTA_QUENTE} (teto CACA_TETO_QUENTE) — ${quentes.length - TETO_DA_LISTA_QUENTE} não foram vistos neste ciclo`
+                            : `${quentes.length} (todos lidos)`,
                             // A resposta para "por que 23h sem nada": nao e o
                             // bot que esta cego, e a lista que e de po. Sem
                             // este numero "naBrasa 234" parecia 234 alvos.

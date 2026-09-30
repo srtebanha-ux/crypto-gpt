@@ -4,7 +4,8 @@ import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
 import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, poolParaVender, SEM_VENDA, pisoDoLucroEmUnidadesCruas, oPrecoCancela, oQueUmaQuedaRenderia, comoLerAsQuedas,
-    viaDeQuebra, oQueUmaAltaRenderia, altaEquivalente, contarVias, comoLerABussola, familiaDoAtivo } from './cacarAoVivo';
+    viaDeQuebra, oQueUmaAltaRenderia, altaEquivalente, contarVias, comoLerABussola, familiaDoAtivo,
+    cabemNoCiclo, hostDoRpc } from './cacarAoVivo';
 import type { Via } from './cacarAoVivo';
 import { SAUDE_UM, quedaAteLiquidar, altaDaDividaAteLiquidar } from './posicoes';
 import { dividaMinimaQueVale, lucroEstimado, lucroDaCobertura, coberturaOtima, lucroMaximo } from './perdidas';
@@ -1161,4 +1162,70 @@ test('o alvo do ensaio pode ser SHORT, e não só LONG', () => {
     assert.equal(c.brasa[0], '0xshort', 'o short entra na frente, e o imune vai para o fim');
     assert.equal(c.brasa[2], '0ximune');
     assert.equal(c.menorMargemDaBrasa!.toFixed(1), '1.5', 'e o maisPerto sai dele');
+});
+
+// ===================================================================
+// LATÊNCIA — cronometrado em 2026-09-30 contra mainnet.base.org,
+// conexão já quente:
+//
+//     1 eth_blockNumber vazio (só o round trip) ......... 457,8 ms
+//     1 multicall com 233 getUserAccountData (FRIA) ..... 559,5 ms
+//     1 multicall com  50 getUserAccountData (FRIA) .....  98,4 ms
+//     1 multicall com 166 getUserAccountData (QUENTE) ... 241,3 ms
+//     1 multicall com  50 getUserAccountData (QUENTE) ... 160,8 ms
+//     decodificar 233 contas + quedaAteLiquidar .........  24,2 ms
+//     repartirPorFragilidade em 209 medidos .............   3,0 ms
+//     oQueUmaQuedaRenderia + comoLerAsQuedas ............  71,8 ms
+//     contarVias + comoLerABussola ......................   0,1 ms
+//     JSON.stringify do estado inteiro ..................   0,4 ms
+//
+// CPU somada: ~100ms. Rede: ~1.000ms em dois round trips. O gargalo é a
+// rede, e o log pesado custa 0,4ms — remover ele não compra nada.
+// ===================================================================
+
+test('o teto da lista quente corta, e diz quantos ficaram fora', () => {
+    const lista = Array.from({ length: 166 }, (_, i) => `0x${i}`);
+    const c = cabemNoCiclo(lista, 50);
+    assert.equal(c.lidos.length, 50, 'lê 50: 241,3ms -> 160,8ms com conexão quente, medido');
+    assert.equal(c.ficaramFora, 116, 'e os 116 que sobraram são declarados, não escondidos');
+    // A soma tem de fechar. É isto que impede o corte de virar silêncio.
+    assert.equal(c.lidos.length + c.ficaramFora, lista.length);
+    // Os 50 são os PRIMEIROS, que é a ordem de urgência que repartirPorFragilidade entregou.
+    assert.equal(c.lidos[0], '0x0');
+    assert.equal(c.lidos[49], '0x49');
+});
+
+test('o teto não corta quando não precisa, e desliga com zero', () => {
+    const curta = ['0xa', '0xb'];
+    assert.deepEqual(cabemNoCiclo(curta, 50), { lidos: curta, ficaramFora: 0 });
+    const longa = Array.from({ length: 300 }, (_, i) => `0x${i}`);
+    // `0` desliga: é a saída para ela reabrir tudo sem novo push.
+    assert.equal(cabemNoCiclo(longa, 0).lidos.length, 300);
+    assert.equal(cabemNoCiclo(longa, 0).ficaramFora, 0);
+    // NaN não pode virar `slice(0, NaN)`, que devolve lista VAZIA e desliga a
+    // caçada em silêncio — o defeito que `CACA_MORDIDA_MAXIMA='0,5'` já causou.
+    assert.equal(cabemNoCiclo(longa, Number.NaN).lidos.length, 300);
+});
+
+test('cortar por queda não esconde um short: as duas réguas são monótonas juntas', () => {
+    // A garantia do corte. A lista chega ordenada por `queda`, e a régua do
+    // short é `altaEquivalente(queda)`. Se a ordem das duas discordasse, o teto
+    // jogaria fora um short que estava na frente.
+    const quedas = [0.5, 1, 1.9608, 3, 5, 10, 50].map((q) => new Decimal(q));
+    const altas = quedas.map((q) => altaEquivalente(q)!);
+    for (let i = 1; i < quedas.length; i++) {
+        assert.equal(quedas[i]!.greaterThan(quedas[i - 1]!), true);
+        assert.equal(altas[i]!.greaterThan(altas[i - 1]!), true,
+            `alta tem de crescer junto: ${altas[i - 1]!.toFixed(4)} -> ${altas[i]!.toFixed(4)}`);
+    }
+});
+
+test('o host do RPC vai para o log SEM a chave', () => {
+    // A chave da Alchemy mora no caminho. Log vira print, print vira conversa.
+    assert.equal(hostDoRpc('https://base-mainnet.g.alchemy.com/v2/CHAVE_SECRETA'), 'base-mainnet.g.alchemy.com');
+    assert.equal(hostDoRpc('https://mainnet.base.org'), 'mainnet.base.org');
+    assert.match(hostDoRpc('https://base-mainnet.g.alchemy.com/v2/CHAVE_SECRETA'), /^[^/]+$/);
+    assert.equal(hostDoRpc('https://base-mainnet.g.alchemy.com/v2/CHAVE_SECRETA').includes('CHAVE_SECRETA'), false);
+    // URL torta não pode derrubar o log nem inventar um host.
+    assert.equal(hostDoRpc('nao é uma url'), 'não consegui ler a URL');
 });

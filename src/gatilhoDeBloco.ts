@@ -28,6 +28,16 @@ export function wsDoHttp(url: string): string | null {
     return null;
 }
 
+/**
+ * O ping. `net_version` em vez de um frame de ping do protocolo porque o
+ * `WebSocket` global do Node nao expoe `ping()` — e uma chamada JSON-RPC barata
+ * serve ao mesmo proposito: obriga o provedor a responder, e a resposta e o que
+ * realimenta o cao de guarda.
+ */
+export function pedidoDePing(id = 99): string {
+    return JSON.stringify({ jsonrpc: '2.0', id, method: 'net_version', params: [] });
+}
+
 /** O pedido de assinatura, no formato JSON-RPC. */
 export function pedidoDeAssinatura(id = 1): string {
     return JSON.stringify({ jsonrpc: '2.0', id, method: 'eth_subscribe', params: ['newHeads'] });
@@ -98,16 +108,99 @@ export function esperarBlocoOuTempo(
  * continua. Por isso nada lanca, e `vivo` existe para o log poder dizer em qual
  * dos dois modos ele esta, em vez de o silencio parecer sucesso.
  */
+/**
+ * Quanto silencio delata conexao morta.
+ *
+ * A Base produz um bloco a cada 2 segundos. Quinze segundos sem aviso nao e
+ * mercado calmo — bloco nasce mesmo sem ninguem negociar. E ambiguidade zero,
+ * que e o unico jeito de um relogio poder decidir sozinho.
+ */
+export const SILENCIO_QUE_MATA_MS = 15_000;
+
+/**
+ * O batimento que faltava, e o defeito que ele conserta.
+ *
+ * `close` e `error` so chegam quando a queda e LIMPA. Um socket meio-aberto —
+ * timeout de idle da Railway, NAT que esquece a conexao, provedor que para de
+ * empurrar sem fechar o TCP — nao dispara nenhum dos dois. O que acontecia:
+ * `vivo` ficava `true` para sempre, `esperarBlocoOuTempo` esperava os 2.500ms
+ * inteiros a cada ciclo porque o aviso nunca vinha, e o log continuava
+ * imprimindo `avisoDeBloco: ligado (último 51954999)` com um numero congelado.
+ *
+ * Degradacao silenciosa que se parece com saude: exatamente a "ausencia com
+ * cara de resposta" que este projeto persegue, no acelerador.
+ *
+ * O conserto tem as duas metades, e uma sozinha nao conserta nada:
+ *
+ *   1. um `ping` periodico, para dar ao provedor motivo de responder;
+ *   2. um CAO DE GUARDA no ultimo aviso recebido — porque `ping` sem resposta
+ *      tambem e silencioso, e e o silencio que precisa derrubar a conexao.
+ *
+ * `ultimoBloco` congelado e a prova, e o log passa a dizer HA QUANTO TEMPO foi
+ * o ultimo aviso, em vez de so o numero.
+ */
 export class OuvinteDeBlocos {
     private ws: WebSocket | null = null;
     private ouvintes = new Set<(n: number) => void>();
     private fechado = false;
     private esperaMs = 1000;
+    private batimento: ReturnType<typeof setInterval> | null = null;
     /** O ultimo bloco anunciado. Serve para o log provar que chega aviso. */
     public ultimoBloco = 0;
+    /** `Date.now()` do ultimo aviso. `0` = nenhum ainda nesta conexao. */
+    public ultimoAvisoEm = 0;
+    /** Quantas vezes o cao de guarda derrubou a conexao. Vai para o log. */
+    public quedasPorSilencio = 0;
     public vivo = false;
 
-    constructor(private readonly url: string, private readonly aoAviso?: (texto: string) => void) {}
+    constructor(
+        private readonly url: string,
+        private readonly aoAviso?: (texto: string) => void,
+        /** Injetaveis para o teste poder correr o relogio sem esperar 15s. */
+        private readonly silencioMs = SILENCIO_QUE_MATA_MS,
+        private readonly agora: () => number = () => Date.now(),
+    ) {}
+
+    /** Ha quanto tempo nao chega aviso. `null` quando nenhum chegou ainda. */
+    public msSemAviso(): number | null {
+        return this.ultimoAvisoEm === 0 ? null : this.agora() - this.ultimoAvisoEm;
+    }
+
+    /**
+     * Uma batida do cao de guarda. Publica para o teste chamar direto.
+     *
+     * Devolve `true` quando derrubou a conexao. O relogio comeca a contar da
+     * ABERTURA, nao do primeiro bloco: um socket que abre e nunca fala e
+     * exatamente o caso que o `close` nao pega.
+     */
+    public baterUmaVez(): boolean {
+        if (this.fechado || !this.vivo) return false;
+        try { this.ws?.send(pedidoDePing()); } catch { /* o silencio decide, nao o envio */ }
+        const parado = this.msSemAviso();
+        if (parado === null || parado < this.silencioMs) return false;
+        this.quedasPorSilencio += 1;
+        this.aoAviso?.(`sem aviso de bloco há ${(parado / 1000).toFixed(1)}s — derrubando e reconectando`);
+        this.vivo = false;
+        const morto = this.ws;
+        this.ws = null;
+        try { morto?.close(); } catch { /* ja estava morto */ }
+        this.pararBatimento();
+        this.reconectar();
+        return true;
+    }
+
+    private comecarBatimento(): void {
+        this.pararBatimento();
+        // Bater a cada terco do limite: tres chances de perceber antes de
+        // derrubar, e sem acordar o processo com frequencia que custe algo.
+        const t = setInterval(() => { this.baterUmaVez(); }, Math.max(1000, Math.floor(this.silencioMs / 3)));
+        t.unref?.();
+        this.batimento = t;
+    }
+
+    private pararBatimento(): void {
+        if (this.batimento !== null) { clearInterval(this.batimento); this.batimento = null; }
+    }
 
     public abrir(): void {
         if (this.fechado) return;
@@ -117,10 +210,20 @@ export class OuvinteDeBlocos {
             ws.addEventListener('open', () => {
                 this.vivo = true;
                 this.esperaMs = 1000;
+                // O relogio do cao de guarda comeca AQUI, e nao no primeiro
+                // bloco: um socket que abre e nunca fala e justamente o caso
+                // que `close` nao pega. Sem isto `msSemAviso()` seria `null`
+                // para sempre e o cao nunca latiria.
+                this.ultimoAvisoEm = this.agora();
                 try { ws.send(pedidoDeAssinatura()); } catch { /* a reconexao resolve */ }
+                this.comecarBatimento();
             });
             ws.addEventListener('message', (ev: MessageEvent) => {
                 const bloco = blocoDaMensagem(typeof ev.data === 'string' ? ev.data : String(ev.data));
+                // QUALQUER mensagem prova que a conexao esta viva, inclusive o
+                // pong e a confirmacao da assinatura. Marcar so no bloco novo
+                // faria o cao derrubar uma conexao saudavel num vale de blocos.
+                this.ultimoAvisoEm = this.agora();
                 if (bloco === null || bloco <= this.ultimoBloco) return;
                 this.ultimoBloco = bloco;
                 for (const f of [...this.ouvintes]) {
@@ -135,6 +238,7 @@ export class OuvinteDeBlocos {
                 if (jaCaiu || this.ws !== ws) return;
                 jaCaiu = true;
                 this.vivo = false;
+                this.pararBatimento();
                 this.aoAviso?.('conexão de blocos caiu; volto a perguntar enquanto reconecto');
                 this.reconectar();
             };
@@ -164,6 +268,7 @@ export class OuvinteDeBlocos {
     public fechar(): void {
         this.fechado = true;
         this.vivo = false;
+        this.pararBatimento();
         try { this.ws?.close(); } catch { /* ja estava fechado */ }
     }
 }
