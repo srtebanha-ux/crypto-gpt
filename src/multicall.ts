@@ -85,25 +85,72 @@ export interface RespostaMulti {
  */
 export function decodificarAggregate3Rapido(dataHex: string): RespostaMulti[] {
     const hex = dataHex.replace(/^0x/, '');
+    const palavras = Math.floor(hex.length / 64);
     const palavra = (i: number) => hex.slice(i * 64, (i + 1) * 64);
-    const numero = (i: number) => Number(BigInt(`0x${palavra(i)}`));
+    /**
+     * Le uma palavra como numero, ou `null` quando ela nao existe.
+     *
+     * AUDITADO EM 2026-09-30, e era o defeito mais caro deste arquivo.
+     *
+     * A versao anterior fazia `Number(BigInt('0x' + palavra(i)))` direto. Numa
+     * resposta truncada `palavra(i)` volta VAZIA, `BigInt('0x')` estoura
+     * `Cannot convert 0x to a BigInt`, e a excecao sobe inteira. Quem chama
+     * (`lerEmLote`) pega isso e preenche o PEDACO TODO com `null` — ate 250
+     * posicoes. Medido com tres respostas corrompidas: as tres mataram o lote.
+     *
+     * Ou seja: um unico item defeituoso cegava o bot para 50 devedores no
+     * ciclo, e o log dizia "Um pedaço da varredura não foi lido" sem dizer que
+     * 49 deles estavam perfeitos.
+     */
+    const numero = (i: number): number | null => {
+        if (i < 0 || i >= palavras) return null;
+        const p = palavra(i);
+        if (p.length < 64) return null;
+        try {
+            const n = BigInt(`0x${p}`);
+            // Um deslocamento absurdo e dado corrompido, nao um ponteiro: usar
+            // como indice geraria leitura fora de faixa em silencio.
+            return n > 0xffffffffn ? null : Number(n);
+        } catch { return null; }
+    };
 
     // A resposta inteira e um unico valor dinamico: a primeira palavra aponta
     // para onde o array comeca, em bytes.
-    const base = numero(0) / 32;
+    const deslBase = numero(0);
+    if (deslBase === null || deslBase % 32 !== 0) return [];
+    const base = deslBase / 32;
     const quantos = numero(base);
+    if (quantos === null) return [];
     const fora: RespostaMulti[] = new Array(quantos);
 
     for (let i = 0; i < quantos; i += 1) {
-        // Deslocamento do item, em bytes, a partir da palavra seguinte ao
-        // tamanho do array.
-        const item = base + 1 + numero(base + 1 + i) / 32;
-        const ok = palavra(item).endsWith('1');
+        // Cada item se defende sozinho: um deslocamento torto no item 7 nao
+        // pode apagar os outros 49. `{ok: false}` e o mesmo que uma chamada que
+        // reverteu, e quem le ja trata esse caso — `rs[k]?.ok` no caminho
+        // quente, e o `null` posicional em `lerEmLote`.
+        const perdido: RespostaMulti = { ok: false, dados: '0x' };
+        const deslItem = numero(base + 1 + i);
+        if (deslItem === null || deslItem % 32 !== 0) { fora[i] = perdido; continue; }
+        const item = base + 1 + deslItem / 32;
+        const bruto = palavra(item);
+        if (bruto.length < 64) { fora[i] = perdido; continue; }
+        // `ok` e um bool ABI: a palavra inteira e 0 ou 1. Comparar a palavra
+        // toda em vez de olhar so o ultimo caractere — `endsWith('1')` aceitava
+        // qualquer palavra terminada em 1, inclusive lixo como `…21`.
+        const ok = BigInt(`0x${bruto}`) === 1n;
         // Dentro do item: [0] ok, [1] deslocamento dos bytes a partir do item.
-        const bytes = item + numero(item + 1) / 32;
+        const deslBytes = numero(item + 1);
+        if (deslBytes === null || deslBytes % 32 !== 0) { fora[i] = { ok, dados: '0x' }; continue; }
+        const bytes = item + deslBytes / 32;
         const tamanho = numero(bytes);
+        if (tamanho === null) { fora[i] = { ok, dados: '0x' }; continue; }
         const inicio = (bytes + 1) * 64;
-        fora[i] = { ok, dados: `0x${hex.slice(inicio, inicio + tamanho * 2)}` };
+        const dados = hex.slice(inicio, inicio + tamanho * 2);
+        // Conteudo mais curto que o tamanho anunciado e resposta cortada. Dar
+        // por boa entregaria meia palavra ao decodificador de cima, que leria
+        // a saude de alguem com os bytes errados — pior que um buraco.
+        if (dados.length < tamanho * 2) { fora[i] = { ok, dados: '0x' }; continue; }
+        fora[i] = { ok, dados: `0x${dados}` };
     }
     return fora;
 }
