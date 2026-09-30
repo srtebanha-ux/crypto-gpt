@@ -7,7 +7,7 @@ import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeE
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro } from './prontidao';
 import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, blocosAteCruzar, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
@@ -3141,12 +3141,58 @@ async function principal(): Promise<'parar' | void> {
                             lucroMinimo: piso,
                           });
                 
-                    // Nada de `estimateGas` nem `getFeeData` aqui. As duas sao
-                    // idas a rede no unico instante em que centenas de
-                    // milissegundos custam a liquidacao — e nenhuma e
-                    // necessaria: gas nao usado volta, e o preco base ja veio
-                    // de carona no multicall do ciclo.
-                    const limiteGas = LIMITE_DE_GAS;
+                    // `estimateGas` ENTROU AQUI em 2026-09-30, e o comentario
+                    // anterior dizia o contrario: "gas nao usado volta, entao
+                    // teto generoso e de graca". Isso e verdade para quem tem
+                    // carteira grande e FALSO no caminho all-in que ela aprovou
+                    // hoje — se o saldo inteiro vai para a gorjeta e a cacada usa
+                    // uma unidade acima do teto, a transacao reverte sem gas e o
+                    // dinheiro vai embora sem liquidacao nenhuma. Foi o pedido
+                    // dela, com estas palavras: "NUNCA um limite cravado".
+                    //
+                    // Por que aqui funciona e nao antes: `eth_estimateGas` sobre
+                    // `cacar()` num alvo que AINDA NAO cruzou devolve
+                    // `execution reverted` — conferido na rede em 2026-09-30.
+                    // Neste ponto a medicao por `eth_call` JA voltou com lucro,
+                    // logo o alvo e liquidavel e a estimativa existe.
+                    //
+                    // O custo e uma ida a rede a mais no pior instante possivel,
+                    // e por isso vai com TEMPO MAXIMO. Sem resposta no prazo o bot
+                    // NAO atira: perder a liquidacao por RPC lento e ruim, perder
+                    // o gas inteiro sem liquidar e pior, e foi ela quem escolheu
+                    // essa ordem ("nao aceito um codigo que va atirar com risco
+                    // de capotar no meio").
+                    const MS_PARA_ESTIMAR = numeroDoAmbiente('CACA_MS_ESTIMAR', process.env.CACA_MS_ESTIMAR, 400);
+                    const estimado = await (async (): Promise<bigint | null> => {
+                        try {
+                            const resposta = await Promise.race([
+                                chamar<string>('eth_estimateGas', [{
+                                    from: await carteira.getAddress(),
+                                    to: contrato.endereco,
+                                    data: envio,
+                                }]),
+                                new Promise<null>((r) => { const t = setTimeout(() => r(null), MS_PARA_ESTIMAR); t.unref?.(); }),
+                            ]);
+                            if (resposta === null) return null;
+                            const n = BigInt(resposta);
+                            return n > 0n ? n : null;
+                        } catch { return null; }
+                    })();
+                    const doGas = limiteDeGasDoTiro({
+                        estimadoGas: estimado,
+                        saldoWei: saldoDeGasWei,
+                        baseFeeWei: baseFeeAtual ?? 20_000_000n,
+                    });
+                    if (doGas.limite === null) {
+                        log.warn('[TIRO ABORTADO] Não estimei o gás, então não atiro.', {
+                            devedor: alvo.devedor,
+                            porque: doGas.porque,
+                            oQueIssoCusta: 'esta liquidação. O que evita é perder o gás inteiro num revert sem gás',
+                            comoDestravar: 'CACA_MS_ESTIMAR maior, ou um RPC que responda eth_estimateGas no prazo',
+                        });
+                        continue;
+                    }
+                    const limiteGas = doGas.limite;
                     const lucroUsd = emDolar(
                         lucroCruValido,
                         casas.get(alvo.divida.toLowerCase()),

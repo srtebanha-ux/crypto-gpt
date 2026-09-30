@@ -319,8 +319,15 @@ test('SIMULAÇÃO: o alvo de US$ 1.986 ATIRA — o teto saiu em 2026-09-30', () 
     //     US$    2 -> 0,4246 gwei, custo US$  0,81   (INALTERADO)
     //     US$   66 -> 6,3093 gwei, custo US$ 11,90   (INALTERADO)
     //     US$  223 -> 9,5486 gwei, custo US$ 18,00   (INALTERADO)
-    //     US$  499 -> 21,1053 gwei, custo US$ 39,79  (recusava)
-    //     US$ 1986 -> 21,1053 gwei, custo US$ 39,79  (recusava)
+    //     US$  499 -> 12,3093 gwei, custo US$ 23,21  (recusava)
+    //     US$ 1986 -> 12,3093 gwei, custo US$ 23,21  (recusava)
+    //
+    // Os 21,11 gwei / US$ 39,79 da primeira medição eram com o gasLimit de 700k.
+    // Ele voltou para 1.200.000 em 2026-09-30 (o teto de 700k tinha folga ZERO
+    // sobre os ~700k que a caçada usa, e dois testes deste repositório gritaram
+    // por um dia). Mais teto de gás = menos gorjeta possível, e a conta fecha:
+    // 12,31 gwei ainda são **31x** a maior gorjeta que qualquer concorrente
+    // pagou nas 19 liquidações medidas (0,4002 gwei).
     //
     // O resgate é ADITIVO: nenhum tiro que já saía mudou de gorjeta.
     const P = politicaDoTiro();
@@ -334,8 +341,11 @@ test('SIMULAÇÃO: o alvo de US$ 1.986 ATIRA — o teto saiu em 2026-09-30', () 
 
     const grande = decidir('1986');
     assert.equal(grande.atira, true, 'O ALVO GRANDE É NOSSO');
-    assert.equal(grande.prioridadeWei! > 21_000_000_000n, true,
-        `gorjeta ${Number(grande.prioridadeWei) / 1e9} gwei: a carteira inteira`);
+    // A gorjeta all-in SAI DO SALDO e do gasLimit, então não se crava: o que se
+    // exige é que ela bata o campo com folga. Campo medido: 0,4002 gwei foi a
+    // maior das 19 liquidações.
+    assert.equal(grande.prioridadeWei! > 4_000_000_000n, true,
+        `gorjeta ${Number(grande.prioridadeWei) / 1e9} gwei tem de passar de 10x o campo`);
 
     // A ponta de baixo continua protegida, e é a única trava que ela pediu para manter.
     assert.equal(decidir('0.49').atira, false);

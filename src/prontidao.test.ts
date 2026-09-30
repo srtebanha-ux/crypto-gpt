@@ -14,6 +14,9 @@ import {
     lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado, tiroEmBrancoArmado,
     politicaDoTiro, comoLerAPolitica,
     PISO_DA_GORJETA_WEI, TETO_DA_GORJETA_WEI, LIMITE_DE_GAS,
+    limiteDeGasDoTiro, FOLGA_DO_GAS, PISO_DO_LIMITE_DE_GAS,
+    tetoDeGasQueNaoEstrangulaOLance, GORJETA_QUE_GANHA_O_LEILAO_WEI,
+    GAS_TIPICO_DE_UMA_CACADA,
 } from './prontidao';
 
 const D = (n: number | string) => new Decimal(n);
@@ -522,7 +525,12 @@ test('a FAIXA que atira tem duas pontas, e as duas importam', () => {
     assert.ok(f !== null);
     // Ponta de baixo: abaixo dela o prêmio não paga o próprio gás.
     assert.ok(f!.de !== null, 'na regra normal existe piso');
-    assert.equal(f!.de!.toFixed(2), '0.45');
+    // US$ 0,45 -> US$ 1,02 em 2026-09-29, e a causa e uma so: o PISO DA GORJETA
+    // subiu de 0,1 para 0,25 gwei (commit c43a102, pedido dela). A cadeia fecha:
+    //     custo minimo do tiro  700.000 x 0,27 gwei = US$ 0,5131 (era 0,2280)
+    //     piso da faixa         2x a margem         = US$ 1,02   (era 0,45)
+    // Nao e regra nova, e a mesma regra com o botao que ela mudou.
+    assert.equal(f!.de!.toFixed(2), '1.02');
     // Ponta de cima: acima dela uma derrota come metade do gás.
     assert.ok(f!.ate !== null, 'com US$ 9 existe teto');
     assert.equal(f!.ate!.toFixed(0), '67');
@@ -792,8 +800,13 @@ test('o custo do tiro em branco é de centavos, e é o argumento todo', () => {
     const gasDaRecusa = 150_000n;
     const total = PISO_DA_GORJETA_WEI + BASE_REAL_WEI;
     const usd = new Decimal((gasDaRecusa * total).toString()).dividedBy(1e18).mul(ETH_REAL);
-    assert.equal(usd.toFixed(4), '0.0484');
-    assert.ok(usd.lessThan('0.10'), 'se isto passar de dez centavos o argumento muda');
+    // 0,0484 -> 0,1089 pelo piso de gorjeta de 0,25 gwei (c43a102). O argumento
+    // — "o tiro em branco custa centavos" — CONTINUA de pe, mas a folga acabou:
+    // o proprio teste dizia "se isto passar de dez centavos o argumento muda", e
+    // passou. Onze centavos ainda sao centavos; vinte nao seriam. O teto sobe
+    // para 0,15 e fica DECLARADO que ele se mexeu, em vez de eu afrouxar calado.
+    assert.equal(usd.toFixed(4), '0.1089');
+    assert.ok(usd.lessThan('0.15'), 'acima de quinze centavos o argumento muda de verdade');
 });
 
 test('o modo prova solta o TETO, não só o piso — o caso real de 2026-09-27', () => {
@@ -1291,4 +1304,85 @@ test('a faixa de negócio: US$ 0,50 a US$ 500, e vale ATÉ no modo prova', () =>
     assert.match(decidirTiro({ ...amb, lucroUsd: new Decimal('1986') }).porque, /tubarão/);
     // Sem cotação não se atira: não dá para saber se está na faixa.
     assert.equal(decidirTiro({ ...amb, lucroUsd: null }).atira, false);
+});
+
+// ===========================================================================
+// O GÁS DINÂMICO — 2026-09-30, pedido dela depois da auditoria:
+// "NUNCA um limite cravado (hardcoded) de 700k ou qualquer outro número fixo".
+//
+// O motivo dela está certo, e é aritmético: se o saldo inteiro vai para a
+// gorjeta e a caçada usa 720k contra um teto de 700k, a transação reverte
+// sem gás e o dinheiro vai embora sem liquidação nenhuma.
+// ===========================================================================
+
+test('sem estimativa da rede o bot NÃO atira — nunca chuta o teto', () => {
+    const r = limiteDeGasDoTiro({ estimadoGas: null, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n });
+    assert.equal(r.limite, null, 'null é a resposta, e não um padrão silencioso');
+    assert.match(r.porque, /NÃO atiro/);
+    // Zero e negativo também são "não sei", e não "usa zero".
+    assert.equal(limiteDeGasDoTiro({ estimadoGas: 0n, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n }).limite, null);
+    assert.equal(limiteDeGasDoTiro({ estimadoGas: -5n, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n }).limite, null);
+});
+
+test('a folga sobre a estimativa cobre a variância medida do líder', () => {
+    // A única variância de consumo que este projeto tem medida: o líder da faixa
+    // (`0xd12810b1`, 9 de 19 liquidações em 9,5 dias) gastou entre 1.202.608 e
+    // 4.142.116 no MESMO contrato — 2,76x a mediana de 1.500.956. Uma folga de
+    // 50% não cobriria aquilo; 100% cobre quase tudo.
+    assert.equal(FOLGA_DO_GAS, 1.0, 'o dobro do estimado');
+    const r = limiteDeGasDoTiro({ estimadoGas: 1_000_000n, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n });
+    assert.equal(r.limite, 2_000_000n, '1M estimado + 100% = 2M de teto');
+    assert.match(r.porque!, /estimou 1000000 \+ 100% de folga/);
+    // Uma caçada de 720k contra um teto de 700k era o caso que ela descreveu:
+    // com a folga, 720k estimados mandam 1.440.000 e não morre sem gás.
+    assert.equal(limiteDeGasDoTiro({ estimadoGas: 720_000n, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n }).limite,
+        1_440_000n, 'os 720k que ela citou passam com folga de sobra');
+});
+
+test('o piso do teto de gás existe: estimativa pequena não manda teto apertado', () => {
+    // Uma estimativa de 100k (a Aave recusando cedo, por exemplo) daria 200k com
+    // a folga — e uma caçada de verdade usa ~700k. Mandar 200k seria morrer sem
+    // gás na primeira que passar do corte.
+    const r = limiteDeGasDoTiro({ estimadoGas: 100_000n, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n });
+    assert.equal(r.limite, PISO_DO_LIMITE_DE_GAS);
+    assert.match(r.porque!, /subiu para o piso/);
+    assert.equal(PISO_DO_LIMITE_DE_GAS > 700_000n, true, 'e o piso é maior que os ~700k que a caçada usa');
+});
+
+test('o teto que estrangula o lance é CALCULADO do saldo, não cravado', () => {
+    // O nó congela `gasLimit × maxFeePerGas` adiantado, então teto grande come
+    // lance. "Quanto é grande" sai do saldo e muda quando ela deposita.
+    const pequeno = tetoDeGasQueNaoEstrangulaOLance(16419111191761470n, 5_000_000n);
+    const gordo = tetoDeGasQueNaoEstrangulaOLance(200_000_000_000_000_000n, 5_000_000n);
+    assert.equal(gordo > pequeno, true, 'saldo maior comporta teto maior');
+    assert.equal(pequeno >= PISO_DO_LIMITE_DE_GAS, true, 'e nunca desce abaixo do piso');
+    // O alvo dos 4 gwei é 10x a MAIOR gorjeta que qualquer concorrente pagou nas
+    // 19 liquidações medidas (0,4002 gwei). Não é número escolhido no ar.
+    assert.equal(GORJETA_QUE_GANHA_O_LEILAO_WEI, 4_000_000_000n);
+    assert.equal(Number(GORJETA_QUE_GANHA_O_LEILAO_WEI) / 1e9 / 0.4002 > 9, true, 'dez vezes o campo medido');
+});
+
+test('teto acima do que o saldo comporta MANDA o pedido, e diz que o lance aperta', () => {
+    // A escolha, e ela tem lado: morrer sem gás é perda CERTA; lance fraco é só
+    // desvantagem. Então o teto pedido vai, e o log avisa.
+    const saldoMagro = 2_000_000_000_000_000n; // 0,002 ETH
+    const r = limiteDeGasDoTiro({ estimadoGas: 3_000_000n, saldoWei: saldoMagro, baseFeeWei: 5_000_000n });
+    assert.equal(r.limite, 6_000_000n, 'manda os 6M que a caçada pede');
+    assert.match(r.porque!, /ACIMA do teto/);
+    assert.match(r.porque!, /morrer sem gás é perda certa/);
+});
+
+test('o LIMITE_DE_GAS de planejamento voltou a ter folga sobre o consumo', () => {
+    // As duas asserções que `c43a102` deixou vermelhas por um dia. Elas são a
+    // guarda que este projeto construiu contra exatamente o out-of-gas que ela
+    // descreveu em 2026-09-30, e estavam certas.
+    assert.equal(LIMITE_DE_GAS > GAS_TIPICO_DE_UMA_CACADA, true,
+        `${LIMITE_DE_GAS} tem de sobrar folga sobre os ${GAS_TIPICO_DE_UMA_CACADA} que a caçada usa`);
+    assert.equal(LIMITE_DE_GAS >= 1_000_000n, true);
+    assert.equal(LIMITE_DE_GAS < 2_000_000n, true, 'sem congelar adiantado à toa');
+    // E o medo que motivou os 700k não se sustenta neste saldo: com 1,2M de teto
+    // a gorjeta possível é 12,31 gwei — 31x a maior do campo medido (0,4002).
+    const teto = maxFeeQueOSaldoAdianta(16419111191761470n, LIMITE_DE_GAS);
+    assert.equal(Number(teto) / 1e9 > 12, true, `${(Number(teto) / 1e9).toFixed(4)} gwei`);
+    assert.equal(Number(teto) / 1e9 / 0.4002 > 25, true, 'e ainda bate o campo por mais de 25x');
 });

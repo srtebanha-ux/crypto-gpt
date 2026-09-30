@@ -333,14 +333,21 @@ const DIVIDA_DO_ALVO_DO_LOG = new Decimal('0.6477');   // 2 x US$ 0,32
 test('o piso de tamanho sai do tiro MAIS BARATO, e o alvo do tiro em seco fica 37x abaixo dele', () => {
     const custoMinimo = custoDoTiroUsd(PISO_DA_GORJETA_WEI, BASEFEE_DO_LOG, ETH_DO_LOG);
     assert.ok(custoMinimo !== null);
-    // 700.000 de gás x 0,12 gwei = 0,000084 ETH.
-    assert.equal(custoMinimo!.toFixed(4), '0.2280');
+    // 700.000 de gás x 0,27 gwei = 0,000189 ETH = US$ 0,5131.
+    // Era US$ 0,2280 com o piso de gorjeta em 0,1 gwei; o piso foi para 0,25 em
+    // 2026-09-29 (c43a102, pedido dela) e este número é consequência aritmética,
+    // não regra nova. É a MESMA causa do piso da faixa ter ido de 0,45 para 1,02.
+    assert.equal(custoMinimo!.toFixed(4), '0.5131');
 
     const piso = dividaMinimaQueVale(custoMinimo);
     assert.ok(piso !== null);
-    assert.equal(piso!.toFixed(2), '23.95');
+    // US$ 23,95 -> US$ 36,87: mesma cadeia do piso de gorjeta de 0,25 gwei. A
+    // dívida mínima que paga o próprio gás sobe junto com o custo do tiro.
+    assert.equal(piso!.toFixed(2), '36.87');
 
-    // O alvo que o bot mirou não chega nem perto.
+    // O alvo que o bot mirou não chega nem perto — e ficou AINDA mais longe:
+    // 37x abaixo do piso viraram 57x. O título do teste diz 37x e fica como
+    // registro do dia em que foi medido; a asserção segue a regra.
     assert.ok(piso!.dividedBy(DIVIDA_DO_ALVO_DO_LOG).greaterThan(35),
         `o alvo do log devia US$ ${DIVIDA_DO_ALVO_DO_LOG.toFixed(2)}, ${piso!.dividedBy(DIVIDA_DO_ALVO_DO_LOG).toFixed(0)}x abaixo do piso`);
 

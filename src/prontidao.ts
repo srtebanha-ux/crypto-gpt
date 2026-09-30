@@ -33,13 +33,139 @@ export const SELETOR_BASEFEE = '0x3e64a696';
  * lance possivel. Apertado demais seria pior: morrer sem gas custa a
  * transacao inteira, depois de pagar.
  *
- * ATUALIZADO 2026-09-29, a pedido dela: 700k, adensamento de gwei. O no
- * congela `gasLimit × maxFeePerGas` adiantado, entao cortar o teto de 1,2M
- * para 700k libera poder de lance na mesma carteira. O custo e que a folga
- * sobre os ~700k tipicos vai a ZERO: uma cacada que use 1 unidade a mais
- * morre sem gas e paga a transacao inteira mesmo assim.
+ * ATUALIZADO 2026-09-29, a pedido dela: 700k. REVERTIDO EM 2026-09-30, a pedido
+ * dela tambem, e os dois pedidos sao coerentes — o segundo tem a medicao que o
+ * primeiro nao tinha.
+ *
+ * Com 700k a folga sobre os ~700k que a cacada usa ia a ZERO: uma cacada que
+ * usasse UMA unidade a mais morria sem gas e pagava a transacao inteira. Dois
+ * testes deste arquivo gritaram na hora (`o limite de gas e folgado, mas nao a
+ * ponto de estrangular o lance` e `o teto de gas nao pode estrangular o lance`)
+ * e ficaram vermelhos por um dia.
+ *
+ * E o medo que motivou os 700k — "teto grande prende o poder de lance" — foi
+ * MEDIDO em 2026-09-30 e nao se sustenta neste saldo:
+ *
+ *     gasLimit    maxFee que o saldo adianta   custo all-in
+ *       700.000              21,1103 gwei         US$ 39,79
+ *     1.200.000              12,3143 gwei         US$ 23,21
+ *     2.000.000               7,3886 gwei         US$ 13,93
+ *     3.000.000               4,9257 gwei         US$  9,29
+ *
+ * A maior gorjeta que QUALQUER concorrente pagou nas 19 liquidacoes medidas foi
+ * 0,4002 gwei. Mesmo com 3M de teto o lance possivel e 12x isso. A folga de gas
+ * e o poder de lance nao competem de verdade aqui: dava para ter os dois.
+ *
+ * ESTE NUMERO NAO E O DO TIRO. Desde 2026-09-30 o tiro usa `eth_estimateGas` no
+ * instante do disparo (ver `limiteDeGasDoTiro`), porque so ali o alvo e
+ * liquidavel e a estimativa existe — antes do cruzamento a chamada REVERTE,
+ * conferido na rede. Este valor sobra para o que precisa de um numero sem rede:
+ * o orcamento de CUs, a `faixaQueAtira` do log e o `gorjetaQueCabeNoSaldo` do
+ * planejamento.
  */
-export const LIMITE_DE_GAS = BigInt(process.env.CACA_LIMITE_GAS ?? '700000');
+export const LIMITE_DE_GAS = BigInt(process.env.CACA_LIMITE_GAS ?? '1200000');
+
+/**
+ * A FOLGA sobre a estimativa da rede, em fracao.
+ *
+ * 1.0 = o dobro do estimado. Nao e chute confortavel: e a unica variancia de
+ * consumo que este projeto tem medida. O lider da faixa (`0xd12810b1`, 9 de 19
+ * liquidacoes em 9,5 dias) gastou, nas nove:
+ *
+ *     1.202.608  1.245.205  1.268.533  1.333.274  1.500.956
+ *     1.665.347  2.293.968  4.086.320  4.142.116
+ *
+ * Mediana 1.500.956, maximo 4.142.116 — **2,76x a mediana**, no MESMO contrato
+ * e no mesmo par de mercado. Uma folga de 50% nao cobriria aquilo; 100% cobre
+ * quase tudo e o resto e barrado pelo teto de baixo.
+ *
+ * O contrato dele faz mais que o nosso, entao 2,76x e limite superior e nao
+ * previsao. Isto e escolha limitada pelo dado que existe, e nao derivacao — e
+ * esta escrito assim de proposito.
+ */
+export const FOLGA_DO_GAS = Number(process.env.CACA_FOLGA_GAS ?? '1.0');
+
+/** O menor teto que faz sentido mandar: abaixo disto a cacada nao cabe. */
+export const PISO_DO_LIMITE_DE_GAS = 900_000n;
+
+/**
+ * O maior teto que ainda deixa a gorjeta ganhar o leilao.
+ *
+ * O no congela `gasLimit × maxFeePerGas`, entao teto grande come lance. Mas
+ * "quanto e grande" nao e opiniao: e o ponto em que o lance possivel deixa de
+ * bater o campo com margem. Campo medido: 0,4002 gwei foi a MAIOR gorjeta das
+ * 19 liquidacoes. Com 10x de margem o alvo e 4 gwei, e o teto de gas que ainda
+ * permite 4 gwei sai do saldo — muda quando ela deposita, entao e calculado e
+ * nao cravado.
+ */
+export const GORJETA_QUE_GANHA_O_LEILAO_WEI = 4_000_000_000n; // 10x os 0,4002 gwei medidos
+
+export function tetoDeGasQueNaoEstrangulaOLance(
+    saldoWei: bigint,
+    baseFeeWei: bigint,
+    gorjetaAlvoWei = GORJETA_QUE_GANHA_O_LEILAO_WEI,
+): bigint {
+    const porUnidade = baseFeeWei + gorjetaAlvoWei;
+    if (porUnidade <= 0n) return PISO_DO_LIMITE_DE_GAS;
+    const cabe = saldoWei / porUnidade;
+    return cabe < PISO_DO_LIMITE_DE_GAS ? PISO_DO_LIMITE_DE_GAS : cabe;
+}
+
+/**
+ * O LIMITE DE GAS DO TIRO, da estimativa da rede — nunca de um numero cravado.
+ *
+ * Pedido dela em 2026-09-30: "NUNCA um limite cravado (hardcoded) de 700k ou
+ * qualquer outro numero fixo". E o motivo dela esta certo: se o saldo inteiro
+ * vai para a gorjeta e a cacada usa 720k contra um teto de 700k, a transacao
+ * reverte sem gas e o dinheiro vai embora sem liquidacao nenhuma.
+ *
+ * `estimado` e `null` quando `eth_estimateGas` nao respondeu. Nesse caso a
+ * resposta e NAO ATIRAR, e nao "usa o padrao": chutar o teto com o saldo todo na
+ * gorjeta e exatamente o risco que ela mandou eliminar. O log diz que nao
+ * estimou, em vez de o bot atirar no escuro.
+ *
+ * Conferido na rede em 2026-09-30: `eth_estimateGas` sobre `cacar()` num alvo
+ * que AINDA NAO cruzou devolve `execution reverted`. Logo esta funcao so pode
+ * ser chamada no instante do disparo, onde o alvo ja e liquidavel — e e la que
+ * o cacador ja faz a medicao por `eth_call`.
+ */
+export function limiteDeGasDoTiro(entrada: {
+    estimadoGas: bigint | null;
+    saldoWei: bigint;
+    baseFeeWei: bigint;
+    folga?: number;
+    gorjetaAlvoWei?: bigint;
+}): { limite: bigint; porque: string } | { limite: null; porque: string } {
+    if (entrada.estimadoGas === null || entrada.estimadoGas <= 0n) {
+        return {
+            limite: null,
+            porque: 'eth_estimateGas não respondeu: NÃO atiro. Chutar o teto com o saldo todo na '
+                + 'gorjeta é perder o gás sem liquidar',
+        };
+    }
+    const folga = Number.isFinite(entrada.folga) ? Math.max(0, entrada.folga!) : FOLGA_DO_GAS;
+    // Em milesimos para nao passar por `Number` e perder precisao no bigint.
+    const comFolga = entrada.estimadoGas * BigInt(Math.round((1 + folga) * 1000)) / 1000n;
+    const piso = comFolga < PISO_DO_LIMITE_DE_GAS ? PISO_DO_LIMITE_DE_GAS : comFolga;
+    const teto = tetoDeGasQueNaoEstrangulaOLance(entrada.saldoWei, entrada.baseFeeWei, entrada.gorjetaAlvoWei);
+    if (piso <= teto) {
+        return {
+            limite: piso,
+            porque: `estimou ${entrada.estimadoGas} + ${(folga * 100).toFixed(0)}% de folga = ${piso}`
+                + (comFolga < PISO_DO_LIMITE_DE_GAS ? ` (subiu para o piso de ${PISO_DO_LIMITE_DE_GAS})` : ''),
+        };
+    }
+    // A folga que a carteira paga e menor que a que a cacada pede. Mandar o teto
+    // pedido esvazia o lance; mandar o teto que cabe arrisca morrer sem gas.
+    // Manda o PEDIDO — morrer sem gas e certeza de perda, lance fraco e so
+    // desvantagem — e o log diz que o lance vai apertado.
+    return {
+        limite: piso,
+        porque: `estimou ${entrada.estimadoGas} + ${(folga * 100).toFixed(0)}% = ${piso}, ACIMA do teto `
+            + `de ${teto} que o saldo comporta com gorjeta cheia. Mando o pedido e o lance vai apertado: `
+            + 'morrer sem gás é perda certa, lance fraco é só desvantagem',
+    };
+}
 
 /**
  * O gas que uma cacada REALMENTE usa.
