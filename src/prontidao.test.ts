@@ -1,4 +1,11 @@
 import { test } from 'node:test';
+// CONTRATO NOVO de `faixaQueAtira`, 2026-09-30: quando o lance sai inteiro nas
+// DUAS pontas, a resposta e `inteiroDe = chao` e `inteiroAte = null` — a regiao
+// e [chao, INFINITO). Antes publicava `inteiroAte = teto`, e `teto` e o TETO DA
+// BUSCA (US$ 1.000.000): um numero que a busca nunca mediu, saindo no log como
+// fronteira. Agora `inteiroDe != null && inteiroAte == null` = inteiro dali para
+// cima, e as DUAS nulas = nunca inteiro.
+
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import { lucroEstimado } from './perdidas';
@@ -548,7 +555,10 @@ test('com gás de sobra o lance inteiro cobre a faixa toda', () => {
     const gordo = { ...AMBIENTE_REAL, saldoWei: 200_000_000_000_000_000n };
     const f = faixaQueAtira(gordo)!;
     assert.equal(f.ate, null, 'sem teto de tiro');
-    assert.ok(f.inteiroAte !== null, 'e o lance inteiro cobre até onde se procurou');
+    // Contrato novo (ver o bloco no topo deste arquivo): inteiro nas duas
+    // pontas sai como [chão, ∞), e não como um `inteiroAte` de US$ 1.000.000.
+    assert.ok(f.inteiroDe !== null, 'o lance sai inteiro A PARTIR do chão');
+    assert.equal(f.inteiroAte, null, 'e NÃO há fronteira de cima — nem inventada');
 });
 
 test('sem cotação do ETH nada sai, e o motivo diz isso', () => {
@@ -859,11 +869,23 @@ test('a política do tiro tem um dono só, e lê os nomes que o Railway usa', ()
     assert.equal(p.atirarAmordacado, false);
 
     // Com a política dela, a faixa reproduz os DOIS números do log das 21:26.
+    //
+    // `gorjetaTotalAcimaDeUsd: undefined` DESLIGA o resgate all-in de
+    // 2026-09-30, porque é isso que reproduz aquele dia. Com o resgate ligado a
+    // faixa não tem mais teto e a região do lance inteiro ganha um buraco no
+    // meio — verdade nova, log velho. Os dois números continuam sendo o teste de
+    // que `politicaDoTiro` tem um dono só.
     const f = faixaQueAtira({
         precoDoEthUsd: new Decimal('2692.43'),
         saldoWei: 3341111000000000n,
         baseFeeWei: 20_000_000n,
-        ...politicaDoTiro({ CACA_FRACAO_GORJETA: '0.15', CACA_RISCO_MAXIMO: '0.8', CACA_LIMITE_GAS: '1200000' }),
+        // `CACA_LUCRO_MAXIMO_USD` EXPLICITO: o padrão virou SEM TETO em
+        // 2026-09-30, a pedido dela ("eu quero o alvo de US$ 1.986").
+        ...politicaDoTiro({ CACA_FRACAO_GORJETA: '0.15', CACA_RISCO_MAXIMO: '0.8',
+            CACA_LIMITE_GAS: '1200000', CACA_LUCRO_MAXIMO_USD: '500' }),
+        // DEPOIS do spread, senão `politicaDoTiro` sobrescreve — o `tsc` pegou
+        // esta exata inversão de ordem.
+        gorjetaTotalAcimaDeUsd: undefined,
         tiroDeProva: false,
     });
     // O teto bate na vírgula com o log: era o número que a ferramenta de fora
@@ -885,7 +907,11 @@ test('a faixa do CENSO e a do TIRO respondem perguntas diferentes', () => {
         precoDoEthUsd: new Decimal('2680.90'),
         saldoWei: 3341111000000000n,
         baseFeeWei: 20_000_000n,
-        ...politicaDoTiro({ CACA_FRACAO_GORJETA: '0.15', CACA_RISCO_MAXIMO: '0.8', CACA_LIMITE_GAS: '1200000' }),
+        // `CACA_LUCRO_MAXIMO_USD` EXPLICITO: o padrao virou SEM TETO em
+        // 2026-09-30, a pedido dela. Este teste pergunta censo contra tiro,
+        // nao qual e o padrao — entao ele liga o teto para provar que funciona.
+        ...politicaDoTiro({ CACA_FRACAO_GORJETA: '0.15', CACA_RISCO_MAXIMO: '0.8',
+            CACA_LIMITE_GAS: '1200000', CACA_LUCRO_MAXIMO_USD: '500' }),
     };
     const premioDaBaleia = new Decimal('1985.95');
 
@@ -1121,7 +1147,11 @@ test('no kamikaze a gorjeta é a MESMA em qualquer tamanho de prêmio', () => {
     // CHÃO. A busca sem direção continua valendo para o caso normal.
     const f = faixaQueAtira({ ...ambiente });
     assert.notEqual(f, null);
-    assert.equal(f!.inteiroDe, null, 'no modo prova não há ponta de baixo: é inteiro em qualquer tamanho');
+    // Contrato novo: "inteiro em qualquer tamanho" passa a ser dito como
+    // `inteiroDe` no chão e `inteiroAte` nulo. Antes era `inteiroDe: null` com
+    // `inteiroAte: 1000000`, que mentia sobre ter medido uma fronteira.
+    assert.notEqual(f!.inteiroDe, null, 'no modo prova é inteiro desde o chão');
+    assert.equal(f!.inteiroAte, null, 'e não há ponta de cima');
 });
 
 test('fora do modo prova a faixa continua respondendo pela ponta de CIMA', () => {
@@ -1137,8 +1167,14 @@ test('fora do modo prova a faixa continua respondendo pela ponta de CIMA', () =>
         tiroDeProva: false,
     });
     assert.notEqual(f, null);
+    // NÃO mexer: este cenário monta os campos na mão e NÃO passa
+    // `gorjetaTotalAcimaDeUsd`, então o resgate all-in está desligado e a forma
+    // continua sendo [chão, Y] — a original. Eu remendei estas duas asserções em
+    // 2026-09-30 achando que a forma tinha mudado em todo lugar, e estava
+    // errado: mudou só onde o resgate está ligado.
     assert.equal(f!.inteiroDe, null, 'no caso normal não há ponta de baixo');
     assert.notEqual(f!.inteiroAte, null, 'e a de cima continua existindo');
+    assert.equal(f!.inteiroTemBuraco, false, 'e sem resgate não há buraco no meio');
 });
 
 test('no KAMIKAZE a migalha recebe a gorjeta INTEIRA, e não metade', () => {
@@ -1173,8 +1209,12 @@ test('no KAMIKAZE a migalha recebe a gorjeta INTEIRA, e não metade', () => {
 
     // E a faixa passa a dizer que o lance é inteiro desde o chão.
     const f = faixaQueAtira({ ...ambiente });
-    assert.equal(f!.inteiroDe, null, 'não há mais ponta de baixo: é inteiro em qualquer tamanho');
-    assert.notEqual(f!.inteiroAte, null);
+    // Contrato novo (ver o bloco no topo do arquivo): "inteiro em qualquer
+    // tamanho" sai como `inteiroDe` no chão e `inteiroAte` nulo. Antes era
+    // `inteiroAte = 1000000`, o TETO DA BUSCA publicado como fronteira.
+    assert.notEqual(f!.inteiroDe, null, 'é inteiro desde o chão');
+    assert.equal(f!.inteiroAte, null, 'e não há fronteira de cima — nem inventada');
+    assert.equal(f!.inteiroTemBuraco, false, 'no kamikaze puro a região é contígua');
 });
 
 test('fora do modo prova a fração de risco CONTINUA cortando a migalha', () => {
@@ -1237,7 +1277,9 @@ test('a faixa de negócio: US$ 0,50 a US$ 500, e vale ATÉ no modo prova', () =>
         precoDoEthUsd: new Decimal('2692.04'),
         saldoWei: 3341111191761470n,
         baseFeeWei: 20_000_000n,
-        ...politicaDoTiro(),
+        // Teto EXPLICITO: o padrao virou sem teto em 2026-09-30. O piso de
+        // US$ 0,50 continua sendo padrao, e e ele que ela mandou manter.
+        ...politicaDoTiro({ CACA_LUCRO_MAXIMO_USD: '500' }),
         tiroDeProva: true as const,
         aceitaPrejuizo: true as const,
     };

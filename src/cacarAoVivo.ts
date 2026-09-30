@@ -1759,8 +1759,32 @@ async function principal(): Promise<'parar' | void> {
      */
     async function resolverPares(medidos: Medida[]): Promise<void> {
         if (dataProvider === null) return;
-        const TETO = numeroDoAmbiente('CACA_PARES_A_RESOLVER', process.env.CACA_PARES_A_RESOLVER, 150);
-        const ATE_QUEDA = numeroDoAmbiente('CACA_PARES_ATE_QUEDA_PCT', process.env.CACA_PARES_ATE_QUEDA_PCT, 10);
+        // O PONTO CEGO, medido no log dela do bloco 51985463:
+        //
+        //     48 LONG | 15 SHORT | 7 AMBAS | 67 imunes | 6559 AINDA NAO SEI
+        //
+        // 6.559 de 6.696 sem direcao mapeada — 98% da rede. A simulacao de
+        // queda e de alta nao dizia nada sobre eles, e a medicao de 2026-09-29
+        // mostrou que 20 das 28 liquidacoes por preco sao SHORT: a massa nao
+        // mapeada e exatamente onde mora o lado que de fato morre.
+        //
+        // A causa era o corte de 10%: quem estava a mais de 10% de cair NUNCA
+        // era perguntado. O padrao agora e SEM CORTE, e o teto por varredura
+        // sobe de 150 para 600.
+        //
+        // Por que isto NAO entra nos 107ms do laco quente: `resolverPares` roda
+        // dentro da VARREDURA, nao do ciclo. O ciclo quente le `[bloco, 15
+        // precos, brasa]` num unico `eth_call` e nao passa por aqui. A varredura
+        // ja gasta 34 multicalls; estes vao junto e so para quem ainda nao se
+        // sabe, entao o custo cai a zero depois de a memoria encher — o log das
+        // 18:18 provou que ela persiste entre varreduras.
+        //
+        // A 600 por varredura, 6.559 desconhecidos levam 11 varreduras. O log
+        // diz quantos faltam a cada volta, para o progresso ser visivel em vez
+        // de eu prometer que enche.
+        const TETO = numeroDoAmbiente('CACA_PARES_A_RESOLVER', process.env.CACA_PARES_A_RESOLVER, 600);
+        const ATE_QUEDA = numeroDoAmbiente(
+            'CACA_PARES_ATE_QUEDA_PCT', process.env.CACA_PARES_ATE_QUEDA_PCT, Number.POSITIVE_INFINITY);
         const aResolver = medidos
             .filter((m) => oQueSeSabeDaVia(m.devedor) === undefined && m.queda.lessThanOrEqualTo(ATE_QUEDA))
             .sort((a, b) => a.queda.comparedTo(b.queda))
@@ -1969,6 +1993,15 @@ async function principal(): Promise<'parar' | void> {
             // etiqueta contradizendo o número ao lado dela.
             passos.lanceInteiroAte = faixa === null
                 ? 'nenhum prêmio com lance inteiro'
+                // TRES regioes, e nao duas. Com o resgate all-in de 2026-09-30 o
+                // lance sai inteiro nas migalhas (a proporcional cabe),
+                // AMORDACADO no meio (nao cabe) e inteiro de novo no premio
+                // grande (o resgate paga a carteira toda). Publicar uma fronteira
+                // ali seria inventar uma que nao existe.
+                : faixa.inteiroTemBuraco
+                    ? 'inteiro nas DUAS pontas e amordaçado no MEIO — não há uma fronteira só. '
+                      + 'Migalha: a gorjeta proporcional cabe no saldo. Prêmio médio: não cabe, e eu atiro '
+                      + 'amordaçada. Prêmio grande: o resgate paga o teto da carteira e volta a ser inteiro'
                 : faixa.inteiroDe !== null
                     ? `A PARTIR de US$ ${faixa.inteiroDe.toFixed(2)} (R$ ${faixa.inteiroDe.mul(5.4).toFixed(2)}) o lance sai `
                       + 'inteiro. ABAIXO disso eu atiro amordaçada — a gorjeta é o teto da carteira, mas a fração '
@@ -2250,7 +2283,18 @@ async function principal(): Promise<'parar' | void> {
                     tudo: descreverLiquidantes(contarLiquidantes(comLucro)),
                     naSuaFaixa: `${descreverLiquidantes(naFaixa)} >>> ${dSua.veredicto.toUpperCase()}: ${dSua.porque}`,
                     acimaDaSuaFaixa: `${descreverLiquidantes(acima)} >>> ${dAcima.veredicto.toUpperCase()}: ${dAcima.porque}`,
-                    abaixoDoPiso: `${descreverLiquidantes(poeira)} — não pagam o próprio gás, o bot não atira nelas`,
+                    // A frase segue o ESTADO, e nao o caso normal. Com o tiro
+                    // de prova armado o piso cai para US$ 0,50
+                    // (`CACA_PISO_DA_PROVA_USD`) e o bot ATIRA em parte destas —
+                    // e tres linhas acima, no mesmo log, `qualFaixa` ja diz que
+                    // a prova esta armada e atira sem teto. Duas linhas do mesmo
+                    // log discordando sobre o mesmo estado e o defeito que o
+                    // CLAUDE.md persegue desde o primeiro dia, e este era o
+                    // ultimo que restava da revisao.
+                    abaixoDoPiso: `${descreverLiquidantes(poeira)} — ${provaAgora().armado
+                        ? 'não pagam o próprio gás pela regra NORMAL, mas o tiro de prova está ARMADO '
+                          + 'e o piso dele é US$ 0,50: o bot atiraria em parte destas'
+                        : 'não pagam o próprio gás, o bot não atira nelas'}`,
                     leitura: dSua.veredicto === 'tem dono'
                         ? 'a SUA faixa tem dono: um endereço leva a maior parte das migalhas, e entrar é briga'
                         : dSua.veredicto === 'não dá para dizer'

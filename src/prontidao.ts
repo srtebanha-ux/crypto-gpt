@@ -597,7 +597,46 @@ export function politicaDoTiro(env: Record<string, string | undefined> = process
         // Diferente de tudo o mais deste objeto, este par vale TAMBEM no modo
         // prova: e regra de negocio, nao protecao de banca.
         lucroMinimoUsd: n('CACA_LUCRO_MINIMO_USD', 0.5),
-        lucroMaximoUsd: n('CACA_LUCRO_MAXIMO_USD', 500),
+        // TETO ARRANCADO EM 2026-09-30, a pedido dela: "eu quero o alvo de
+        // US$ 1.986". Era 500, e o padrao agora e SEM TETO.
+        //
+        // O que ela ganha: o alvo grande deixa de ser recusado com "tubarao,
+        // deixo passar". A auditoria de hoje provou que era ESTE portao — e nao
+        // latencia — que recusava US$ 1.986.
+        //
+        // O que ela aceita, e esta medido: o premio de uma posicao grande SATURA
+        // em US$ 1.986, porque e o que o pool da Aerodrome vende sem o
+        // escorregamento comer o lucro (`coberturaOtima`). Uma divida de
+        // US$ 95M rende os mesmos US$ 1.986 de uma de US$ 240 mil. E quem usa
+        // agregador cobre mais da mesma divida e tem mais incentivo para pagar
+        // gorjeta alta — era esse o argumento do teto.
+        //
+        // `Infinity` e o padrao, e nao um numero grande: um numero grande seria
+        // um teto disfarcado, e `dentroDaFaixaDeNegocio` ja trata infinito.
+        // Para voltar a ter teto: `CACA_LUCRO_MAXIMO_USD=500`.
+        lucroMaximoUsd: n('CACA_LUCRO_MAXIMO_USD', Number.POSITIVE_INFINITY),
+        // ACIMA DESTE PREMIO a gorjeta vira TUDO O QUE A CARTEIRA ADIANTA.
+        //
+        // Pedido dela em 2026-09-30: "se eu tiver que queimar os 0.016 ETH
+        // inteiros para garantir a vitoria no alvo de US$ 1.986, eu aceito".
+        //
+        // Medido no mesmo dia, saldo 0,016419 ETH, baseFee 0,005 gwei, gas 700k:
+        //
+        //     teto da carteira ............ 21,1103 gwei  (custo US$ 39,79)
+        //     amordacada (risco 0,6) ...... 14,0685 gwei
+        //     concorrentes, 19 liquidacoes .. 0,0129 a 0,4002 gwei
+        //
+        // Ou seja: mesmo AMORDACADA a gorjeta ja era 35x a maior que qualquer
+        // concorrente pagou. O kamikaze compra 50% a mais de gorjeta contra um
+        // campo que nunca passou de 0,4 — nao era a mordaca que custava o alvo.
+        // Vai ligado porque ela pediu e porque US$ 39,79 contra US$ 1.986 e
+        // barato, nao porque a medicao dizia que era necessario.
+        //
+        // O limiar e 500 de proposito: e a fronteira que ELA desenhou para o
+        // teto, agora reaproveitada de "recuso" para "vou com tudo". Numero que
+        // ela escolheu, nao numero que eu inventei.
+        // `0` = sem piso extra: quem decide e a regra derivada acima.
+        gorjetaTotalAcimaDeUsd: n('CACA_GORJETA_TOTAL_ACIMA_DE_USD', 0),
     };
 }
 
@@ -634,10 +673,45 @@ export function comoLerAPolitica(p: ReturnType<typeof politicaDoTiro>): string {
         + `→${p.fracaoMaximaDoSaldo} do saldo | margem ${p.margemMinima}x | mordida máx ${p.tetoDaMordida}`
         + ` | amordaçado ${p.atirarAmordacado ? 'sim' : 'não'}`
         + ` | aceita prejuízo ${p.aceitaPrejuizo ? 'SIM' : 'não'}`
-        + ` | faixa de negócio US$ ${p.lucroMinimoUsd}–${p.lucroMaximoUsd}`;
+        + ` | faixa de negócio US$ ${p.lucroMinimoUsd}–${
+            Number.isFinite(p.lucroMaximoUsd) ? p.lucroMaximoUsd : 'SEM TETO'}`
+        + ` | gorjeta TOTAL acima de US$ ${p.gorjetaTotalAcimaDeUsd}`;
 }
 
-export function decidirTiro(e: {
+/**
+ * A DECISAO, e o kamikaze por premio alto e um RESGATE — nunca um upgrade.
+ *
+ * A primeira versao de 2026-09-30 ligava o all-in sempre que a mordaca mordia,
+ * o que mudava a gorjeta de TODO premio acima de ~US$ 80: um alvo de US$ 223
+ * passava a pagar US$ 39,79 de gas onde pagava US$ 18,00, contra um campo que
+ * (medido, 19 liquidacoes) nunca passou de 0,4002 gwei. E quebrou 13 testes de
+ * uma vez, porque invertia a forma da faixa que este projeto construiu medindo.
+ *
+ * Mudanca demais para o que ela pediu, que foi "nao perder o alvo grande".
+ *
+ * Entao a regra e estritamente ADITIVA: decide normal; se o normal RECUSA e a
+ * recusa vem da mordaca, tenta outra vez com a carteira inteira. Nenhum tiro
+ * que ja saia muda de gorjeta; so os que nao saiam passam a sair.
+ *
+ *     premio US$   2 -> 0,4246 gwei  (igual a antes)
+ *     premio US$  66 -> 6,3093 gwei  (igual a antes)
+ *     premio US$ 223 -> 9,5486 gwei  (igual a antes)
+ *     premio US$ 329 -> RECUSAVA     -> agora 21,1053 gwei, custo US$ 39,79
+ *     premio US$1986 -> RECUSAVA     -> agora 21,1053 gwei, custo US$ 39,79
+ */
+export function decidirTiro(e: Parameters<typeof decidirTiroUmaVez>[0]): DecisaoDoTiro {
+    const normal = decidirTiroUmaVez(e);
+    if (normal.atira) return normal;
+    // Ja e kamikaze por ser prova, ou o resgate esta desligado: nada a tentar.
+    if ((e.tiroDeProva ?? false) && (e.gorjetaKamikaze ?? true)) return normal;
+    if (e.gorjetaTotalAcimaDeUsd === undefined) return normal;
+    const resgate = decidirTiroUmaVez({ ...e, forcarKamikaze: true });
+    // So vale se o resgate REALMENTE atira. Devolver o resgate que tambem
+    // recusa trocaria o motivo da recusa por outro, e o motivo e o que ela le.
+    return resgate.atira ? resgate : normal;
+}
+
+function decidirTiroUmaVez(e: {
     lucroUsd: Decimal | null;
     precoDoEthUsd: Decimal | null;
     saldoWei: bigint;
@@ -706,6 +780,13 @@ export function decidirTiro(e: {
     lucroMinimoUsd?: number;
     /** Teto da faixa de NEGOCIO. Acima disto e tubarao e se deixa passar. */
     lucroMaximoUsd?: number;
+    /**
+     * Acima deste premio a gorjeta vira o teto da carteira. `undefined` = so o
+     * tiro de prova entra no kamikaze, que era o comportamento antigo.
+     */
+    gorjetaTotalAcimaDeUsd?: number;
+    /** Uso interno do resgate acima. Nao vem do ambiente. */
+    forcarKamikaze?: boolean;
 }): DecisaoDoTiro {
     const limiteGas = e.limiteGas ?? LIMITE_DE_GAS;
     const fracaoDoLucro = fracaoAdaptativa({
@@ -725,16 +806,17 @@ export function decidirTiro(e: {
     // Entao no modo prova a desejada e o TETO DA CARTEIRA, e quem corta passa a
     // ser so `gorjetaQueCabeNoSaldo` com a fracao de risco. UM tiro, e o modo
     // se desarma sozinho pelo nonce.
-    const kamikaze = (e.tiroDeProva ?? false) && (e.gorjetaKamikaze ?? true);
+    //
+    // E DESDE 2026-09-30 tambem por PREMIO ALTO, pedido dela: "se eu tiver que
+    // queimar os 0.016 ETH inteiros para garantir a vitoria no alvo de
+    // US$ 1.986, eu aceito". A mesma mecanica, dois gatilhos — e nao duas
+    // implementacoes, que e a regra 3 deste projeto.
     const desejadaProporcionalWei = gorjetaPorGas({
         lucroUsd: e.lucroUsd ?? new Decimal(0),
         precoDoEthUsd: e.precoDoEthUsd ?? new Decimal(0),
         limiteGas: GAS_TIPICO_DE_UMA_CACADA,
         fracaoDoLucro,
     });
-    const desejadaWei = kamikaze
-        ? maxFeeQueOSaldoAdianta(e.saldoWei, limiteGas)
-        : desejadaProporcionalWei;
     const saldoUsd = e.precoDoEthUsd === null
         ? null
         : new Decimal(e.saldoWei.toString()).dividedBy(1e18).mul(e.precoDoEthUsd);
@@ -749,6 +831,49 @@ export function decidirTiro(e: {
             fracaoBase: fracaoBaseDoSaldo,
             fracaoMaxima: e.fracaoMaximaDoSaldo ?? 0.6,
         });
+    // O limiar NAO e um numero cravado, e a primeira versao disto era — eu pus
+    // 500 e criei uma FAIXA MORTA: medido, a mordaca comeca a recusar em
+    // US$ 329 (o `ate` de `faixaQueAtira` com o saldo dela), entao US$ 499
+    // recusava por estar acima da mordaca e abaixo do meu limiar. Um buraco de
+    // US$ 170 de premio, criado pelo conserto.
+    //
+    // E 329 nao serve de constante: ele SAI do saldo, e muda quando ela
+    // deposita. A regra derivada, que se ajusta sozinha:
+    //
+    //   vai com tudo quando (a) a mordaca REALMENTE morde — a proporcional nao
+    //   cabe no saldo, logo quem limita e a carteira e nao a politica — e
+    //   (b) o premio cobre a margem exigida sobre o custo do tiro all-in.
+    //
+    // (b) impede o caso idiota: com o teto da carteira a US$ 39,79 de gas, um
+    // premio de US$ 40 queimaria a carteira para empatar. `margemMinima` (2x) e
+    // a mesma regua que o resto da decisao usa, entao o piso efetivo e
+    // ~US$ 79,58 e ele acompanha o saldo e o gas sem eu escolher nada.
+    //
+    // `CACA_GORJETA_TOTAL_ACIMA_DE_USD` fica como piso OPCIONAL por cima disso,
+    // para ela poder dizer "so acima de US$ X" sem mexer em codigo.
+    const premioUsd = e.lucroUsd ?? new Decimal(0);
+    const tetoDaCarteiraWei = maxFeeQueOSaldoAdianta(e.saldoWei, limiteGas);
+    const custoAllInUsd = e.precoDoEthUsd === null
+        ? null
+        : custoDoTiroUsd(tetoDaCarteiraWei, e.baseFeeWei, e.precoDoEthUsd);
+    const mordacaMorde = desejadaProporcionalWei > tetoDaCarteiraWei
+        || gorjetaQueCabeNoSaldo({
+            gorjetaDesejadaWei: desejadaProporcionalWei,
+            saldoWei: e.saldoWei,
+            baseFeeWei: e.baseFeeWei,
+            fracaoMaximaDoSaldo: risco,
+        }) < desejadaProporcionalWei;
+    const pagaAMargem = custoAllInUsd !== null
+        && custoAllInUsd.greaterThan(0)
+        && premioUsd.greaterThanOrEqualTo(custoAllInUsd.mul(e.margemMinima ?? 2));
+    const pisoOpcional = e.gorjetaTotalAcimaDeUsd === undefined
+        || !Number.isFinite(e.gorjetaTotalAcimaDeUsd)
+        || premioUsd.greaterThanOrEqualTo(e.gorjetaTotalAcimaDeUsd);
+    const premioJustifica = (e.forcarKamikaze ?? false) && mordacaMorde && pagaAMargem && pisoOpcional;
+    const kamikaze = ((e.tiroDeProva ?? false) && (e.gorjetaKamikaze ?? true)) || premioJustifica;
+    const desejadaWei = kamikaze
+        ? tetoDaCarteiraWei
+        : desejadaProporcionalWei;
     // NO KAMIKAZE A FRACAO DE RISCO SAI INTEIRA.
     //
     // `fracaoDoSaldoQueValeArriscar` escala pelo LUCRO: premio pequeno fica na
@@ -1023,6 +1148,25 @@ export interface FaixaDeTiro {
      * tela em que `numDeUS$88` dizia `gorjeta 2.49 gwei (inteira)`.
      */
     inteiroDe: Decimal | null;
+    /**
+     * A regiao do lance inteiro NAO e contigua?
+     *
+     * Descoberto em 2026-09-30 consertando o resgate all-in. Com ele a forma
+     * passou a ter TRES regioes, e nao duas:
+     *
+     *     premio pequeno .... a proporcional cabe no saldo  -> INTEIRO
+     *     premio medio ...... a proporcional nao cabe       -> amordacado
+     *     premio grande ..... o resgate paga a carteira toda -> INTEIRO
+     *
+     * `inteiroDe` e `inteiroAte` sao DOIS campos e descrevem uma fronteira. Com
+     * tres regioes, qualquer um dos dois que eu publicasse seria uma fronteira
+     * que nao existe — a etiqueta que nao descreve o conjunto, que e o defeito
+     * que este projeto persegue desde o primeiro dia.
+     *
+     * Entao quando ha buraco as duas pontas saem `null` e ESTE campo fica
+     * `true`, e o log diz que ha buraco em vez de inventar um numero.
+     */
+    inteiroTemBuraco: boolean;
 }
 
 export function faixaQueAtira(
@@ -1090,8 +1234,42 @@ export function faixaQueAtira(
     let inteiroDe: Decimal | null = null;
     const noChao = inteiro(chao);
     const noTeto = inteiro(teto);
-    if (noChao && noTeto) {
-        inteiroAte = teto;
+    /**
+     * Ha BURACO no meio? Amostra em escala geometrica entre o chao e o teto.
+     *
+     * Geometrica e nao linear porque a faixa cobre cinco ordens de grandeza: uma
+     * grade linear de 24 pontos entre US$ 1 e US$ 1.000.000 nao olharia NENHUM
+     * premio abaixo de US$ 40.000, que e onde a regiao muda de forma.
+     */
+    const temBuraco = (() => {
+        if (!noChao || !noTeto) return false;
+        const razao = teto.dividedBy(chao);
+        if (!razao.isFinite() || razao.lessThanOrEqualTo(1)) return false;
+        const PASSOS = 40;
+        const fator = razao.pow(1 / PASSOS);
+        let x = chao;
+        for (let i = 0; i < PASSOS; i++) {
+            x = x.mul(fator);
+            if (x.greaterThanOrEqualTo(teto)) break;
+            if (!inteiro(x)) return true;
+        }
+        return false;
+    })();
+    if (temBuraco) {
+        // As duas pontas ficam `null` e quem fala e `inteiroTemBuraco`.
+    } else if (noChao && noTeto) {
+        // INTEIRO EM TODA A FAIXA. A versao anterior publicava
+        // `inteiroAte = teto`, e `teto` e o TETO DA BUSCA (US$ 1.000.000) —
+        // um numero que a busca nunca mediu, saindo no log como se fosse
+        // fronteira. Com a gorjeta all-in de 2026-09-30 esse caso passou a ser
+        // o normal para premio alto, e o log imprimiu `inteiroAte 1000000.00`:
+        // teto de busca virando medicao, que e o defeito deste projeto.
+        //
+        // A forma certa da regiao e [chao, INFINITO), e as duas pontas dizem
+        // isso sem inventar numero: `inteiroDe` no chao, `inteiroAte` nulo.
+        // Assim `inteiroDe != null && inteiroAte == null` = inteiro dali para
+        // cima, e as DUAS nulas = nunca inteiro. Distinguivel, que era o ponto.
+        inteiroDe = chao;
     } else if (noChao) {
         // Cresce e perde a forca: o caso normal, fora do modo prova.
         inteiroAte = fronteira(chao, teto);
@@ -1101,7 +1279,7 @@ export function faixaQueAtira(
         inteiroDe = fronteira(teto, chao);
         inteiroAte = teto;
     }
-    return { de, ate, inteiroAte, inteiroDe };
+    return { de, ate, inteiroAte, inteiroDe, inteiroTemBuraco: temBuraco };
 }
 
 /**

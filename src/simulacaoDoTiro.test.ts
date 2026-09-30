@@ -306,27 +306,76 @@ test('SIMULAÇÃO: um item corrompido no meio dos 50 não apaga os outros 49', (
     assert.equal(parcial.some((x) => x.ok), true, 'e ao menos um item bom foi entregue');
 });
 
-test('SIMULAÇÃO: a faixa que atira, com o saldo real dela', () => {
-    // Auditado em 2026-09-30, e é a resposta ao medo dela de perder o alvo de
-    // US$ 1.986: o bot RECUSA esse alvo. Duas vezes.
+test('SIMULAÇÃO: o alvo de US$ 1.986 ATIRA — o teto saiu em 2026-09-30', () => {
+    // A auditoria de 2026-09-30 provou que era o TETO DE NEGÓCIO — e não
+    // latência — que recusava o alvo grande:
+    //
+    //     antes:  US$ 1986 -> "ACIMA do teto de US$ 500,00: tubarão, deixo passar"
+    //     antes:  US$  499 -> "lance amordaçado E uma derrota comeria 60% do gás"
+    //
+    // Ela mandou arrancar o teto e autorizou queimar a carteira inteira. Agora,
+    // com o saldo real (0,016419 ETH), baseFee 0,005 gwei, ETH US$ 2.691,75:
+    //
+    //     US$    2 -> 0,4246 gwei, custo US$  0,81   (INALTERADO)
+    //     US$   66 -> 6,3093 gwei, custo US$ 11,90   (INALTERADO)
+    //     US$  223 -> 9,5486 gwei, custo US$ 18,00   (INALTERADO)
+    //     US$  499 -> 21,1053 gwei, custo US$ 39,79  (recusava)
+    //     US$ 1986 -> 21,1053 gwei, custo US$ 39,79  (recusava)
+    //
+    // O resgate é ADITIVO: nenhum tiro que já saía mudou de gorjeta.
     const P = politicaDoTiro();
-    const faixa = faixaQueAtira({
-        saldoWei: SALDO_WEI, baseFeeWei: BASEFEE_WEI, precoDoEthUsd: ETH_USD, ...P,
-    } as never) as { de: Decimal | null; ate: Decimal | null };
+    assert.equal(Number.isFinite(P.lucroMaximoUsd!), false, 'o padrão é SEM TETO de lucro');
+    assert.equal(P.lucroMinimoUsd, 0.5, 'e o piso de US$ 0,50 ficou, que é o que ela mandou manter');
 
-    assert.equal(faixa.ate !== null, true, 'existe um TETO, e ele não é infinito');
-    assert.equal(faixa.ate!.lessThan(1986), true,
-        `o teto é US$ ${faixa.ate!.toFixed(2)} — o alvo de US$ 1.986 está FORA do alcance`);
-    // E o teto da faixa de negócio corta antes ainda.
-    assert.equal(P.lucroMaximoUsd! < 1986, true,
-        `CACA_LUCRO_MAXIMO_USD = ${P.lucroMaximoUsd} recusa US$ 1.986 como "tubarão"`);
-
-    const decisao = decidirTiro({
-        lucroUsd: new Decimal(1986), precoDoEthUsd: ETH_USD, saldoWei: SALDO_WEI,
+    const decidir = (usd: string) => decidirTiro({
+        lucroUsd: new Decimal(usd), precoDoEthUsd: ETH_USD, saldoWei: SALDO_WEI,
         baseFeeWei: BASEFEE_WEI, ...P, limiteGas: LIMITE_DE_GAS,
-    } as never) as { atira: boolean; porque?: string };
-    assert.equal(decisao.atira, false, 'e a decisão real recusa');
-    assert.match(decisao.porque!, /ACIMA do teto/, 'dizendo por quê');
+    } as never) as { atira: boolean; porque?: string; prioridadeWei?: bigint };
+
+    const grande = decidir('1986');
+    assert.equal(grande.atira, true, 'O ALVO GRANDE É NOSSO');
+    assert.equal(grande.prioridadeWei! > 21_000_000_000n, true,
+        `gorjeta ${Number(grande.prioridadeWei) / 1e9} gwei: a carteira inteira`);
+
+    // A ponta de baixo continua protegida, e é a única trava que ela pediu para manter.
+    assert.equal(decidir('0.49').atira, false);
+    assert.match(decidir('0.49').porque!, /ABAIXO do piso/);
+
+    // ADITIVO: as migalhas NÃO mudaram de gorjeta. Se tivessem mudado, eu teria
+    // trocado o comportamento provado de 1.300 testes por um pedido de um só.
+    // Na casa que a REGRA determina, e não na última do arredondamento: cravar o
+    // wei exato amarrava o teste ao preço do ETH até o centésimo de centavo.
+    assert.equal((Number(decidir('2').prioridadeWei) / 1e9).toFixed(4), '0.4246',
+        'US$ 2 continua em 0,4246 gwei — a migalha NÃO foi para o all-in');
+    assert.equal(decidir('223').prioridadeWei! < 10_000_000_000n, true,
+        'US$ 223 continua na gorjeta proporcional, e não no all-in');
+
+    // E não há faixa morta: a primeira versão deste conserto cravou o limiar em
+    // US$ 500 e US$ 499 passou a recusar — buraco de US$ 170 criado pelo
+    // conserto. Varredura de US$ 1 a US$ 3.000, um dólar por vez.
+    for (let usd = 1; usd <= 3000; usd += 1) {
+        assert.equal(decidir(String(usd)).atira, true, `US$ ${usd} não pode recusar`);
+    }
+});
+
+test('SIMULAÇÃO: a região do lance inteiro tem BURACO, e o log diz isso', () => {
+    // Descoberto consertando o resgate: a região deixou de ser contígua.
+    //
+    //     migalha ....... a gorjeta proporcional cabe no saldo -> INTEIRO
+    //     prêmio médio .. não cabe                            -> amordaçado
+    //     prêmio grande . o resgate paga a carteira toda       -> INTEIRO
+    //
+    // `inteiroDe` e `inteiroAte` são DOIS campos e descrevem UMA fronteira.
+    // Publicar qualquer um dos dois aqui seria inventar uma fronteira que não
+    // existe — a etiqueta que não descreve o conjunto.
+    const P = politicaDoTiro();
+    const f = faixaQueAtira({
+        saldoWei: SALDO_WEI, baseFeeWei: BASEFEE_WEI, precoDoEthUsd: ETH_USD, ...P,
+    } as never) as { ate: Decimal | null; inteiroDe: Decimal | null; inteiroAte: Decimal | null; inteiroTemBuraco: boolean };
+    assert.equal(f.ate, null, 'sem teto de tiro: o alvo grande está dentro');
+    assert.equal(f.inteiroTemBuraco, true, 'e a região do lance inteiro NÃO é contígua');
+    assert.equal(f.inteiroDe, null, 'então nenhuma das duas pontas publica fronteira');
+    assert.equal(f.inteiroAte, null);
 });
 
 test('as duas réguas da saúde concordam no ponto do gatilho', () => {

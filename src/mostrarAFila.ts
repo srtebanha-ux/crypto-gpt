@@ -159,8 +159,21 @@ async function lerParaMontar(cs: Array<{ alvo: string; dados: string }>): Promis
         + `${medidos.length} com dívida viva\n`);
 
     // 3. OS PARES, ANTES DE ORDENAR. É este o conserto.
-    const ATE = Number(process.env.FILA_ATE_QUEDA ?? '10');
-    const TETO = Number(process.env.FILA_PARES ?? '150');
+    // OS MESMOS BOTOES DO CACADOR, e nao botoes proprios.
+    //
+    // Esta ferramenta existe para conferir producao, e em 2026-09-28 ela rodou
+    // com `margemQuente = 15` enquanto o cacador usava 25 — publicou
+    // `naListaQuente: 35` contra os 323 do Railway. Um numero meu que nao confere
+    // com producao, na ferramenta que existe para conferir com producao.
+    //
+    // Aconteceu de novo em 2026-09-30: o cacador passou a resolver pares SEM
+    // corte de queda e 600 por varredura, e esta ferramenta continuou em 10% e
+    // 150 — mostrando 3.223 desconhecidos e fazendo o conserto parecer que nao
+    // funcionou. `FILA_*` fica como atalho para rodar rapido, mas o PADRAO agora
+    // e o do cacador.
+    const ATE = Number(process.env.FILA_ATE_QUEDA
+        ?? process.env.CACA_PARES_ATE_QUEDA_PCT ?? String(Number.POSITIVE_INFINITY));
+    const TETO = Number(process.env.FILA_PARES ?? process.env.CACA_PARES_A_RESOLVER ?? '600');
     const candidatos = medidos
         .filter((m) => m.queda.lessThanOrEqualTo(ATE))
         .sort((a, b) => a.queda.comparedTo(b.queda))
