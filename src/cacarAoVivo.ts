@@ -19,6 +19,7 @@ import { naoCruzouAinda, codificarUserReserveData, decodificarUserReserveData, C
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
+import { EscadaDeRpc, listaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
     lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
@@ -773,8 +774,60 @@ const CONTRATOS_ATIVOS = [
     { nome: 'V2 (Multi-Ativo)', endereco: process.env.CACA_CONTRATO ?? '0xd87AeEcCb5969BA28C49581736cD2c0b58B117A8', tipo: 'V2' as const }
 ];
 
-let rpc = process.env.CACA_RPC_URL ?? REDE.rpc;
+/**
+ * A ESCADA DE PROVEDORES, viva no caminho quente.
+ *
+ * `rpc` continua sendo a url em uso — centenas de linhas leem essa variável —
+ * mas quem decide qual é ela agora é a escada, e ela decide A CADA FALHA, não só
+ * no boot. O failover que existia aqui antes era de uma vez: escolhia no boot e
+ * nunca mais olhava.
+ */
+const ESCADA = new EscadaDeRpc(
+    listaDeRpcs(process.env, RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [REDE.rpc]),
+    {
+        falhasParaTrocar: Number(process.env.CACA_FALHAS_PARA_TROCAR ?? '2'),
+        voltarAoPrimarioMs: Number(process.env.CACA_VOLTAR_AO_PRIMARIO_MS ?? '300000'),
+    },
+);
+let rpc = ESCADA.url();
 let rpcId = 0;
+
+/**
+ * Trata uma falha decidindo se ela é do provedor, e troca de degrau se for.
+ *
+ * Devolve `true` quando vale repetir a chamada — ou seja, quando o provedor
+ * falhou. Uma reversão devolve `false` e sobe como sempre: o nó respondeu, e a
+ * resposta é sobre o nosso contrato.
+ */
+function aEscadaAbsorve(mensagem: string): boolean {
+    if (!ehFalhaDeTransporte(mensagem)) return false;
+    const r = ESCADA.falhou();
+    rpc = r.url;
+    if (r.trocou) {
+        log.warn('[RPC] TROQUEI DE PROVEDOR — o anterior não respondeu.', {
+            de: hostDoRpc(r.de),
+            para: hostDoRpc(r.para),
+            erro: mensagem.slice(0, 120),
+            degrau: `${ESCADA.indice() + 1} de ${ESCADA.quantos()}`,
+            porque: 'provedor sobrecarregado e crash de mercado são o MESMO evento: '
+                + 'é exatamente aqui que não se pode ficar cego',
+        });
+    }
+    return true;
+}
+
+/** Tenta voltar ao primário quando o castigo venceu. Barato: só troca a url. */
+function talvezVoltarAoPrimario(): void {
+    if (!ESCADA.deveVoltarAoPrimario()) return;
+    const de = ESCADA.url();
+    ESCADA.voltarAoPrimario();
+    rpc = ESCADA.url();
+    log.info('[RPC] Voltando ao provedor primário.', {
+        de: hostDoRpc(de), para: hostDoRpc(rpc),
+        porque: 'ficar no secundário para sempre é degradar em silêncio — ele é mais '
+            + 'lento e tem teto de 2.000 blocos no eth_getLogs',
+    });
+}
 const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Gerenciador de Nonce Atômico para evitar conflitos em alta velocidade
@@ -864,10 +917,19 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4): Pro
     let espera = 1000;
     for (let i = 0; ; i += 1) {
         try {
-            return await umaChamada<T>(metodo, params);
+            const r = await umaChamada<T>(metodo, params);
+            ESCADA.deuCerto();
+            return r;
         } catch (e) {
             const msg = (e as Error).message;
-            if (i >= tentativas - 1 || !ehLimiteDoProvedor(msg)) throw e;
+            if (i >= tentativas - 1) throw e;
+            // A ESCADA PRIMEIRO. Antes, só `ehLimiteDoProvedor` autorizava
+            // repetir: um timeout puro não era limite de taxa, então a chamada
+            // morria na primeira tentativa e o bot ficava cego sem nunca
+            // alcançar o failover escrito no boot. Trocar de provedor e repetir
+            // na hora é mais rápido que a escada de espera, e não espera nada.
+            if (aEscadaAbsorve(msg)) continue;
+            if (!ehLimiteDoProvedor(msg)) throw e;
             log.warn('O provedor pediu calma; esperando.', { erro: msg, esperandoMs: espera });
             await dormir(espera);
             espera *= 2;
@@ -937,7 +999,18 @@ async function chamarCruComPaciencia(
 ): Promise<{ ok: true; dados: string } | { ok: false; mensagem: string; dados?: string }> {
     let espera = 1000;
     for (let i = 0; ; i += 1) {
-        const r = await chamarCru(params);
+        let r: Awaited<ReturnType<typeof chamarCru>>;
+        try {
+            r = await chamarCru(params);
+            ESCADA.deuCerto();
+        } catch (e) {
+            // `chamarCru` LANÇA quando o transporte falha, e aqui isso subia
+            // inteiro: a medição do tiro morria por timeout de um provedor
+            // enquanto outro, vivo, estava a uma linha de distância.
+            const msg = (e as Error).message;
+            if (i < tentativas - 1 && aEscadaAbsorve(msg)) continue;
+            throw e;
+        }
         if (r.ok || r.dados || i >= tentativas - 1 || !ehLimiteDoProvedor(r.mensagem)) return r;
         recusasDoProvedor += 1;
         msEsperandoOProvedor += espera;
@@ -1438,15 +1511,24 @@ async function principal(): Promise<'parar' | void> {
     let donoCarteira: string | null = null;
     let nonceManager: LocalNonceManager | null = null;
 
-    const rpcs = process.env.CACA_RPC_URL ? [process.env.CACA_RPC_URL] : (RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [REDE.rpc]);
+    // A escada já tenta os degraus sozinha dentro de `chamar`, então aqui basta
+    // UMA pergunta: se o primário estiver fora, ela troca e responde pelo
+    // secundário. O laço que existia aqui era o failover INTEIRO do bot, e só
+    // rodava no boot.
     let topo = 0;
-    for (const c of rpcs) {
-        try {
-            rpc = c;
-            topo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
-            break;
-        } catch { /* próximo */ }
-    }
+    try {
+        topo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
+    } catch { /* a escada já tentou todos; o laço de fora repete */ }
+    log.info('[RPC] A escada de provedores.', {
+        quantos: ESCADA.quantos(),
+        usando: hostDoRpc(rpc),
+        emOrdem: `degrau ${ESCADA.indice() + 1}`,
+        trocaApos: `${process.env.CACA_FALHAS_PARA_TROCAR ?? '2'} falhas de transporte seguidas`,
+        voltaAoPrimarioEm: `${Number(process.env.CACA_VOLTAR_AO_PRIMARIO_MS ?? '300000') / 1000}s`,
+        comoAdicionar: ESCADA.quantos() > 1
+            ? 'já tem redundância'
+            : 'defina RPC_URL_2 no Railway — com um só provedor, ele caindo é o bot cego',
+    });
     if (!topo) return;
 
     // A carteira nasce DEPOIS de saber qual RPC responde.
@@ -2838,6 +2920,8 @@ async function principal(): Promise<'parar' | void> {
         // total que nao descreve o ciclo que o `custou` mede, e duas etiquetas
         // discordando sobre a mesma linha e o defeito que este projeto persegue.
         zerarContaDaPaciencia();
+        // Conferido uma vez por ciclo, fora do caminho de rede: só troca a url.
+        talvezVoltarAoPrimario();
         try {
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 const novoTopo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
@@ -3021,7 +3105,10 @@ async function principal(): Promise<'parar' | void> {
                                     ? ` — dos quais ${pac.ms}ms PARADO esperando o provedor (${pac.recusas} recusas). O gargalo é o RPC, não o código.`
                                     : '');
                         })(),
-                        rpc: hostDoRpc(rpc),
+                        rpc: ESCADA.ehOPrimario()
+                            ? hostDoRpc(rpc)
+                            : `${hostDoRpc(rpc)} — NO SECUNDÁRIO (degrau ${ESCADA.indice() + 1} de `
+                              + `${ESCADA.quantos()}, ${ESCADA.trocas} trocas): o primário caiu`,
                     });
                 }
             } else {
