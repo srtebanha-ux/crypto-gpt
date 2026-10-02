@@ -2073,6 +2073,16 @@ async function principal(): Promise<'parar' | void> {
      * SUCEDIDAS no mesmo endereco o bloqueavam para sempre, sem log. O bot ia
      * se auto-paralisando, um devedor lucrativo por vez.
      */
+    /**
+     * Quando cada MOTIVO de recusa foi dito por último.
+     *
+     * A chave é motivo + saldo, de propósito: um saldo novo é um fato novo, e um
+     * motivo novo também. Só a repetição literal cala.
+     */
+    const recusaJaDita = new Map<string, number>();
+    const REPETIR_RECUSA_MS = numeroDoAmbiente(
+        'CACA_REPETIR_RECUSA_MS', process.env.CACA_REPETIR_RECUSA_MS, 600_000);
+    let recusasCaladas = 0;
     const falhasPorAlvo = new Map<string, { quantas: number; em: number }>();
     const ESQUECER_FALHA_MS = Number(process.env.CACA_ESQUECER_FALHA_MS ?? '3600000');
     /**
@@ -3739,10 +3749,33 @@ async function principal(): Promise<'parar' | void> {
                     if (disjuntorAberto) continue;
 
                     if (!decisao.atira) {
-                        // UM log de recusa, com o motivo que a propria regra
-                        // deu. Eram quatro blocos, cada um com sua conta e sua
-                        // chance de discordar dos outros.
+                        // ABORTAR SEM ENCHER O LOG, pedido dela em 2026-10-02:
+                        // "se o bot não tiver saldo sequer para cobrir a
+                        // transação base, ele deve abortar em silêncio".
+                        //
+                        // O aborto sempre existiu — o que não existia era o
+                        // silêncio. Com a carteira seca, esta linha saía para
+                        // CADA alvo de CADA ciclo: centenas de blocos idênticos
+                        // por minuto, afogando tudo que importa.
+                        //
+                        // Mas silêncio de verdade seria pior que a enxurrada, e
+                        // é o defeito que este projeto persegue: "não atirei por
+                        // falta de gás" calado é indistinguível de "não havia
+                        // alvo". Então a linha sai INTEIRA na primeira vez e a
+                        // cada mudança de motivo ou de saldo, e cala enquanto
+                        // nada mudou — a mesma informação, uma vez.
+                        const assinatura = `${decisao.porque}|${saldoDeGasWei}`;
+                        const jaDisse = recusaJaDita.get(assinatura);
+                        const agora = Date.now();
+                        if (jaDisse !== undefined && agora - jaDisse < REPETIR_RECUSA_MS) {
+                            recusasCaladas += 1;
+                            continue;
+                        }
+                        recusaJaDita.set(assinatura, agora);
                         log.warn(`NÃO ATIREI: ${decisao.porque}`, {
+                            calei: recusasCaladas > 0
+                                ? `${recusasCaladas} recusas idênticas desde a última vez que falei (mesmo motivo, mesmo saldo)`
+                                : 'nenhuma antes desta',
                             devedor: alvo.devedor,
                             premio: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
                             saldo: `${emEth(saldoDeGasWei)} ETH`,
@@ -3759,6 +3792,7 @@ async function principal(): Promise<'parar' | void> {
                                     : 'me mandar esta linha inteira',
                             oQueEuDeixeiPassar: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
                         });
+                        recusasCaladas = 0;
                         continue;
                     }
 
