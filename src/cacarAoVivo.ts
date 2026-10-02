@@ -19,6 +19,11 @@ import { naoCruzouAinda, codificarUserReserveData, decodificarUserReserveData, C
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
+import {
+    NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
+    lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
+    juntarDevedoresDoCache, esquecerQuemNaoDeveMais, comoEstaACobertura,
+} from './cacheDeDevedores';
 
 /**
  * Quanto pedir emprestado, em unidades cruas.
@@ -741,8 +746,21 @@ const SELETOR_BLOCO_DO_MULTICALL = '0x42cbb15c';
 const REDE_ESCOLHIDA = (process.env.CACA_REDE ?? 'base').toLowerCase();
 const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const ENVIAR = process.env.CACA_ENVIAR === '1';
+// A janela do PRIMEIRO boot, quando ainda não existe cache: 30 dias, para o bot
+// começar a caçar em minutos em vez de em duas horas.
+//
+// JÁ FOI o teto da memória do bot, e era o buraco no radar — o placar dela
+// acusou 11 liquidações com "nem sabia" porque alvos mais velhos que 30 dias
+// nunca tinham sido perguntados. Agora é só o ponto de partida: o cache desce
+// daqui até o nascimento do Pool e guarda no volume, então a cobertura cresce
+// boot após boot em vez de ser cortada a cada um.
 const BLOCOS = Number(process.env.CACA_BLOCOS ?? '1296000');
-const PEDACO = Number(process.env.CACA_PEDACO ?? '2000');
+// 2000 era o teto do `mainnet.base.org`, e virou o teto do bot em qualquer
+// provedor. O RPC de produção dela aceita 10.000, e a diferença não é detalhe:
+// varrer os 49,7 milhões de blocos do Pool custa 4.972 chamadas a 10.000 e
+// 24.860 a 2.000. Pedir 10.000 só é seguro porque `descobrirPedaco` MEDE o teto
+// do provedor antes de montar as faixas e cai para 2.000 onde 10.000 não cabe.
+const PEDACO = Number(process.env.CACA_PEDACO ?? '10000');
 const MIN_COLETA = Number(process.env.CACA_MIN_COLETA ?? '37');
 const TIMEOUT_MS = Number(process.env.CACA_TIMEOUT_MS ?? '20000');
 const PAUSA_MS = Number(process.env.CACA_PAUSA_MS ?? '600');
@@ -1113,55 +1131,205 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
     return porPedaco.flat();
 }
 
-async function juntarDevedores(topo: number, blocoInicial?: number): Promise<string[]> {
-    const vistos = new Set<string>();
-    const inicio = blocoInicial !== undefined ? Math.max(0, blocoInicial) : Math.max(0, topo - BLOCOS + 1);
-    const faixas = faixasDeBlocos(inicio, topo, PEDACO);
-    let falhas = 0;
-    const CONCORRENCIA = 5; 
+/**
+ * O resultado da varredura, e a razao de nao ser so a lista.
+ *
+ * `faixasLidas` sao as faixas que voltaram SEM erro. O cache precisa delas para
+ * saber ate onde pode avancar `ultimoBloco` sem gravar um buraco permanente: se
+ * a janela do meio falhou e o cache avanca por cima dela, o proximo boot comeca
+ * depois do buraco e ninguem volta nunca.
+ */
+export interface VarreduraDeDevedores {
+    devedores: string[];
+    faixasLidas: Array<[number, number]>;
+    faixasQueFalharam: number;
+    de: number;
+    ate: number;
+    /** Sobrou história por ler porque o orçamento de tempo acabou. */
+    cortadaPeloTempo: boolean;
+}
 
-    if (faixas.length > 10) {
+/**
+ * O menor pedaço que ainda vale tentar antes de desistir de uma faixa.
+ *
+ * `PEDACO` é o tamanho da PRIMEIRA tentativa. Quando ela falha a faixa é
+ * partida ao meio e tentada de novo, até aqui.
+ *
+ * O número existe porque os dois provedores têm tetos diferentes e MEDIDOS: o
+ * `mainnet.base.org` recusa `eth_getLogs` acima de 2.000 blocos; o RPC de
+ * produção dela aceita 10.000 (deduzido do censo rodando com faixas de 10.000 e
+ * zero falhas). Um `PEDACO` cravado serve a um e trai o outro — e trai do pior
+ * jeito possível: todas as faixas falham, a lista volta VAZIA, e o log diz
+ * "varredura concluída, 0 devedores", que é ausência com cara de resposta.
+ *
+ * Com a partição, 10.000 é um palpite otimista barato: onde cabe, custa 1
+ * chamada; onde não cabe, custa 1 falha e 5 chamadas de 2.000.
+ */
+export const PEDACO_MINIMO = 2000;
+
+/** O maior tamanho de faixa que ESTE provedor aceitou, medido uma vez por processo. */
+let pedacoMedido: number | null = null;
+
+/**
+ * Mede o teto de `eth_getLogs` do provedor em vez de adivinhá-lo.
+ *
+ * Quatro chamadas no pior caso, uma vez por processo, e depois toda a varredura
+ * usa o tamanho certo. Sem isto, a varredura profunda de 48 milhões de blocos
+ * ou paga 5x mais chamadas do que precisa (faixa de 2.000 num provedor que
+ * aceita 10.000) ou falha inteira e devolve zero.
+ *
+ * Uma falha de rede passageira na sondagem é lida como teto menor, e o erro
+ * então é para o lado seguro: mais chamadas, nunca menos cobertura.
+ */
+async function descobrirPedaco(topo: number): Promise<{ pedaco: number; tentativas: number }> {
+    if (pedacoMedido !== null) return { pedaco: pedacoMedido, tentativas: 0 };
+    let tamanho = Math.max(PEDACO_MINIMO, PEDACO);
+    let tentativas = 0;
+    for (;;) {
+        tentativas += 1;
+        const a = Math.max(0, topo - tamanho + 1);
+        try {
+            await chamar<Array<{ topics: string[] }>>('eth_getLogs', [
+                {
+                    address: REDE.pool,
+                    fromBlock: `0x${a.toString(16)}`,
+                    toBlock: `0x${topo.toString(16)}`,
+                    topics: [TOPIC_BORROW],
+                },
+            ]);
+            pedacoMedido = tamanho;
+            return { pedaco: tamanho, tentativas };
+        } catch {
+            if (tamanho <= PEDACO_MINIMO) {
+                pedacoMedido = PEDACO_MINIMO;
+                return { pedaco: PEDACO_MINIMO, tentativas };
+            }
+            tamanho = Math.max(PEDACO_MINIMO, Math.floor(tamanho / 2));
+        }
+    }
+}
+
+async function juntarDevedores(topo: number, blocoInicial?: number): Promise<string[]> {
+    return (await varrerDevedores(topo, blocoInicial)).devedores;
+}
+
+/**
+ * Lê uma faixa, e quando o provedor recusa por tamanho, parte ao meio e insiste.
+ *
+ * Devolve as SUBFAIXAS que deram certo, e não um "deu certo" só: se metade da
+ * faixa foi lida e a outra metade não, o cache tem de saber exatamente qual
+ * metade — é disso que depende a fronteira sem buraco.
+ */
+async function lerFaixaPartindoSePreciso(
+    a: number,
+    b: number,
+    vistos: Set<string>,
+): Promise<{ lidas: Array<[number, number]>; falhas: number }> {
+    try {
+        const logs = await chamar<Array<{ topics: string[] }>>('eth_getLogs', [
+            {
+                address: REDE.pool,
+                fromBlock: `0x${a.toString(16)}`,
+                toBlock: `0x${b.toString(16)}`,
+                topics: [TOPIC_BORROW],
+            },
+        ]);
+        for (const d of devedoresDosEventos(logs)) vistos.add(d);
+        return { lidas: [[a, b]], falhas: 0 };
+    } catch {
+        // Faixa de tamanho mínimo que falha é falha de verdade: partir mais não
+        // ajudaria e só gastaria chamadas.
+        if (b - a + 1 <= PEDACO_MINIMO) return { lidas: [], falhas: 1 };
+        const meio = a + Math.floor((b - a) / 2);
+        const esquerda = await lerFaixaPartindoSePreciso(a, meio, vistos);
+        const direita = await lerFaixaPartindoSePreciso(meio + 1, b, vistos);
+        return {
+            lidas: [...esquerda.lidas, ...direita.lidas],
+            falhas: esquerda.falhas + direita.falhas,
+        };
+    }
+}
+
+async function varrerDevedores(
+    topo: number,
+    blocoInicial?: number,
+    opcoes: {
+        /** Para de ler quando passar disto, salvando o que já leu. 0 = sem teto. */
+        orcamentoMs?: number;
+        /** 'tras' lê do bloco mais novo para o mais velho (a varredura profunda). */
+        ordem?: 'frente' | 'tras';
+        /** Silencia os logs de progresso (a coleta periódica não precisa deles). */
+        calada?: boolean;
+    } = {},
+): Promise<VarreduraDeDevedores> {
+    const vistos = new Set<string>();
+    const faixasLidas: Array<[number, number]> = [];
+    const inicio = blocoInicial !== undefined ? Math.max(0, blocoInicial) : Math.max(0, topo - BLOCOS + 1);
+    const medida = await descobrirPedaco(topo);
+    const todas = faixasDeBlocos(inicio, topo, medida.pedaco);
+    const faixas = opcoes.ordem === 'tras' ? [...todas].reverse() : todas;
+    const orcamentoMs = opcoes.orcamentoMs ?? 0;
+    const comecouEm = Date.now();
+    let falhas = 0;
+    let cortadaPeloTempo = false;
+    const CONCORRENCIA = 5;
+
+    if (faixas.length > 10 && !opcoes.calada) {
         const lotes = Math.ceil(faixas.length / CONCORRENCIA);
         const minutos = ((lotes * (PAUSA_MS + 700)) / 60_000).toFixed(1);
         log.info('Juntando histórico de devedores (Modo Turbo - Multithread).', {
             faixas: faixas.length,
             estimativa: `~${minutos} minutos`,
-            velocidade: `${CONCORRENCIA} chamadas em paralelo`
+            velocidade: `${CONCORRENCIA} chamadas em paralelo`,
+            pedaco: medida.tentativas > 0
+                ? `${medida.pedaco} blocos por chamada (MEDIDO em ${medida.tentativas} sondagem(ns); pedi ${PEDACO})`
+                : `${medida.pedaco} blocos por chamada`,
+            ordem: opcoes.ordem === 'tras' ? 'do mais NOVO para o mais velho' : 'do mais velho para o mais novo',
+            orcamento: orcamentoMs > 0
+                ? `${(orcamentoMs / 1000).toFixed(0)}s — o que não couber fica para o próximo boot, do cache`
+                : 'sem teto de tempo',
         });
     }
 
     let lidas = 0;
     for (let i = 0; i < faixas.length; i += CONCORRENCIA) {
+        // O teto de tempo é o que impede o boot de ficar uma hora cego. Ele é
+        // conferido ANTES do lote, nunca no meio: cortar no meio de um lote
+        // deixaria faixas pela metade sem ninguém saber quais.
+        if (orcamentoMs > 0 && Date.now() - comecouEm > orcamentoMs) {
+            cortadaPeloTempo = true;
+            break;
+        }
         const lote = faixas.slice(i, i + CONCORRENCIA);
-        
-        await Promise.all(lote.map(async ([a, b]) => {
-            try {
-                const logs = await chamar<Array<{ topics: string[] }>>('eth_getLogs', [
-                    {
-                        address: REDE.pool,
-                        fromBlock: `0x${a.toString(16)}`,
-                        toBlock: `0x${b.toString(16)}`,
-                        topics: [TOPIC_BORROW],
-                    },
-                ]);
-                for (const d of devedoresDosEventos(logs)) vistos.add(d);
-            } catch {
-                falhas += 1;
-            }
-        }));
-        
+
+        const resultados = await Promise.all(
+            lote.map(([a, b]) => lerFaixaPartindoSePreciso(a, b, vistos)),
+        );
+        for (const r of resultados) {
+            faixasLidas.push(...r.lidas);
+            falhas += r.falhas;
+        }
+
         lidas += lote.length;
-        if (faixas.length > 10 && (lidas % (CONCORRENCIA * 5) === 0 || lidas === faixas.length)) {
+        if (faixas.length > 10 && !opcoes.calada && (lidas % (CONCORRENCIA * 5) === 0 || lidas === faixas.length)) {
             log.info('Progresso da varredura acelerada.', {
                 lidas: `${lidas} de ${faixas.length}`,
-                devedoresAteAgora: vistos.size
+                devedoresAteAgora: vistos.size,
+                decorrido: `${((Date.now() - comecouEm) / 1000).toFixed(0)}s`,
             });
         }
         if (i + CONCORRENCIA < faixas.length) {
             await dormir(PAUSA_MS);
         }
     }
-    return [...vistos];
+    return {
+        devedores: [...vistos],
+        faixasLidas,
+        faixasQueFalharam: falhas,
+        de: inicio,
+        ate: topo,
+        cortadaPeloTempo,
+    };
 }
 
 interface Alvo {
@@ -1653,17 +1821,163 @@ async function principal(): Promise<'parar' | void> {
     /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
     const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 2);
 
-    let devedores = await juntarDevedores(topo);
-    devedores = devedores.filter(d => !isDevedorIgnorado(d));
+    // ========================================================================
+    // O CACHE PERSISTENTE, pedido dela em 2026-10-02.
+    //
+    // O buraco que ele tapa: o placar acusou 11 liquidacoes com "nem sabia" —
+    // alvos invisiveis porque a janela de 30 dias (`CACA_BLOCOS`) nunca tinha
+    // perguntado por eles.
+    //
+    // Medido em 2026-10-02: o Pool da Base nasceu no bloco 2.357.134, 3,15 anos
+    // atras. Varrer tudo com `PEDACO=10000` custa 4.972 chamadas = 129.272 CUs —
+    // 0,65% do teto de 20M/mes. UMA vez e barato; a cada boot, a 10 boots/dia,
+    // sao 38,8M e o dobro do teto. Por isso o cache, e por isso ele PRECISA de
+    // volume: o sistema de arquivos do Railway e efemero, e cache que o deploy
+    // apaga e placebo caro — a varredura volta e o log diz que cacheou.
+    // ========================================================================
+    const nascimento = NASCIMENTO_DO_POOL[REDE_ESCOLHIDA] ?? 0;
+    const estadoDoCache = await lerCache(CAMINHO_DO_CACHE, REDE_ESCOLHIDA, REDE.pool);
+    // A VARREDURA ACONTECE EM DUAS PARTES, e a ordem é o que separa um boot de
+    // segundos de um boot de uma hora.
+    //
+    // 1) A FRENTE, bloqueante: os blocos que faltam entre o cache e o topo. Com
+    //    cache é um punhado de blocos; sem cache é a janela de 30 dias de antes,
+    //    que já era o comportamento aceito. O bot só começa a caçar depois
+    //    desta, porque caçar sem a lista recente é caçar o vazio.
+    //
+    // 2) O FUNDO, para trás e com teto de tempo: do que o cache já cobre em
+    //    direção ao nascimento do Pool. É aqui que moram os 3 anos, e é por isso
+    //    que ele desce do mais novo para o mais velho — quem tomou emprestado na
+    //    semana passada ainda deve; quem tomou em 2023 já pagou ou foi
+    //    liquidado, e se voltar a tomar emprestado o `Borrow` novo o traz de
+    //    volta pela parte 1.
+    //
+    // Com `CACA_CACHE_FUNDO_MS=0` o fundo roda inteiro de uma vez: ~21 minutos
+    // de boot cego UMA vez, e cobertura total gravada no volume para sempre.
+    const ORCAMENTO_DO_FUNDO_MS = numeroDoAmbiente(
+        'CACA_CACHE_FUNDO_MS', process.env.CACA_CACHE_FUNDO_MS, 300_000);
+    const ORCAMENTO_DO_FUNDO_NA_COLETA_MS = numeroDoAmbiente(
+        'CACA_CACHE_COLETA_MS', process.env.CACA_CACHE_COLETA_MS, 30_000);
+
+    const comecaEm = estadoDoCache.usavel
+        ? deOndeComecar(estadoDoCache, nascimento)
+        : Math.max(nascimento, topo - BLOCOS + 1);
+    log.info('[CACHE] A memória de devedores que sobrevive ao deploy.', {
+        caminho: CAMINHO_DO_CACHE,
+        estado: estadoDoCache.usavel ? 'USÁVEL' : 'NÃO uso',
+        porque: estadoDoCache.porque,
+        cobertura: comoEstaACobertura(
+            estadoDoCache.usavel ? estadoDoCache.cache : null, nascimento, topo),
+        nascimentoDoPool: nascimento,
+        agoraVarroDe: `${comecaEm} até ${topo} (${(topo - comecaEm + 1).toLocaleString('pt-BR')} blocos)`,
+        depoisDesco: ORCAMENTO_DO_FUNDO_MS > 0
+            ? `até ${(ORCAMENTO_DO_FUNDO_MS / 1000).toFixed(0)}s descendo para o nascimento (CACA_CACHE_FUNDO_MS)`
+            : 'o fundo INTEIRO, sem teto de tempo — este boot vai demorar, e é a última vez',
+        seOVolumeNaoEstiverMontado: 'cada boot paga tudo de novo — confira o `gravou` abaixo',
+    });
+
+    const varrido = await varrerDevedores(topo, comecaEm);
+    // O `ultimoBloco` só avança até onde NÃO há buraco. Avançar por cima de uma
+    // janela que falhou gravaria o buraco para sempre.
+    let cobertoAte = ateOndeSemBuraco(comecaEm, varrido.faixasLidas);
+    if (!estadoDoCache.usavel && varrido.faixasLidas.length > 0) {
+        // Sem cache não havia fronteira anterior: o que foi lido agora É a
+        // fronteira, e ela começa no primeiro bloco desta varredura.
+        cobertoAte = Math.max(cobertoAte, comecaEm - 1);
+    }
+    let juntos = juntarDevedoresDoCache(
+        estadoDoCache.usavel ? estadoDoCache.cache.devedores : {},
+        varrido.devedores,
+        topo,
+    );
+    let blocoInicialDoCache = estadoDoCache.usavel ? estadoDoCache.cache.blocoInicial : comecaEm;
+    let ultimoBlocoDoCache = Math.max(
+        cobertoAte, estadoDoCache.usavel ? estadoDoCache.cache.ultimoBloco : comecaEm - 1);
+
+    // ------------------------------------------------------------------ o fundo
+    if (blocoInicialDoCache > nascimento) {
+        const antesDeDescer = blocoInicialDoCache;
+        const fundo = await varrerDevedores(blocoInicialDoCache - 1, nascimento, {
+            orcamentoMs: ORCAMENTO_DO_FUNDO_MS,
+            ordem: 'tras',
+        });
+        // Para trás a fronteira é o MENOR bloco acima do qual tudo foi lido: ela
+        // desce de `blocoInicial` em direção ao nascimento, e só desce por cima
+        // de faixas contíguas. Uma faixa que falhou no meio para a descida ali.
+        const desceuAte = deOndeSemBuraco(blocoInicialDoCache - 1, fundo.faixasLidas);
+        blocoInicialDoCache = Math.min(blocoInicialDoCache, desceuAte);
+        juntos = juntarDevedoresDoCache(juntos, fundo.devedores, blocoInicialDoCache);
+        log.info('[CACHE] Fundo do histórico.', {
+            desci: `do bloco ${antesDeDescer} para o ${blocoInicialDoCache} — `
+                + `${(antesDeDescer - blocoInicialDoCache).toLocaleString('pt-BR')} blocos `
+                + `(~${Math.round(((antesDeDescer - blocoInicialDoCache) * 2) / 86400)} dias) de história nova`,
+            achei: `${fundo.devedores.length.toLocaleString('pt-BR')} devedores nesta descida`,
+            faixasQueFalharam: fundo.faixasQueFalharam,
+            parou: fundo.cortadaPeloTempo
+                ? `o orçamento de ${(ORCAMENTO_DO_FUNDO_MS / 1000).toFixed(0)}s acabou — o resto fica para `
+                  + `o próximo boot e para as coletas (a cada ${MIN_COLETA} min)`
+                : blocoInicialDoCache <= nascimento
+                    ? 'CHEGUEI AO NASCIMENTO DO POOL: cobertura total, 100% da história'
+                    : 'parei numa faixa que falhou; o próximo boot retoma daqui',
+        });
+    }
+
+    const gravacao = await gravarCache(CAMINHO_DO_CACHE, {
+        versao: VERSAO_DO_CACHE,
+        rede: REDE_ESCOLHIDA,
+        pool: REDE.pool,
+        blocoInicial: blocoInicialDoCache,
+        ultimoBloco: ultimoBlocoDoCache,
+        devedores: juntos,
+    });
+    log.info(gravacao.gravou ? '[CACHE] Gravado.' : '[CACHE] NÃO GRAVOU — o próximo boot vai pagar tudo de novo.', {
+        resultado: gravacao.porque,
+        cobertura: comoEstaACobertura(
+            { versao: VERSAO_DO_CACHE, rede: REDE_ESCOLHIDA, pool: REDE.pool,
+              blocoInicial: blocoInicialDoCache, ultimoBloco: ultimoBlocoDoCache, devedores: juntos },
+            nascimento, topo),
+        faixasQueFalharam: varrido.faixasQueFalharam,
+        cobertoSemBuracoAte: cobertoAte,
+        // Sem esta linha, "o cache nao avancou porque nada falhou" fica
+        // indistinguivel de "o cache nao avancou porque TUDO falhou".
+        oQueIssoQuerDizer: varrido.faixasQueFalharam === 0
+            ? 'nenhuma janela falhou: a cobertura é contígua'
+            : `${varrido.faixasQueFalharam} janelas falharam, e o cache NÃO avançou por cima delas — `
+              + 'o próximo boot relê daquele ponto',
+    });
+
+    /** O que o cache guarda, vivo na memória — a fonte da lista e do que se grava. */
+    let memoriaDoCache = juntos;
+    let devedores = Object.keys(juntos).filter(d => !isDevedorIgnorado(d));
     /**
-     * Em que bloco cada devedor entrou na lista.
+     * Em que bloco cada devedor foi visto tomando emprestado por último.
      *
-     * Existe para a lista poder ESQUECER. Sem isto ela so cresce, e a
-     * varredura completa de hora em hora relê um conjunto cada vez maior —
-     * custo e memoria subindo sozinhos durante meses de execucao.
+     * JÁ FOI a régua do esquecimento, por idade, e isso virou contradição no dia
+     * em que o cache passou a guardar 3 anos: a regra apagava justamente o que o
+     * cache tinha ido buscar, e apagava sem olhar — um devedor de 2024 com
+     * dívida viva hoje saía da lista por ser velho.
+     *
+     * Agora o esquecimento é por ESTADO (`esquecerQuemNaoDeveMais`, alimentado
+     * pela varredura completa, que já mede dívida zero de graça), e este mapa
+     * serve ao que ele sempre deveria ter servido: dizer QUANDO cada endereço
+     * apareceu, para o cache gravar a data certa.
      */
-    const vistoEm = new Map<string, number>();
-    for (const d of devedores) vistoEm.set(d.toLowerCase(), topo);
+    const vistoEm = new Map<string, number>(Object.entries(juntos));
+    /** Grava o que está na memória. Chamado quando a memória muda de verdade. */
+    const regravarCache = async (motivo: string): Promise<void> => {
+        const g = await gravarCache(CAMINHO_DO_CACHE, {
+            versao: VERSAO_DO_CACHE,
+            rede: REDE_ESCOLHIDA,
+            pool: REDE.pool,
+            blocoInicial: blocoInicialDoCache,
+            ultimoBloco: ultimoBlocoDoCache,
+            devedores: memoriaDoCache,
+        });
+        (g.gravou ? log.info : log.warn)(
+            g.gravou ? '[CACHE] Regravado.' : '[CACHE] NÃO regravei.',
+            { motivo, resultado: g.porque },
+        );
+    };
 
     let ultimaColeta = Date.now();
     let ultimoBlocoLido = topo; 
@@ -2528,32 +2842,66 @@ async function principal(): Promise<'parar' | void> {
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 const novoTopo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
                 if (novoTopo > ultimoBlocoColeta) {
-                    const novos = await juntarDevedores(novoTopo, ultimoBlocoColeta + 1);
-                    // Juntar sem nunca esquecer fazia a lista virar o historico
-                    // acumulado desde o boot: em meses a varredura completa
-                    // releria um conjunto que so cresce, e o custo horario
-                    // junto. A janela de 30 dias so limitava a PRIMEIRA coleta.
-                    //
-                    // Refazer a varredura inteira a cada coleta consertaria o
-                    // vazamento criando um maior: 648 consultas a cada 37
-                    // minutos sao 57M CUs/mes num teto de 20M. Entao a lista
-                    // anota QUANDO cada um entrou, e esquece quem saiu da
-                    // janela — uma conta local, sem nenhuma chamada a mais.
+                    // A FRENTE: os blocos novos desde a última coleta. Nada de
+                    // esquecer por idade aqui — a lista agora cresce de verdade,
+                    // e quem a enxuga é a varredura completa, que vê dívida
+                    // ZERO e manda esquecer por estado. Idade apagaria devedor
+                    // velho com dívida viva, que é exatamente o buraco que o
+                    // placar dela acusou com "nem sabia".
+                    const varreduraNova = await varrerDevedores(
+                        novoTopo, ultimoBlocoColeta + 1, { calada: true });
+                    const novos = varreduraNova.devedores;
                     for (const d of novos) vistoEm.set(d.toLowerCase(), novoTopo);
-                    const maisVelhoAceito = novoTopo - BLOCOS;
-                    for (const [d, bloco] of vistoEm) {
-                        if (bloco < maisVelhoAceito) vistoEm.delete(d);
+                    memoriaDoCache = juntarDevedoresDoCache(memoriaDoCache, novos, novoTopo);
+                    // A fronteira da frente só avança até onde não há buraco.
+                    const frente = ateOndeSemBuraco(ultimoBlocoColeta + 1, varreduraNova.faixasLidas);
+                    if (frente > ultimoBlocoDoCache) ultimoBlocoDoCache = frente;
+
+                    // O FUNDO, de pouco em pouco: enquanto faltar história para
+                    // trás, cada coleta desce um naco com teto de tempo. Sem
+                    // isto a cobertura total dependeria de rebootar o container
+                    // várias vezes, o que é pedir ao deploy que faça o trabalho
+                    // do bot.
+                    if (blocoInicialDoCache > nascimento && ORCAMENTO_DO_FUNDO_NA_COLETA_MS > 0) {
+                        const antesDeDescer = blocoInicialDoCache;
+                        const fundo = await varrerDevedores(blocoInicialDoCache - 1, nascimento, {
+                            orcamentoMs: ORCAMENTO_DO_FUNDO_NA_COLETA_MS,
+                            ordem: 'tras',
+                            calada: true,
+                        });
+                        const desceuAte = deOndeSemBuraco(blocoInicialDoCache - 1, fundo.faixasLidas);
+                        blocoInicialDoCache = Math.min(blocoInicialDoCache, desceuAte);
+                        for (const d of fundo.devedores) {
+                            const k = d.toLowerCase();
+                            if (!vistoEm.has(k)) vistoEm.set(k, blocoInicialDoCache);
+                        }
+                        memoriaDoCache = juntarDevedoresDoCache(
+                            memoriaDoCache, fundo.devedores, blocoInicialDoCache);
+                        if (antesDeDescer !== blocoInicialDoCache) {
+                            log.info('[CACHE] Desci mais um naco do histórico.', {
+                                desci: `${(antesDeDescer - blocoInicialDoCache).toLocaleString('pt-BR')} blocos `
+                                    + `(~${Math.round(((antesDeDescer - blocoInicialDoCache) * 2) / 86400)} dias)`,
+                                achei: fundo.devedores.length,
+                                cobertura: comoEstaACobertura(
+                                    { versao: VERSAO_DO_CACHE, rede: REDE_ESCOLHIDA, pool: REDE.pool,
+                                      blocoInicial: blocoInicialDoCache, ultimoBloco: ultimoBlocoDoCache,
+                                      devedores: memoriaDoCache },
+                                    nascimento, novoTopo),
+                            });
+                        }
                     }
+
                     const antes = devedores.length;
                     devedores = [...vistoEm.keys()].filter((d) => !isDevedorIgnorado(d));
                     if (devedores.length !== antes) {
                         log.info('Lista de devedores atualizada.', {
                             antes, agora: devedores.length,
                             entraram: novos.length,
-                            janela: `${BLOCOS} blocos (~${Math.round((BLOCOS * 2) / 86400)} dias)`,
+                            esquecerPor: 'ESTADO (dívida zero na varredura completa), não idade',
                         });
                     }
                     ultimoBlocoColeta = novoTopo;
+                    await regravarCache(`coleta até o bloco ${novoTopo}`);
                 }
                 ultimaColeta = Date.now();
             }
@@ -2690,11 +3038,23 @@ async function principal(): Promise<'parar' | void> {
                     })));
 
                     const medidos: Medida[] = [];
+                    /**
+                     * Quem a corrente acabou de dizer que NÃO DEVE NADA.
+                     *
+                     * `dividaBase === 0` é o fato, lido direto da Aave, e não uma
+                     * inferência: `quedaAteLiquidar` também devolve `null` para
+                     * quem deve e não tem garantia, que é outra coisa. Esquecer
+                     * pelo fato errado é como a régua de idade errava.
+                     */
+                    const semDivida: string[] = [];
                     for (let i = 0; i < aLer.length; i++) {
                         const dadoConta = loteGigante[i];
                         if (!dadoConta) continue;
                         try {
                             const conta = decodificarContaDoUsuario(dadoConta);
+                            if (varredura === 'completa' && conta.dividaBase.isZero()) {
+                                semDivida.push(aLer[i]!);
+                            }
                             // A varredura completa le a saude de TODO MUNDO, e
                             // era a unica leitura que nao alimentava a deriva.
                             // Sem isto o ensaio no boot dizia "0 amostras" e a
@@ -2729,6 +3089,39 @@ async function principal(): Promise<'parar' | void> {
                     // encolhendo a cada passagem ate sobrar ninguem, e o bot
                     // ficaria cego sem avisar.
                     if (varredura === 'completa') {
+                        // O ESQUECIMENTO POR ESTADO.
+                        //
+                        // Esta é a única varredura que olha TODO MUNDO, então é a
+                        // única que pode dizer quem não deve mais nada. E ela já
+                        // pagou por essa informação: vem na mesma resposta da
+                        // saúde, de graça.
+                        //
+                        // É reversível de propósito: se a pessoa voltar a tomar
+                        // emprestado, o `Borrow` novo a traz de volta pela coleta,
+                        // porque `Borrow` é exatamente o evento que a varredura lê.
+                        // A régua de idade que estava aqui não era reversível —
+                        // apagava por velhice e nunca mais ia buscar.
+                        if (semDivida.length > 0) {
+                            const limpeza = esquecerQuemNaoDeveMais(memoriaDoCache, semDivida);
+                            memoriaDoCache = limpeza.devedores;
+                            for (const d of semDivida) vistoEm.delete(d.toLowerCase());
+                            if (limpeza.esquecidos > 0) {
+                                // A lista que a PRÓXIMA varredura completa vai ler
+                                // sai daqui. Esquecer só no cache e não aqui faria
+                                // o bot continuar pagando leitura por conta zerada
+                                // até a próxima coleta — a economia viria 37 min
+                                // depois do motivo.
+                                devedores = [...vistoEm.keys()].filter((d) => !isDevedorIgnorado(d));
+                                log.info('Esqueci quem não deve mais nada.', {
+                                    esquecidos: limpeza.esquecidos,
+                                    restam: Object.keys(memoriaDoCache).length,
+                                    aLerNaProximaVarredura: devedores.length,
+                                    porque: 'dívida ZERO na corrente — sem dívida não há liquidação. '
+                                        + 'Se voltarem a tomar emprestado, o Borrow novo os traz de volta',
+                                    gravoNaProximaColeta: `em até ${MIN_COLETA} min`,
+                                });
+                            }
+                        }
                         // ANTES de trocar as camadas: quem foi liquidado teve a
                         // saude restaurada e sai da brasa na proxima reparticao.
                         // Contando depois, o balde 'brasa' ficaria vazio sempre
