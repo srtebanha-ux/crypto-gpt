@@ -3659,21 +3659,61 @@ async function principal(): Promise<'parar' | void> {
                     // RPC lento. Nada abaixo disto muda de comportamento: quem
                     // responde em 300ms continua respondendo em 300ms.
                     const MS_PARA_ESTIMAR = numeroDoAmbiente('CACA_MS_ESTIMAR', process.env.CACA_MS_ESTIMAR, 800);
-                    const estimado = await (async (): Promise<bigint | null> => {
-                        try {
-                            const resposta = await Promise.race([
-                                chamar<string>('eth_estimateGas', [{
-                                    from: await carteira.getAddress(),
-                                    to: contrato.endereco,
-                                    data: envio,
-                                }]),
-                                new Promise<null>((r) => { const t = setTimeout(() => r(null), MS_PARA_ESTIMAR); t.unref?.(); }),
-                            ]);
-                            if (resposta === null) return null;
-                            const n = BigInt(resposta);
-                            return n > 0n ? n : null;
-                        } catch { return null; }
-                    })();
+                    // O SALDO VAI DE CARONA NA ESTIMATIVA, pedido dela em
+                    // 2026-10-03: "ler o saldo atual de ETH da carteira do
+                    // enviador ANTES de construir o tiro".
+                    //
+                    // Ele já era lido, mas no máximo uma vez por minuto, porque
+                    // uma ida à rede no laço quente custa a liquidação. O buraco
+                    // que isso deixava: entre duas leituras o saldo pode ter
+                    // caído por fora — ela movendo ETH, outro serviço gastando —
+                    // e a trava toda é calculada CONTRA esse número. Saldo velho
+                    // alto é o jeito exato de produzir o `insufficient funds` que
+                    // ela está tentando evitar.
+                    //
+                    // E aqui não custa latência: a estimativa já espera até
+                    // 800ms, e as duas chamadas correm JUNTAS dentro da mesma
+                    // janela. Zero milissegundo a mais no instante do tiro.
+                    //
+                    // Falha ou atraso devolve `null`, e `null` cai no último
+                    // saldo conhecido — nunca em zero. "Não consegui ler" não
+                    // pode virar "está sem gás": uma abortaria a caçada por um
+                    // soluço de RPC.
+                    const [estimado, saldoAgora] = await Promise.all([
+                        (async (): Promise<bigint | null> => {
+                            try {
+                                const resposta = await Promise.race([
+                                    chamar<string>('eth_estimateGas', [{
+                                        from: await carteira.getAddress(),
+                                        to: contrato.endereco,
+                                        data: envio,
+                                    }]),
+                                    new Promise<null>((r) => { const t = setTimeout(() => r(null), MS_PARA_ESTIMAR); t.unref?.(); }),
+                                ]);
+                                if (resposta === null) return null;
+                                const n = BigInt(resposta);
+                                return n > 0n ? n : null;
+                            } catch { return null; }
+                        })(),
+                        (async (): Promise<bigint | null> => {
+                            try {
+                                const resposta = await Promise.race([
+                                    (carteira!.provider as JsonRpcProvider).getBalance(donoCarteira!),
+                                    new Promise<null>((r) => { const t = setTimeout(() => r(null), MS_PARA_ESTIMAR); t.unref?.(); }),
+                                ]);
+                                return resposta === null ? null : BigInt(resposta.toString());
+                            } catch { return null; }
+                        })(),
+                    ]);
+                    if (saldoAgora !== null) {
+                        // Antes de `limiteDeGasDoTiro`, de propósito: é ele o
+                        // primeiro a dimensionar pelo saldo, e dimensionar pelo
+                        // saldo de um minuto atrás é a trava olhando o número
+                        // errado.
+                        saldoDeGasWei = saldoAgora;
+                        saldoLidoEm = Date.now();
+                        saldoJaLido = true;
+                    }
                     const doGas = limiteDeGasDoTiro({
                         estimadoGas: estimado,
                         saldoWei: saldoDeGasWei,
