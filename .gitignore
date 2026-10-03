@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+.env.*.local
+
+# Estado do olho nos alvos: leitura local, não é código
+.olho/
+
+# Scripts de medição de uma vez só. Não são código do bot.
+.tmp/

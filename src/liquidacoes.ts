@@ -1,0 +1,1072 @@
+// Leitura do histórico de liquidações em protocolos de empréstimo on-chain.
+//
+// A pergunta que este arquivo existe para responder é uma só, e ela decide se
+// vale construir qualquer coisa depois:
+//
+//   Nos últimos meses, quantas liquidações GRANDES aconteceram, e sobrou
+//   alguma para quem não tem servidor colado no validador?
+//
+// Liquidação é o alvo certo — e não arbitragem — por causa de onde vem o
+// tamanho. Numa arbitragem o lucro tem teto na profundidade da piscina: o
+// próprio trade empurra o preço e fecha a diferença no meio do caminho, o que
+// `getAmountOut` em ammMath.ts calcula. Numa liquidação o tamanho vem da
+// DÍVIDA DE OUTRA PESSOA. O bônus é uma fração dela, e quem liquida pode pegar
+// o valor emprestado por flash loan. Capital próprio vira gás, não limite.
+//
+// Nada aqui envia transação, assina, ou precisa de chave privada. É leitura.
+import { id } from 'ethers';
+import { Decimal } from 'decimal.js';
+import { decodeAddressWord, decodeUintWord, fromRawUnits, stripHexPrefix } from './evmAbi';
+
+/** A assinatura do evento que o Aave V3 emite ao liquidar. */
+export const ASSINATURA_LIQUIDATION_CALL =
+    'LiquidationCall(address,address,address,uint256,uint256,address,bool)';
+
+/**
+ * O tópico do evento, CALCULADO e não decorado.
+ *
+ * Isto era uma constante escrita à mão, com um comentário admitindo que era
+ * palpite: quem escreveu não tinha como calcular keccak nem alcançar a rede.
+ * O palpite estava certo — foi conferido depois, dígito por dígito — mas um
+ * tópico errado aqui não daria erro nenhum: daria ZERO liquidações, para
+ * sempre, e o bot pareceria estar vigiando um mercado vazio.
+ *
+ * Calcular custa uma linha e tira a sorte da equação.
+ */
+export const TOPIC_LIQUIDATION_CALL = id(ASSINATURA_LIQUIDATION_CALL);
+
+export interface LogCru {
+    address: string;
+    topics: string[];
+    data: string;
+    blockNumber: string;
+    transactionHash: string;
+}
+
+export interface Liquidacao {
+    bloco: number;
+    transacao: string;
+    /** Quem tomou emprestado e não pagou. */
+    devedor: string;
+    /** O token da dívida que foi quitada. */
+    ativoDaDivida: string;
+    /** O token que o liquidante levou como prêmio. */
+    ativoDaGarantia: string;
+    /** Quanto da dívida foi coberto, em unidades CRUAS do token. */
+    dividaCrua: Decimal;
+    /** Quanto de garantia o liquidante levou, em unidades CRUAS. */
+    garantiaCrua: Decimal;
+    /** Quem executou — o endereço que ficou com o bônus. */
+    liquidante: string;
+}
+
+/** Endereço de 32 bytes (como vem em `topics`) para os 20 bytes de verdade. */
+export function enderecoDoTopico(topico: string): string {
+    const sem = stripHexPrefix(topico);
+    if (sem.length < 40) throw new Error(`Tópico curto demais para conter endereço: ${topico}`);
+    return `0x${sem.slice(-40).toLowerCase()}`;
+}
+
+/**
+ * Decodifica um log de LiquidationCall.
+ *
+ * Os três endereços vêm em `topics` porque são `indexed`; os números e o
+ * endereço do liquidante vêm em `data`, em palavras de 32 bytes:
+ *
+ *   data[0] = debtToCover
+ *   data[1] = liquidatedCollateralAmount
+ *   data[2] = liquidator
+ *   data[3] = receiveAToken
+ */
+export function decodificarLiquidacao(log: LogCru): Liquidacao {
+    if (log.topics.length < 4) {
+        throw new Error(`LiquidationCall precisa de 4 tópicos, veio com ${log.topics.length}`);
+    }
+    return {
+        bloco: Number.parseInt(log.blockNumber, 16),
+        transacao: log.transactionHash,
+        ativoDaGarantia: enderecoDoTopico(log.topics[1]),
+        ativoDaDivida: enderecoDoTopico(log.topics[2]),
+        devedor: enderecoDoTopico(log.topics[3]),
+        dividaCrua: decodeUintWord(log.data, 0),
+        garantiaCrua: decodeUintWord(log.data, 1),
+        liquidante: decodeAddressWord(log.data, 2),
+    };
+}
+
+export interface Token {
+    simbolo: string;
+    decimais: number;
+    /** Vale ~1 dólar? Só para esses dá para dizer o valor sem consultar preço. */
+    estavel: boolean;
+    /**
+     * Segue o preço do ETH? (WETH e cbETH seguem; cbETH com um ágio pequeno
+     * que ignoramos de propósito.)
+     *
+     * Marcar não basta para virar dólar: é preciso ALGUÉM informar o preço do
+     * ETH. Sem ele a liquidação continua caindo em "sem cotação", que é a
+     * resposta honesta. Com ele, vira um número aproximado e ROTULADO como
+     * aproximado — porque o preço de hoje aplicado a uma liquidação de cinco
+     * meses atrás está errado, e o relatório tem obrigação de dizer isso.
+     */
+    emEth?: boolean;
+}
+
+/**
+ * Tokens conhecidos na Base.
+ *
+ * Deliberadamente curto e deliberadamente sem chute: um token fora desta lista
+ * NÃO vira dólar por aproximação. Ele aparece no relatório como "não
+ * convertido", com o número cru. Inventar uma cotação para caber na tabela
+ * seria o mesmo erro do `acasoSeria` fixo — número certo de aparência,
+ * conclusão errada.
+ */
+export const TOKENS_BASE: Record<string, Token> = {
+    '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca': { simbolo: 'USDbC', decimais: 6, estavel: true },
+    '0x50c5725949a6f0c72e6c4a641f24049a917db0cb': { simbolo: 'DAI', decimais: 18, estavel: true },
+    '0x4200000000000000000000000000000000000006': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+    '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22': { simbolo: 'cbETH', decimais: 18, estavel: false, emEth: true },
+};
+
+/**
+ * Valor da dívida em dólares — ou null quando não dá para saber.
+ *
+ * Null é uma resposta legítima e importante: significa "dívida em token que eu
+ * não sei cotar". Some do histograma de dólares e aparece contado à parte, em
+ * vez de entrar com um valor inventado.
+ */
+export function valorEmDolares(
+    l: Liquidacao,
+    tokens: Record<string, Token> = TOKENS_BASE,
+    precoEth?: Decimal | null,
+): Decimal | null {
+    const t = tokens[l.ativoDaDivida.toLowerCase()];
+    if (!t) return null;
+    const cru = fromRawUnits(l.dividaCrua, t.decimais);
+    if (t.estavel) return cru;
+    if (t.emEth && precoEth && precoEth.greaterThan(0)) return cru.mul(precoEth);
+    return null;
+}
+
+/** As faixas do histograma, em dólares. A última é aberta para cima. */
+export const FAIXAS_USD = [1_000, 10_000, 50_000, 100_000, 500_000];
+
+export interface ResumoDoHistorico {
+    total: number;
+    /** Quantas não deu para cotar, por falta do token na tabela. */
+    semCotacao: number;
+    /** Chave = piso da faixa em dólares. */
+    porFaixa: Record<number, number>;
+    /** Quantos endereços diferentes capturaram alguma. */
+    liquidantesDistintos: number;
+    /** Os maiores capturadores, do maior para o menor. */
+    maioresLiquidantes: Array<{ endereco: string; quantas: number }>;
+    maior: Decimal | null;
+    /**
+     * A SOMA de tudo que deu para cotar, em dólares — o buraco que a contagem
+     * escondia.
+     *
+     * `porFaixa` responde "quantas são grandes?". Não responde "onde está o
+     * dinheiro?", e as duas perguntas têm respostas diferentes: 3.082 migalhas
+     * de US$200 são 88% das liquidações e podem ser 4% do bolo. Quem olha só a
+     * contagem conclui que o negócio é volume; quem soma descobre que o
+     * negócio são treze eventos por semestre.
+     */
+    somaCotada: Decimal;
+    /** A soma em dólares de cada faixa, para cima. Chave = piso da faixa. */
+    somaAcimaDe: Record<number, Decimal>;
+    /**
+     * O tamanho do meio. A MÉDIA aqui mentiria: uma de US$255 mil no meio de
+     * milhares de US$200 puxa a média para um valor que nenhuma liquidação
+     * real tem. A mediana diz como é a liquidação TÍPICA — que é a que se
+     * pegaria num dia comum.
+     */
+    medianaCotada: Decimal | null;
+    /**
+     * As MAIORES liquidações, uma por uma, com quem ficou com cada bônus.
+     *
+     * O ranking por CONTAGEM esconde a única coisa que decide se há espaço
+     * para quem chega agora. Em 180 dias na Base, um endereço capturou 3.166
+     * de 5.043 — 63% —, e desse número não se conclui nada: ele pode estar
+     * catando milhares de migalhas de US$200 e nem disputar as sete acima de
+     * US$100 mil, ou pode estar levando as sete também.
+     *
+     * São situações opostas. Uma diz "tem espaço nas grandes"; a outra diz
+     * "o lugar está tomado". Contar quantas cada um pegou não separa as duas;
+     * olhar QUEM pegou as maiores separa.
+     */
+    maioresLiquidacoes: Array<{
+        usd: Decimal;
+        liquidante: string;
+        bloco: number;
+        transacao: string;
+        /** O bônus é configurado na GARANTIA, então ela precisa viajar junto. */
+        garantia: string;
+    }>;
+}
+
+/**
+ * O relatório que decide se a ideia vive.
+ *
+ * `liquidantesDistintos` é a linha mais importante e é fácil não perceber por
+ * quê: ela mede se o lugar está tomado. Trezentas liquidações gordas capturadas
+ * por três endereços significam três robôs profissionais dividindo tudo — e
+ * qualquer um que chegar agora disputa com eles em milissegundos. As mesmas
+ * trezentas espalhadas por duzentos endereços significam que sobra.
+ */
+export function resumirHistorico(
+    liquidacoes: Liquidacao[],
+    tokens: Record<string, Token> = TOKENS_BASE,
+    precoEth?: Decimal | null,
+): ResumoDoHistorico {
+    const porFaixa: Record<number, number> = {};
+    const somaAcimaDe: Record<number, Decimal> = {};
+    for (const f of FAIXAS_USD) {
+        porFaixa[f] = 0;
+        somaAcimaDe[f] = new Decimal(0);
+    }
+    let somaCotada = new Decimal(0);
+
+    const contagem = new Map<string, number>();
+    const comValor: Array<{ l: Liquidacao; usd: Decimal }> = [];
+    let semCotacao = 0;
+    let maior: Decimal | null = null;
+
+    for (const l of liquidacoes) {
+        contagem.set(l.liquidante, (contagem.get(l.liquidante) ?? 0) + 1);
+        const usd = valorEmDolares(l, tokens, precoEth);
+        if (usd === null) {
+            semCotacao += 1;
+            continue;
+        }
+        comValor.push({ l, usd });
+        if (maior === null || usd.greaterThan(maior)) maior = usd;
+        somaCotada = somaCotada.plus(usd);
+        for (const f of FAIXAS_USD) {
+            if (usd.greaterThanOrEqualTo(f)) {
+                porFaixa[f] += 1;
+                somaAcimaDe[f] = somaAcimaDe[f].plus(usd);
+            }
+        }
+    }
+
+    const maiores = [...contagem.entries()]
+        .map(([endereco, quantas]) => ({ endereco, quantas }))
+        .sort((a, b) => b.quantas - a.quantas)
+        .slice(0, 5);
+
+    const maioresLiquidacoes = comValor
+        .sort((a, b) => b.usd.comparedTo(a.usd))
+        .slice(0, 10)
+        .map((x) => ({
+            usd: x.usd,
+            liquidante: x.l.liquidante,
+            bloco: x.l.bloco,
+            transacao: x.l.transacao,
+            garantia: x.l.ativoDaGarantia,
+        }));
+
+    // `comValor` ficou ordenado do MAIOR para o menor pelo sort acima, e o
+    // meio de uma lista ordenada é o meio em qualquer direção.
+    const medianaCotada = comValor.length > 0 ? comValor[Math.floor(comValor.length / 2)].usd : null;
+
+    return {
+        total: liquidacoes.length,
+        semCotacao,
+        porFaixa,
+        liquidantesDistintos: contagem.size,
+        maioresLiquidantes: maiores,
+        maior,
+        somaCotada,
+        somaAcimaDe,
+        medianaCotada,
+        maioresLiquidacoes,
+    };
+}
+
+/**
+ * Onde está o dinheiro: nas migalhas ou nas poucas grandes?
+ *
+ * A pergunta veio dela, e ela estava certa em fazê-la: "a gente não pode ser o
+ * louco que pega todas?". O relatório até aqui não tinha como responder, porque
+ * só sabia CONTAR. Contando, as migalhas são 88% e a resposta parece óbvia.
+ * Somando, pode ser o contrário.
+ *
+ * As duas respostas pedem bots opostos. Se o bolo está nas migalhas, o negócio
+ * é volume: estar sempre ligada, gastar pouco de gás, pegar o que aparecer. Se
+ * o bolo está em treze eventos por semestre, volume é só o plantão que te
+ * mantém presente — e o dinheiro está em ganhar disputas raras.
+ */
+export function repartirOBolo(
+    r: ResumoDoHistorico,
+    pisoGrande = 50_000,
+): { fracaoNasGrandes: Decimal | null; leitura: string } {
+    if (r.somaCotada.lessThanOrEqualTo(0)) {
+        return { fracaoNasGrandes: null, leitura: 'sem dado suficiente' };
+    }
+    const nasGrandes = r.somaAcimaDe[pisoGrande] ?? new Decimal(0);
+    const fracao = nasGrandes.dividedBy(r.somaCotada);
+    const pct = fracao.mul(100).toFixed(0);
+    const quantas = r.porFaixa[pisoGrande] ?? 0;
+    const resto = r.total - r.semCotacao - quantas;
+
+    if (fracao.greaterThanOrEqualTo(0.5)) {
+        return {
+            fracaoNasGrandes: fracao,
+            leitura: `${pct}% do dinheiro está em ${quantas} liquidações, e os outros ${100 - Number(pct)}% espalhados em ${resto}. Pegar todas é PLANTÃO, não é o negócio: o negócio são essas ${quantas}.`,
+        };
+    }
+    if (fracao.lessThanOrEqualTo(0.2)) {
+        return {
+            fracaoNasGrandes: fracao,
+            leitura: `só ${pct}% do dinheiro está nas ${quantas} grandes — o resto está espalhado em ${resto} liquidações. Aqui volume É o negócio, e ser "o louco que pega todas" é a estratégia certa.`,
+        };
+    }
+    return {
+        fracaoNasGrandes: fracao,
+        leitura: `${pct}% do dinheiro nas ${quantas} grandes e o resto em ${resto}. Os dois negócios valem parecido — dá para começar pelo volume e subir.`,
+    };
+}
+
+/**
+ * Parte um intervalo de blocos em pedaços.
+ *
+ * Existe porque `eth_getLogs` tem teto de intervalo em todo provedor, e o teto
+ * varia. Pedir seis meses de uma vez leva erro em qualquer um deles; pedir de
+ * mil em mil leva uma eternidade num RPC público. O tamanho é parâmetro para
+ * a primeira rodada poder responder qual cabe.
+ */
+export function faixasDeBlocos(de: number, ate: number, tamanho: number): Array<[number, number]> {
+    if (tamanho < 1) throw new Error('tamanho de faixa precisa ser >= 1');
+    if (ate < de) return [];
+    const faixas: Array<[number, number]> = [];
+    for (let inicio = de; inicio <= ate; inicio += tamanho) {
+        faixas.push([inicio, Math.min(inicio + tamanho - 1, ate)]);
+    }
+    return faixas;
+}
+
+/**
+ * Conta quantos eventos de cada tipo apareceram — o MODO DESCOBERTA.
+ *
+ * Sem poder calcular keccak nem alcançar a rede, a assinatura do evento é um
+ * palpite. Esta função troca o palpite por medição: roda sem filtro de tópico e
+ * mostra o que o contrato realmente emite, ordenado por frequência. O tópico
+ * certo é reconhecível pela contagem e confere contra a constante lá em cima.
+ */
+export function contarPorTopico(logs: LogCru[]): Array<{ topico: string; quantos: number }> {
+    const c = new Map<string, number>();
+    for (const l of logs) {
+        if (l.topics.length === 0) continue;
+        const t = l.topics[0].toLowerCase();
+        c.set(t, (c.get(t) ?? 0) + 1);
+    }
+    return [...c.entries()]
+        .map(([topico, quantos]) => ({ topico, quantos }))
+        .sort((a, b) => b.quantos - a.quantos);
+}
+
+/**
+ * O erro é do tipo "sua faixa de blocos é grande demais"?
+ *
+ * Cada provedor recusa com uma frase diferente, e o número muda por plano: a
+ * Alchemy no plano grátis responde "up to a 10 block range", outros falam em
+ * "query returned more than N results" ou "range is too large". Tentar
+ * adivinhar o teto certo de cada um pela documentação é trabalho que envelhece;
+ * reconhecer a recusa e partir a faixa ao meio resolve para todos, inclusive
+ * os que ainda não existem.
+ *
+ * Visto em 18/09: os 101 pedaços de 2.000 blocos falharam, e o relatório final
+ * anunciou "o endereço do contrato provavelmente está errado" — o endereço
+ * estava certo, nenhuma leitura tinha acontecido.
+ */
+export function ehLimiteDeFaixa(mensagem: string): boolean {
+    const m = mensagem.toLowerCase();
+    return (
+        m.includes('block range') ||
+        m.includes('range is too large') ||
+        m.includes('returned more than') ||
+        m.includes('query timeout') ||
+        m.includes('too many results') ||
+        m.includes('limit exceeded') ||
+        // drpc: "ranges over 10000 blocks are not supported on free plan".
+        // Não bate com nenhuma das outras e a diferença é só de redação.
+        m.includes('are not supported on free plan') ||
+        m.includes('ranges over')
+    );
+}
+
+/**
+ * RPCs para EXPERIMENTAR, não para confiar.
+ *
+ * O da Ethereum devolveu 648 falhas de 649 com "ranges over 10000 blocks are
+ * not supported on free plan" — em pedaços de 2.000 blocos. A mensagem fala de
+ * tamanho e o tamanho estava dentro; um pedaço passou e o resto não. Isso não
+ * é teto de faixa, é plano grátis que só enxerga bloco recente, descrito com a
+ * mensagem errada pelo provedor.
+ *
+ * Eu não tenho como testar isto daqui: a caixa onde eu rodo não alcança RPC de
+ * blockchain. Então em vez de eu escolher um e ela descobrir em vinte minutos
+ * que não presta, o programa experimenta todos e RELATA qual serve e com que
+ * tamanho de pedaço. É o mesmo caminho que resolveu o palpite do tópico.
+ */
+/**
+ * Redes de gás barato, para a pergunta dela: "tem outro lugar tipo a Base, ou
+ * menor, onde o gás seja mais barato?"
+ *
+ * Os endereços de pool abaixo eu escrevi de memória e NÃO confiro. Isso seria
+ * imprudente se o programa aceitasse — mas ele não aceita: antes de varrer ele
+ * pede `eth_getCode` no endereço e `getReservesList()` no pool, e um endereço
+ * errado aparece como "não há contrato aqui" ou "não é um pool da Aave" na
+ * largada, em segundos. Escrever palpite que o programa confere é diferente de
+ * escrever palpite que vira relatório.
+ */
+export const REDES_BARATAS = ['gnosis', 'bnb', 'scroll', 'metis', 'linea', 'celo'];
+
+export const RPCS_PARA_TENTAR: Record<string, string[]> = {
+    gnosis: ['https://rpc.gnosischain.com', 'https://gnosis-rpc.publicnode.com'],
+    bnb: ['https://bsc-dataseed.binance.org', 'https://bsc-rpc.publicnode.com'],
+    scroll: ['https://rpc.scroll.io', 'https://scroll-rpc.publicnode.com'],
+    metis: ['https://andromeda.metis.io/?owner=1088'],
+    linea: ['https://rpc.linea.build'],
+    celo: ['https://forno.celo.org'],
+    base: ['https://mainnet.base.org', 'https://base-rpc.publicnode.com', 'https://base.llamarpc.com'],
+    ethereum: [
+        'https://ethereum-rpc.publicnode.com',
+        'https://eth.llamarpc.com',
+        'https://rpc.ankr.com/eth',
+        'https://cloudflare-eth.com',
+        'https://eth.drpc.org',
+    ],
+    arbitrum: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum-one-rpc.publicnode.com'],
+    optimism: ['https://mainnet.optimism.io', 'https://optimism-rpc.publicnode.com'],
+    polygon: ['https://polygon-rpc.com', 'https://polygon-bor-rpc.publicnode.com'],
+    avalanche: ['https://api.avax.network/ext/bc/C/rpc', 'https://avalanche-c-chain-rpc.publicnode.com'],
+};
+
+/** Tamanhos de pedaço a experimentar, do menor para o maior. */
+export const TAMANHOS_PARA_SONDAR = [10, 100, 1_000, 2_000, 10_000];
+
+export interface Sonda {
+    rpc: string;
+    /** Maior pedaço que funcionou LONGE do topo. 0 = não serve. */
+    maiorFaixa: number;
+    erro?: string;
+}
+
+/**
+ * Qual RPC usar, dado o que a sondagem encontrou.
+ *
+ * Ganha o que aguenta o maior pedaço, porque é ele que decide se a varredura
+ * leva vinte minutos ou cinco horas: 1.296.000 blocos de dez em dez são cento
+ * e trinta mil pedidos.
+ *
+ * Empate fica com o primeiro da lista, que é a ordem de preferência escrita à
+ * mão em `RPCS_PARA_TENTAR`.
+ */
+export function escolherMelhorRpc(sondas: Sonda[]): Sonda | null {
+    const servem = sondas.filter((s) => s.maiorFaixa > 0);
+    if (servem.length === 0) return null;
+    return servem.reduce((melhor, s) => (s.maiorFaixa > melhor.maiorFaixa ? s : melhor));
+}
+
+/**
+ * Quanto tempo a varredura vai levar, em minutos, com um dado pedaço.
+ *
+ * Existe para a decisão sair ANTES da espera, e não depois. Cinco horas de
+ * varredura não é "um pouco mais lento": é uma tarde perdida por um número que
+ * dava para calcular em uma linha.
+ */
+export function minutosEstimados(blocos: number, pedaco: number, segPorPedido = 0.3): number {
+    if (pedaco <= 0) return Infinity;
+    return (Math.ceil(blocos / pedaco) * segPorPedido) / 60;
+}
+
+export interface Rede {
+    nome: string;
+    rpc: string;
+    /** Endereço do Pool da Aave V3 nessa rede. */
+    pool: string;
+    segPorBloco: number;
+    /** Blocos que cobrem ~180 dias, já calculado. */
+    blocos180d: number;
+    /**
+     * As moedas DESTA rede.
+     *
+     * O mesmo USDC tem endereço diferente em cada rede, e a tabela era só da
+     * Base. Trocar `LIQUIDACOES_REDE` para ethereum e rodar teria devolvido
+     * 100% "sem cotação" — e, pior, com aparência de resposta: varredura
+     * completa, zero falhas, veredicto suspenso por "não sei cotar". Mais uma
+     * da família de falhas que não dá erro na tela.
+     *
+     * Hoje serve de RESERVA: a tabela de verdade é descoberta no pool, com
+     * `getReservesList()`. Redes sem tabela à mão dependem inteiramente da
+     * descoberta, o que é o objetivo — escrever endereço de memória é o erro
+     * que se está tentando parar de cometer.
+     */
+    tokens?: Record<string, Token>;
+    /** O que paga o gás nesta rede. Nem toda rede cobra em ETH. */
+    moedaNativa: string;
+}
+
+/** USDC/USDT/DAI/WETH de cada rede. São os ativos em que a dívida costuma estar. */
+const TOKENS_ETHEREUM: Record<string, Token> = {
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0xdac17f958d2ee523a2206206994597c13d831ec7': { simbolo: 'USDT', decimais: 6, estavel: true },
+    '0x6b175474e89094c44da98b954eedeac495271d0f': { simbolo: 'DAI', decimais: 18, estavel: true },
+    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+};
+
+const TOKENS_ARBITRUM: Record<string, Token> = {
+    '0xaf88d065e77c8cc2239327c5edb3a432268e5831': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0xff970a61a04b1ca14834a43f5de4533ebddb5cc8': { simbolo: 'USDC.e', decimais: 6, estavel: true },
+    '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9': { simbolo: 'USDT', decimais: 6, estavel: true },
+    '0xda10009cbd5d07dd0cecc66161fc93d7c9000da1': { simbolo: 'DAI', decimais: 18, estavel: true },
+    '0x82af49447d8a07e3bd95bd0d56f35241523fbab1': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+};
+
+const TOKENS_OPTIMISM: Record<string, Token> = {
+    '0x0b2c639c533813f4aa9d7837caf62653d097ff85': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0x7f5c764cbc14f9669b88837ca1490cca17c31607': { simbolo: 'USDC.e', decimais: 6, estavel: true },
+    '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58': { simbolo: 'USDT', decimais: 6, estavel: true },
+    '0xda10009cbd5d07dd0cecc66161fc93d7c9000da1': { simbolo: 'DAI', decimais: 18, estavel: true },
+    '0x4200000000000000000000000000000000000006': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+};
+
+const TOKENS_POLYGON: Record<string, Token> = {
+    '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': { simbolo: 'USDC.e', decimais: 6, estavel: true },
+    '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': { simbolo: 'USDT', decimais: 6, estavel: true },
+    '0x8f3cf7ad23cd3cadbd9735aff958023239c6a063': { simbolo: 'DAI', decimais: 18, estavel: true },
+    '0x7ceb23fd6bc0add59e62ac25578270cff1b9f619': { simbolo: 'WETH', decimais: 18, estavel: false, emEth: true },
+};
+
+const TOKENS_AVALANCHE: Record<string, Token> = {
+    '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e': { simbolo: 'USDC', decimais: 6, estavel: true },
+    '0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7': { simbolo: 'USDt', decimais: 6, estavel: true },
+    '0xd586e7f844cea2f87f50152665bcbc2c279d8d70': { simbolo: 'DAI.e', decimais: 18, estavel: true },
+    '0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab': { simbolo: 'WETH.e', decimais: 18, estavel: false, emEth: true },
+};
+
+/**
+ * Redes prontas, para a varredura não depender de acertar três variáveis.
+ *
+ * A Aave V3 usa o MESMO endereço de Pool em várias redes porque foi implantada
+ * de forma determinística; Ethereum e Base fogem disso e têm os seus.
+ *
+ * Todos os endereços aqui são melhor-esforço de quem não conseguia alcançar a
+ * rede para conferir. Isso não é problema: endereço errado aparece como "zero
+ * eventos com zero falhas", e o modo descoberta mostra o que o contrato emite
+ * de verdade. O palpite do tópico da Base foi confirmado exatamente assim.
+ */
+export const REDES: Record<string, Rede> = {
+    gnosis: {
+        nome: 'Gnosis',
+        rpc: 'https://rpc.gnosischain.com',
+        pool: '0xb50201558B00496A145fE76f7424749556E326D8',
+        segPorBloco: 5,
+        blocos180d: 3_110_400,
+        moedaNativa: 'xDAI',
+    },
+    bnb: {
+        nome: 'BNB Chain',
+        rpc: 'https://bsc-dataseed.binance.org',
+        pool: '0x6807dc923806fE8Fd134338EABCA509979a7e0cB',
+        segPorBloco: 3,
+        blocos180d: 5_184_000,
+        moedaNativa: 'BNB',
+    },
+    scroll: {
+        nome: 'Scroll',
+        rpc: 'https://rpc.scroll.io',
+        pool: '0x11fCfe756c05AD438e312a7fd934381537D3cFfe',
+        segPorBloco: 3,
+        blocos180d: 5_184_000,
+        moedaNativa: 'ETH',
+    },
+    metis: {
+        nome: 'Metis',
+        rpc: 'https://andromeda.metis.io/?owner=1088',
+        pool: '0x90df02551bB792286e8D4f13E0e357b4Bf1D6a57',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+        moedaNativa: 'METIS',
+    },
+    linea: {
+        nome: 'Linea',
+        rpc: 'https://rpc.linea.build',
+        pool: '0xc47b8C00b0f69a36fa203Ffeac0334874574a8Ac',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+        moedaNativa: 'ETH',
+    },
+    celo: {
+        nome: 'Celo',
+        rpc: 'https://forno.celo.org',
+        pool: '0x3E59A31363E2ad014dcbc521c4a0d5757d9f3402',
+        segPorBloco: 5,
+        blocos180d: 3_110_400,
+        moedaNativa: 'CELO',
+    },
+    base: {
+        nome: 'Base',
+        rpc: 'https://mainnet.base.org',
+        pool: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+        moedaNativa: 'ETH',
+        tokens: TOKENS_BASE,
+    },
+    ethereum: {
+        nome: 'Ethereum',
+        rpc: 'https://eth.drpc.org',
+        pool: '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',
+        segPorBloco: 12,
+        blocos180d: 1_296_000,
+        moedaNativa: 'ETH',
+        tokens: TOKENS_ETHEREUM,
+    },
+    arbitrum: {
+        nome: 'Arbitrum',
+        rpc: 'https://arb1.arbitrum.io/rpc',
+        pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+        segPorBloco: 0.25,
+        // 180 dias dariam 62 milhões de blocos e horas de leitura. Aqui a
+        // janela é menor de propósito: ~30 dias, que já mostra o tamanho.
+        blocos180d: 10_368_000,
+        moedaNativa: 'ETH',
+        tokens: TOKENS_ARBITRUM,
+    },
+    optimism: {
+        nome: 'Optimism',
+        rpc: 'https://mainnet.optimism.io',
+        pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+        moedaNativa: 'ETH',
+        tokens: TOKENS_OPTIMISM,
+    },
+    polygon: {
+        nome: 'Polygon',
+        rpc: 'https://polygon-rpc.com',
+        pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+        moedaNativa: 'POL',
+        tokens: TOKENS_POLYGON,
+    },
+    avalanche: {
+        nome: 'Avalanche',
+        rpc: 'https://api.avax.network/ext/bc/C/rpc',
+        pool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+        segPorBloco: 2,
+        blocos180d: 7_776_000,
+        moedaNativa: 'AVAX',
+        tokens: TOKENS_AVALANCHE,
+    },
+};
+
+/**
+ * Quanto o vencedor pagou ACIMA do obrigatório, em múltiplos da taxa base.
+ *
+ * É esta razão que separa as duas formas de disputa, e elas pedem estratégias
+ * opostas:
+ *
+ *   ~1x   → CORRIDA. Todo mundo paga o mínimo e quem chega primeiro leva.
+ *           Quem não tem servidor colado no sequenciador não entra.
+ *   >>1x  → LEILÃO. Está sendo pago um prêmio para passar na frente, e
+ *           quem aceita lucro menor pode dar lance maior e ganhar.
+ *
+ * Deliberadamente em múltiplos da base, e não em dólares: a razão responde a
+ * pergunta sem precisar da cotação do ETH, que eu não tenho e não vou
+ * inventar.
+ */
+export function multiploDaBase(params: {
+    /** Preço efetivo pago por gás, em wei. */
+    efetivoWei: Decimal;
+    /** Taxa base do bloco, em wei. */
+    baseWei: Decimal;
+}): Decimal | null {
+    if (params.baseWei.lessThanOrEqualTo(0)) return null;
+    return params.efetivoWei.dividedBy(params.baseWei);
+}
+
+/** O que foi de fato entregue ao validador como gorjeta, em wei. */
+export function gorjetaWei(params: {
+    efetivoWei: Decimal;
+    baseWei: Decimal;
+    gasUsado: Decimal;
+}): Decimal {
+    const prioridade = Decimal.max(params.efetivoWei.minus(params.baseWei), 0);
+    return prioridade.mul(params.gasUsado);
+}
+
+/** A leitura em português do que a razão significa. */
+export function lerDisputa(multiploMediano: Decimal | null): string {
+    if (multiploMediano === null) return 'sem dado suficiente';
+    if (multiploMediano.lessThan(1.5)) {
+        return 'CORRIDA: os vencedores pagaram quase a taxa mínima. Quem leva é quem chega primeiro, e dar lance não adianta.';
+    }
+    if (multiploMediano.lessThan(5)) {
+        return 'MISTO: pagaram acima do mínimo, mas pouco. Há alguma disputa por prioridade.';
+    }
+    return 'LEILÃO: pagaram MUITO acima do mínimo para passar na frente. Aqui quem aceita lucro menor consegue dar lance maior e ganhar.';
+}
+
+/**
+ * A leitura pela CONTAGEM de quem pagou perto do mínimo — não pela mediana.
+ *
+ * A mediana foi um erro meu e a primeira medição real mostrou por quê. Os oito
+ * maiores prêmios da Base pagaram, em múltiplos da taxa base:
+ *
+ *     1,3x · 1,9x · 1,9x · 2,2x · 4,2x · 16,8x · 69,6x · 2.651,3x
+ *
+ * A mediana disso é 4,2x e `lerDisputa` a chamou de "MISTO: há alguma disputa
+ * por prioridade". Mas metade dos vencedores pagou MENOS DE 2,5x, ou seja,
+ * ganhou um prêmio de seis dígitos pagando quase nada. Isso não é disputa: é
+ * ausência de disputa. Um único maluco pagando 2.651x puxa a mediana para cima
+ * e apaga o fato que decide tudo.
+ *
+ * O que separa corrida de leilão não é o quanto o VENCEDOR MEDIANO pagou. É
+ * quantos vencedores conseguiram NÃO PAGAR. Num leilão de verdade isso não
+ * acontece: se dava para levar $156.899 pagando 1,9x, alguém teria oferecido
+ * 2x. Ninguém ofereceu — logo o lance não era o que decidia.
+ */
+export function lerDisputaPorPiso(multiplos: Decimal[], pisoAte = 2.5): string {
+    if (multiplos.length < 4) return 'sem dado suficiente';
+    const noPiso = multiplos.filter((m) => m.lessThanOrEqualTo(pisoAte)).length;
+    const fracao = noPiso / multiplos.length;
+    const quantos = `${noPiso} de ${multiplos.length} vencedores pagaram até ${pisoAte}x a taxa base`;
+    if (fracao >= 0.5) {
+        return `CORRIDA: ${quantos} — levaram prêmios grandes sem pagar por prioridade. Se dar lance adiantasse, alguém teria dado. Aceitar lucro menor NÃO ajuda aqui: não há leilão para ganhar, e sim chegada para vencer.`;
+    }
+    if (fracao <= 0.2) {
+        return `LEILÃO: só ${quantos} — o resto pagou caro para passar na frente. Aqui quem aceita lucro menor pode pagar mais e ganhar.`;
+    }
+    return `MISTO: ${quantos}. Parte das disputas se decide no lance e parte na chegada.`;
+}
+
+/**
+ * Onde no bloco o vencedor caiu — e o que a mediana escondeu aqui também.
+ *
+ * Esta é a TERCEIRA vez neste projeto que eu escolhi uma estatística do meio
+ * para um dado que não tem meio, e vale escrever por quê: a mediana só
+ * descreve bem uma pilha com um monte no centro. Liquidação grande não é
+ * assim. Ela é disputada de dois jeitos opostos, e o resultado são dois
+ * montes com um vazio entre eles. A mediana cai no vazio e descreve um
+ * vencedor que não existe.
+ *
+ * As oito maiores da Base, em fração do bloco:
+ *
+ *     0,1% · 0,7% · 12,6% · 16,7% · 16,7% · 86,1% · 89,5% · 92,9%
+ *
+ * A mediana é 16,7% e a leitura antiga chamou de "INTERMEDIÁRIA: nem
+ * privilégio de chegada, nem caminho comum". Mas não existe nenhum vencedor
+ * intermediário ali. Existem cinco na frente e TRÊS NO FUNDO — inclusive a
+ * maior de todas, US$255.485 na transação 6.494 de 6.990.
+ *
+ * E é o fundo que importa, porque é prova de existência. Ganhar um prêmio de
+ * seis dígitos na transação 6.494 significa que 6.493 transações passaram
+ * antes sem levar. Quem levou não chegou primeiro nem pagou para passar na
+ * frente: simplesmente ninguém disputou. Uma vez seria sorte; três de oito é
+ * espaço.
+ *
+ * Contar o fundo, então, e não medir o meio.
+ */
+export function lerPosicao(fracoes: Decimal[]): string {
+    if (fracoes.length < 4) return 'sem dado suficiente';
+    const fundo = fracoes.filter((f) => f.greaterThan(0.5)).length;
+    const frente = fracoes.filter((f) => f.lessThan(0.15)).length;
+    const n = fracoes.length;
+
+    if (fundo === 0) {
+        return `NINGUÉM GANHOU DO FUNDO (${frente} de ${n} vencedores na frente do bloco): toda vez que houve prêmio grande, quem levou estava na cabeça. Chegar tarde nunca deu certo — e chegar cedo é infraestrutura, não código.`;
+    }
+    return `TEM ESPAÇO: ${fundo} de ${n} vencedores levaram prêmios grandes estando na METADE DE TRÁS do bloco — passaram milhares de transações antes sem ninguém pegar. Não foi velocidade nem lance: foi ninguém ter disputado. É aqui que programar melhor ganha de chegar primeiro.`;
+}
+
+/**
+ * A grande caiu sozinha ou no meio de um monte?
+ *
+ * As duas situações são boas para ela, mas por motivos opostos, e pedem bots
+ * diferentes — por isso não dá para deixar as duas juntas num número só.
+ *
+ * SOZINHA significa que o evento passou despercebido: ninguém estava olhando
+ * aquela posição. Ganha quem tiver a lista mais completa de posições vigiadas,
+ * e isso é trabalho de código, feito com calma, antes do dia.
+ *
+ * NO MEIO DE UM MONTE significa pânico: abriu mais coisa do que os robôs
+ * conseguiram processar e sobrou para quem estava por perto. Ganha quem
+ * aguentar o tranco — e quem estiver ligado naquele minuto.
+ *
+ * Não custa chamada nenhuma de rede: os blocos já vieram na varredura.
+ */
+export function aglomeracao(
+    todas: Liquidacao[],
+    alvos: Array<{ usd: Decimal; bloco: number }>,
+    janelaBlocos = 30,
+): { sozinhas: number; emMonte: number; leitura: string; detalhe: string[] } {
+    const blocos = todas.map((l) => l.bloco).sort((a, b) => a - b);
+    let sozinhas = 0;
+    let emMonte = 0;
+    const detalhe: string[] = [];
+
+    for (const alvo of alvos) {
+        // -1 para não contar a própria.
+        const vizinhas =
+            blocos.filter((b) => Math.abs(b - alvo.bloco) <= janelaBlocos).length - 1;
+        if (vizinhas >= 3) emMonte += 1;
+        else sozinhas += 1;
+        detalhe.push(`$${alvo.usd.toFixed(0)}: ${vizinhas} outras em ±${janelaBlocos} blocos`);
+    }
+
+    const n = alvos.length;
+    const leitura =
+        emMonte > sozinhas
+            ? `PÂNICO: ${emMonte} de ${n} das grandes caíram no meio de um monte. Abre mais do que os robôs dão conta e sobra. O bot precisa estar LIGADO no minuto certo e aguentar várias de uma vez.`
+            : `DESPERCEBIDAS: ${sozinhas} de ${n} das grandes caíram sozinhas, sem outras por perto. Ninguém estava olhando aquela posição. Ganha quem tiver a lista de posições mais completa — e isso se faz com calma, antes.`;
+
+    return { sozinhas, emMonte, leitura, detalhe };
+}
+
+// ---------------------------------------------------------------------------
+// O BÔNUS — o número que eu vinha chutando e que decide quanto uma vitória paga.
+// ---------------------------------------------------------------------------
+
+/**
+ * `getConfiguration(address)` no contrato da Aave. Conferido com ethers:
+ * os quatro primeiros bytes de keccak("getConfiguration(address)").
+ */
+export const SELETOR_GET_CONFIGURATION = '0xc44b11f7';
+
+/** A chamada pronta para `eth_call`: seletor + o ativo em palavra de 32 bytes. */
+export function chamadaDeConfiguracao(ativo: string): string {
+    return SELETOR_GET_CONFIGURATION + ativo.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+}
+
+/**
+ * O bônus de liquidação daquele ativo, como fração — 0.05 para 5%.
+ *
+ * Eu vinha escrevendo "uns 5% a 10%, depende da moeda" e isso era chute. A
+ * diferença entre 5% e 10% dobra o que ela ganha, então o chute não era um
+ * detalhe: era metade da resposta.
+ *
+ * A Aave guarda a configuração de cada ativo empacotada num único número de
+ * 256 bits, cada pedaço num intervalo de bits. O bônus está nos bits 32 a 47 e
+ * vem em centésimos de por cento, com 100% embutido: 10500 quer dizer que o
+ * liquidante recebe 105% do valor da dívida em garantia. O lucro é o que passa
+ * de 100% — 5%.
+ *
+ * Importante: o bônus é configurado na GARANTIA, não na dívida. Quem decide
+ * quanto se ganha é a moeda que se leva, não a que se paga.
+ */
+export function bonusDeLiquidacao(dataHex: string): Decimal | null {
+    const limpo = dataHex.replace(/^0x/, '');
+    if (limpo.length < 64) return null;
+    const bruto = (BigInt(`0x${limpo.slice(0, 64)}`) >> 32n) & 0xffffn;
+    // Zero = ativo sem configuração de garantia. Não existe bônus de 0%: o que
+    // existe é ativo que não serve de garantia, e aí a resposta é "não sei".
+    if (bruto === 0n) return null;
+    return new Decimal(bruto.toString()).dividedBy(10_000).minus(1);
+}
+
+/**
+ * O que sobra para ela, antes do gás.
+ *
+ * Não é a dívida. A dívida é de quem quebrou; ela só a paga e leva a garantia
+ * com o ágio. Confundir as duas infla o resultado por vinte vezes — e foi
+ * exatamente o erro de ordem de grandeza que eu já cometi uma vez hoje.
+ */
+export function lucroBruto(dividaUsd: Decimal, bonus: Decimal): Decimal {
+    return dividaUsd.mul(bonus);
+}
+
+// ---------------------------------------------------------------------------
+// A JANELA — quanto tempo a porta fica aberta.
+// ---------------------------------------------------------------------------
+
+/** Faixas da janela, em blocos, da mais apertada para a mais folgada. */
+export const FAIXAS_DE_JANELA: Array<{ ate: number; nome: string }> = [
+    { ate: 0, nome: 'mesmo bloco' },
+    { ate: 5, nome: '1-5 blocos' },
+    { ate: 30, nome: '6-30 blocos' },
+    { ate: 300, nome: '31-300 blocos' },
+    { ate: 1800, nome: '301-1800 blocos' },
+];
+
+export interface Janela {
+    pares: number;
+    mesmoBloco: number;
+    porFaixa: Record<string, number>;
+    medianaBlocos: number | null;
+    medianaSegundos: number | null;
+    leitura: string;
+}
+
+/**
+ * Quanto tempo uma posição liquidável sobrevive antes de alguém pegar.
+ *
+ * É a pergunta que decide se ela consegue competir, e até agora eu só sabia
+ * fazê-la com nó de rede caro. Dá para responder de graça, e a chave é o
+ * `devedor`, que já vem no evento e que eu não estava usando para nada.
+ *
+ * A Aave não deixa quitar a dívida inteira de uma vez no caso comum: fecha-se
+ * uma parte e o resto continua lá, liquidável, à vista de todo mundo. Então
+ * quando o MESMO devedor aparece duas vezes, o intervalo entre as duas é
+ * tempo em que havia dinheiro exposto e ninguém pegou.
+ *
+ * Mesmo bloco significa que a porta fecha antes de dar para reagir do Brasil.
+ * Trinta blocos na Base são um minuto — e um minuto é uma eternidade para
+ * código que já estava pronto esperando.
+ *
+ * O que isto NÃO é: medição direta da janela. O segundo evento pode ser um
+ * episódio novo, com o preço tendo caído mais depois. Por isso pares acima de
+ * `limiteBlocos` são descartados em vez de entrarem como janelas enormes, e
+ * pares da mesma transação também — um liquidante fechando duas posições de
+ * uma vez é uma ação só, não é disputa. É um limite SUPERIOR mal-humorado, e
+ * serve porque a resposta que interessa é de ordem de grandeza: segundos ou
+ * minutos.
+ */
+export function janelaDeOportunidade(
+    todas: Liquidacao[],
+    segPorBloco = 2,
+    limiteBlocos = 1800,
+): Janela {
+    const porDevedor = new Map<string, Liquidacao[]>();
+    for (const l of todas) {
+        const k = l.devedor.toLowerCase();
+        const lista = porDevedor.get(k);
+        if (lista) lista.push(l);
+        else porDevedor.set(k, [l]);
+    }
+
+    const porFaixa: Record<string, number> = {};
+    for (const f of FAIXAS_DE_JANELA) porFaixa[f.nome] = 0;
+    const vaos: number[] = [];
+    let mesmoBloco = 0;
+
+    for (const lista of porDevedor.values()) {
+        if (lista.length < 2) continue;
+        const ordenada = [...lista].sort((a, b) => a.bloco - b.bloco);
+        for (let i = 1; i < ordenada.length; i += 1) {
+            const antes = ordenada[i - 1];
+            const agora = ordenada[i];
+            // Mesma transação é uma ação só, não é alguém tendo chegado depois.
+            if (antes.transacao === agora.transacao) continue;
+            const vao = agora.bloco - antes.bloco;
+            if (vao > limiteBlocos) continue;
+            vaos.push(vao);
+            if (vao === 0) mesmoBloco += 1;
+            const faixa = FAIXAS_DE_JANELA.find((f) => vao <= f.ate);
+            if (faixa) porFaixa[faixa.nome] += 1;
+        }
+    }
+
+    if (vaos.length === 0) {
+        return {
+            pares: 0,
+            mesmoBloco: 0,
+            porFaixa,
+            medianaBlocos: null,
+            medianaSegundos: null,
+            leitura: 'sem dado suficiente: nenhum devedor apareceu duas vezes.',
+        };
+    }
+
+    vaos.sort((a, b) => a - b);
+    const mediana = vaos[Math.floor(vaos.length / 2)];
+    const segundos = mediana * segPorBloco;
+    const fracaoInstantanea = mesmoBloco / vaos.length;
+
+    let leitura: string;
+    if (fracaoInstantanea >= 0.5) {
+        leitura = `PORTA FECHA NA HORA: ${mesmoBloco} de ${vaos.length} pares aconteceram no MESMO bloco. Não sobra tempo para reagir de fora — competir aqui é questão de infraestrutura, não de código.`;
+    } else if (segundos >= 30) {
+        leitura = `DÁ TEMPO: a janela típica é de ${mediana} blocos, uns ${segundos} segundos. Para código que já estava pronto esperando, isso é uma eternidade. É aqui que programar melhor ganha de chegar primeiro.`;
+    } else {
+        leitura = `JANELA APERTADA: a típica é de ${mediana} blocos, uns ${segundos} segundos. Dá, mas só com a transação pronta e assinada antes — não dá para montar nada na hora.`;
+    }
+
+    return {
+        pares: vaos.length,
+        mesmoBloco,
+        porFaixa,
+        medianaBlocos: mediana,
+        medianaSegundos: segundos,
+        leitura,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// DESCOBRIR as moedas da rede, em vez de eu escrever a tabela de memória.
+// ---------------------------------------------------------------------------
+
+export const SELETOR_GET_RESERVES_LIST = '0xd1946dbc';
+export const SELETOR_SYMBOL = '0x95d89b41';
+export const SELETOR_DECIMALS = '0x313ce567';
+
+/**
+ * Por que a tabela de moedas deixa de ser escrita à mão.
+ *
+ * Hoje eu escrevi `TOKENS_BASE` de cabeça e a rodada da Ethereum morreu por
+ * causa disso — o mesmo USDC tem endereço diferente em cada rede. Consertei
+ * escrevendo mais cinco tabelas de cabeça, o que é a mesma aposta cinco vezes.
+ *
+ * A Aave sabe a resposta: `getReservesList()` devolve todos os ativos do pool,
+ * e cada um responde `symbol()` e `decimals()`. Três chamadas e a tabela sai
+ * correta, para qualquer rede, inclusive as que eu nunca ouvi falar.
+ *
+ * As tabelas à mão ficam como reserva: se a descoberta falhar, usa-se a que
+ * existir, e o relatório diz qual das duas veio.
+ */
+export function decodificarListaDeEnderecos(dataHex: string): string[] {
+    const limpo = dataHex.replace(/^0x/, '');
+    if (limpo.length < 128) return [];
+    const quantos = Number(BigInt(`0x${limpo.slice(64, 128)}`));
+    const fora: string[] = [];
+    for (let i = 0; i < quantos; i += 1) {
+        const palavra = limpo.slice(128 + i * 64, 128 + (i + 1) * 64);
+        if (palavra.length < 64) break;
+        fora.push(`0x${palavra.slice(24)}`.toLowerCase());
+    }
+    return fora;
+}
+
+/** Decodifica uma string ABI, e também o formato curto de bytes32 que alguns tokens antigos usam. */
+export function decodificarTexto(dataHex: string): string {
+    const limpo = dataHex.replace(/^0x/, '');
+    if (limpo.length === 0) return '';
+    if (limpo.length === 64) {
+        // bytes32 cru: texto seguido de zeros.
+        const bytes = limpo.replace(/(00)+$/, '');
+        return Buffer.from(bytes, 'hex').toString('utf8').replace(/\0/g, '');
+    }
+    if (limpo.length < 128) return '';
+    const tamanho = Number(BigInt(`0x${limpo.slice(64, 128)}`));
+    return Buffer.from(limpo.slice(128, 128 + tamanho * 2), 'hex').toString('utf8');
+}
+
+/**
+ * Classifica pelo símbolo — e é aqui que o cuidado importa.
+ *
+ * Estável é o que vale ~1 dólar. Um símbolo com USD ou DAI é estável; um com
+ * ETH segue o preço do ETH. O resto fica sem cotação, que continua sendo a
+ * resposta honesta em vez de um chute.
+ *
+ * `wstETH` e `weETH` valem MAIS que um ETH (são ETH rendendo juros), então
+ * marcá-los como `emEth` subestimaria a dívida. Ficam de fora de propósito: é
+ * melhor aparecer em "sem cotação" do que entrar com um número baixo demais e
+ * fazer o histograma dizer que não há nada grande.
+ */
+export function classificarToken(simbolo: string, decimais: number): Token {
+    const s = simbolo.toUpperCase();
+    const estavel = /USD|DAI|EUR|BRZ|GHO|FRAX|LUSD|MAI/.test(s);
+    const puroEth = s === 'WETH' || s === 'ETH' || s === 'WETH.E';
+    return { simbolo, decimais, estavel, ...(puroEth ? { emEth: true } : {}) };
+}
+
+/** Uma chamada `eth_call` sem argumentos. */
+export function chamadaSimples(seletor: string): string {
+    return seletor;
+}
