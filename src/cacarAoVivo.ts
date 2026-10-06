@@ -1229,16 +1229,27 @@ export interface VarreduraDeDevedores {
  * partida ao meio e tentada de novo, até aqui.
  *
  * O número existe porque os dois provedores têm tetos diferentes e MEDIDOS: o
- * `mainnet.base.org` recusa `eth_getLogs` acima de 2.000 blocos; o RPC de
- * produção dela aceita 10.000 (deduzido do censo rodando com faixas de 10.000 e
- * zero falhas). Um `PEDACO` cravado serve a um e trai o outro — e trai do pior
- * jeito possível: todas as faixas falham, a lista volta VAZIA, e o log diz
- * "varredura concluída, 0 devedores", que é ausência com cara de resposta.
+ * RPC de produção dela aceita 10.000 (deduzido do censo rodando com faixas de
+ * 10.000 e zero falhas). Um `PEDACO` cravado serve a um e trai o outro — e trai
+ * do pior jeito possível: todas as faixas falham, a lista volta VAZIA, e o log
+ * diz "varredura concluída, 0 devedores", que é ausência com cara de resposta.
  *
- * Com a partição, 10.000 é um palpite otimista barato: onde cabe, custa 1
- * chamada; onde não cabe, custa 1 falha e 5 chamadas de 2.000.
+ * E ERA 2000, pelo teto medido do `mainnet.base.org` em 2026-10-02. Em
+ * 2026-10-06 o mesmo provedor respondeu `eth_getLogs is limited to a 500 range`:
+ * ele APERTOU o teto em quatro dias. Com o piso em 2.000 a descida parava acima
+ * do que o provedor aceitava e devolvia zero devedores — exatamente o defeito
+ * que a sondagem existe para evitar, criado pelo piso dela.
+ *
+ * A lição é sobre o número, não sobre o provedor: teto de provedor é coisa que
+ * MUDA, então o piso tem de ser baixo o bastante para a descida alcançar
+ * qualquer teto plausível. 250 é metade do menor teto que a Base já anunciou.
+ *
+ * O custo, contado passo a passo a partir de `PEDACO` 10.000 contra um provedor
+ * de teto 500: 10.000, 5.000, 2.500, 1.250, 625 falham e 312 passa — SEIS
+ * sondagens, uma vez por processo, e depois a varredura inteira já nasce no
+ * tamanho certo. Contra o RPC de produção (teto 10.000) é UMA.
  */
-export const PEDACO_MINIMO = 2000;
+export const PEDACO_MINIMO = 250;
 
 /** O maior tamanho de faixa que ESTE provedor aceitou, medido uma vez por processo. */
 let pedacoMedido: number | null = null;
@@ -3105,9 +3116,18 @@ async function principal(): Promise<'parar' | void> {
                         seADividaSubir: tabelaDeAltas,
                         bussola,
                         gatilhoEm: `${margemDaBrasa.toFixed(4)}%`,
-                        naListaQuente: TETO_DA_LISTA_QUENTE > 0 && quentes.length > TETO_DA_LISTA_QUENTE
-                            ? `${quentes.length}, mas LI SÓ ${TETO_DA_LISTA_QUENTE} (teto CACA_TETO_QUENTE) — ${quentes.length - TETO_DA_LISTA_QUENTE} não foram vistos neste ciclo`
-                            : `${quentes.length} (todos lidos)`,
+                        // ESTE CICLO LEU SÓ A BRASA — é o que o título diz.
+                        //
+                        // A etiqueta aqui vinha copiada da varredura 'quentes' e
+                        // publicava `1324 (todos lidos)` num ciclo que leu ZERO
+                        // deles. Achado no log dela de 2026-10-06, e é a forma
+                        // exata que este projeto persegue: etiqueta que não
+                        // descreve o conjunto. Pior aqui do que em outros
+                        // lugares, porque ela estava lendo este log para
+                        // entender três dias sem tiro — e ele afirmava cobertura
+                        // de 1.324 posições que ninguém tinha olhado.
+                        naListaQuente: `${quentes.length} esperando, e NENHUM foi lido neste ciclo — `
+                            + `este ciclo é só a brasa (${brasa.length}). Eles entram na varredura 'quentes'`,
                         custou: (() => {
                             const pac = contaDaPaciencia();
                             return `${Date.now() - inicioDoCiclo}ms`
