@@ -538,6 +538,15 @@ export interface Degrau {
     quantos: number;
     /** Dessas, quantas pagariam o proprio gas. */
     quantosValem: number;
+    /**
+     * Dessas, quantas entraram SEM o par resolvido — ou seja, por suposicao.
+     *
+     * `alcancaNaDirecao` conta o desconhecido como alcancavel de proposito, e o
+     * vies esta certo. O que nao pode e a soma publicada nao dizer quanto dela e
+     * palpite: depois de um deploy a memoria dos pares volta vazia e a tabela
+     * infla sozinha, parecendo oportunidade nova.
+     */
+    porPalpite: number;
     dividaUsd: Decimal;
     /** Soma do lucro das que valem. NAO e a divida. */
     lucroUsd: Decimal;
@@ -607,6 +616,22 @@ export function oQueUmMovimentoRenderia(medidos: Medida[], degraus: number[], di
             const regua = direcao === 'queda' ? m.queda : altaEquivalente(m.queda);
             return regua !== null && regua.lessThanOrEqualTo(quedaPct);
         });
+        // QUANTOS DESTES SÃO PALPITE.
+        //
+        // `alcancaNaDirecao` devolve `true` para quem ainda não teve o par
+        // resolvido, e o viés está certo: deixar um sensível de fora custa o
+        // tiro, vigiar um imune por engano custa uma vaga.
+        //
+        // Mas a SOMA publicada não pode calar isso. Em 2026-10-06, logo depois
+        // de um deploy, a memória dos pares voltou vazia (`57163 ainda não
+        // sei`) e a tabela saltou de "1%: 1 alcanço" para "1%: 191 alcanço",
+        // com US$ 171.144 a 10%. Parecia o mercado abrindo; era a bússola
+        // apagada contando imunes como alcançáveis — e as DUAS tabelas, queda e
+        // alta, inflaram juntas, o que é impossível para a mesma posição.
+        //
+        // Número medido e número suposto na mesma soma, sem etiqueta: é o
+        // defeito que este arquivo persegue desde o primeiro dia.
+        const porPalpite = alcancados.filter((m) => m.via === undefined).length;
         let dividaUsd = new Decimal(0);
         let lucroUsd = new Decimal(0);
         let quantosValem = 0;
@@ -632,7 +657,7 @@ export function oQueUmMovimentoRenderia(medidos: Medida[], degraus: number[], di
                 if (maior === null || comparaPremio(candidato, maior) < 0) maior = candidato;
             }
         }
-        return { quedaPct, quantos: alcancados.length, quantosValem, dividaUsd, lucroUsd, maior };
+        return { quedaPct, quantos: alcancados.length, quantosValem, porPalpite, dividaUsd, lucroUsd, maior };
     });
 }
 
@@ -683,7 +708,10 @@ export function comoLerAsQuedas(degraus: Degrau[]): string {
     // e era uma de US$ 66 a 1,44% de cair.
     return degraus
         .map((d) => `${d.quedaPct}%: ${d.quantos} alcanço/${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)}${
-            d.maior === null ? '' : `, maior US$ ${d.maior.lucroUsd.toFixed(0)} a ${d.maior.quedaPct.toFixed(2)}%`})`)
+            d.maior === null ? '' : `, maior US$ ${d.maior.lucroUsd.toFixed(0)} a ${d.maior.quedaPct.toFixed(2)}%`}${
+            // Sem esta fração, "191 alcanço" com 190 de par desconhecido lê
+            // igual a "191 alcanço" medidos um por um.
+            d.porPalpite > 0 ? `, mas ${d.porPalpite} de ${d.quantos} são PALPITE: par ainda não resolvido` : ''})`)
         .join(' | ');
 }
 
@@ -1251,6 +1279,25 @@ export interface VarreduraDeDevedores {
  */
 export const PEDACO_MINIMO = 250;
 
+/**
+ * Os tamanhos a sondar, do pedido ate o piso, partindo ao meio.
+ *
+ * Exportada porque DOIS lugares precisam dela — o cacador e a ferramenta da
+ * REGRA 0 — e porque uma regra em dois lugares e a regra 3 deste projeto. Em
+ * 2026-10-06 o `mostrarAFila` tinha o 2.000 cravado e devolveu 205 de 205
+ * janelas falhadas, cobertura 0%, na ferramenta que existe justamente para
+ * pegar esse tipo de coisa antes do deploy.
+ */
+export function tamanhosASondar(pedido: number, piso: number): number[] {
+    const fora: number[] = [];
+    let t = Math.max(piso, pedido);
+    for (;;) {
+        fora.push(t);
+        if (t <= piso) return fora;
+        t = Math.max(piso, Math.floor(t / 2));
+    }
+}
+
 /** O maior tamanho de faixa que ESTE provedor aceitou, medido uma vez por processo. */
 let pedacoMedido: number | null = null;
 
@@ -1298,7 +1345,9 @@ function anunciarPedaco(pedaco: number, tentativas: number, bateuNoPiso: boolean
  */
 async function descobrirPedaco(topo: number): Promise<{ pedaco: number; tentativas: number }> {
     if (pedacoMedido !== null) return { pedaco: pedacoMedido, tentativas: 0 };
-    let tamanho = Math.max(PEDACO_MINIMO, PEDACO);
+    const escada = tamanhosASondar(PEDACO, PEDACO_MINIMO);
+    let passo = 0;
+    let tamanho = escada[0]!;
     let tentativas = 0;
     for (;;) {
         tentativas += 1;
@@ -1316,12 +1365,13 @@ async function descobrirPedaco(topo: number): Promise<{ pedaco: number; tentativ
             anunciarPedaco(tamanho, tentativas, false);
             return { pedaco: tamanho, tentativas };
         } catch {
-            if (tamanho <= PEDACO_MINIMO) {
+            passo += 1;
+            if (passo >= escada.length) {
                 pedacoMedido = PEDACO_MINIMO;
                 anunciarPedaco(PEDACO_MINIMO, tentativas, true);
                 return { pedaco: PEDACO_MINIMO, tentativas };
             }
-            tamanho = Math.max(PEDACO_MINIMO, Math.floor(tamanho / 2));
+            tamanho = escada[passo]!;
         }
     }
 }

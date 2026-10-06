@@ -30,7 +30,7 @@ import {
     repartirPorFragilidade, oPrecoCancela, oQueUmaQuedaRenderia, oQueUmaAltaRenderia, comoLerAsQuedas,
     viaDeQuebra, contarVias, comoLerABussola, altaEquivalente,
     quantoPedirEmprestado, poolParaVender, pisoDoLucroEmUnidadesCruas,
-    margemQueDecideORitmo, montarAlvos, type Medida,
+    margemQueDecideORitmo, montarAlvos, tamanhosASondar, PEDACO_MINIMO, type Medida,
 } from './cacarAoVivo';
 import { POOLS } from './contratos';
 
@@ -115,7 +115,34 @@ async function lerParaMontar(cs: Array<{ alvo: string; dados: string }>): Promis
     }
 
     // 1. O universo de devedores. Cobertura DECLARADA, sempre.
-    const JANELA = 2000;
+    //
+    // O TAMANHO DA JANELA É MEDIDO, NÃO CRAVADO.
+    //
+    // Era `2000`, o teto do `mainnet.base.org` medido em 02/10. Em 06/10 o mesmo
+    // provedor passou a recusar acima de 500, e esta ferramenta devolveu 205 de
+    // 205 janelas falhadas, cobertura 0,0% — e imprimiu a tabela inteira de
+    // zeros embaixo disso, na ferramenta que existe para pegar exatamente esse
+    // tipo de coisa antes do deploy.
+    //
+    // A escada de tamanhos vem de `tamanhosASondar`, a MESMA que o caçador usa:
+    // duas cópias divergiriam no dia em que uma fosse corrigida.
+    let JANELA = 0;
+    for (const t of tamanhosASondar(10000, PEDACO_MINIMO)) {
+        try {
+            const r = await rpc<Array<{ topics: string[] }>>('eth_getLogs', [{
+                address: POOL, fromBlock: `0x${(topo - t + 1).toString(16)}`, toBlock: `0x${topo.toString(16)}`,
+                topics: [TOPIC_BORROW],
+            }]);
+            if (!r.error) { JANELA = t; break; }
+        } catch { /* próximo tamanho */ }
+        await dormir(200);
+    }
+    if (JANELA === 0) {
+        console.log('\nPAREI: nenhum tamanho de janela foi aceito por este RPC, nem o menor.');
+        console.log('Sem universo de devedores não há fila, e publicar zeros seria inventar uma medição.');
+        return;
+    }
+    console.log(`JANELA MEDIDA: ${JANELA} blocos por eth_getLogs neste RPC`);
     const vistos = new Set<string>();
     let falharam = 0;
     for (let i = 0; i < JANELAS; i++) {
@@ -129,6 +156,14 @@ async function lerParaMontar(cs: Array<{ alvo: string; dados: string }>): Promis
         } catch { falharam++; }
         if (i % 40 === 39) process.stderr.write(`.${vistos.size}`);
         await dormir(150);
+    }
+    if (falharam === JANELAS) {
+        // O defeito que esta ferramenta cometeu em 06/10: declarou cobertura
+        // 0,0% e, logo abaixo, imprimiu `1%: 0 alcanço` como se fosse resposta.
+        // Cobertura zero não é "não há ninguém", é "não perguntei".
+        console.log(`\nPAREI: TODAS as ${JANELAS} janelas falharam. Cobertura 0%.`);
+        console.log('Isto NÃO quer dizer que a fila está vazia — quer dizer que eu não consegui perguntar.');
+        return;
     }
     const devedores = [...vistos];
     console.log(`UNIVERSO: ${devedores.length} devedores em ${JANELAS} janelas de ${JANELA} blocos `

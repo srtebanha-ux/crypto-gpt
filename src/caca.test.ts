@@ -596,8 +596,36 @@ test('a linha que ela vai ler tem forma travada', () => {
     ];
     assert.equal(
         comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [2, 5])),
+        '2%: 1 alcanço/1 valem (US$ 2, maior US$ 2 a 1.16%, mas 1 de 1 são PALPITE: par ainda não resolvido)'
+        + ' | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00%, mas 2 de 2 são PALPITE: par ainda não resolvido)',
+    );
+});
+
+test('sem palpite nenhum a linha NÃO carrega a ressalva', () => {
+    // O gêmeo do teste acima, e a razão de a ressalva existir: ela tem de
+    // aparecer quando o par é suposto E sumir quando ele foi medido. Uma
+    // ressalva que sai sempre vira ruído e deixa de ser lida — foi assim que
+    // `jaSabia: 6575` passou despercebido por dias.
+    const medidos = [
+        { devedor: '0xPERTO', queda: new Decimal('1.1562'), dividaUsd: new Decimal('91.74'), via: 'long' as const },
+        { devedor: '0xMEDIO', queda: new Decimal(4), dividaUsd: new Decimal(4000), via: 'long' as const },
+    ];
+    const linha = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [2, 5]));
+    assert.equal(linha.includes('PALPITE'), false, linha);
+    assert.equal(
+        linha,
         '2%: 1 alcanço/1 valem (US$ 2, maior US$ 2 a 1.16%) | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00%)',
     );
+});
+
+test('a ressalva conta SÓ os supostos, não o degrau inteiro', () => {
+    // O caso que uma contagem preguiçosa erraria: um medido e um suposto no
+    // mesmo degrau têm de sair como "1 de 2", não "2 de 2" nem nada.
+    const medidos = [
+        { devedor: '0xSABIDO', queda: new Decimal(1), dividaUsd: new Decimal(4000), via: 'long' as const },
+        { devedor: '0xSUPOSTO', queda: new Decimal(1), dividaUsd: new Decimal(4000) },
+    ];
+    assert.match(comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [2])), /mas 1 de 2 são PALPITE/);
 });
 
 test('tabela vazia diz "nada medido", não vira string vazia', () => {
@@ -747,7 +775,7 @@ test('a linha mostra ALCANÇO e VALEM separados — é a resposta para "a prova 
         { devedor: '0xBOM', queda: new Decimal(0.9), dividaUsd: new Decimal(4000) },
     ];
     const linha = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1]));
-    assert.equal(linha, '1%: 3 alcanço/1 valem (US$ 87, maior US$ 87 a 0.90%)');
+    assert.equal(linha, '1%: 3 alcanço/1 valem (US$ 87, maior US$ 87 a 0.90%, mas 3 de 3 são PALPITE: par ainda não resolvido)');
 });
 
 // ---------------------------------------------------------------------------
@@ -859,7 +887,7 @@ test('degrau sem ninguém que valha não inventa um maior', () => {
     const [d] = oQueUmaQuedaRenderia(medidos, [2]);
     assert.equal(d!.quantosValem, 0);
     assert.equal(d!.maior, null);
-    assert.equal(comoLerAsQuedas([d!]), '2%: 1 alcanço/0 valem (US$ 0)');
+    assert.equal(comoLerAsQuedas([d!]), '2%: 1 alcanço/0 valem (US$ 0, mas 1 de 1 são PALPITE: par ainda não resolvido)');
 });
 
 test('modo prova: o RITMO segue o alvo em que o bot atira, não o que passa o piso', () => {
