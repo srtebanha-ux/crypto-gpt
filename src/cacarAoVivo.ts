@@ -1846,6 +1846,20 @@ async function principal(): Promise<'parar' | void> {
      * passou uma hora atras. Um numero que ninguem consegue ler nao informa
      * nada, mesmo estando correto.
      */
+    /**
+     * QUANDO as tabelas foram calculadas. 0 = nunca.
+     *
+     * Elas so sao refeitas na varredura COMPLETA — a unica que olha todo mundo —
+     * e o log as reimprime a cada ciclo, ao lado de campos que sao ao vivo
+     * (`mercado`, `oraculoJaCaiuPct`). Com `CACA_MINUTOS_COMPLETA=180` isso quer
+     * dizer um retrato de ate tres horas atras publicado como se fosse de agora.
+     *
+     * Achado em 2026-10-06 porque dois logs separados por cinco minutos trouxeram
+     * as tabelas byte a byte identicas enquanto o oraculo tinha andado 0,17%%.
+     * Numero velho ao lado de numero novo, sem etiqueta, e a forma do defeito que
+     * este projeto persegue.
+     */
+    let tabelasCalculadasEm = 0;
     let tabelaDeQuedas = 'ainda não medida';
     /** A gêmea: o que uma ALTA da dívida renderia — a via SHORT, medida em 2026-09-29. */
     let tabelaDeAltas = 'ainda não medida';
@@ -3306,6 +3320,13 @@ async function principal(): Promise<'parar' | void> {
                             const ms = msAteAProximaChegada();
                             return ms === null ? 'nenhuma projetável' : `a mais próxima em ${emQuantoTempo(ms)}`;
                         })(),
+                        // A IDADE VEM JUNTO, senão o retrato velho se passa por
+                        // leitura de agora ao lado de `mercado` e `oraculoJaCaiuPct`,
+                        // que são ao vivo.
+                        essasDuasTabelasTem: tabelasCalculadasEm === 0
+                            ? 'nunca foram calculadas: nenhuma varredura completa rodou ainda'
+                            : `${Math.round((Date.now() - tabelasCalculadasEm) / 1000)}s de idade `
+                              + `(só mudam na varredura completa, a cada ${MINUTOS_ENTRE_COMPLETAS} min)`,
                         seOMercadoCair: tabelaDeQuedas,
                         seADividaSubir: tabelaDeAltas,
                         bussola,
@@ -3499,6 +3520,7 @@ async function principal(): Promise<'parar' | void> {
                         esquecerQuemSaiu(historicoDeSaude, brasa);
                         tabelaDeQuedas = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1, 2, 3, 5, 10]));
                         tabelaDeAltas = comoLerAsQuedas(oQueUmaAltaRenderia(medidos, [1, 2, 3, 5, 10]));
+                        tabelasCalculadasEm = Date.now();
                         bussola = comoLerABussola(contarVias(medidos));
                         // O teto era IMPLICITO: o bot sabia recusar uma baleia
                         // (a simulacao reverte, o piso de lucro barra), mas
