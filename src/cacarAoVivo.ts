@@ -584,7 +584,7 @@ export interface Degrau {
      *
      * E e o maior sozinho que decide, porque e UM alvo por vez que dispara.
      */
-    maior: { lucroUsd: Decimal; quedaPct: Decimal } | null;
+    maior: { lucroUsd: Decimal; quedaPct: Decimal; viaSabida: boolean } | null;
 }
 
 /**
@@ -659,7 +659,7 @@ export function oQueUmMovimentoRenderia(medidos: Medida[], degraus: number[], di
         let dividaUsd = new Decimal(0);
         let lucroUsd = new Decimal(0);
         let quantosValem = 0;
-        let maior: { lucroUsd: Decimal; quedaPct: Decimal } | null = null;
+        let maior: { lucroUsd: Decimal; quedaPct: Decimal; viaSabida: boolean } | null = null;
         for (const m of alcancados) {
             if (m.dividaUsd === null) continue;
             dividaUsd = dividaUsd.plus(m.dividaUsd);
@@ -674,7 +674,13 @@ export function oQueUmMovimentoRenderia(medidos: Medida[], degraus: number[], di
                 // do conjunto: numa linha de `alta`, dizer "a 1.44%" com o
                 // número da queda seria publicar a régua do outro lado da rua.
                 const regua = direcao === 'queda' ? m.queda : altaEquivalente(m.queda);
-                const candidato = { lucroUsd: lucro, quedaPct: regua ?? m.queda };
+                // O MAIOR carrega se ELE é medido ou suposto.
+                //
+                // A fração do degrau não responde a pergunta que ela faz quando
+                // olha o log: "esse alvo de US$ 985 a 0,99% é de verdade?".
+                // "187 de 190 são palpite" não diz em qual dos dois baldes está
+                // o maior — e é nele que ela vai mirar.
+                const candidato = { lucroUsd: lucro, quedaPct: regua ?? m.queda, viaSabida: m.via !== undefined };
                 // O desempate vive em `comparaPremio` porque o lucro satura no
                 // teto do pool: duas baleias empatam ate a ultima casa, e com
                 // `>` estrito quem ganhava era a ordem do multicall.
@@ -732,7 +738,8 @@ export function comoLerAsQuedas(degraus: Degrau[]): string {
     // e era uma de US$ 66 a 1,44% de cair.
     return degraus
         .map((d) => `${d.quedaPct}%: ${d.quantos} alcanço/${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)}${
-            d.maior === null ? '' : `, maior US$ ${d.maior.lucroUsd.toFixed(0)} a ${d.maior.quedaPct.toFixed(2)}%`}${
+            d.maior === null ? '' : `, maior US$ ${d.maior.lucroUsd.toFixed(0)} a ${d.maior.quedaPct.toFixed(2)}%`
+            + (d.maior.viaSabida ? ' [par MEDIDO]' : ' [par SUPOSTO: pode ser imune]')}${
             // Sem esta fração, "191 alcanço" com 190 de par desconhecido lê
             // igual a "191 alcanço" medidos um por um.
             d.porPalpite > 0 ? `, mas ${d.porPalpite} de ${d.quantos} são PALPITE: par ainda não resolvido` : ''})`)

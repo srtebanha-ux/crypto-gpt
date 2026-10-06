@@ -596,8 +596,8 @@ test('a linha que ela vai ler tem forma travada', () => {
     ];
     assert.equal(
         comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [2, 5])),
-        '2%: 1 alcanço/1 valem (US$ 2, maior US$ 2 a 1.16%, mas 1 de 1 são PALPITE: par ainda não resolvido)'
-        + ' | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00%, mas 2 de 2 são PALPITE: par ainda não resolvido)',
+        '2%: 1 alcanço/1 valem (US$ 2, maior US$ 2 a 1.16% [par SUPOSTO: pode ser imune], mas 1 de 1 são PALPITE: par ainda não resolvido)'
+        + ' | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00% [par SUPOSTO: pode ser imune], mas 2 de 2 são PALPITE: par ainda não resolvido)',
     );
 });
 
@@ -614,7 +614,7 @@ test('sem palpite nenhum a linha NÃO carrega a ressalva', () => {
     assert.equal(linha.includes('PALPITE'), false, linha);
     assert.equal(
         linha,
-        '2%: 1 alcanço/1 valem (US$ 2, maior US$ 2 a 1.16%) | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00%)',
+        '2%: 1 alcanço/1 valem (US$ 2, maior US$ 2 a 1.16% [par MEDIDO]) | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00% [par MEDIDO])',
     );
 });
 
@@ -775,7 +775,7 @@ test('a linha mostra ALCANÇO e VALEM separados — é a resposta para "a prova 
         { devedor: '0xBOM', queda: new Decimal(0.9), dividaUsd: new Decimal(4000) },
     ];
     const linha = comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [1]));
-    assert.equal(linha, '1%: 3 alcanço/1 valem (US$ 87, maior US$ 87 a 0.90%, mas 3 de 3 são PALPITE: par ainda não resolvido)');
+    assert.equal(linha, '1%: 3 alcanço/1 valem (US$ 87, maior US$ 87 a 0.90% [par SUPOSTO: pode ser imune], mas 3 de 3 são PALPITE: par ainda não resolvido)');
 });
 
 // ---------------------------------------------------------------------------
@@ -1263,4 +1263,26 @@ test('o host do RPC vai para o log SEM a chave', () => {
     assert.equal(hostDoRpc('https://base-mainnet.g.alchemy.com/v2/CHAVE_SECRETA').includes('CHAVE_SECRETA'), false);
     // URL torta não pode derrubar o log nem inventar um host.
     assert.equal(hostDoRpc('nao é uma url'), 'não consegui ler a URL');
+});
+
+
+test('o MAIOR diz se ELE é medido, não só a fração do degrau', () => {
+    // A pergunta que ela fez olhando o log de 2026-10-06: "tem uma linha a menos
+    // de 1% pra cair, preciso pegar ela". O degrau dizia "187 de 190 são
+    // PALPITE" — e isso NÃO responde em qual dos dois baldes está o maior, que é
+    // justamente onde ela vai mirar.
+    //
+    // Aqui o menor (que é o mais perto de cair, e por isso vira o `maior` só se
+    // o lucro mandar) tem via conhecida e o outro não.
+    const sabido = [
+        { devedor: '0xSABIDO', queda: new Decimal(0.5), dividaUsd: new Decimal(4000), via: 'long' as const },
+        { devedor: '0xSUPOSTO', queda: new Decimal(0.9), dividaUsd: new Decimal(10) },
+    ];
+    assert.match(comoLerAsQuedas(oQueUmaQuedaRenderia(sabido, [1])), /\[par MEDIDO\]/);
+
+    const suposto = [
+        { devedor: '0xSUPOSTO', queda: new Decimal(0.5), dividaUsd: new Decimal(4000) },
+        { devedor: '0xSABIDO', queda: new Decimal(0.9), dividaUsd: new Decimal(10), via: 'long' as const },
+    ];
+    assert.match(comoLerAsQuedas(oQueUmaQuedaRenderia(suposto, [1])), /\[par SUPOSTO: pode ser imune\]/);
 });
