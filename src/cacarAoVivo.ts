@@ -1967,6 +1967,8 @@ async function principal(): Promise<'parar' | void> {
      */
     const DERROTAS_ATE_PARAR = Number(process.env.CACA_DERROTAS_ATE_PARAR ?? '8');
     let disjuntorAberto = false;
+    /** `CACA_DISJUNTOR=0` desliga a parada automática após N derrotas. */
+    const DISJUNTOR_LIGADO = process.env.CACA_DISJUNTOR !== '0';
     /**
      * O gas que resta, em wei. Lido de tempos em tempos, nao a cada tiro.
      *
@@ -4046,7 +4048,36 @@ async function principal(): Promise<'parar' | void> {
                         : new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).mul(ethUsd);
                     const emEth = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
 
-                    if (disjuntorAberto) continue;
+                    // O DISJUNTOR DEIXA DE SER MUDO.
+                    //
+                    // Era `if (disjuntorAberto) continue;` — sem uma linha. O bot
+                    // via o alvo cair, media, aprovava o tiro, e não mandava, em
+                    // silêncio. Para quem lê o log, "não atirou porque o
+                    // disjuntor está aberto" ficava idêntico a "não havia alvo".
+                    //
+                    // Ela disse, em 2026-10-06: "perdemos vários alvos por ele
+                    // não atirar". Este é o único portão do caminho do tiro que
+                    // recusa sem avisar — e por isso o primeiro suspeito.
+                    //
+                    // E ele agora pode ser desligado: com 0,0158 ETH de capital
+                    // que ela declarou 100% de risco, parar após 8 derrotas é
+                    // uma cautela que ela não pediu. `CACA_DISJUNTOR=0` tira.
+                    if (disjuntorAberto) {
+                        if (DISJUNTOR_LIGADO) {
+                            log.error('[DISJUNTOR ABERTO] Tinha alvo e NÃO atirei.', {
+                                devedor: alvo.devedor,
+                                premio: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
+                                porque: `${perdasSeguidas} derrotas seguidas abriram o disjuntor`,
+                                oQueDestrava: 'um tiro que acerte, ou religar o serviço, ou CACA_DISJUNTOR=0',
+                                oQueEuDeixeiPassar: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
+                            });
+                            continue;
+                        }
+                        log.warn('[DISJUNTOR IGNORADO] Ele abriu, mas CACA_DISJUNTOR=0: atiro assim mesmo.', {
+                            derrotasSeguidas: perdasSeguidas,
+                            oRisco: 'se houver algo quebrado (nonce, RPC, contrato), cada tiro queima gás à toa',
+                        });
+                    }
 
                     if (!decisao.atira) {
                         // ABORTAR SEM ENCHER O LOG, pedido dela em 2026-10-02:

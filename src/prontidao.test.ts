@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import { lucroEstimado } from './perdidas';
 import {
+    TETO_SEM_ESTIMATIVA,
     gorjetaPorGas, tetoPorGas, lerBasefee,
     lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, tiroDeProvaArmado, tiroEmBrancoArmado,
     politicaDoTiro, comoLerAPolitica,
@@ -1315,13 +1316,43 @@ test('a faixa de negócio: US$ 0,50 a US$ 500, e vale ATÉ no modo prova', () =>
 // sem gás e o dinheiro vai embora sem liquidação nenhuma.
 // ===========================================================================
 
-test('sem estimativa da rede o bot NÃO atira — nunca chuta o teto', () => {
+test('sem estimativa o bot ATIRA, com teto acima do maximo medido', () => {
+    // ESTE TESTE MUDOU DE LADO EM 2026-10-06, e o motivo esta escrito para a
+    // proxima sessao nao reverter sem saber.
+    //
+    // Ele exigia `limite: null` — nao atirar quando `eth_estimateGas` nao
+    // responde. A razao era boa (nao morrer sem gas), mas a conclusao estava
+    // errada: morrer sem gas so acontece com limite BAIXO. Um limite ALTO nao
+    // tem esse risco, porque o no congela `gasLimit x maxFee` e DEVOLVE o que
+    // nao foi consumido — o preco e lance mais apertado, nao dinheiro perdido.
+    //
+    // Ela disse, depois de perder alvos: "eu so quero que ele atire na hora
+    // certa e pegue o alvo de primeira". Perder a liquidacao por um RPC lento e
+    // perda CERTA; lance apertado e so desvantagem.
+    //
+    // O que o teste protege agora e a regra de verdade: o teto de emergencia
+    // tem de ficar ACIMA do maximo de consumo ja MEDIDO (4.142.116, do lider da
+    // faixa), senao ele reintroduz o fracasso que o original temia.
+    assert.ok(TETO_SEM_ESTIMATIVA > 4_142_116n, 'o maximo medido do lider da faixa');
+
     const r = limiteDeGasDoTiro({ estimadoGas: null, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n });
-    assert.equal(r.limite, null, 'null é a resposta, e não um padrão silencioso');
-    assert.match(r.porque, /NÃO atiro/);
-    // Zero e negativo também são "não sei", e não "usa zero".
-    assert.equal(limiteDeGasDoTiro({ estimadoGas: 0n, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n }).limite, null);
-    assert.equal(limiteDeGasDoTiro({ estimadoGas: -5n, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n }).limite, null);
+    assert.notEqual(r.limite, null, 'atira: perder por RPC lento e perda certa');
+    assert.ok(r.limite! > 4_142_116n, 'e com teto acima do maximo medido');
+    assert.match(r.porque, /não respondeu/);
+
+    // Zero e negativo seguem sendo "nao sei" e caem no mesmo caminho.
+    for (const e of [0n, -5n]) {
+        const x = limiteDeGasDoTiro({ estimadoGas: e, saldoWei: 16419111191761470n, baseFeeWei: 5_000_000n });
+        assert.ok(x.limite === null || x.limite > 4_142_116n);
+    }
+});
+
+test('sem estimativa E com saldo magro, ai sim NAO atira', () => {
+    // O portao que sobra, e ele e aritmetica: se o saldo nao comporta nem o piso
+    // de gas, atirar e morrer sem gas de verdade. Aqui `null` continua certo.
+    const r = limiteDeGasDoTiro({ estimadoGas: null, saldoWei: 100_000_000_000n, baseFeeWei: 5_000_000n });
+    assert.equal(r.limite, null);
+    assert.match(r.porque, /abaixo do piso/);
 });
 
 test('a folga sobre a estimativa cobre a variância medida do líder', () => {

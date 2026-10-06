@@ -87,6 +87,26 @@ export const FOLGA_DO_GAS = Number(process.env.CACA_FOLGA_GAS ?? '1.0');
 
 /** O menor teto que faz sentido mandar: abaixo disto a cacada nao cabe. */
 export const PISO_DO_LIMITE_DE_GAS = 900_000n;
+/**
+ * O teto a mandar quando `eth_estimateGas` nao responde a tempo.
+ *
+ * ACIMA do maximo MEDIDO, e isso nao e folga arbitraria. A unica variancia de
+ * consumo que este projeto mediu: o lider da faixa (`0xd12810b1`, 9 de 19
+ * liquidacoes em 9,5 dias) gastou entre 1.202.608 e 4.142.116 no MESMO
+ * contrato — 2,76x a mediana de 1.500.956.
+ *
+ * A primeira versao disto foi 2.800.000 ("4x o gas tipico"), que e MENOR que o
+ * maximo ja observado. Teria produzido exatamente o fracasso que ela temia:
+ * morrer sem gas no meio, pagando o lance e nao liquidando. O teste vizinho —
+ * que guarda essa medicao — pegou.
+ *
+ * 5.000.000 cobre o maximo medido com 21%% de margem. Nao ha risco de sobra: o
+ * no congela `gasLimit x maxFee` e DEVOLVE o que nao foi consumido. O preco e
+ * lance mais apertado, e `tetoDeGasQueNaoEstrangulaOLance` ja corta pelo que o
+ * saldo comporta. Medido com o saldo dela: mesmo a 3M o lance sai a 4,93 gwei,
+ * doze vezes o maior lance da concorrencia.
+ */
+export const TETO_SEM_ESTIMATIVA = 5_000_000n;
 
 /**
  * O maior teto que ainda deixa a gorjeta ganhar o leilao.
@@ -137,10 +157,47 @@ export function limiteDeGasDoTiro(entrada: {
     gorjetaAlvoWei?: bigint;
 }): { limite: bigint; porque: string } | { limite: null; porque: string } {
     if (entrada.estimadoGas === null || entrada.estimadoGas <= 0n) {
+        // NÃO ATIRAR ERA A RESPOSTA ERRADA, e ela disse por que em 2026-10-06:
+        // "eu só quero que ele atire na hora certa e pegue o alvo de primeira".
+        //
+        // O medo que justificava abortar era morrer SEM GÁS — gastar o lance e
+        // não liquidar. Mas isso só acontece com limite BAIXO demais. Um limite
+        // ALTO não tem esse risco: o nó congela `gasLimit × maxFee` e DEVOLVE o
+        // que não foi usado. O preço de um teto generoso é lance menor, não
+        // dinheiro perdido.
+        //
+        // Então o certo não é escolher entre "atirar no escuro" e "não atirar":
+        // é mandar um teto que a caçada não consegue estourar. `TETO_SEM_ESTIMATIVA`
+        // é 4x o gás típico medido de uma caçada — e `tetoDeGasQueNaoEstrangulaOLance`
+        // continua cortando pelo que o saldo comporta, então nunca vira
+        // `insufficient funds`.
+        //
+        // Perder a liquidação por um `eth_estimateGas` lento é perda certa.
+        // Lance apertado é só desvantagem.
+        // AQUI O GAS GANHA DA GORJETA, e e uma escolha, nao um descuido.
+        //
+        // `tetoDeGasQueNaoEstrangulaOLance` reserva 4 gwei para o lance, e com o
+        // saldo dela (0,0164 ETH) isso limita o gas a 4.099.653 — ABAIXO do
+        // maximo medido de 4.142.116. Ou seja: os dois nao cabem juntos.
+        //
+        // Sem estimativa, quem decide e o risco: morrer sem gas e perda CERTA
+        // (paga o lance, nao liquida); lance apertado e so desvantagem. Entao o
+        // teto aqui reserva apenas o PISO da gorjeta, e o lance fica com o que
+        // sobrar — medido, uns 3,3 gwei, oito vezes o maior lance que a
+        // concorrencia da faixa pagou.
+        const cabeNoSaldo = entrada.saldoWei / (entrada.baseFeeWei + PISO_DA_GORJETA_WEI);
+        const alvo = TETO_SEM_ESTIMATIVA < cabeNoSaldo ? TETO_SEM_ESTIMATIVA : cabeNoSaldo;
+        if (alvo < PISO_DO_LIMITE_DE_GAS) {
+            return {
+                limite: null,
+                porque: `eth_estimateGas não respondeu E o saldo só comporta ${alvo} de gás, abaixo do piso `
+                    + `de ${PISO_DO_LIMITE_DE_GAS}. Atirar aqui é morrer sem gás de verdade`,
+            };
+        }
         return {
-            limite: null,
-            porque: 'eth_estimateGas não respondeu: NÃO atiro. Chutar o teto com o saldo todo na '
-                + 'gorjeta é perder o gás sem liquidar',
+            limite: alvo,
+            porque: `eth_estimateGas não respondeu — mando ${alvo}, que é teto generoso e a caçada não `
+                + 'estoura. O que sobra o nó devolve; o custo é lance mais apertado, não gás perdido',
         };
     }
     const folga = Number.isFinite(entrada.folga) ? Math.max(0, entrada.folga!) : FOLGA_DO_GAS;
