@@ -24,8 +24,37 @@ import { Decimal } from 'decimal.js';
  * conservador, e nao uma constante escondida no meio do codigo. Errar para
  * MENOS aqui faz acordar cedo demais (gasta um pouco de CU a toa); errar para
  * MAIS faz perder a janela inteira. Na duvida, menos.
+ *
+ * ERA 0.5, E ERA PALPITE — este comentario dizia "na duvida, menos" e o numero
+ * escolhido errava para MAIS, que e o lado que o proprio comentario proibia.
+ *
+ * MEDIDO em 2026-10-06 nos eventos `AnswerUpdated` dos agregadores da Base, 7
+ * dias, cobertura 92,9% (ETH) e 90,9% (cbBTC) — entao as contagens sao piso, nao
+ * teto:
+ *
+ *     ETH/USD    agregador 0xd772f6d9…   121,7 escritas/dia
+ *                salto por escrita: p50 0,1603%  p90 0,2216%  max 1,3600%
+ *                limiar aparente: 0,151%
+ *     cbBTC/USD  agregador 0x13723399…   167,7 escritas/dia
+ *                salto por escrita: p50 0,1143%  p90 0,1663%  max 0,4663%
+ *                limiar aparente: 0,103%
+ *
+ * O limiar verdadeiro e de 3,3 a 4,9 vezes MENOR que o palpite. A consequencia
+ * nao era teorica: `posturaPorMargem` arma 'atento' em `desvio x 0.6` = 0,30%,
+ * e o desvio antes de uma escrita chega a 0,22% no p90. Ou seja, a postura
+ * 'atento' — a que le a corrente mais rapido nos segundos que decidem — NUNCA
+ * armava. O log dela de 2026-10-06 mostra o efeito: `0.0193% abaixo do oraculo
+ * (dormindo)`, tres dias seguidos.
+ *
+ * 0,10 e o menor dos dois limiares medidos, que e o lado certo de errar.
+ *
+ * E O QUE ISTO NAO RESOLVE, para a proxima sessao nao se enganar: o oraculo
+ * persegue o mercado dentro de 0,10–0,15%, entao o mercado NUNCA corre 1% na
+ * frente do oraculo. Antecipar compra ~0,15% de dianteira, nao 1%. Um alvo a
+ * 0,99% nao e alcancavel por antecipacao — ele cruza exatamente na escrita, e a
+ * autopsia de 2026-09-28 mediu que os valiosos morrem nesse mesmo bloco.
  */
-export const DESVIO_TIPICO_PCT = new Decimal(0.5);
+export const DESVIO_TIPICO_PCT = new Decimal(0.10);
 
 /**
  * A que preço da garantia esta posição vira liquidável.

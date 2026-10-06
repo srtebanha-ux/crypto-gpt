@@ -64,7 +64,12 @@ test('mercado já derrubou alguém = DEDO NO GATILHO, mesmo com desvio pequeno',
     // minúscula, longe de acionar o feed por desvio, que mesmo assim já
     // derruba quem estava a 0,04% de cair.
     const fila = quemCaiPrimeiro([{ devedor: '0xa', quedaPct: D(0.04) }], ETH);
-    const mercado = ETH.mul(0.999); // só 0,1% abaixo
+    // METADE do limiar medido, e derivado dele de propósito: o limiar é um
+    // número MEDIDO, e número medido tem data de validade. Em 2026-10-06 ele
+    // caiu de 0,5 (palpite) para 0,10 (medido nos eventos do agregador), e este
+    // teste quebrou por ter o 0,1% cravado. Amarrado à constante, ele passa a
+    // afirmar a REGRA em vez do número.
+    const mercado = ETH.mul(1 - DESVIO_TIPICO_PCT.toNumber() / 200);
     assert.ok(desvioDoOraculo(mercado, ETH).lessThan(DESVIO_TIPICO_PCT));
     assert.equal(qualPostura(mercado, ETH, fila), 'dedo no gatilho');
     assert.equal(ritmoDaPostura('dedo no gatilho', 8000), 200);
@@ -108,11 +113,15 @@ test('ficar com o dedo no gatilho o DIA INTEIRO não caberia', () => {
 import { posturaPorMargem } from './adiantar';
 
 test('queda pequena NÃO vira dedo no gatilho, mesmo derrubando alguém no papel', () => {
-    // O erro que esta função existe para corrigir. Alguém a 0,04% de cair, o
-    // mercado cai 0,1% — mas 0,1% não faz o feed escrever, então o preço
-    // on-chain não se move e ninguém fica liquidável. Correr a 200ms aqui
-    // gastaria CU para nada.
-    assert.equal(posturaPorMargem(D(0.1), D(0.04)), 'dormindo');
+    // O erro que esta função existe para corrigir. Alguém a 0,04% de cair e um
+    // mercado que caiu MENOS que o limiar de escrita: o preço on-chain não se
+    // move, ninguém fica liquidável, e correr a 200ms gastaria CU para nada.
+    //
+    // A queda de prova é metade do limiar, derivada dele — com 0,1% cravado
+    // este teste passou a falhar quando a MEDIÇÃO de 2026-10-06 mostrou que
+    // 0,1% JÁ faz o feed escrever (limiar real 0,103% no cbBTC).
+    const metade = DESVIO_TIPICO_PCT.dividedBy(2);
+    assert.equal(posturaPorMargem(metade, D(0.04)), 'dormindo');
 });
 
 test('queda que faz o feed escrever E derruba alguém = dedo no gatilho', () => {
@@ -125,8 +134,11 @@ test('queda que faz o feed escrever mas não derruba ninguém = atento', () => {
 });
 
 test('chegando perto do limiar já aperta o passo', () => {
-    assert.equal(posturaPorMargem(D(0.35), D(0.04)), 'atento');
-    assert.equal(posturaPorMargem(D(0.2), D(0.04)), 'dormindo');
+    // A faixa do 'atento' é [limiar x 0.6, limiar). Escrita relativa, porque é
+    // o limiar que muda quando alguém o mede de novo.
+    const limiar = DESVIO_TIPICO_PCT.toNumber();
+    assert.equal(posturaPorMargem(D(limiar * 0.8), D(0.04)), 'atento');
+    assert.equal(posturaPorMargem(D(limiar * 0.5), D(0.04)), 'dormindo');
 });
 
 test('sem ninguém na brasa nunca vira dedo no gatilho', () => {
@@ -138,8 +150,9 @@ test('o estado caro se limita sozinho', () => {
     // Enquanto o desvio não chega ao limiar, não se corre. Quando chega, o
     // feed escreve em segundos e a corrida acaba. É isso que impede o ritmo
     // de 200ms de virar o ritmo do dia inteiro.
-    assert.equal(posturaPorMargem(D(0.49), D(0.01)), 'atento');
-    assert.equal(posturaPorMargem(D(0.50), D(0.01)), 'dedo no gatilho');
+    const limiar = DESVIO_TIPICO_PCT.toNumber();
+    assert.equal(posturaPorMargem(D(limiar * 0.98), D(0.01)), 'atento');
+    assert.equal(posturaPorMargem(D(limiar), D(0.01)), 'dedo no gatilho');
 });
 
 // ---------------------------------------------------------------------------

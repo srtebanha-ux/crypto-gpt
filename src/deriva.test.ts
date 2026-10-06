@@ -379,15 +379,33 @@ test('a postura combinada é a MAIS urgente, nunca a última calculada', () => {
 });
 
 test('o caso exato do log: mercado dormindo + juro chegando = bot acordado', () => {
-    // 0,1007% de queda não alcança o limiar de escrita do feed (0,5%), então o
-    // mercado manda dormir. Com o juro a 40 minutos, o bot tem de estar atento.
+    // Os números são do log real: mercado 0,1007% abaixo do oráculo, o mais
+    // frágil a 1,1562%.
+    //
+    // O VEREDICTO DO MERCADO MUDOU EM 2026-10-06, e para melhor. Com o limiar
+    // de escrita em 0,5% (palpite) estes 0,1007% davam 'dormindo', e só o juro
+    // acordava o bot. Medido nos eventos do agregador, o limiar é 0,10%: então
+    // 0,1007% JÁ é um feed a ponto de escrever, e a postura certa é 'atento'
+    // pelo próprio mercado. Era esta a razão de a antecipação nunca ter sido
+    // exercitada — o portão pedia 5x mais desvio do que o oráculo precisa.
     const doMercado = posturaPorMargem(new Decimal('0.1007'), new Decimal('1.1562'));
-    assert.equal(doMercado, 'dormindo', 'é isso que o log mostrava');
+    assert.equal(doMercado, 'atento', 'o limiar medido acorda o bot aqui');
+    // 'dedo no gatilho' continua recusado, e tem de continuar: o mercado caiu
+    // 0,1% e o alvo precisa de 1,16%. Correr a 200ms não faria ninguém cair.
+    assert.notEqual(doMercado, 'dedo no gatilho');
     const combinada = posturaMaisForte(doMercado, posturaPorChegada(40 * MIN));
-    assert.equal(combinada, 'atento', 'e é isso que ele passa a fazer');
-    // E armar deixa de ser recusado, que era o buraco.
-    assert.equal(valeArmar(doMercado, 10_000, 5_000), false, 'o defeito');
+    assert.equal(combinada, 'atento');
     assert.equal(valeArmar(combinada, 10_000, 5_000), true, 'o conserto');
+
+    // E o buraco original — armar recusado porque o mercado dormia — continua
+    // coberto, agora com um desvio que de fato deixa o feed quieto.
+    const dormindo = posturaPorMargem(new Decimal('0.01'), new Decimal('1.1562'));
+    assert.equal(dormindo, 'dormindo');
+    assert.equal(valeArmar(dormindo, 10_000, 5_000), false, 'o defeito');
+    assert.equal(
+        valeArmar(posturaMaisForte(dormindo, posturaPorChegada(40 * MIN)), 10_000, 5_000),
+        true, 'o juro resgata',
+    );
 });
 
 test('juro chegando não estraga o ritmo quando o mercado já está correndo', () => {
