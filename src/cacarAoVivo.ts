@@ -1961,6 +1961,32 @@ async function principal(): Promise<'parar' | void> {
     // Uma politica, lida uma vez. Antes cada montagem relia o ambiente por
     // conta propria, e foi assim que uma delas ficou com cinco campos de nove.
     const POLITICA = politicaDoTiro();
+    // OS BOTÕES, NO BOOT. Uma linha, sempre.
+    //
+    // `comoLerAPolitica` existia desde 2026-09-28, mas só saía dentro do
+    // `[EM SECO]` — que depende do modo prova e de haver alvo. Então ela mexia
+    // numa variável no Railway, o container subia, e NADA no log dizia se o bot
+    // tinha lido o valor novo. O CLAUDE.md já registra esse buraco com estas
+    // palavras: "duas máquinas, dois conjuntos de botões, e nenhuma linha
+    // ligando um ao outro" — e ele custou 30%% de diferença inexplicada entre o
+    // terminal e a produção até alguém varrer botão por botão.
+    //
+    // Achado de novo em 2026-10-06, quando ela trocou quatro variáveis de uma
+    // vez e nem ela nem eu tínhamos como conferir se pegaram.
+    log.info('[BOTÕES] Com o que eu subi.', {
+        politica: comoLerAPolitica(POLITICA),
+        ritmo: `ciclo ${INTERVALO_MS}ms dormindo | varredura completa a cada ${MINUTOS_ENTRE_COMPLETAS} min`,
+        listas: `teto da lista quente ${TETO_DA_LISTA_QUENTE > 0 ? TETO_DA_LISTA_QUENTE : 'sem teto'} | `
+            + `pedaço de varredura ${PEDACO} blocos (pedido; o medido sai na linha [RPC])`,
+        // Lido do ambiente aqui, e não da constante: ela só nasce mais abaixo,
+        // junto do cache, e esta linha precisa sair ANTES de qualquer varredura.
+        cache: `${CAMINHO_DO_CACHE} | fundo por boot ${
+            numeroDoAmbiente('CACA_CACHE_FUNDO_MS', process.env.CACA_CACHE_FUNDO_MS, 300_000) === 0
+                ? 'SEM TETO (varre a história inteira)'
+                : `${numeroDoAmbiente('CACA_CACHE_FUNDO_MS', process.env.CACA_CACHE_FUNDO_MS, 300_000) / 1000}s`}`,
+        // Sem isto, "não atirou" e "não podia atirar" ficam iguais no log.
+        envio: ENVIAR ? 'LIGADO: manda transação de verdade' : 'DESLIGADO (CACA_ENVIAR != 1): mede e não manda',
+    });
     const FRACAO_DO_SALDO_POR_TIRO = POLITICA.fracaoBaseDoSaldo;
     /** O teto do risco quando o premio e muito maior que o saldo. */
     const FRACAO_MAXIMA_DO_SALDO = POLITICA.fracaoMaximaDoSaldo;
