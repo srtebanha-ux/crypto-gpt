@@ -916,3 +916,121 @@ dívida)` é o bônus REALIZADO, caso por caso.
 E a obra em si, se ela mandar: o Morpho Blue é outro mecanismo — `liquidate`
 com callback em vez do `flashLoanSimple` da Aave, e a saúde é por mercado em vez
 de um `getUserAccountData` só. Caminho novo no contrato e deploy novo.
+
+## 2026-10-06, tarde: "ele vai atirar?" — os portões que faziam o bot calar
+
+Ela perguntou, depois de perder alvos: *"eu só quero que ele atire na hora certa
+e pegue o alvo de primeira"*. Tracei o caminho do tiro inteiro. **Sete portões
+podem recusar**, e dois eram defeito.
+
+Medido com o saldo dela (0,0158 ETH) e os botões de produção, a faixa que de
+fato dispara: **de US$ 1,02 até SEM TETO**. O bot não é medroso — o único portão
+que recusa é `margemMinima` de 2x, e ele nunca apareceu como causa de perda em
+nenhuma medição.
+
+### 1. O disjuntor era MUDO, e é o pior tipo de defeito
+
+`if (disjuntorAberto) continue;` — sem uma linha de log. Ele abre com 8 derrotas
+seguidas e só fecha quando um tiro acerta. Aberto, o bot via o alvo cair, media,
+aprovava o tiro e **não mandava, em silêncio**. Para quem lê o log, "não atirei
+porque o disjuntor está aberto" era idêntico a "não havia alvo".
+
+Agora grita a cada alvo recusado, com o prêmio que deixou passar. E
+`CACA_DISJUNTOR=0` desliga: com 0,0158 ETH que ela declarou 100% de risco, parar
+após 8 derrotas é uma cautela que ela não pediu.
+
+### 2. `eth_estimateGas` lento ABORTAVA o tiro — e o conserto quase foi pior
+
+Sem estimativa em 800ms, `limiteDeGasDoTiro` devolvia `null` e o alvo se perdia.
+A razão era boa (não morrer sem gás) e a conclusão estava errada: **morrer sem
+gás só acontece com limite BAIXO.** Limite ALTO não tem esse risco — o nó congela
+`gasLimit × maxFee` e DEVOLVE o que não foi consumido. Perder a liquidação por
+um RPC lento é perda CERTA; lance apertado é só desvantagem.
+
+**E aqui o teste vizinho me salvou.** Minha primeira versão usou 2.800.000 ("4x o
+gás típico"), que é MENOR que o máximo já observado: o líder da faixa
+(`0xd12810b1`) gastou entre 1.202.608 e **4.142.116** no MESMO contrato, 2,76x a
+mediana. Teria reintroduzido exatamente o fracasso que o original temia. São
+5.000.000 agora.
+
+E os dois não cabem juntos no saldo dela: reservar 4 gwei de gorjeta limita o gás
+a 4.099.653, abaixo do máximo medido. Então **sem estimativa o GÁS ganha da
+gorjeta** — reserva só o piso do lance. Medido: manda 5.000.000, atira, 2,84 gwei
+(sete vezes o maior lance da concorrência) e congela 0,014239 de 0,015821 ETH.
+
+### 3. Um soluço de RPC no boot DESLIGAVA o bot para sempre
+
+Achado por acidente, tentando rodar a REGRA 0 com o provedor estrangulado:
+
+    [ERROR] Falha ao descobrir contratos base. {"erro":"over rate limit"}
+    [ERROR] Configuração impede rodar. Não reinicio sozinho — corrija e reimplante.
+
+Não havia nada errado na configuração. `principal()` devolvia 'parar', que faz o
+laço de fora dar `return` e nunca mais reiniciar. **Boot é o que acontece em TODO
+deploy** — um soluço de dois segundos no instante errado desligava o bot até
+alguém abrir o log, com a mensagem mandando procurar no lugar errado.
+
+Agora falha de TRANSPORTE lança e o laço reinicia; endereço que não responde com
+o RPC vivo continua 'parar'. Conferido na rede: 43 reinícios onde antes era uma
+morte.
+
+### 4. A bússola morria a cada deploy, e isso enchia a brasa de IMUNE
+
+O cache fazia os DEVEDORES sobreviverem e o que o bot sabia sobre eles morria
+junto. Três consequências, e só a primeira é cosmética:
+
+1. As tabelas inflam: `alcancaNaDirecao` conta desconhecido como alcançável
+   (viés correto), e com 57 mil desconhecidos o log publicou **US$ 171.137 a
+   10%**, dos quais 3.589 de 3.593 eram palpite.
+2. **A BRASA ENCHE DE IMUNE.** Dos 600 pares reresolvidos após um deploy, 589
+   eram imunes — 98%. Não é azar: ele resolve de cima para baixo da fila de
+   fragilidade, e quem está no topo está lá PORQUE é imune (moeda única, o preço
+   se cancela). Medido: com 600 conhecidos o `gatilhoEm` era 4,45%; com 5.000,
+   14,54%; com 10.000, 15,82%.
+3. Reencher custava 4 dias, e cada deploy zerava.
+
+O campo `vias` no cache é opcional (cache velho continua servindo). E a gravação
+tem de ser **no instante em que aprende**: a primeira versão só gravava na coleta
+de 37 em 37 minutos, o container reiniciou aos 26, e perdeu tudo. Confirmado em
+produção: a bússola foi de 5.000 para 9.998 atravessando um deploy.
+
+### 5. As duas etiquetas que mentiam
+
+- `naListaQuente: "1324 (todos lidos)"` numa linha chamada **"Só a brasa"**, que
+  leu ZERO deles. A ternária veio copiada da varredura 'quentes'.
+- As tabelas de queda só mudam na varredura COMPLETA e eram reimpressas a cada
+  ciclo ao lado de campos ao vivo. Agora dizem a própria idade.
+- E o `maior` de cada degrau agora diz `[par MEDIDO]` ou `[par SUPOSTO: pode ser
+  imune]` — porque "187 de 190 são palpite" não responde em qual balde está o
+  alvo em que ela vai mirar.
+
+## 2026-10-06: o incentivo do Morpho é função do LLTV, e isso muda a estratégia
+
+Medido nos eventos `Liquidate`, 10 dias, cobertura **100%** (1.385 janelas), 60
+liquidações, todas resolvidas. Sem preço externo nenhum: o bônus sai de
+`(seizedAssets × preço do oráculo DO MERCADO) / repaidAssets − 1`, e o oráculo do
+Morpho já traz os decimais embutidos.
+
+    LLTV  62,5%   26 liq.   bônus mediano 16,47%
+    LLTV    77%    5 liq.   bônus mediano  9,27%
+    LLTV    86%    9 liq.   bônus mediano  4,40%
+    LLTV  91,5%    1 liq.   bônus mediano  2,73%
+    LLTV  94,5%   17 liq.   bônus mediano  1,68%
+    LLTV  96,5%    2 liq.   bônus mediano  1,11%
+
+**Mediana geral 5,62%** — meus 5% assumidos estavam quase certos na média e
+completamente errados onde importa. Os mercados de LLTV baixo (pares exóticos:
+cbZEC, cbDOGE, cbLTC, cbXRP contra USDC) pagam **três vezes** o que eu assumi, e
+são o maior grupo.
+
+**A conclusão para a estratégia:** não é "entrar no Morpho". É entrar nos
+mercados de **LLTV ≤ 77%**. Nos de LLTV alto o prêmio é tão magro que o gás come
+quase tudo — a poeira da Aave de novo.
+
+E uma observação de forma: **o Morpho liquida em RAJADA, não em fluxo.** 822 em
+30 dias, mas 2 em dois dias e 60 em dez. A maior parte vem concentrada em poucos
+dias de mercado ruim. Um bot lá fica parado quase sempre e precisa estar vivo e
+rápido exatamente nos dias de queda forte.
+
+A armadilha do método, declarada: o oráculo é lido AGORA e as liquidações são do
+passado. Por isso a janela é curta. Com janela longa este número vira ficção.
