@@ -1255,6 +1255,37 @@ export const PEDACO_MINIMO = 250;
 let pedacoMedido: number | null = null;
 
 /**
+ * Publica o teto medido do provedor. SEMPRE, e nao so quando a varredura e grande.
+ *
+ * Existe por um buraco achado em 2026-10-06, quando ela perguntou como resolver a
+ * falta de um segundo RPC: a sondagem ja media o teto, mas quem imprimia era o log
+ * de "Juntando historico", que so sai com mais de 10 faixas. Num boot com cache a
+ * varredura e de um punhado de blocos — entao ela plugaria um `RPC_URL_2` novo e
+ * NUNCA saberia o que ele aguenta. Trocar de provedor as cegas e exatamente o que
+ * a escada existe para nao fazer.
+ *
+ * E o numero tem de aparecer porque ele MUDA: o `mainnet.base.org` servia 2.000
+ * blocos em 02/10 e 500 em 06/10, medido nos dois dias.
+ */
+function anunciarPedaco(pedaco: number, tentativas: number, bateuNoPiso: boolean): void {
+    log.info('[RPC] Teto de eth_getLogs deste provedor, MEDIDO agora.', {
+        provedor: hostDoRpc(rpc),
+        aceita: `${pedaco.toLocaleString('pt-BR')} blocos por chamada`,
+        pedi: PEDACO,
+        sondagens: tentativas,
+        oQueIssoCusta: pedaco >= PEDACO
+            ? 'nenhum desconto: a varredura vai no tamanho que pedi'
+            : `${(PEDACO / pedaco).toFixed(1)}x mais chamadas que o pedido para cobrir a mesma história`,
+        // Sem esta linha, "o provedor é limitado" fica igual a "o provedor
+        // recusou tudo e eu desci até o piso sem nunca ter sucesso".
+        atencao: bateuNoPiso
+            ? `NENHUMA sondagem passou, nem a de ${PEDACO_MINIMO}: estou usando o piso no escuro. `
+              + 'Se as faixas falharem, a lista de devedores volta VAZIA — confira o próximo log'
+            : 'medido com resposta boa do provedor',
+    });
+}
+
+/**
  * Mede o teto de `eth_getLogs` do provedor em vez de adivinhá-lo.
  *
  * Quatro chamadas no pior caso, uma vez por processo, e depois toda a varredura
@@ -1282,10 +1313,12 @@ async function descobrirPedaco(topo: number): Promise<{ pedaco: number; tentativ
                 },
             ]);
             pedacoMedido = tamanho;
+            anunciarPedaco(tamanho, tentativas, false);
             return { pedaco: tamanho, tentativas };
         } catch {
             if (tamanho <= PEDACO_MINIMO) {
                 pedacoMedido = PEDACO_MINIMO;
+                anunciarPedaco(PEDACO_MINIMO, tentativas, true);
                 return { pedaco: PEDACO_MINIMO, tentativas };
             }
             tamanho = Math.max(PEDACO_MINIMO, Math.floor(tamanho / 2));
