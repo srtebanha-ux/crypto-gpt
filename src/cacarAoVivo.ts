@@ -2465,6 +2465,23 @@ async function principal(): Promise<'parar' | void> {
                 foraDoCorte: `${medidos.length - dentroDoCorte.length} estão acima de ${ATE_QUEDA}% e NÃO foram perguntados`,
                 porQue: 'sem isto os imunes a preço ocupam a frente da brasa e contaminam o maisPerto',
             });
+            // GRAVA AGORA, e não daqui a 37 minutos.
+            //
+            // MEDIDO em 2026-10-06, e foi o conserto de hoje falhando em
+            // produção: o bot subiu 16:58, aprendeu 5.000 pares na primeira
+            // varredura, e reiniciou 17:24 — ANTES da coleta periódica, que é a
+            // única que gravava. As 5.000 vias nunca chegaram ao disco e a
+            // bússola voltou do zero.
+            //
+            // A gravação do boot não resolve: ela acontece ANTES de qualquer
+            // varredura, então grava `vias: {}` por definição. Quem tem de
+            // gravar é quem aprendeu, no instante em que aprendeu.
+            //
+            // O custo é um `JSON.stringify` e uma escrita por varredura
+            // completa — medido, 20ms e 2,70 MB para 50 mil devedores — contra
+            // perder horas de aprendizado em qualquer reinício. E num dia de
+            // ajustes como hoje, reinício é o que mais acontece.
+            if (montados.length > 0) await regravarCache(`${montados.length} pares novos`);
         } catch (e) {
             // Falhar aqui NAO pode calar a varredura: sem par conhecido a
             // ordem volta a ser a de antes, que e pior mas nao e mentira.
