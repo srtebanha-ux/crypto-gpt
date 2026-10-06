@@ -24,6 +24,7 @@ import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
     lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
     juntarDevedoresDoCache, esquecerQuemNaoDeveMais, comoEstaACobertura,
+    juntarVias, viasQueAindaImportam,
 } from './cacheDeDevedores';
 
 /**
@@ -261,6 +262,29 @@ export function lembrarAVia(devedor: string, via: Via): void {
 }
 export function oQueSeSabeDaVia(devedor: string): Via | undefined {
     return viaPorDevedor.get(devedor.toLowerCase());
+}
+/** O que o bot aprendeu, para o cache gravar. Pares, não o Map, para o JSON. */
+export function todasAsViasSabidas(): Array<[string, string]> {
+    return [...viaPorDevedor.entries()];
+}
+/**
+ * Recarrega o que o cache guardou. Devolve quantas entraram.
+ *
+ * Não sobrescreve o que esta sessão já aprendeu: o que foi lido da corrente
+ * agora é mais novo que o que estava no disco, e uma posição troca de par
+ * quando o dono troca de garantia.
+ */
+export function relembrarVias(vias: Record<string, string>): number {
+    let quantas = 0;
+    for (const [k, v] of Object.entries(vias)) {
+        const chave = k.toLowerCase();
+        if (viaPorDevedor.has(chave)) continue;
+        if (v === 'long' || v === 'short' || v === 'ambas' || v === 'imune') {
+            viaPorDevedor.set(chave, v);
+            quantas += 1;
+        }
+    }
+    return quantas;
 }
 
 /**
@@ -2013,6 +2037,10 @@ async function principal(): Promise<'parar' | void> {
     // ========================================================================
     const nascimento = NASCIMENTO_DO_POOL[REDE_ESCOLHIDA] ?? 0;
     const estadoDoCache = await lerCache(CAMINHO_DO_CACHE, REDE_ESCOLHIDA, REDE.pool);
+    // Lido aqui, junto do cache, porque a PRIMEIRA gravação já precisa dele —
+    // declarar mais abaixo fazia o boot gravar um cache sem as vias que acabara
+    // de ler, apagando no disco o que tinha acabado de recuperar.
+    const viasDoCache = estadoDoCache.usavel ? (estadoDoCache.cache.vias ?? {}) : {};
     // A VARREDURA ACONTECE EM DUAS PARTES, e a ordem é o que separa um boot de
     // segundos de um boot de uma hora.
     //
@@ -2105,6 +2133,7 @@ async function principal(): Promise<'parar' | void> {
         blocoInicial: blocoInicialDoCache,
         ultimoBloco: ultimoBlocoDoCache,
         devedores: juntos,
+        vias: viasQueAindaImportam(juntarVias(viasDoCache, todasAsViasSabidas()), juntos),
     });
     log.info(gravacao.gravou ? '[CACHE] Gravado.' : '[CACHE] NÃO GRAVOU — o próximo boot vai pagar tudo de novo.', {
         resultado: gravacao.porque,
@@ -2124,6 +2153,23 @@ async function principal(): Promise<'parar' | void> {
 
     /** O que o cache guarda, vivo na memória — a fonte da lista e do que se grava. */
     let memoriaDoCache = juntos;
+    // AS VIAS VOLTAM COM OS DEVEDORES.
+    //
+    // Sem isto o cache fazia os devedores sobreviverem ao deploy e o que o bot
+    // sabia sobre eles morria junto — e o pior efeito não era o log inflado, era
+    // a BRASA: com o par desconhecido contando como sensível, os imunes (que
+    // parecem os mais frágeis porque o preço se cancela) ocupavam as 233 vagas
+    // da patrulha rápida. Medido em 2026-10-06, logo após um deploy: dos 600
+    // pares resolvidos, 589 eram imunes.
+    const viasVoltaram = relembrarVias(viasDoCache);
+    log.info('[CACHE] A bússola que sobreviveu ao deploy.', {
+        viasNoDisco: Object.keys(viasDoCache).length,
+        recarregadas: viasVoltaram,
+        porque: viasVoltaram > 0
+            ? 'a brasa já nasce sabendo quem é imune, em vez de reaprender por 4 dias'
+            : 'nenhuma no disco: esta é a primeira gravação com vias, ou o cache é anterior a elas',
+    });
+
     let devedores = Object.keys(juntos).filter(d => !isDevedorIgnorado(d));
     /**
      * Em que bloco cada devedor foi visto tomando emprestado por último.
@@ -2148,6 +2194,10 @@ async function principal(): Promise<'parar' | void> {
             blocoInicial: blocoInicialDoCache,
             ultimoBloco: ultimoBlocoDoCache,
             devedores: memoriaDoCache,
+            // O que foi aprendido DESDE o boot entra aqui: cada varredura
+            // completa resolve mais 600 pares, e sem esta linha eles morreriam
+            // no próximo deploy como morreram no de hoje.
+            vias: viasQueAindaImportam(juntarVias(viasDoCache, todasAsViasSabidas()), memoriaDoCache),
         });
         (g.gravou ? log.info : log.warn)(
             g.gravou ? '[CACHE] Regravado.' : '[CACHE] NÃO regravei.',

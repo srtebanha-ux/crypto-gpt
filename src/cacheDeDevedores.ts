@@ -74,6 +74,33 @@ export interface CacheDeDevedores {
     ultimoBloco: number;
     /** endereço (minúsculo) -> bloco em que foi visto tomando emprestado. */
     devedores: Record<string, number>;
+    /**
+     * O QUE O BOT APRENDEU sobre cada devedor: por onde a posição quebra.
+     *
+     * endereço (minúsculo) -> 'long' | 'short' | 'ambas' | 'imune'.
+     *
+     * Opcional de propósito: um cache gravado antes desta versão não tem o
+     * campo, e tem de continuar servindo — invalidar 3 anos de história por
+     * causa de um campo novo seria cobrar o preço inteiro por uma melhoria.
+     *
+     * POR QUE ELE EXISTE, medido em 2026-10-06. O cache fazia os DEVEDORES
+     * sobreviverem ao deploy, e o que o bot sabia sobre eles morria junto: a
+     * bússola voltava com `57163 ainda não sei`. Três consequências, e só a
+     * primeira é cosmética:
+     *
+     *   1. As tabelas inflam. `alcancaNaDirecao` conta o desconhecido como
+     *      alcançável — viés correto — e com 57 mil desconhecidos o log passou
+     *      a publicar US$ 171.137 a 10%, dos quais 3.589 de 3.593 eram palpite.
+     *   2. A BRASA ENCHE DE IMUNE. Os 600 pares que o bot resolveu depois do
+     *      deploy deram 589 imunes — 98%. Não é azar: ele resolve de cima para
+     *      baixo, e quem está no topo da fila de fragilidade está lá PORQUE é
+     *      imune (moeda única, o preço se cancela e a queda aparente some). Com
+     *      o par desconhecido contando como sensível, eles ocupam as 233 vagas
+     *      e empurram alvos reais para fora da patrulha rápida.
+     *   3. Reencher custa 4 dias: 57.168 pares a 600 por varredura completa, uma
+     *      por hora. E cada deploy zera de novo.
+     */
+    vias?: Record<string, string>;
 }
 
 export type EstadoDoCache =
@@ -207,6 +234,48 @@ export function comoEstaACobertura(
 }
 
 /** Junta o que já se sabia com o que a varredura nova achou. */
+/**
+ * Junta o que se sabia das vias com o que se aprendeu agora.
+ *
+ * O novo manda: uma posição muda de par quando o dono troca de garantia ou de
+ * dívida, e nesse caso a leitura de agora é a verdade e a antiga é lixo.
+ *
+ * Só aceita os quatro valores conhecidos. Um cache adulterado ou de uma versão
+ * futura não pode injetar uma via que o resto do código não sabe ler — ela
+ * cairia no `undefined` e viraria "ainda não sei", que é benigno, mas um valor
+ * TORTO viajaria pelas comparações sem ninguém notar.
+ */
+export const VIAS_CONHECIDAS = ['long', 'short', 'ambas', 'imune'] as const;
+export function juntarVias(
+    antigas: Record<string, string> | undefined,
+    novas: Iterable<[string, string]>,
+): Record<string, string> {
+    const fora: Record<string, string> = {};
+    for (const [k, v] of Object.entries(antigas ?? {})) {
+        if ((VIAS_CONHECIDAS as readonly string[]).includes(v)) fora[k.toLowerCase()] = v;
+    }
+    for (const [k, v] of novas) {
+        if ((VIAS_CONHECIDAS as readonly string[]).includes(v)) fora[k.toLowerCase()] = v;
+    }
+    return fora;
+}
+
+/**
+ * Tira das vias quem não está mais na lista de devedores.
+ *
+ * Sem isto o mapa de vias cresceria para sempre, guardando o par de gente que
+ * pagou a dívida em 2024 — e é o mesmo vazamento que a regra de esquecimento
+ * por estado conserta do outro lado.
+ */
+export function viasQueAindaImportam(
+    vias: Record<string, string>,
+    devedores: Record<string, number>,
+): Record<string, string> {
+    const fora: Record<string, string> = {};
+    for (const [k, v] of Object.entries(vias)) if (k in devedores) fora[k] = v;
+    return fora;
+}
+
 export function juntarDevedoresDoCache(
     antigos: Record<string, number>,
     novos: Iterable<string>,
