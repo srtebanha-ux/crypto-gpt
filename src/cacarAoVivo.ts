@@ -1675,6 +1675,8 @@ async function principal(): Promise<'parar' | void> {
 
     let dataProvider: string | null = null;
     let oraculo: string | null = null;
+    /** A mensagem da falha, para separar "o nó recusou" de "o endereço está errado". */
+    let falhaDaDescoberta: string | null = null;
     try {
         const prov = enderecoDaResposta(
             await chamar<string>('eth_call', [{ to: REDE.pool, data: SELETOR_ADDRESSES_PROVIDER }, 'latest']),
@@ -1688,10 +1690,43 @@ async function principal(): Promise<'parar' | void> {
             );
         }
     } catch (e) {
-        log.error('Falha ao descobrir contratos base.', { erro: (e as Error).message });
+        falhaDaDescoberta = (e as Error).message;
+        log.error('Falha ao descobrir contratos base.', { erro: falhaDaDescoberta });
     }
-    
-    if (!dataProvider || !oraculo) return 'parar';
+
+    if (!dataProvider || !oraculo) {
+        // 'parar' MATA O BOT PARA SEMPRE — o laço de fora faz `return` e não
+        // reinicia. Então só pode sair daqui o que uma reimplantação conserta.
+        //
+        // ACHADO EM 2026-10-06, tentando rodar a REGRA 0: o provedor devolveu
+        // `over rate limit` nesta primeira chamada e o bot imprimiu
+        // "Configuração impede rodar. Não reinicio sozinho — corrija e
+        // reimplante." e morreu. Não havia nada errado na configuração: era o
+        // provedor pedindo calma por alguns segundos.
+        //
+        // Num boot depois de um deploy — que é quando TODO container sobe — um
+        // soluço de dois segundos no RPC desliga o bot até alguém olhar o log.
+        // E a mensagem manda procurar o defeito no lugar errado, que é o defeito
+        // que este projeto persegue: etiqueta que não descreve o fato.
+        //
+        // Falha de transporte é passageira e pede OUTRA VOLTA; endereço que não
+        // responde com o RPC vivo é configuração e pede gente.
+        if (falhaDaDescoberta !== null && ehFalhaDeTransporte(falhaDaDescoberta)) {
+            log.warn('O provedor não respondeu no boot. Isto NÃO é configuração — vou tentar de novo.', {
+                erro: falhaDaDescoberta,
+                provedor: hostDoRpc(rpc),
+                oQueIssoNaoE: 'não é endereço errado nem variável faltando: o nó recusou a chamada',
+                oQueVouFazer: 'o laço de fora reinicia em 1s, e a escada de RPC tenta o próximo provedor',
+            });
+            throw new Error(`provedor mudo no boot: ${falhaDaDescoberta}`);
+        }
+        log.error('Não achei o dataProvider ou o oráculo da Aave com o RPC respondendo.', {
+            dataProvider, oraculo,
+            erro: falhaDaDescoberta ?? 'as chamadas voltaram, mas vazias',
+            porque: 'isto é configuração — endereço de pool errado, rede errada, ou a Aave mudou o registro',
+        });
+        return 'parar';
+    }
 
     // ---- Conferir o cofre de cada caçador, antes de qualquer caçada. ----
     //
