@@ -797,3 +797,122 @@ linha do log tinha tudo. O `[BLOCO]` chegou cortado, junto com "suborno sonoro"
 (era dinâmico), "cubo no máximo" (cubro), "2 encontros encontrados" (endereços) e
 o censo repetido três vezes. Antes de caçar o defeito, vale conferir se o log
 chegou inteiro.
+
+## 2026-10-06: três dias sem tiro, e o que a medição disse
+
+Ela mandou o log de três dias com `tiros: "Nenhum tiro ainda."` e perguntou "?".
+A tentação era responder "o mercado está calmo" — que é ausência com cara de
+resposta. Quatro varreduras depois, nenhuma dessas respostas era a certa.
+
+### O que ESTÁ medido, com a cobertura ao lado
+
+**Liquidações na Base inteira, 30 dias, cobertura 99,9% (2.591 de 2.593 janelas
+de 500 blocos).** Varrido SEM filtro de contrato, por cinco assinaturas com o
+`topic0` calculado por keccak na hora — a corrente diz quem são os credores, e
+nenhum endereço foi escrito de cabeça:
+
+    Morpho Blue  0xbbbbbbbb…   822 liq. | US$ 1.210.292 | maior 88.926 | 488/794 pagam o gás
+    Aave V3      0xa238dd80…   216 liq. | US$   226.082 | maior 94.643 |  47/207 pagam o gás
+    Compound V2  (30 mercados) 316 liq. | US$    62.298 | maior 21.383 |  48/227 pagam o gás
+
+**A Aave — a única que o bot vigia — é 16% das liquidações da Base.** O Morpho é
+61% delas, 5,3x o bolo estimado, e 61% das dele pagam o próprio gás contra 23%
+na Aave. 126 das 1.354 ficaram sem preço, 122 por serem tokens fora da lista do
+oráculo da Aave: é piso, não teto.
+
+**O ritmo do oráculo, pelos eventos `AnswerUpdated`, 7 dias, cobertura 92,9%
+(ETH) e 90,9% (cbBTC):**
+
+    ETH/USD    0xd772f6d9…  121,7 escritas/dia | salto p50 0,1603% p90 0,2216% máx 1,36%
+    cbBTC/USD  0x13723399…  167,7 escritas/dia | salto p50 0,1143% p90 0,1663% máx 0,47%
+
+Daí sai o limiar de escrita: **0,151% e 0,103%** — e o `DESVIO_TIPICO_PCT` era
+0,5 por palpite, de 3,3 a 4,9 vezes maior. Como `posturaPorMargem` arma 'atento'
+em `desvio × 0.6` = 0,30% e o desvio antes de uma escrita chega a 0,22% no p90,
+**a postura 'atento' nunca armou**. Não era o mercado parado: era o portão
+pedindo mais desvio do que o oráculo precisa. Corrigido em `0fa11cb`.
+
+E o que isso NÃO resolve: o oráculo persegue o mercado dentro de 0,10–0,15%,
+então o mercado nunca corre 1% na frente dele. Antecipar compra 0,15% de
+dianteira, não 1%. **Um alvo a 0,99% não é alcançável por antecipação.**
+
+**Episódios de queda abaixo do máximo das 24h** (ETH): −0,99% trinta vezes por
+mês, −1,88% vinte e uma, −3,40% quatro. Os alvos cruzam. Esperar não é fé.
+
+### E os TRÊS defeitos meus, todos da mesma família
+
+1. **Número medido tem data de validade.** Em 02/10 medi o `mainnet.base.org`
+   recusando `eth_getLogs` acima de 2.000 e cravei `PEDACO_MINIMO = 2000`. Em
+   06/10 — quatro dias — o mesmo provedor respondeu `limited to a 500 range`. A
+   sondagem parava ACIMA do teto, toda faixa falhava, e a varredura devolvia
+   ZERO devedores em silêncio: o defeito exato que ela existe para evitar,
+   criado pelo piso que eu escolhi. Um piso tem de alcançar qualquer teto
+   plausível, não o que estava lá na terça.
+
+2. **Cache de falha.** No script de tamanhos, uma recusa passageira do RPC era
+   guardada como se fosse medição e envenenava o token para sempre: 25 das 32
+   linhas saíram "NÃO SEI o preço". Agora só o SUCESSO é cacheado, e
+   "o oráculo não lista este ativo" (resposta) está separado de "o RPC me
+   recusou" (minha falha), porque pedem ações opostas.
+
+3. **Fallback que inventa identidade.** Pior dos três, e veio DEPOIS de eu ter
+   consertado o nº 2. Quando `underlying()` falhava, o script assumia "é ETH
+   nativo a 18 casas" e precificava a US$ 4.200 — produziu uma linha de
+   **US$ 212.304.815** para um mercado que era AERO, e um "lucro estimado" de
+   US$ 11 milhões/mês que eu quase publiquei. Falha não tem valor padrão.
+
+4. **Etiqueta que não descreve o conjunto**, no log que ela estava lendo para
+   entender os três dias: `[BLOCO …] Só a brasa` imprimia
+   `naListaQuente: "1324 (todos lidos)"` num ciclo que leu ZERO deles. A
+   ternária veio copiada da varredura 'quentes' e só conferia o teto.
+
+### A regra que sai disto
+
+**Não extrapole de três dias.** O corte de 3 dias me enganou nas DUAS direções
+no mesmo dia: primeiro disse que o Compound V2 era o prêmio (é o menor dos
+três), depois fez o Morpho parecer trivial com US$ 142 (é o maior, com
+US$ 1,2 milhão). E a média da rede é 44,7 liquidações/dia — aqueles três dias
+tiveram 11/dia, quatro vezes abaixo. Já era a regra 4 deste arquivo; agora tem
+dois exemplos meus no mesmo dia.
+
+**E teste amarrado a um literal quebra a cada remedição.** Cinco testes falharam
+por terem o 0,5 cravado nos valores de prova. Foram reescritos relativos à
+constante: afirmam a REGRA — a faixa do 'atento' é [limiar × 0.6, limiar) — e
+sobrevivem à próxima medição.
+
+### A concentração no Morpho: SEM DONO, nos dois cortes
+
+Medido no mesmo dia, cobertura **100%** (2.593 de 2.593 janelas), julgado pelo
+`quemTemDono` deste repositório — e não por critério novo, porque a regra de
+dono já errou cinco vezes aqui e as cinco estão registradas acima.
+
+    todas as 822          72 endereços | maior 126 (15,3%) | top3 41%  >>> sem dono
+    só as que pagam o gás 40 endereços | maior  96 (19,6%) | top3 43%  >>> sem dono
+
+O veredicto, com as palavras da própria função: "o desequilíbrio é real (o acaso
+daria em 0,00%), mas ninguém está acima de um terço com 40 endereços na mesa: é
+mercado aberto, não domínio". As duas perguntas foram feitas separadas de
+propósito — medir "a faixa dela" com piso zero foi o erro do censo de setembro.
+
+**E a assimetria que a soma esconde: a mediana é US$ 141,96 de dívida**, uns
+US$ 2,82 de lucro líquido. O US$ 1,2 milhão somado é carregado por um punhado de
+grandes (88.926, 79.614, 52.394), e blocos repetidos no topo (51354208,
+51354428) indicam liquidação PARCIAL da mesma posição em fatias. Então "490
+pagam o próprio gás" não são 490 posições.
+
+**`0xd12810b1…` aparece com 17 de 490.** É o mesmo endereço que o censo de
+setembro apontou como líder na faixa dela na Aave (9 de 19). Os jogadores sérios
+são multi-protocolo: é confirmação de que o Morpho importa e aviso de quem está
+lá.
+
+### O que NÃO está medido, e decide a próxima obra
+
+**O incentivo real do Morpho Blue.** Assumi 5% em todas as contas acima; os
+comptrollers do Compound deram 10% e 8%, lidos. Se o do Morpho for menor, menos
+de 490 pagam o gás e a conta encolhe. Dá para medir dos próprios eventos, sem
+lembrar fórmula: `seizedAssets × preço da garantia ÷ (repaidAssets × preço da
+dívida)` é o bônus REALIZADO, caso por caso.
+
+E a obra em si, se ela mandar: o Morpho Blue é outro mecanismo — `liquidate`
+com callback em vez do `flashLoanSimple` da Aave, e a saúde é por mercado em vez
+de um `getUserAccountData` só. Caminho novo no contrato e deploy novo.
