@@ -18,6 +18,7 @@ import {
     limiteDeGasDoTiro, FOLGA_DO_GAS, PISO_DO_LIMITE_DE_GAS,
     tetoDeGasQueNaoEstrangulaOLance, GORJETA_QUE_GANHA_O_LEILAO_WEI,
     GAS_TIPICO_DE_UMA_CACADA,
+    GORJETA_DA_FRENTE_GWEI,
 } from './prontidao';
 
 const D = (n: number | string) => new Decimal(n);
@@ -1416,4 +1417,62 @@ test('o LIMITE_DE_GAS de planejamento voltou a ter folga sobre o consumo', () =>
     const teto = maxFeeQueOSaldoAdianta(16419111191761470n, LIMITE_DE_GAS);
     assert.equal(Number(teto) / 1e9 > 12, true, `${(Number(teto) / 1e9).toFixed(4)} gwei`);
     assert.equal(Number(teto) / 1e9 / 0.4002 > 25, true, 'e ainda bate o campo por mais de 25x');
+});
+
+// ===========================================================================
+// O TETO DA GORJETA DO TIRO ESPECULATIVO — medido em 2026-10-07.
+// ===========================================================================
+
+test('o teto corta a gorjeta do tiro especulativo, e o normal fica agressivo', () => {
+    // MEDIDO: a frente do bloco na Base custa p50 0,0150 gwei e p90 0,1366
+    // (15 blocos, cobertura 100%, 90 amostras), e o liquidante que levou o
+    // alvo de US$ 49,33 pagou 0,046688 gwei. O bot pagava 2,84 — acima da
+    // MAXIMA vista em qualquer das seis primeiras posicoes. Isso nao ganhava
+    // nada a mais e reduzia as tentativas de 57 para 6.
+    const ambiente = {
+        lucroUsd: new Decimal(49.33),
+        precoDoEthUsd: new Decimal(2581.19),
+        saldoWei: 15_821_000_000_000_000n, // 0,015821 ETH, o saldo dela
+        baseFeeWei: 5_000_000n,            // 0,005 gwei, o do bloco 52289907
+    };
+    const semTeto = decidirTiro(ambiente);
+    const comTeto = decidirTiro({
+        ...ambiente,
+        tetoDaGorjetaWei: BigInt(Math.round(GORJETA_DA_FRENTE_GWEI * 1e9)),
+    });
+    assert.ok(comTeto.prioridadeWei <= BigInt(Math.round(GORJETA_DA_FRENTE_GWEI * 1e9)),
+        `o teto tem de valer: ${comTeto.prioridadeWei}`);
+    assert.ok(semTeto.prioridadeWei > comTeto.prioridadeWei,
+        'sem teto a gorjeta e maior — senao este teste nao prova nada');
+    // E as duas AINDA atiram: cortar a gorjeta nao pode fechar o portao.
+    assert.equal(comTeto.atira, true, comTeto.porque);
+});
+
+test('o teto medido GANHA a frente do bloco com folga', () => {
+    // Nao serve um teto que economiza e perde a corrida. Os numeros medidos:
+    const p90DaFrente = 0.136577;
+    const oQueOVencedorPagou = 0.046688;
+    assert.ok(GORJETA_DA_FRENTE_GWEI > p90DaFrente,
+        `${GORJETA_DA_FRENTE_GWEI} tem de passar o p90 da frente (${p90DaFrente})`);
+    assert.ok(GORJETA_DA_FRENTE_GWEI > oQueOVencedorPagou * 3,
+        'e tem de ser pelo menos 3x o que o vencedor de 2026-10-07 pagou');
+});
+
+test('o teto NAO aumenta uma gorjeta pequena', () => {
+    // Teto e teto: num premio de migalha a gorjeta ja sai abaixo dele, e o
+    // teto nao pode virar piso e gastar mais do que a politica queria.
+    const ambiente = {
+        lucroUsd: new Decimal(0.6),
+        precoDoEthUsd: new Decimal(2581.19),
+        saldoWei: 15_821_000_000_000_000n,
+        baseFeeWei: 5_000_000n,
+    };
+    const semTeto = decidirTiro(ambiente);
+    const comTeto = decidirTiro({
+        ...ambiente, tetoDaGorjetaWei: BigInt(Math.round(GORJETA_DA_FRENTE_GWEI * 1e9)),
+    });
+    if (semTeto.prioridadeWei <= BigInt(Math.round(GORJETA_DA_FRENTE_GWEI * 1e9))) {
+        assert.equal(comTeto.prioridadeWei, semTeto.prioridadeWei,
+            'gorjeta que ja cabe no teto nao pode mudar');
+    }
 });

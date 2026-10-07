@@ -6,8 +6,8 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
-import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro } from './prontidao';
+import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, type Postura } from './adiantar';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI } from './prontidao';
 import {
     lerRecibo, placarVazio, contarTiro, comoEstaIndo, placarParaCache, placarDoCache,
 } from './tiros';
@@ -1972,6 +1972,27 @@ async function principal(): Promise<'parar' | void> {
     /** `CACA_DISJUNTOR=0` desliga a parada automática após N derrotas. */
     const DISJUNTOR_LIGADO = process.env.CACA_DISJUNTOR !== '0';
     /**
+     * O TIRO ESPECULATIVO NA ESCRITA DO ORÁCULO. Ligado por padrão.
+     *
+     * Em um mês de operação o bot não atirou uma vez, e a autópsia de
+     * 2026-10-07 mediu por quê: as liquidações que valem são levadas DENTRO do
+     * bloco da escrita do oráculo, e ler-e-reagir não alcança esse bloco. Este
+     * é o único caminho medido que alcança — e ele GASTA GÁS QUANDO ERRA.
+     *
+     * Ligado por padrão porque a dona do bot pediu exatamente isso, por
+     * escrito, depois de um mês sem tiro. `CACA_ATIRAR_NA_ESCRITA=0` desliga.
+     */
+    const ATIRAR_NA_ESCRITA = process.env.CACA_ATIRAR_NA_ESCRITA !== '0';
+    /**
+     * Teto da gorjeta do tiro ESPECULATIVO, em gwei. Medido, nao escolhido:
+     * ver `GORJETA_DA_FRENTE_GWEI` em `prontidao.ts` para a tabela das 90
+     * amostras. `CACA_GORJETA_ESPECULATIVA_GWEI` ajusta.
+     */
+    const TETO_GORJETA_ESPECULATIVA_GWEI = numeroDoAmbiente(
+        'CACA_GORJETA_ESPECULATIVA_GWEI',
+        process.env.CACA_GORJETA_ESPECULATIVA_GWEI,
+        GORJETA_DA_FRENTE_GWEI);
+    /**
      * O gas que resta, em wei. Lido de tempos em tempos, nao a cada tiro.
      *
      * Precisa existir porque a gorjeta e paga mesmo quando a transacao
@@ -3337,6 +3358,51 @@ async function principal(): Promise<'parar' | void> {
                             porque: antes.porque,
                             oQuePodeDarErrado: 'se eu chegar antes do cruzamento, a Aave recusa e o gás é perdido',
                         });
+                        continue;
+                    }
+                    // A SEGUNDA CHANCE, e é a única que já produziu alvo.
+                    //
+                    // O portão acima decide por `blocosAteCruzar`, que vem da
+                    // deriva por JURO — e o log imprime `chegandoPorJuro:
+                    // "nenhuma projetável"` em toda linha, porque o juro é
+                    // 9.000x pequeno demais para derrubar uma posição. Em um
+                    // mês ele nunca liberou um tiro.
+                    //
+                    // As liquidações que valem acontecem por PREÇO, no mesmo
+                    // bloco da escrita do oráculo. Medido em 2026-10-07:
+                    // HF 1.00184180 no fim do bloco 52289906, liquidada no
+                    // 52289907 com prêmio de US$ 49,33, e o preço do oráculo
+                    // caiu 0,1857% DENTRO daquele bloco. O log do bot, cinco
+                    // blocos antes, já dizia `mercado 0,3899% abaixo do
+                    // oráculo`: ele tinha a informação e não tinha a regra.
+                    if (queda !== null) {
+                        const naEscrita = atirarNaEscritaIminente({
+                            mercadoCaiuPct: mercadoAgora(),
+                            quedaDoAlvoPct: queda,
+                            // A bússola já sabe: `imune` é par de mesma moeda
+                            // ou mesma família, onde o preço se cancela na
+                            // conta da saúde. São 21.678 dos 57.811, e para
+                            // eles o gás é perda CERTA, não aposta.
+                            // `undefined` (par ainda não resolvido) NÃO vira
+                            // imune: quem não se sabe continua candidato, que é
+                            // o mesmo viés que a seleção da brasa já usa.
+                            precoCancela: oQueSeSabeDaVia(brasa[i]!) === 'imune',
+                            ligada: ATIRAR_NA_ESCRITA,
+                        });
+                        if (naEscrita.atira) {
+                            vaoCruzar.add(brasa[i]!.toLowerCase());
+                            caidos.push(brasa[i]);
+                            log.warn('[NA ESCRITA] Pegando carona na escrita do oráculo — tiro ESPECULATIVO.', {
+                                devedor: brasa[i],
+                                faltaCair: `${queda.toFixed(6)}%`,
+                                mercadoJaCaiu: `${mercadoAgora()?.toFixed(4) ?? '—'}%`,
+                                oOraculoEscreveEm: `${DESVIO_TIPICO_PCT.toFixed(4)}%`,
+                                aEscritaFechaAte: `${SALTO_P90_PCT.toFixed(4)}% (p90 medido em 7 dias)`,
+                                porque: naEscrita.porque,
+                                oQuePodeDarErrado: 'se a escrita vier menor que o esperado, a Aave recusa e o gás '
+                                    + 'é perdido. É aposta, e é a única que alcança um alvo que vale',
+                            });
+                        }
                     }
                 } catch {}
             }
@@ -4061,6 +4127,22 @@ async function principal(): Promise<'parar' | void> {
                         limiteGas,
                         perdasSeguidas,
                         tiroDeProva: provaAgora().armado,
+                        // O TETO DA GORJETA SO PARA O TIRO ESPECULATIVO.
+                        //
+                        // `vaoCruzar` guarda quem ainda NAO esta liquidavel e
+                        // foi mandado na aposta da escrita do oraculo. Esse
+                        // tiro paga a gorjeta mesmo revertendo, entao a gorjeta
+                        // decide quantas tentativas o saldo aguenta: medido em
+                        // 2026-10-07, 6 a 2,84 gwei contra 57 a 0,3 gwei — e
+                        // 0,3 ja e 2,2x o p90 da frente do bloco e 6,4x o que o
+                        // vencedor do alvo de US$ 49,33 pagou.
+                        //
+                        // Em posicao JA liquidavel o teto nao entra: ali o alvo
+                        // e certo, a gorjeta e paga uma vez, e perder por lance
+                        // seria perder dinheiro na mesa.
+                        tetoDaGorjetaWei: vaoCruzar.has(alvo.devedor.toLowerCase())
+                            ? BigInt(Math.round(TETO_GORJETA_ESPECULATIVA_GWEI * 1e9))
+                            : undefined,
                     });
                     const fracao = decisao.fracaoDoLucro;
                     const risco = decisao.risco;

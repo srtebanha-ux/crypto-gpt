@@ -57,6 +57,21 @@ import { Decimal } from 'decimal.js';
 export const DESVIO_TIPICO_PCT = new Decimal(0.10);
 
 /**
+ * QUANTO UMA ESCRITA DO ORACULO ANDA, em pontos percentuais.
+ *
+ * Medidos na mesma varredura de 2026-10-06 (ETH/USD, 7 dias, cobertura 92,9%)
+ * e registrados ate hoje APENAS no comentario acima — o que os tornava
+ * inutilizaveis pelo codigo. Sao eles que dizem quanto da distancia de um alvo
+ * uma escrita e capaz de fechar, e e essa a aposta de `atirarNaEscritaIminente`.
+ *
+ * O p90 e o numero de trabalho: errar para MAIS aqui faz atirar em alvo que a
+ * escrita nao alcanca (gas perdido), errar para MENOS faz deixar passar o alvo.
+ */
+export const SALTO_P50_PCT = new Decimal(0.1603);
+export const SALTO_P90_PCT = new Decimal(0.2216);
+export const SALTO_MAX_PCT = new Decimal(1.36);
+
+/**
  * A que preço da garantia esta posição vira liquidável.
  *
  * `quedaAteLiquidar` ja diz de quantos por cento e a queda. Aqui isso vira um
@@ -386,6 +401,108 @@ export function valeArmar(
  * assim, em palavras: "eu quero que ele atire o mais rapido possivel a qualquer
  * custo".
  */
+/**
+ * ATIRAR NA ESCRITA IMINENTE — a unica rota que pode ganhar um alvo que vale.
+ *
+ * POR QUE ELA EXISTE, e e a conclusao de um mes de medicoes deste projeto.
+ *
+ * `atirarAntesDoCruzamento`, logo abaixo, decide por `blocosAteCruzar`, que vem
+ * de `deriva.ts` — a projecao por JURO. O log de producao imprime
+ * `chegandoPorJuro: "nenhuma projetavel"` em TODA linha, e o CLAUDE.md ja mediu
+ * que o juro e 9.000x pequeno demais para derrubar uma posicao. Ou seja: a
+ * maquina de antecipacao estava ligada na unica das tres causas que nunca
+ * produz alvo valioso, e por isso o bot nunca atirou uma vez em um mes.
+ *
+ * As tres causas, medidas: PRECO (quase todas), JURO (lento, projetavel),
+ * DONO (sem aviso). As valiosas acontecem por PRECO, e a autopsia de
+ * 2026-10-07 mediu o mecanismo com os numeros crus:
+ *
+ *     bloco 52289906   HF 1.00184180   falta cair 0,1838%
+ *     bloco 52289907   LIQUIDADA, transacao 6 de 537
+ *     o preco do oraculo caiu 0,1857% DENTRO do bloco 52289907
+ *
+ * O premio era US$ 49,33 e o bot cobriria a mesma fatia (US$ 1.081,95). Nao
+ * perdeu por lentidao, por gorjeta nem por portao: perdeu porque le o estado
+ * DEPOIS do bloco minerado, e nao existiu bloco em que o alvo estivesse
+ * liquidavel e disponivel.
+ *
+ * A APOSTA, e e por isso que ela e defensavel: **nao se preve o mercado, se
+ * preve o oraculo correr atras de um movimento que JA ACONTECEU.** Quando o
+ * log diz `mercado 0,3899% abaixo do oraculo`, essa distancia e fato medido, e
+ * o oraculo escreve quando ela passa de ~0,151%. A escrita vai fechar parte
+ * dela — `SALTO_P90_PCT` diz quanta. Se o que falta ao alvo cabe nesse salto,
+ * a transacao mandada AGORA chega no bloco da escrita.
+ *
+ * O que se paga quando erra: o gas de uma reversao. O que se ganha quando
+ * acerta: o alvo inteiro, que por este desenho era inalcancavel.
+ */
+export function atirarNaEscritaIminente(entrada: {
+    /**
+     * Quanto o mercado esta ABAIXO do oraculo, em pontos percentuais. Fato
+     * medido (`quedaDoMercado`), nao projecao. `null` e "a Binance nao
+     * respondeu", e isso NAO autoriza tiro: ausencia nao e oportunidade.
+     */
+    mercadoCaiuPct: Decimal | null;
+    /** Quanto o oraculo precisa cair para ESTE alvo cruzar (`quedaAteLiquidar`). */
+    quedaDoAlvoPct: Decimal;
+    /** O alvo e imune a preco? Par de mesma moeda/familia nao cruza por preco. */
+    precoCancela?: boolean;
+    /** Desligada por `CACA_ATIRAR_NA_ESCRITA=0`: ela gasta gas quando erra. */
+    ligada: boolean;
+    /** O salto que uma escrita fecha. Padrao: o p90 medido. */
+    saltoDaEscrita?: Decimal;
+    /** O desvio a partir do qual o oraculo escreve. Padrao: o medido. */
+    desvioDeEscrita?: Decimal;
+}): { atira: boolean; porque: string } {
+    if (!entrada.ligada) {
+        return { atira: false, porque: 'CACA_ATIRAR_NA_ESCRITA=0: não atiro na escrita iminente' };
+    }
+    if (entrada.precoCancela === true) {
+        // O par se cancela: nenhuma escrita de preco derruba esta posicao, por
+        // grande que seja. Atirar aqui e gas perdido com certeza, nao aposta.
+        return { atira: false, porque: 'imune a preço (par de mesma moeda ou família): escrita nenhuma o derruba' };
+    }
+    const mercado = entrada.mercadoCaiuPct;
+    if (mercado === null) {
+        return { atira: false, porque: 'sem cotação de mercado — e "não sei" não é "o oráculo vai escrever"' };
+    }
+    if (!mercado.isFinite() || mercado.isNegative()) {
+        return { atira: false, porque: `desvio de mercado inválido (${mercado.toString()})` };
+    }
+    const alvo = entrada.quedaDoAlvoPct;
+    if (!alvo.isFinite() || alvo.isNegative()) {
+        return { atira: false, porque: `distância do alvo inválida (${alvo.toString()})` };
+    }
+    const limiar = entrada.desvioDeEscrita ?? DESVIO_TIPICO_PCT;
+    const saltoTipico = entrada.saltoDaEscrita ?? SALTO_P90_PCT;
+    if (mercado.lessThan(limiar)) {
+        return {
+            atira: false,
+            porque: `o mercado está ${mercado.toFixed(4)}% abaixo e o oráculo só escreve a partir de `
+                + `${limiar.toFixed(4)}%: não há escrita iminente para pegar carona`,
+        };
+    }
+    // A ESCRITA NAO PODE PASSAR DO MERCADO: ela persegue, nao ultrapassa. Entao
+    // o que ela e capaz de fechar e o MENOR entre o salto tipico e a distancia
+    // que de fato existe. Usar so o salto tipico mandaria tiro num alvo a
+    // 0,20% com o mercado 0,12% abaixo — a escrita nao tem de onde tirar.
+    const fecha = Decimal.min(saltoTipico, mercado);
+    if (alvo.greaterThan(fecha)) {
+        return {
+            atira: false,
+            porque: `o alvo precisa de ${alvo.toFixed(4)}% e a escrita iminente fecha no máximo `
+                + `${fecha.toFixed(4)}% (salto p90 ${saltoTipico.toFixed(4)}%, mercado ${mercado.toFixed(4)}%)`,
+        };
+    }
+    return {
+        atira: true,
+        porque: `o mercado já caiu ${mercado.toFixed(4)}% e o oráculo escreve a partir de ${limiar.toFixed(4)}%: `
+            + `a escrita é iminente e fecha até ${fecha.toFixed(4)}%, que cobre os ${alvo.toFixed(4)}% que faltam. `
+            + 'Mando AGORA para chegar NO bloco da escrita — é o único jeito de ganhar um alvo que vale. '
+            + 'Se a escrita vier menor, a Aave recusa e o gás é perdido: é o preço da aposta',
+    };
+}
+
 export function atirarAntesDoCruzamento(entrada: {
     /** De `blocosAteCruzar`. `null` quer dizer "nao sei", e nao "longe". */
     blocosAteCruzar: number | null;

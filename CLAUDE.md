@@ -1192,3 +1192,107 @@ a minha ao lado.
 A mecânica provável é a óbvia — a transmissão do oráculo caiu no mesmo bloco e a
 liquidação entrou atrás dela, na posição 6 — mas eu não a PROVEI, e este arquivo
 existe para separar as duas coisas.
+
+## 2026-10-07, ULTIMATO: por que um mês sem tiro, e o que de fato estava errado
+
+Ela escreveu, depois de um mês: *"a gente está a quase um mês nisso e você só
+errou, só errou, não atiramos não pegamos um alvo"*. Está certa na conta. E a
+causa não era nenhuma das que eu venho consertando.
+
+### O que eu achava, e estava ERRADO
+
+Passei semanas consertando medições, etiquetas de log, portões e gorjeta. Duas
+coisas que eu afirmei nesta mesma sessão e que a medição derrubou:
+
+1. **"Ela perde o leilão por desenho, porque o teto do pool limita o lucro em
+   US$ 1.986."** Falso. A cobertura ótima é **US$ 90.387**, que cobre dívida até
+   US$ 182.000 inteira. No alvo de hoje o bot cobriria exatamente os mesmos
+   US$ 1.081,95 que o vencedor cobriu, e estimaria US$ 47,12 contra os
+   US$ 49,33 brutos reais. **A economia do bot está certa.** O "US$ 2.050" que
+   eu publiquei saiu de eu passar a DÍVIDA onde `coberturaOtima` pede a
+   PROFUNDIDADE DO POOL. Erro meu, no script, não no bot.
+
+2. **"As duas transações do nonce 4→6 foram tiros revertidos."** Falso, e eu
+   mandei ela conferir no basescan duas vezes. Buscadas por busca binária em
+   `eth_getTransactionCount` e lidas nos recibos: as SEIS transações da carteira
+   foram **SUCESSO**, e as de nonce 4 e 5 gastaram 3,67M de gás cada — são
+   deploys de contrato. **O bot nunca atirou nenhuma vez**, e o nonce 6 está
+   inteiramente explicado por instalação.
+
+### O defeito de verdade: a antecipação estava ligada na causa errada
+
+`atirarAntesDoCruzamento` — a única porta que manda uma transação ANTES da
+posição ficar liquidável, que é a única forma de chegar no bloco certo — decide
+por `blocosAteCruzar`, que vem de `deriva.ts`: **a projeção por JURO.**
+
+O log de produção imprime, em TODA linha: `chegandoPorJuro: "nenhuma
+projetável"`. E este arquivo já tinha medido que o juro é **9.000x pequeno
+demais** para derrubar uma posição.
+
+Ou seja: a máquina de antecipação existia, estava completa, testada, e ligada na
+única das três causas que nunca produz alvo valioso. Por isso o bot passou um
+mês vendo alvos e nunca disparando.
+
+O conserto é `atirarNaEscritaIminente`, e a aposta dela é defensável porque
+**não prevê o mercado — prevê o oráculo correr atrás de um movimento que JÁ
+ACONTECEU.** Quando o log diz `mercado 0,3899% abaixo do oráculo`, essa
+distância é fato medido; o oráculo escreve a partir de ~0,151% e a escrita fecha
+até 0,2216% (p90 medido em 7 dias). Se o que falta ao alvo cabe nesse salto, a
+transação mandada agora chega NO bloco da escrita.
+
+Conferido contra o alvo real de hoje, e é o teste que guarda a regra:
+`mercado 0,3899% + alvo a 0,1838%` → **ATIRA**. Era US$ 49,33.
+
+E os saltos medidos (`SALTO_P50_PCT`, `SALTO_P90_PCT`, `SALTO_MAX_PCT`) viviam
+só no comentário de `DESVIO_TIPICO_PCT` — o que os tornava inutilizáveis pelo
+código, e é por isso que esta regra nunca pôde existir. Medição que não é
+constante de código é medição que não trabalha.
+
+### E a segunda metade, que é o que torna a primeira pagável
+
+Um tiro especulativo paga a gorjeta MESMO revertendo. Então a gorjeta decide
+quantas tentativas o saldo aguenta. Medido em 2026-10-07, 15 blocos recentes da
+Base, cobertura 100%, 90 amostras das seis primeiras posições de cada bloco:
+
+    as seis primeiras posições juntas:  p50 0,0150 gwei  p90 0,1366  p99 1,9950
+    o vencedor do alvo de US$ 49,33:        0,046688 gwei, custo total US$ 0,12
+    o que o bot paga:                       2,84 gwei
+
+**Ela pode pagar 19x o p90 da frente do bloco e 61x o que o vencedor pagou.** O
+diagnóstico de "leilão perdido" estava errado nos dois sentidos: ela não é
+superada no lance — ela nunca entrou no leilão. E pagar 2,84 gwei não ganhava
+nada a mais; só reduzia as tentativas:
+
+    2,84 gwei -> US$ 6,71 por errada -> a carteira aguenta   6
+    0,30 gwei -> US$ 0,71 por errada -> a carteira aguenta  57
+    0,015 gwei-> US$ 0,05 por errada -> a carteira aguenta 866
+
+`GORJETA_DA_FRENTE_GWEI = 0.3` é 2,2x o p90 da frente e 6,4x o que o vencedor
+pagou — folga para ganhar — e só se aplica ao tiro ESPECULATIVO. Em posição já
+liquidável o teto não entra: ali o alvo é certo e perder por lance seria perder
+dinheiro na mesa.
+
+### O tamanho do alvo, finalmente calculado
+
+    BOLO DE BÔNUS da Base, 30 dias, cobertura 99,9%:  US$ 41.967/mês
+      Morpho Blue  US$ 34.009 (81%)  <- o bot não olha
+      Aave V3      US$  5.155 (12%)  <- o único que ele olha
+      Compound V2  US$  2.803  (7%)
+
+    A meta de R$ 10.000/mês = US$ 1.845 = 4,40% do bolo inteiro
+    São 37 tiros/mês a US$ 49, ou 9 a US$ 200, de 583 que pagam o próprio gás
+
+Não é fantasia. Mas são 6,4% dos alvos que pagam o gás, num lago de 12%.
+
+### O que NÃO está resolvido, e é a próxima obra
+
+**O alvo de hoje não estava na brasa.** Precisava de 0,1838% e o log, cinco
+blocos antes, dizia que o mais perto que paga o gás estava a 0,3733%. Com a
+brasa cortando em 14,51%, se o bot o tivesse lido ele seria o PRIMEIRO da fila.
+E o devedor não emite `Borrow` há 20,8h (cobertura 99,2%), então só o cache de
+3 anos o acha. **A regra nova não serve para nada se o alvo não está na lista** —
+e é esse o próximo buraco, não a gorjeta.
+
+**E a janela no Morpho continua sem resposta:** 32 liquidações em 5 dias, mas só
+9 mediíveis (cobertura 28,1%), 2 delas com janela. 22% contra os 25,6% da Aave —
+parecido, mas 28% de cobertura não decide nada.

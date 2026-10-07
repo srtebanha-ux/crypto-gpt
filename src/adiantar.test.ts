@@ -4,6 +4,7 @@ import { Decimal } from 'decimal.js';
 import {
     precoDeQueda, quemCaiPrimeiro, jaCairamNoMercado, desvioDoOraculo,
     qualPostura, ritmoDaPostura, custoDaVigiliaEmCUs, DESVIO_TIPICO_PCT,
+    atirarNaEscritaIminente, SALTO_P50_PCT, SALTO_P90_PCT, SALTO_MAX_PCT,
 } from './adiantar';
 
 const D = (n: number | string) => new Decimal(n);
@@ -237,4 +238,111 @@ test('não rearma o que ainda está fresco', () => {
     // Rearmar a cada ciclo do gatilho (200ms) gastaria uma leitura por ciclo
     // justamente no momento mais caro.
     assert.equal(valeArmar('dedo no gatilho', 100, 5000), false);
+});
+
+// ===========================================================================
+// ATIRAR NA ESCRITA IMINENTE — a rota que a autopsia de 2026-10-07 justificou.
+// ===========================================================================
+
+test('o ALVO REAL de 2026-10-07 teria sido atirado', () => {
+    // Os numeros crus, medidos na corrente:
+    //   bloco 52289906  HF 1.00184180  falta cair 0,1838%
+    //   bloco 52289907  LIQUIDADA (transacao 6 de 537), premio US$ 49,33
+    //   o log do bot, no bloco 52289902: mercado 0,3899% abaixo do oraculo
+    // O bot tinha TODA a informacao e nenhuma regra que a ligasse ao tiro.
+    const r = atirarNaEscritaIminente({
+        mercadoCaiuPct: new Decimal('0.3899'),
+        quedaDoAlvoPct: new Decimal('0.1838'),
+        precoCancela: false,
+        ligada: true,
+    });
+    assert.equal(r.atira, true, r.porque);
+    assert.ok(r.porque.includes('0.1838'), r.porque);
+});
+
+test('alvo longe demais para a escrita fechar NAO e atirado', () => {
+    // O CLAUDE.md ja avisa: o oraculo persegue o mercado dentro de 0,10-0,15%,
+    // entao antecipar compra ~0,15% de dianteira, nao 1%. Um alvo a 0,99% nao
+    // e alcancavel por antecipacao, e atirar nele e gas perdido.
+    const r = atirarNaEscritaIminente({
+        mercadoCaiuPct: new Decimal('0.3899'),
+        quedaDoAlvoPct: new Decimal('0.99'),
+        ligada: true,
+    });
+    assert.equal(r.atira, false);
+    assert.ok(r.porque.includes('fecha no máximo'), r.porque);
+});
+
+test('a escrita NAO pode fechar mais do que o mercado andou', () => {
+    // Alvo a 0,20% com o mercado so 0,12% abaixo: a escrita persegue o
+    // mercado, nao o ultrapassa — ela nao tem de onde tirar os 0,20%.
+    // Usar so o salto p90 (0,2216%) deixaria este tiro passar.
+    const r = atirarNaEscritaIminente({
+        mercadoCaiuPct: new Decimal('0.12'),
+        quedaDoAlvoPct: new Decimal('0.20'),
+        ligada: true,
+    });
+    assert.equal(r.atira, false, r.porque);
+    assert.ok(r.porque.includes('mercado 0.1200%'), r.porque);
+});
+
+test('sem escrita iminente nao se atira', () => {
+    // Mercado 0,05% abaixo: abaixo do limiar medido de 0,10%. Nao ha escrita
+    // para pegar carona, ainda que o alvo esteja colado.
+    const r = atirarNaEscritaIminente({
+        mercadoCaiuPct: new Decimal('0.05'),
+        quedaDoAlvoPct: new Decimal('0.01'),
+        ligada: true,
+    });
+    assert.equal(r.atira, false);
+    assert.ok(r.porque.includes('não há escrita iminente'), r.porque);
+});
+
+test('IMUNE a preco nunca e atirado, por perto que esteja', () => {
+    // Par de mesma moeda/familia: o preco se cancela na conta da saude. Aqui
+    // o gas e perda CERTA, nao aposta — e sao 21.678 dos 57.811 devedores.
+    const r = atirarNaEscritaIminente({
+        mercadoCaiuPct: new Decimal('1.5'),
+        quedaDoAlvoPct: new Decimal('0.0001'),
+        precoCancela: true,
+        ligada: true,
+    });
+    assert.equal(r.atira, false);
+    assert.ok(r.porque.includes('imune a preço'), r.porque);
+});
+
+test('sem cotacao de mercado nao se atira: ausencia nao e oportunidade', () => {
+    // `quedaDoMercado` devolve null quando a Binance nao responde, e o
+    // CLAUDE.md registra que "mercado calmo" e "Binance morta" davam o mesmo
+    // log. Aqui a diferenca e dinheiro.
+    const r = atirarNaEscritaIminente({
+        mercadoCaiuPct: null,
+        quedaDoAlvoPct: new Decimal('0.01'),
+        ligada: true,
+    });
+    assert.equal(r.atira, false);
+    assert.ok(r.porque.includes('não sei'), r.porque);
+});
+
+test('a chave desliga, porque o tiro gasta gas quando erra', () => {
+    const r = atirarNaEscritaIminente({
+        mercadoCaiuPct: new Decimal('0.3899'),
+        quedaDoAlvoPct: new Decimal('0.1838'),
+        ligada: false,
+    });
+    assert.equal(r.atira, false);
+    assert.ok(r.porque.includes('CACA_ATIRAR_NA_ESCRITA=0'), r.porque);
+});
+
+test('os saltos medidos sao constantes de codigo, nao de comentario', () => {
+    // Eles viviam APENAS na docstring de DESVIO_TIPICO_PCT, o que os tornava
+    // inutilizaveis — e por isso a regra de antecipacao nunca pode existir.
+    assert.equal(SALTO_P50_PCT.toFixed(4), '0.1603');
+    assert.equal(SALTO_P90_PCT.toFixed(4), '0.2216');
+    // E a ordem tem de valer: p50 < p90 < max.
+    assert.ok(SALTO_P50_PCT.lessThan(SALTO_P90_PCT));
+    assert.ok(SALTO_P90_PCT.lessThan(SALTO_MAX_PCT));
+    // E o limiar de escrita e MENOR que o salto tipico: o oraculo escreve
+    // quando o desvio passa de 0,151% e anda 0,16% no p50.
+    assert.ok(DESVIO_TIPICO_PCT.lessThan(SALTO_P50_PCT));
 });

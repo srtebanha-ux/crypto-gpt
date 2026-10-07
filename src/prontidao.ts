@@ -882,6 +882,34 @@ export function comoLerAPolitica(p: ReturnType<typeof politicaDoTiro>): string {
  *     premio US$ 329 -> RECUSAVA     -> agora 21,1053 gwei, custo US$ 39,79
  *     premio US$1986 -> RECUSAVA     -> agora 21,1053 gwei, custo US$ 39,79
  */
+/**
+ * O PRECO DA FRENTE DO BLOCO NA BASE, medido em 2026-10-07.
+ *
+ * 15 blocos recentes, cobertura 100%, 90 amostras das seis primeiras posicoes
+ * de cada bloco, gorjeta = `effectiveGasPrice - baseFeePerGas`:
+ *
+ *     tx 1   p50 0,000000 gwei   p90 0,000000   max 0,000000
+ *     tx 2   p50 0,025000        p90 0,758971   max 1,995000
+ *     tx 3   p50 0,020200        p90 0,136577   max 0,363801
+ *     tx 4   p50 0,020200        p90 0,030000   max 0,340867
+ *     tx 5   p50 0,015000        p90 0,025000   max 0,145686
+ *     tx 6   p50 0,006536        p90 0,020200   max 0,131206
+ *     as seis juntas: p50 0,0150  p90 0,1366  p99 1,9950
+ *
+ * E o liquidante que levou o alvo de US$ 49,33 em 2026-10-07, na transacao 6 de
+ * 537 do bloco 52289907, pagou **0,046688 gwei** — custo total US$ 0,1219.
+ *
+ * O BOT PAGA 2,84 gwei, acima da maxima vista em qualquer das seis posicoes.
+ * Isso nao fazia ele ganhar mais: fazia cada ERRADA custar US$ 6,71 em vez de
+ * centavos, e e por isso que o tiro especulativo parecia impagavel. Com
+ * 0,0158 ETH a carteira aguenta 6 erradas a 2,84 gwei e 866 a 0,015.
+ *
+ * 0,3 gwei e 2,2x o p90 das seis primeiras posicoes e 6,4x o que o vencedor
+ * pagou — folga de sobra para ganhar — e deixa uma errada em US$ 0,71, que
+ * sao 57 tentativas com este saldo.
+ */
+export const GORJETA_DA_FRENTE_GWEI = 0.3;
+
 export function decidirTiro(e: Parameters<typeof decidirTiroUmaVez>[0]): DecisaoDoTiro {
     const normal = decidirTiroUmaVez(e);
     if (normal.atira) return normal;
@@ -949,6 +977,11 @@ function decidirTiroUmaVez(e: {
      * So tem efeito junto com `tiroDeProva`, que e onde mora a trava: UM tiro, e o
      * modo se desarma sozinho pelo nonce.
      */
+    /**
+     * Teto da gorjeta, em wei. Para o tiro ESPECULATIVO, que paga mesmo quando
+     * reverte. Ver `GORJETA_DA_FRENTE_GWEI` para os numeros medidos.
+     */
+    tetoDaGorjetaWei?: bigint;
     aceitaPrejuizo?: boolean;
     /**
      * No modo prova, NAO amordacar a gorjeta pelo tamanho do premio.
@@ -1089,6 +1122,20 @@ function decidirTiroUmaVez(e: {
         baseFeeWei: e.baseFeeWei,
         fracaoMaximaDoSaldo: riscoDoTiro,
     });
+    // O TETO DA GORJETA, para o tiro que pode ERRAR.
+    //
+    // Um tiro especulativo paga a gorjeta mesmo revertendo, entao a gorjeta
+    // decide quantas tentativas o saldo aguenta. Medido em 2026-10-07: a frente
+    // do bloco na Base custa 0,0150 gwei no p50 e 0,1366 no p90, e o vencedor
+    // do alvo de US$ 49,33 pagou 0,046688. Pagar 2,84 gwei nao ganhava mais
+    // nada e reduzia as tentativas de 57 para 6.
+    //
+    // So se aplica quando quem chama PEDE o teto: o tiro em cima de uma
+    // posicao ja liquidavel continua agressivo, porque ali a gorjeta e paga
+    // uma vez e o alvo e certo.
+    if (e.tetoDaGorjetaWei !== undefined && prioridadeWei > e.tetoDaGorjetaWei) {
+        prioridadeWei = e.tetoDaGorjetaWei;
+    }
 
     const custoUsd = custoDoTiroUsd(prioridadeWei, e.baseFeeWei, e.precoDoEthUsd);
     // No modo prova a margem cai para zero: qualquer lucro acima de zero passa.
