@@ -1296,3 +1296,28 @@ e é esse o próximo buraco, não a gorjeta.
 **E a janela no Morpho continua sem resposta:** 32 liquidações em 5 dias, mas só
 9 mediíveis (cobertura 28,1%), 2 delas com janela. 22% contra os 25,6% da Aave —
 parecido, mas 28% de cobertura não decide nada.
+
+### 2026-10-07, 11:40: o tiro especulativo disparou — e o portão seguinte o barrou
+
+Primeiro `[NA ESCRITA]` da história do projeto, e o log mostrou o defeito
+seguinte na mesma respiração:
+
+    [NA ESCRITA]          devedor 0x9e70b090, falta cair 0,061721%,
+                          mercado já caiu 0,1953%
+    [ANTES DO CRUZAMENTO] a medição reverteu, como tinha de reverter
+    [ESCOLHA]             lucros ["V1: 0", "V2: 0"]
+    ...e nenhum tiro saiu.
+
+A medição roda por `eth_call` ANTES da posição cruzar, e a Aave recusa posição
+saudável: **ela reverte sempre e devolve zero, por construção.** E
+`decidirTiro` exige lucro acima de zero. Então o caminho que existe para atirar
+antes do cruzamento era barrado por exigir uma prova que só existe DEPOIS
+dele — a mesma espera que faz o bot chegar tarde, voltando por outra porta.
+
+Para o alvo especulativo o lucro passa a vir de `lucroEstimado`, que é a curva
+do pool medida em `venda.ts` aplicada à dívida que a própria Aave devolveu.
+Conferido contra o alvo real de hoje: dívida US$ 2.163,90 → estimativa
+US$ 47,12, e o bônus bruto realizado pelo vencedor foi US$ 49,33.
+
+Sem dívida conhecida não se estima nada: fica a medição e o portão recusa com
+motivo, em vez de um zero inventado.

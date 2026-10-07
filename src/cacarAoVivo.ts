@@ -4083,11 +4083,42 @@ async function principal(): Promise<'parar' | void> {
                         continue;
                     }
                     const limiteGas = doGas.limite;
-                    const lucroUsd = emDolar(
+                    const medido = emDolar(
                         lucroCruValido,
                         casas.get(alvo.divida.toLowerCase()),
                         precos.get(alvo.divida.toLowerCase()),
                     );
+                    // O TIRO ESPECULATIVO NAO PODE SER MEDIDO. Achado no
+                    // primeiro log em que ele disparou, 2026-10-07 11:40:
+                    //
+                    //   [NA ESCRITA] devedor 0x9e70b090, falta cair 0,061721%
+                    //   [ANTES DO CRUZAMENTO] a medicao reverteu, como tinha
+                    //   [ESCOLHA] lucros ["V1: 0", "V2: 0"]
+                    //   ...e nenhum tiro saiu.
+                    //
+                    // A medicao roda por `eth_call` ANTES da posicao cruzar, e a
+                    // Aave recusa posicao saudavel: ela reverte SEMPRE e devolve
+                    // zero. `decidirTiro` exige lucro acima de zero. Entao o
+                    // caminho que existe para atirar antes do cruzamento era
+                    // barrado por exigir prova que so existe DEPOIS dele — a
+                    // mesma espera que faz o bot chegar sempre tarde, de volta
+                    // por outra porta.
+                    //
+                    // Para esse alvo o lucro vem de `lucroEstimado`, que e a
+                    // curva do pool medida em `venda.ts` aplicada a divida que a
+                    // propria Aave devolveu. Conferido contra o alvo real de
+                    // 2026-10-07: divida US$ 2.163,90 -> estimativa US$ 47,12,
+                    // e o bonus bruto que o vencedor realizou foi US$ 49,33.
+                    const especulativo = vaoCruzar.has(alvo.devedor.toLowerCase());
+                    // `alvo.dividaUsd` pode nao estar preenchido: sem divida
+                    // nao se estima nada, e inventar zero aqui seria o defeito
+                    // que este arquivo persegue. Nesse caso fica a medicao, e o
+                    // portao recusa com motivo.
+                    const lucroUsd = especulativo
+                        && (medido === null || medido.lessThanOrEqualTo(0))
+                        && alvo.dividaUsd !== undefined
+                        ? lucroEstimado(alvo.dividaUsd)
+                        : medido;
                     const base = baseFeeAtual ?? 20_000_000n;
 
                     // O saldo e lido no maximo uma vez por minuto: e uma ida a
