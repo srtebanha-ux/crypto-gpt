@@ -1145,9 +1145,29 @@ gás)"`. Com US$ 2.163,90 de dívida ela paga o gás com folga, e a brasa corta 
 da brasa e o `maisFragilA` teria dito 0,1838%.
 
 **Então o bot não a tinha lido.** E este devedor não emite `Borrow` há mais de
-15,6 horas (varrido daqui, 28.080 blocos), ou seja: só o cache de 3 anos o
-acharia. A pergunta que fica, e que só o log dela responde, é se ele está entre
-os 57.811 e não foi lido, ou se não está lá.
+**20,8 horas** — varrido daqui, 37.440 blocos, cobertura 99,2% (119 de 120
+janelas). Ou seja: só o cache de 3 anos o acharia. A pergunta que fica, e que
+só o log dela responde, é se ele está entre os 57.811 e não foi lido, ou se não
+está lá.
+
+#### E o defeito meu nessa medição, que a conclusão esconderia
+
+A primeira versão desta varredura filtrou `topics[3]` e publicou "15,6 horas".
+`topics[3]` do `Borrow` é o **`referralCode`**. Quem deve está em `topics[2]`
+(`onBehalfOf` indexado) — e `devedoresDosEventos`, neste repositório, já diz
+isso no próprio comentário:
+
+    Borrow(reserve indexed, user, onBehalfOf indexed, ...)
+
+Então o filtro casava com um campo que não tem nada a ver, e "nenhum achado" era
+garantido por construção: **ausência fabricada pelo método**, com cara de
+medição, no mesmo dia em que este arquivo ganhou um capítulo sobre isso.
+
+Refeita no campo certo — e passando cada evento por `devedoresDosEventos` em vez
+de pela minha leitura do tópico — a resposta foi a MESMA. Isso não absolve o
+primeiro número: ele acertou por sorte, e um número que acerta por sorte não é
+medição. É a regra 2 outra vez: a medição já existia no repositório e eu escrevi
+a minha ao lado.
 
 ### Dois becos sem saída, DECLARADOS
 
