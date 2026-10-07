@@ -1321,3 +1321,38 @@ US$ 47,12, e o bônus bruto realizado pelo vencedor foi US$ 49,33.
 
 Sem dívida conhecida não se estima nada: fica a medição e o portão recusa com
 motivo, em vez de um zero inventado.
+
+### 2026-10-07, 12:15: a POEIRA liquidável era um laço infinito
+
+O `[NAO MANDEI]` recém-criado pagou por si na primeira hora. Ele apontou
+`0x12314a83c193f7b5aeabdbd69da59d328329d111`, que aparecia no log desde 12:06 com
+os dois contratos revertendo por um motivo que **não** era "ainda não cruzou".
+
+Lido na rede, no mesmo minuto:
+
+    saúde    0,96540468   >>> LIQUIDÁVEL
+    dívida   US$ 0,00     garantia US$ 0,01
+
+É poeira. Uma posição assim fica **permanentemente liquidável e
+permanentemente impossível**: a medição reverte porque não há o que liquidar, e
+a saúde nunca volta acima de 1. O bot tentava nela em TODO ciclo.
+
+E o contador de falhas por alvo não a barrava, porque ele só incrementa no
+caminho do ENVIO — e aqui nunca se envia (`medicoes.length === 0` dá `continue`
+antes). Laço infinito, enchendo o log e escondendo alvo de verdade.
+
+O corte não é um piso novo: é `lucroEstimado`, que já existe, já é líquida do gás
+e já traz a curva do pool medida em `venda.ts`. Se ela não devolve lucro
+positivo, não há tiro possível ali por preço nenhum. Conferido nos dois extremos:
+
+    dívida US$    0,00  ->  renderia −US$ 0,30   poeira
+    dívida US$ 2.163,90 ->  renderia  US$ 47,12  vale o tiro
+
+Inventar um piso aqui seria a quarta vez, neste arquivo, que eu sincronizo uma
+regra na mão em dois lugares.
+
+**E o `[NAO MANDEI]` existe porque os dois `continue` eram mudos.** Se
+`CACA_ENVIAR` não fosse 1, o bot media, aprovava e não mandava — com o log
+IDÊNTICO a "não havia alvo". Foi o disjuntor mudo outra vez, no mesmo caminho.
+Custo medido do silêncio: eu pedi a linha `[BOTÕES]` três vezes para descobrir
+de fora o que aquela linha podia ter dito sozinha no instante exato.

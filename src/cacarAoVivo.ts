@@ -2386,6 +2386,8 @@ async function principal(): Promise<'parar' | void> {
         'CACA_REPETIR_RECUSA_MS', process.env.CACA_REPETIR_RECUSA_MS, 600_000);
     let recusasCaladas = 0;
     const falhasPorAlvo = new Map<string, { quantas: number; em: number }>();
+    /** Quando cada poeira liquidável foi avisada. Uma vez por hora, não por ciclo. */
+    const poeiraAvisadaEm = new Map<string, number>();
     const ESQUECER_FALHA_MS = Number(process.env.CACA_ESQUECER_FALHA_MS ?? '3600000');
     /**
      * Teto de envios por JANELA, nao pela vida do processo.
@@ -3365,10 +3367,51 @@ async function principal(): Promise<'parar' | void> {
                 const dadoConta = resp[inicioDaBrasa + i];
                 if (!dadoConta) continue;
                 try {
-                    const saude = decodificarContaDoUsuario(dadoConta).saude;
+                    const conta = decodificarContaDoUsuario(dadoConta);
+                    const saude = conta.saude;
                     registrarDeriva(historicoDeSaude, brasa[i]!, saude, Date.now());
                     const queda = quedaAteLiquidar(saude);
-                    if (queda !== null && queda.isZero()) { caidos.push(brasa[i]); continue; }
+                    if (queda !== null && queda.isZero()) {
+                        // POEIRA LIQUIDAVEL E LACO INFINITO.
+                        //
+                        // MEDIDO em 2026-10-07 em `0x12314a83c193f7b5aeabd…`:
+                        // saude 0,96540468 (liquidavel), divida US$ 0,00,
+                        // garantia US$ 0,01. Uma posicao assim fica
+                        // PERMANENTEMENTE liquidavel e PERMANENTEMENTE
+                        // impossivel: a medicao reverte porque nao ha o que
+                        // liquidar, e o bot tentava nela em TODO ciclo.
+                        //
+                        // E o contador de falhas por alvo nao a barrava, porque
+                        // ele so incrementa no caminho do ENVIO — e aqui nunca
+                        // se envia. Laco infinito, enchendo o log e escondendo
+                        // alvo de verdade.
+                        //
+                        // O TESTE NAO E UM PISO NOVO: e `lucroEstimado`, que
+                        // ja existe, ja e liquida do gas e da curva do pool
+                        // medida em `venda.ts`. Se ela nao devolve lucro
+                        // positivo, nao existe tiro possivel nesta posicao, por
+                        // preco nenhum. Inventar um piso aqui seria a quarta vez
+                        // que eu sincronizo uma regra na mao neste arquivo.
+                        const dividaUsd = conta.dividaBase.dividedBy(1e8);
+                        const renderia = lucroEstimado(dividaUsd);
+                        if (renderia.lessThanOrEqualTo(0)) {
+                            if (Date.now() - (poeiraAvisadaEm.get(brasa[i]!.toLowerCase()) ?? 0) > 3_600_000) {
+                                poeiraAvisadaEm.set(brasa[i]!.toLowerCase(), Date.now());
+                                log.info('[POEIRA] Liquidável e impossível: não insisto.', {
+                                    devedor: brasa[i],
+                                    saude: saude.dividedBy(1e18).toFixed(8),
+                                    dividaUsd: `US$ ${dividaUsd.toFixed(4)}`,
+                                    renderia: `US$ ${renderia.toFixed(4)} (líquido do gás)`,
+                                    porque: 'nem cobrindo a melhor fatia o lucro passa de zero: a medição reverte '
+                                        + 'porque não há o que liquidar, e a saúde fica abaixo de 1 para sempre. '
+                                        + 'Tentar em todo ciclo só esconde alvo de verdade no log',
+                                });
+                            }
+                            continue;
+                        }
+                        caidos.push(brasa[i]);
+                        continue;
+                    }
                     const b = blocosAteCruzar(
                         historicoDeSaude.get(brasa[i]!.toLowerCase()) ?? [], MS_POR_BLOCO, Date.now());
                     const antes = atirarAntesDoCruzamento({
