@@ -1034,3 +1034,65 @@ rápido exatamente nos dias de queda forte.
 
 A armadilha do método, declarada: o oráculo é lido AGORA e as liquidações são do
 passado. Por isso a janela é curta. Com janela longa este número vira ficção.
+
+## 2026-10-07: o placar morria no deploy, e o nonce sabia a resposta
+
+O log dela das 10:32 de hoje imprimiu `tiros: "Nenhum tiro ainda."` com a
+`conta_bot` em **nonce 6**. Duas transações saíram daquela carteira e o bot não
+sabia de nenhuma.
+
+A frase não estava mentindo sobre a memória dele — estava mentindo sobre o
+**passado**. O placar morava em `let tiros = placarVazio()`, o Railway reinicia
+o container várias vezes por dia, e a pergunta que mais importa ("ele já
+atirou?") era respondida com a memória do boot de agora. Ausência com cara de
+resposta, no número que decide se o bot funciona.
+
+É a MESMA classe de defeito que a bússola, e o conserto é o mesmo arquivo: o
+placar vai para o cache (`CacheDeDevedores.placar`, opcional, cache velho
+continua servindo) e é gravado **no instante em que o tiro resolve**, não na
+coleta de 37 em 37 minutos — a primeira versão da bússola gravava assim, o
+container reiniciou aos 26 e perdeu tudo. Um tiro acontece algumas vezes por
+MÊS: perder a contagem dele por esperar a coleta seria perder o evento mais raro.
+
+E há uma segunda metade, que é a que importa mais: **o nonce já sabia.** Ele
+conta transações saídas da carteira, nunca volta para trás, e já é lido no boot
+de graça. `oQueACorrenteDiz` compara os dois e a frase passou a ser:
+
+    Nenhum tiro que eu lembre. A corrente diz 6 transações já saídas desta
+    carteira e eu contei 0 tiro(s): 6 saíram sem eu lembrar — antes deste boot,
+    ou antes de existir cache. Confira no basescan.
+
+"que eu lembre", e não "ainda": a contagem mora num cache que pode não ter
+montado. O que o nonce NÃO diz é que toda transação foi um tiro — a carteira
+poderia ter mandado outra coisa — então a frase fala em TRANSAÇÕES e manda
+conferir, em vez de afirmar tiros que não foram contados.
+
+Dois cuidados que os testes guardam: o lucro vai ao disco como TEXTO, porque
+`JSON.stringify` de um `Decimal` grava os internos da biblioteca
+(`{"s":1,"e":1,"d":[91,4]}`) e `new Decimal` não lê isso de volta — voltaria
+zero em silêncio; e `disparados` na volta é o MÁXIMO entre o campo gravado e a
+soma dos desfechos, senão um arquivo cortado faz a taxa de acerto passar de 100%.
+
+### O teto do provedor mudou pela TERCEIRA vez em cinco dias
+
+`src/olharAgora.ts` ainda tinha `const JANELA = 2_000` com o comentário
+"Medido" — verdade em 02/10. Medido de novo hoje, com a função de sondagem:
+
+    02/10   2.000 blocos
+    06/10     500 blocos
+    07/10     312 blocos   <- hoje, mesmo `mainnet.base.org`
+
+Com o 2.000 cravado, as 160 janelas falhavam todas e a varredura devolvia zero
+devedores — o defeito exato que `mostrarAFila.ts` sofreu ontem, na mesma linha.
+Agora as duas ferramentas leem `tamanhosASondar` do caçador em vez de ter cada
+uma a sua lista: é a REGRA 3, e a cópia provaria a cópia.
+
+**Um número medido tem data de validade de DIAS, não de semanas.** Três leituras
+do mesmo provedor em cinco dias, caindo. Quem cravar a quarta vai errar também.
+
+### O que o log de hoje diz de bom
+
+A bússola fechou: `0 ainda não sei`, de 57.811 devedores — 25.055 LONG, 5.514
+SHORT, 5.564 AMBAS e **21.678 imunes (37,5%)**. Era isso que enchia a brasa de
+imune a cada deploy, e agora não enche mais: `gatilhoEm` estabilizou em 14,51%
+em vez dos 4,45% de uma bússola recém-nascida.

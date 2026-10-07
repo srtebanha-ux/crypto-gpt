@@ -14,6 +14,7 @@ import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodifica
 import { MULTICALL3, codificarAggregate3, decodificarAggregate3, partirEmPedacos } from './multicall';
 import { lucroEstimado } from './perdidas';
 import { faixaQueAtira, politicaDoTiro, comoLerAPolitica } from './prontidao';
+import { tamanhosASondar, PEDACO_MINIMO } from './cacarAoVivo';
 import { compararLeituras, naoForamLidos, leituraDeAgora, comoLerOMovimento, resumir, comoLerACobertura, type Alvo, type Leitura } from './olhoNosAlvos';
 
 const RPC = process.env.OLHO_RPC ?? 'https://mainnet.base.org';
@@ -67,12 +68,51 @@ function sementes(pasta: string): string[] {
     return [...vistos];
 }
 
+/**
+ * O MAIOR `eth_getLogs` que ESTE provedor aceita, medido agora.
+ *
+ * A escada de tamanhos vem de `tamanhosASondar`, do caçador, e não de uma lista
+ * própria: é a REGRA 3 do CLAUDE.md — uma regra em dois lugares é a mesma regra,
+ * e a cópia provaria a cópia. `mostrarAFila.ts` já lê a mesma função pelo mesmo
+ * motivo.
+ *
+ * Se NADA passar, devolve o piso e deixa as janelas falharem: `comoLerACobertura`
+ * então diz "TODAS as N janelas falharam", que é a resposta certa. Inventar um
+ * tamanho aqui seria trocar um buraco declarado por uma ausência com cara de
+ * resposta.
+ */
+async function descobrirJanela(topo: number): Promise<number> {
+    const pedido = Number(process.env.OLHO_JANELA ?? '10000');
+    for (const t of tamanhosASondar(pedido, PEDACO_MINIMO)) {
+        try {
+            await rpc<unknown[]>('eth_getLogs', [{
+                address: POOL, fromBlock: `0x${(topo - t + 1).toString(16)}`, toBlock: `0x${topo.toString(16)}`,
+                topics: [TOPIC_BORROW],
+            }], 1);
+            console.log(`janela: ${t} blocos (o maior que ${new URL(RPC).host} aceitou agora)`);
+            return t;
+        } catch { /* próximo tamanho */ }
+    }
+    console.log(`janela: NENHUM tamanho passou, nem o piso de ${PEDACO_MINIMO}. `
+        + 'As janelas vão falhar e a cobertura vai dizer isso.');
+    return PEDACO_MINIMO;
+}
+
 /** Varre a Base atras de quem esta perto de cair. Declara a cobertura. */
 async function varrer(topo: number, ateQuedaPct: number, semente: string[]): Promise<
     { alvos: Alvo[]; lidos: number; daJanela: number; daMemoria: number; blocos: number;
       janelas: number; janelasQueFalharam: number }> {
-    // O RPC publico recusa eth_getLogs acima de 2.000 blocos. Medido.
-    const JANELA = 2_000, QUANTAS = Number(process.env.OLHO_JANELAS ?? '160');
+    // O TETO DO PROVEDOR É MEDIDO, NUNCA CRAVADO.
+    //
+    // Aqui estava `const JANELA = 2_000` com o comentário "Medido" — e era
+    // verdade em 02/10. Em 06/10 o MESMO provedor respondeu `limited to a 500
+    // range`: as 160 janelas falhavam todas e a varredura devolvia zero
+    // devedores. É o defeito exato que `mostrarAFila.ts` sofreu no mesmo dia,
+    // pela mesma linha, e a lição está na REGRA do CLAUDE.md: um número medido
+    // tem data de validade, e um piso tem de alcançar qualquer teto plausível
+    // em vez do que estava lá na terça.
+    const JANELA = await descobrirJanela(topo);
+    const QUANTAS = Number(process.env.OLHO_JANELAS ?? String(Math.round(320_000 / JANELA)));
     // Contadas, nao engolidas: uma varredura que falhou inteira dizia 100%.
     let falharam = 0;
     const vistos = new Set<string>();
@@ -82,7 +122,7 @@ async function varrer(topo: number, ateQuedaPct: number, semente: string[]): Pro
             const logs = await rpc<Array<{ topics: string[] }>>('eth_getLogs', [{
                 address: POOL, fromBlock: `0x${(ate - JANELA + 1).toString(16)}`, toBlock: `0x${ate.toString(16)}`,
                 topics: [TOPIC_BORROW],
-            }]);
+            }], 3);
             for (const d of devedoresDosEventos(logs)) vistos.add(d.toLowerCase());
         } catch { falharam++; }
         if (i % 40 === 39) process.stderr.write(`.${vistos.size}`);

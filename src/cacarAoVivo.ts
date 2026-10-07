@@ -8,7 +8,9 @@ import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } fr
 import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, DESVIO_TIPICO_PCT, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro } from './prontidao';
-import { lerRecibo, placarVazio, contarTiro, comoEstaIndo } from './tiros';
+import {
+    lerRecibo, placarVazio, contarTiro, comoEstaIndo, placarParaCache, placarDoCache,
+} from './tiros';
 import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, blocosAteCruzar, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDeQualquerFonte, quedaDoMercado } from './precoDeMercado';
@@ -2125,6 +2127,24 @@ async function principal(): Promise<'parar' | void> {
     // declarar mais abaixo fazia o boot gravar um cache sem as vias que acabara
     // de ler, apagando no disco o que tinha acabado de recuperar.
     const viasDoCache = estadoDoCache.usavel ? (estadoDoCache.cache.vias ?? {}) : {};
+    // O PLACAR DOS TIROS volta do disco pela mesma razão que as vias, e com a
+    // mesma medição por trás: em 2026-10-06 o nonce da carteira estava em 6 —
+    // duas transações tinham saído — e o log imprimia "Nenhum tiro ainda",
+    // porque o placar morava em memória e o container reinicia várias vezes
+    // por dia. A pergunta que mais importa era respondida com a memória do
+    // boot de agora, com cara de resposta sobre o passado inteiro.
+    if (estadoDoCache.usavel && estadoDoCache.cache.placar !== undefined) {
+        tiros = placarDoCache(estadoDoCache.cache.placar);
+        log.info('[CACHE] O placar dos tiros que sobreviveu ao deploy.', {
+            // O nonce é a conferência DE FORA: ele conta transações saídas da
+            // carteira e não volta para trás, então discordar dele é a única
+            // forma de o placar provar que está incompleto em vez de supor.
+            placar: comoEstaIndo(tiros, nonceManager?.nonceConhecido()),
+            // Sem isto, "o cache não tinha placar" e "o placar era zero" ficam
+            // iguais — e são fatos diferentes sobre a mesma pergunta.
+            vindoDoDisco: `${tiros.disparados} tiro(s) contados antes deste boot`,
+        });
+    }
     // A VARREDURA ACONTECE EM DUAS PARTES, e a ordem é o que separa um boot de
     // segundos de um boot de uma hora.
     //
@@ -2282,6 +2302,9 @@ async function principal(): Promise<'parar' | void> {
             // completa resolve mais 600 pares, e sem esta linha eles morreriam
             // no próximo deploy como morreram no de hoje.
             vias: viasQueAindaImportam(juntarVias(viasDoCache, todasAsViasSabidas()), memoriaDoCache),
+            // O placar vai em TODA gravação, não numa própria: assim ele pega
+            // carona nas que já acontecem e nunca fica mais velho que o cache.
+            placar: placarParaCache(tiros),
         });
         (g.gravou ? log.info : log.warn)(
             g.gravou ? '[CACHE] Regravado.' : '[CACHE] NÃO regravei.',
@@ -3334,7 +3357,10 @@ async function principal(): Promise<'parar' | void> {
                         naBrasa: brasa.length,
                         // Sem isto, "mercado calmo" e "Binance morta" dao o
                         // mesmo log — e sao coisas opostas.
-                        tiros: comoEstaIndo(tiros),
+                        // O nonce entra aqui porque é ESTA a linha que ela lê
+                        // para saber se o bot já atirou, e era ela que dizia
+                        // "Nenhum tiro ainda" com duas transações já saídas.
+                        tiros: comoEstaIndo(tiros, nonceManager?.nonceConhecido()),
                         armados: alvosArmados.size,
                         gas: saldoLidoEm === 0 ? 'ainda não li' : `${new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6)} ETH`,
                         avisoDeBloco: ouvinte === null ? 'desligado' : (ouvinte.vivo ? `ligado (último ${ouvinte.ultimoBloco})` : 'CAIU — perguntando'),
@@ -4233,6 +4259,26 @@ async function principal(): Promise<'parar' | void> {
                                 }
                             }
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro);
+                            // AO DISCO AGORA, e não na próxima coleta.
+                            //
+                            // A primeira versão da persistência da bússola
+                            // gravava só na coleta de 37 em 37 minutos; o
+                            // container reiniciou aos 26 e perdeu tudo. Um tiro
+                            // acontece algumas vezes por MÊS: perder a contagem
+                            // dele por esperar a próxima coleta seria perder
+                            // justamente o evento mais raro e mais caro.
+                            //
+                            // Sem `await`: gravar é acelerador, não motor — o
+                            // disco não pode atrasar o laço quente. E com
+                            // `.catch()`, não `void`: uma promessa rejeitada
+                            // sem tratamento DERRUBA o processo no Node 22, e
+                            // derrubar o bot para registrar um tiro seria o
+                            // diagnóstico matando o que ele existe para medir.
+                            regravarCache(`tiro ${desfecho} (${tiros.disparados} no total)`)
+                                .catch((e: unknown) => log.warn('[CACHE] Não gravei o placar do tiro.', {
+                                    erro: (e as Error).message?.slice(0, 120),
+                                    oQueIssoCusta: 'a contagem volta a zero no próximo deploy — o nonce ainda denuncia',
+                                }));
                             // Perder sobe o lance; ganhar devolve ele para a
                             // base. Assim o bot nao paga caro para sempre por
                             // uma sequencia ruim que ja passou.

@@ -101,6 +101,30 @@ export interface CacheDeDevedores {
      *      por hora. E cada deploy zera de novo.
      */
     vias?: Record<string, string>;
+    /**
+     * O PLACAR DOS TIROS, que morria em todo deploy.
+     *
+     * MEDIDO em 2026-10-06: o nonce da carteira estava em 6 — duas transações
+     * tinham saído — e o log imprimia `tiros: "Nenhum tiro ainda."`. O placar
+     * morava em memória e o Railway reinicia o container várias vezes por dia,
+     * então a pergunta que mais importa ("ele já atirou?") era respondida com a
+     * memória do boot de agora e tinha cara de resposta sobre o passado inteiro.
+     *
+     * É a MESMA classe de defeito que a bússola (o campo `vias` acima) e tem o
+     * mesmo conserto, pelo mesmo arquivo. Opcional pela mesma razão: cache
+     * gravado antes desta versão não tem o campo e tem de continuar servindo.
+     *
+     * O lucro vai como TEXTO porque `JSON.stringify` de um `Decimal` grava os
+     * internos da biblioteca (`{"s":1,"e":1,"d":[…]}`), que `new Decimal` não lê
+     * de volta: voltaria zero em silêncio. Ver `placarParaCache` em `tiros.ts`.
+     */
+    placar?: {
+        disparados: number;
+        acertou: number;
+        reverteu: number;
+        sumiu: number;
+        lucroEstimadoUsd: string;
+    };
 }
 
 export type EstadoDoCache =
