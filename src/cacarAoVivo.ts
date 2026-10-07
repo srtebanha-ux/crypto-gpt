@@ -2191,6 +2191,36 @@ async function principal(): Promise<'parar' | void> {
     const comecaEm = estadoDoCache.usavel
         ? deOndeComecar(estadoDoCache, nascimento)
         : Math.max(nascimento, topo - BLOCOS + 1);
+    // PROCURAR UM DEVEDOR ESPECIFICO NA MEMORIA.
+    //
+    // Existe por uma pergunta que travou a estrategia em 2026-10-07 e que eu
+    // nao consegui responder de fora: o alvo de US$ 49,33 daquele dia
+    // (`0x6b950f30…`) precisava cair 0,1838%, e o log dizia que o mais perto
+    // que paga o gas estava a 0,3733%. Com a brasa cortando em 14,13%, se o bot
+    // o tivesse LIDO ele seria o primeiro da fila. Entao ou ele nao esta na
+    // lista, ou esta e nao foi lido — e as duas pedem consertos opostos.
+    //
+    // A lista mora no volume do Railway e nao da para inspecionar daqui. Esta
+    // linha responde com UMA variavel de ambiente, sem deploy de ferramenta
+    // nova e sem varredura: `CACA_PROCURAR=0x6b95…` (ou varios, separados por
+    // virgula).
+    const procurar = (process.env.CACA_PROCURAR ?? '')
+        .split(',').map((x) => x.trim().toLowerCase()).filter((x) => x.startsWith('0x'));
+    if (procurar.length > 0) {
+        const doCache = estadoDoCache.usavel ? estadoDoCache.cache.devedores : {};
+        log.info('[PROCURA] O que a memória sabe destes endereços.', Object.fromEntries(
+            procurar.map((d) => [d, (() => {
+                const bloco = doCache[d];
+                if (bloco === undefined) {
+                    return 'NÃO ESTÁ na memória — nenhum `Borrow` dele foi lido. '
+                        + 'É buraco de cobertura do cache, não falha de leitura';
+                }
+                const via = (estadoDoCache.usavel ? estadoDoCache.cache.vias ?? {} : {})[d];
+                return `está na memória, visto no bloco ${bloco}`
+                    + `, via ${via ?? 'ainda não resolvida'}`
+                    + '. Então se não apareceu na brasa, foi a LEITURA que falhou';
+            })()])));
+    }
     log.info('[CACHE] A memória de devedores que sobrevive ao deploy.', {
         caminho: CAMINHO_DO_CACHE,
         estado: estadoDoCache.usavel ? 'USÁVEL' : 'NÃO uso',
