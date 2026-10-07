@@ -2402,6 +2402,8 @@ async function principal(): Promise<'parar' | void> {
     const falhasPorAlvo = new Map<string, { quantas: number; em: number }>();
     /** Quando cada poeira liquidável foi avisada. Uma vez por hora, não por ciclo. */
     const poeiraAvisadaEm = new Map<string, number>();
+    /** Quando cada alvo pulado foi avisado. Uma vez por minuto, não por ciclo. */
+    const puloAvisadoEm = new Map<string, number>();
     /**
      * UM TIRO POR ALVO POR BLOCO.
      *
@@ -3907,6 +3909,35 @@ async function principal(): Promise<'parar' | void> {
             }
 
             for (const alvo of alvos) {
+                // O CORTE POR FALHA VEM ANTES DE MEDIR.
+                //
+                // MEDIDO no log de 2026-10-07 12:44: `[PULEI] tentativas: 4`
+                // saia DEPOIS de `[ALERTA] Simulacao executada` nos dois
+                // contratos. O corte funcionava — nenhum tiro saiu, nenhum gas
+                // foi gasto — mas o bot rodava QUATRO `eth_call` por segundo
+                // num alvo que ja tinha decidido nao atirar, no mesmo segundo,
+                // repetidamente. Isso e CU do provedor dela, que ela paga.
+                //
+                // `eth_call` nao custa gas, e por isso a ordem parecia
+                // inofensiva. Custa CU, e CU tem conta no fim do mes.
+                const chaveDoCorte = `${alvo.devedor}|${alvo.garantia}|${alvo.divida}`.toLowerCase();
+                const anterior = falhasPorAlvo.get(chaveDoCorte);
+                if (anterior && Date.now() - anterior.em > ESQUECER_FALHA_MS) {
+                    falhasPorAlvo.delete(chaveDoCorte);
+                }
+                const falhouAntes = falhasPorAlvo.get(chaveDoCorte)?.quantas ?? 0;
+                if (falhouAntes >= MAX_POR_ALVO) {
+                    if (Date.now() - (puloAvisadoEm.get(chaveDoCorte) ?? 0) > 60_000) {
+                        puloAvisadoEm.set(chaveDoCorte, Date.now());
+                        log.info('[PULEI] Este alvo já falhou demais na última hora — nem meço.', {
+                            devedor: alvo.devedor,
+                            tentativas: falhouAntes,
+                            voltaEm: `${Math.round(ESQUECER_FALHA_MS / 60000)}min`,
+                            porque: 'medir custa CU do provedor, e a decisão já está tomada',
+                        });
+                    }
+                    continue;
+                }
                 // Duas fases, e a separacao existe por um motivo caro: o laco
                 // antigo ENVIAVA dentro dele, uma transacao por contrato no
                 // MESMO alvo. Nonces consecutivos da mesma carteira sao
