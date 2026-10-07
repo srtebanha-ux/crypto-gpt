@@ -5,7 +5,7 @@ import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
-import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
+import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI } from './prontidao';
 import {
@@ -3435,7 +3435,7 @@ async function principal(): Promise<'parar' | void> {
                         // que eu sincronizo uma regra na mao neste arquivo.
                         const dividaUsd = conta.dividaBase.dividedBy(1e8);
                         const renderia = lucroEstimado(dividaUsd);
-                        if (renderia.lessThanOrEqualTo(0)) {
+                        if (ehPoeira(dividaUsd)) {
                             if (Date.now() - (poeiraAvisadaEm.get(brasa[i]!.toLowerCase()) ?? 0) > 3_600_000) {
                                 poeiraAvisadaEm.set(brasa[i]!.toLowerCase(), Date.now());
                                 log.info('[POEIRA] Liquidável e impossível: não insisto.', {
@@ -3620,6 +3620,8 @@ async function principal(): Promise<'parar' | void> {
                      * pelo fato errado é como a régua de idade errava.
                      */
                     const semDivida: string[] = [];
+                    /** Poeira liquidável que a varredura achou e NÃO mandou para a fila. */
+                    let poeiraNaVarredura = 0;
                     for (let i = 0; i < aLer.length; i++) {
                         const dadoConta = loteGigante[i];
                         if (!dadoConta) continue;
@@ -3636,7 +3638,22 @@ async function principal(): Promise<'parar' | void> {
                             registrarDeriva(historicoDeSaude, aLer[i]!, conta.saude, Date.now());
                             const queda = quedaAteLiquidar(conta.saude);
                             if (queda === null) continue;
-                            if (queda.isZero()) { if (!caidos.includes(aLer[i])) caidos.push(aLer[i]); }
+                            if (queda.isZero()) {
+                                // A MESMA regra da brasa, pelo MESMO caminho.
+                                //
+                                // Este `caidos.push` e o gemeo que eu esqueci
+                                // as 12:15: consertei a poeira no laco da brasa
+                                // e a varredura completa continuou empurrando.
+                                // As 17:04 vieram OITO de uma vez, no mesmo
+                                // bloco 52301641 — entre elas `0x8c095dd7…`,
+                                // com saude 0,998653 e divida US$ 0,00.
+                                const dividaAqui = conta.dividaBase.dividedBy(1e8);
+                                if (ehPoeira(dividaAqui)) {
+                                    poeiraNaVarredura += 1;
+                                } else if (!caidos.includes(aLer[i])) {
+                                    caidos.push(aLer[i]);
+                                }
+                            }
                             // A Aave responde a divida em "moeda base": dolares
                             // com 8 casas. Vem na mesma resposta da saude, de
                             // graca, e era descartada.
@@ -3662,6 +3679,20 @@ async function principal(): Promise<'parar' | void> {
                     // encolhendo a cada passagem ate sobrar ninguem, e o bot
                     // ficaria cego sem avisar.
                     if (varredura === 'completa') {
+                        // SILENCIO NAO E RESPOSTA. Se a varredura achou poeira
+                        // liquidavel e a descartou, isso tem de aparecer — foi
+                        // justamente a AUSENCIA desta linha que deixou oito
+                        // delas entrarem na fila sem ninguem notar, das 12:15
+                        // as 17:04 de 2026-10-07.
+                        if (poeiraNaVarredura > 0) {
+                            log.info('[POEIRA] A varredura achou liquidável impossível e não mandou para a fila.', {
+                                quantas: poeiraNaVarredura,
+                                porque: 'dívida tão pequena que nem cobrindo a melhor fatia o lucro passa de '
+                                    + 'zero: a medição reverte porque não há o que liquidar, e a saúde fica '
+                                    + 'abaixo de 1 para sempre',
+                                oQueIssoEvita: 'cada uma custaria 4 eth_call por ciclo, para sempre',
+                            });
+                        }
                         // O ESQUECIMENTO POR ESTADO.
                         //
                         // Esta é a única varredura que olha TODO MUNDO, então é a

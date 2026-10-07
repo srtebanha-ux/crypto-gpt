@@ -4,6 +4,7 @@ import { Decimal } from 'decimal.js';
 import { comparaPremio,
     lucroEstimado, emDolar, ondeEuEstava, montarPlacar, oQueIssoQuerDizer,
     type Perdida, type Cobertura,
+    ehPoeira,
 } from './perdidas';
 
 const D = (n: number | string) => new Decimal(n);
@@ -179,4 +180,45 @@ test('comparaPremio: lucro manda, e o empate vai para quem cai primeiro', () => 
     assert.ok(comparaPremio(p('1985.95441843', '4.04'), p('1985.95441843', '2.12')) > 0);
     // Empate nos dois campos é 0, senão `sort` fica instável de novo.
     assert.equal(comparaPremio(p('1986', '2.12'), p('1986', '2.12')), 0);
+});
+
+// ===========================================================================
+// POEIRA LIQUIDAVEL — uma regra, um lugar. REGRA 3, quinta vez.
+// ===========================================================================
+
+test('ehPoeira barra os DOIS casos reais de 2026-10-07', () => {
+    // Medidos na rede, com horas de diferença:
+    //   12:15  0x12314a83…  saúde 0,96540468  dívida US$ 0,00  garantia US$ 0,01
+    //   17:04  0x8c095dd7…  saúde 0,998653    dívida US$ 0,00  garantia US$ 0,00
+    // Liquidáveis para sempre e impossíveis para sempre.
+    assert.equal(ehPoeira(new Decimal(0)), true);
+    assert.equal(ehPoeira(new Decimal('0.01')), true);
+    assert.equal(ehPoeira(new Decimal(10)), true, 'US$ 10 de dívida rende -US$ 0,08');
+});
+
+test('ehPoeira NAO barra o alvo que vale — o de US$ 49,33', () => {
+    // Dívida US$ 2.163,90, bônus bruto realizado US$ 49,33, estimativa US$ 47,12.
+    assert.equal(ehPoeira(new Decimal('2163.90')), false);
+});
+
+test('dívida negativa ou não-finita conta como poeira, nunca como alvo', () => {
+    // Ausência e lixo não podem virar autorização de gasto.
+    assert.equal(ehPoeira(new Decimal(-5)), true);
+    assert.equal(ehPoeira(new Decimal(Number.NaN)), true);
+    assert.equal(ehPoeira(new Decimal(Number.POSITIVE_INFINITY)), true);
+});
+
+test('ehPoeira e lucroEstimado concordam sempre — senao sao duas regras', () => {
+    // O defeito que este teste guarda: eu escrevi o critério como `if` dentro
+    // do laço da brasa e a varredura completa ficou com o seu próprio
+    // `caidos.push`, sem filtro. Em 2026-10-07 às 17:04 entraram OITO poeiras
+    // de uma vez pelo caminho que eu não consertei. REGRA 3, quinta vez.
+    for (const d of ['0', '0.5', '5', '18', '18.5', '19', '25', '100', '5000']) {
+        const divida = new Decimal(d);
+        assert.equal(
+            ehPoeira(divida),
+            lucroEstimado(divida).lessThanOrEqualTo(0),
+            `divergiram em US$ ${d}: são duas regras onde devia ser uma`,
+        );
+    }
 });

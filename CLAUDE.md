@@ -1476,3 +1476,42 @@ O log de 12:44 mostra que o 0,10% não dispara escrita nenhuma: o desvio subiu d
 fora da corrente e o tempo até a próxima escrita. Precisa de histórico de preço
 fora da corrente alinhado aos eventos `AnswerUpdated` — não dá para fazer daqui
 com o que temos. Até medir, o piso de prêmio é o que impede a aposta de sangrar.
+
+### 2026-10-07, 17:04: OITO poeiras de uma vez — a REGRA 3 pela QUINTA vez
+
+O log trouxe oito devedores diferentes, todos no bloco **52301641**, todos com
+`[NAO MANDEI] Nenhum contrato produziu medição utilizável`. Lido na rede, o
+primeiro deles:
+
+    0x8c095dd766b5a0936da8b3b2d8a6e68052bff18d
+    saúde 0,998653   LIQUIDÁVEL
+    dívida US$ 0,00  garantia US$ 0,00  renderia −US$ 0,30
+
+É poeira — **e o filtro que eu escrevi às 12:15, cinco horas antes, devia
+tê-la barrado.** Não barrou.
+
+Porque `caidos.push` acontece em QUATRO lugares, e eu consertei os do laço da
+brasa. O quarto é a **varredura completa**, que tem o seu próprio
+`if (queda.isZero()) caidos.push(...)` — sem filtro nenhum. E como ela passou a
+rodar a cada 15 minutos em vez de 60 (`CACA_MINUTOS_COMPLETA=15`), despejou oito
+de uma vez.
+
+**É a REGRA 3 deste arquivo me pegando pela quinta vez**, e a quinta foi no
+conserto da quarta: *"uma regra em dois lugares é a mesma regra; se dois lugares
+calculam a mesma coisa, junte num só em vez de sincronizar na mão"*. Eu escrevi
+um `if` no laço em vez de uma função, e o gêmeo continuou solto.
+
+Agora é `ehPoeira(dividaUsd)` em `perdidas.ts`, e os dois caminhos a chamam. Um
+teste exige que ela e `lucroEstimado` **concordem em toda dívida** — se
+divergirem, voltaram a ser duas regras.
+
+E a varredura passou a DIZER quantas descartou (`[POEIRA] A varredura achou
+liquidável impossível e não mandou para a fila`). Foi a ausência dessa linha que
+deixou as oito entrarem sem ninguém notar entre 12:15 e 17:04 — silêncio não é
+resposta, no arquivo que diz isso desde a primeira página.
+
+Conferido com a função de verdade:
+
+    dívida US$    0,00  ->  renderia −US$ 0,30   POEIRA (os dois casos de hoje)
+    dívida US$   10,00  ->  renderia −US$ 0,08   POEIRA
+    dívida US$ 2.163,90 ->  renderia  US$ 47,12  vale a fila

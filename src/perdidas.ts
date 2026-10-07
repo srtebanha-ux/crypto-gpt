@@ -113,6 +113,33 @@ const otimaPorProfundidade = new Map<string, Decimal>();
  * resultado e memorizado porque a profundidade nao muda em memoria e isto e
  * chamado uma vez por posicao medida — milhares por varredura.
  */
+/**
+ * ESTA POSICAO E POEIRA? Liquidavel para sempre e impossivel para sempre.
+ *
+ * MEDIDO em 2026-10-07 em duas ocasioes, e a segunda e a licao:
+ *
+ *   12:15  `0x12314a83…`  saude 0,96540468  divida US$ 0,00  garantia US$ 0,01
+ *   17:04  `0x8c095dd7…`  saude 0,998653    divida US$ 0,00  garantia US$ 0,00
+ *
+ * Uma posicao assim fica liquidavel (saude < 1) e impossivel ao mesmo tempo: a
+ * medicao reverte porque nao ha o que liquidar, e a saude nunca volta acima de
+ * 1. O bot tentava nelas sem parar.
+ *
+ * POR QUE ELA EXISTE COMO FUNCAO, e nao como `if` no laco: eu escrevi o teste
+ * dentro do laco da brasa as 12:15 e **a varredura completa continuou
+ * empurrando poeira para a fila**, porque ela tem o seu proprio `caidos.push`.
+ * As 17:04 vieram OITO de uma vez, no mesmo bloco. E a REGRA 3 do CLAUDE.md me
+ * pegando pela quinta vez: uma regra em dois lugares e a mesma regra.
+ *
+ * O criterio nao e piso novo: e `lucroEstimado`, que ja desconta gas e ja traz
+ * a curva do pool medida em `venda.ts`. Sem lucro positivo nao existe tiro
+ * possivel ali, por preco nenhum.
+ */
+export function ehPoeira(dividaUsd: Decimal, profundidadeUsd?: Decimal): boolean {
+    if (!dividaUsd.isFinite() || dividaUsd.lessThanOrEqualTo(0)) return true;
+    return lucroEstimado(dividaUsd, profundidadeUsd).lessThanOrEqualTo(0);
+}
+
 export function coberturaOtima(
     profundidadeUsd: Decimal = PROFUNDIDADE_DA_VENDA,
     passos = 2000,
