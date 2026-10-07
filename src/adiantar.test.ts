@@ -4,7 +4,7 @@ import { Decimal } from 'decimal.js';
 import {
     precoDeQueda, quemCaiPrimeiro, jaCairamNoMercado, desvioDoOraculo,
     qualPostura, ritmoDaPostura, custoDaVigiliaEmCUs, DESVIO_TIPICO_PCT,
-    atirarNaEscritaIminente, SALTO_P50_PCT, SALTO_P90_PCT, SALTO_MAX_PCT,
+    atirarNaEscritaIminente, SALTO_P50_PCT, SALTO_P90_PCT, SALTO_MAX_PCT, APOSTA_MINIMA_USD,
 } from './adiantar';
 
 const D = (n: number | string) => new Decimal(n);
@@ -255,6 +255,7 @@ test('o ALVO REAL de 2026-10-07 teria sido atirado', () => {
         quedaDoAlvoPct: new Decimal('0.1838'),
         precoCancela: false,
         ligada: true,
+        premioUsd: new Decimal('47.12'), // o que `lucroEstimado` dá para aquela dívida
     });
     assert.equal(r.atira, true, r.porque);
     assert.ok(r.porque.includes('0.1838'), r.porque);
@@ -268,6 +269,7 @@ test('alvo longe demais para a escrita fechar NAO e atirado', () => {
         mercadoCaiuPct: new Decimal('0.3899'),
         quedaDoAlvoPct: new Decimal('0.99'),
         ligada: true,
+        premioUsd: new Decimal('47.12'),
     });
     assert.equal(r.atira, false);
     assert.ok(r.porque.includes('fecha no máximo'), r.porque);
@@ -281,6 +283,7 @@ test('a escrita NAO pode fechar mais do que o mercado andou', () => {
         mercadoCaiuPct: new Decimal('0.12'),
         quedaDoAlvoPct: new Decimal('0.20'),
         ligada: true,
+        premioUsd: new Decimal('47.12'),
     });
     assert.equal(r.atira, false, r.porque);
     assert.ok(r.porque.includes('mercado 0.1200%'), r.porque);
@@ -293,6 +296,7 @@ test('sem escrita iminente nao se atira', () => {
         mercadoCaiuPct: new Decimal('0.05'),
         quedaDoAlvoPct: new Decimal('0.01'),
         ligada: true,
+        premioUsd: new Decimal('47.12'),
     });
     assert.equal(r.atira, false);
     assert.ok(r.porque.includes('não há escrita iminente'), r.porque);
@@ -306,6 +310,7 @@ test('IMUNE a preco nunca e atirado, por perto que esteja', () => {
         quedaDoAlvoPct: new Decimal('0.0001'),
         precoCancela: true,
         ligada: true,
+        premioUsd: new Decimal('47.12'),
     });
     assert.equal(r.atira, false);
     assert.ok(r.porque.includes('imune a preço'), r.porque);
@@ -319,6 +324,7 @@ test('sem cotacao de mercado nao se atira: ausencia nao e oportunidade', () => {
         mercadoCaiuPct: null,
         quedaDoAlvoPct: new Decimal('0.01'),
         ligada: true,
+        premioUsd: new Decimal('47.12'),
     });
     assert.equal(r.atira, false);
     assert.ok(r.porque.includes('não sei'), r.porque);
@@ -329,6 +335,7 @@ test('a chave desliga, porque o tiro gasta gas quando erra', () => {
         mercadoCaiuPct: new Decimal('0.3899'),
         quedaDoAlvoPct: new Decimal('0.1838'),
         ligada: false,
+        premioUsd: new Decimal('47.12'),
     });
     assert.equal(r.atira, false);
     assert.ok(r.porque.includes('CACA_ATIRAR_NA_ESCRITA=0'), r.porque);
@@ -345,4 +352,61 @@ test('os saltos medidos sao constantes de codigo, nao de comentario', () => {
     // E o limiar de escrita e MENOR que o salto tipico: o oraculo escreve
     // quando o desvio passa de 0,151% e anda 0,16% no p50.
     assert.ok(DESVIO_TIPICO_PCT.lessThan(SALTO_P50_PCT));
+});
+
+
+test('a aposta NAO se paga em premio pequeno — e e aritmetica, nao cautela', () => {
+    // MEDIDO em 2026-10-07: 7 apostas, 0 acertos, US$ 2,10 gastos. O oráculo
+    // escreve 121,7 vezes/dia e a Base faz 43.200 blocos/dia, então a chance
+    // CEGA de a transação cair no bloco de uma escrita é 1/355 = 0,282%. Com
+    // US$ 0,30 por errada, um prêmio de US$ 1,80 exigiria 14,3% de acerto —
+    // 51x o acaso. O bot apostou quatro vezes seguidas nesse prêmio.
+    const base = {
+        mercadoCaiuPct: new Decimal('0.3899'),
+        quedaDoAlvoPct: new Decimal('0.1460'),
+        ligada: true as const,
+    };
+    const migalha = atirarNaEscritaIminente({ ...base, premioUsd: new Decimal('1.80') });
+    assert.equal(migalha.atira, false, migalha.porque);
+    assert.ok(migalha.porque.includes('aritmética'), migalha.porque);
+
+    // E o alvo que valia a pena — o de 2026-10-07, US$ 49,33 bruto — passa.
+    const bom = atirarNaEscritaIminente({ ...base, premioUsd: new Decimal('47.12') });
+    assert.equal(bom.atira, true, bom.porque);
+});
+
+test('sem saber o premio NAO se aposta: ausencia nao e autorizacao', () => {
+    for (const premio of [undefined, null, new Decimal(Number.NaN)]) {
+        const r = atirarNaEscritaIminente({
+            mercadoCaiuPct: new Decimal('0.3899'),
+            quedaDoAlvoPct: new Decimal('0.1460'),
+            ligada: true,
+            premioUsd: premio,
+        });
+        assert.equal(r.atira, false, `${premio}`);
+        assert.ok(r.porque.includes('Ausência não é autorização'), r.porque);
+    }
+});
+
+test('o piso pode ser desligado, e ai volta ao comportamento de antes', () => {
+    // `CACA_APOSTA_MINIMA_USD=0` libera qualquer prêmio. A escolha é dela.
+    const r = atirarNaEscritaIminente({
+        mercadoCaiuPct: new Decimal('0.3899'),
+        quedaDoAlvoPct: new Decimal('0.1460'),
+        ligada: true,
+        premioUsd: new Decimal('1.80'),
+        premioMinimoUsd: new Decimal(0),
+    });
+    assert.equal(r.atira, true, r.porque);
+});
+
+test('o piso medido exige que a aposta seja melhor que o acaso, nao igual', () => {
+    // A tabela que justifica o número, e ela está na docstring:
+    //   premio US$ 1,80 -> 14,3% (51x o acaso)   US$ 20 -> 1,5% (5x)
+    // US$ 20 é escolha, não medição — a taxa real não está medida. O teste
+    // guarda a ORDEM de grandeza, para a próxima sessão não baixar sem medir.
+    assert.ok(APOSTA_MINIMA_USD.greaterThanOrEqualTo(10),
+        'abaixo de US$ 10 a aposta precisa acertar mais de 3% — 10x o acaso cego');
+    assert.ok(APOSTA_MINIMA_USD.lessThanOrEqualTo(106),
+        'US$ 106 é onde a aposta se paga no acaso cego; acima disso o piso é pessimista demais');
 });

@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
-import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, type Postura } from './adiantar';
+import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI } from './prontidao';
 import {
     lerRecibo, placarVazio, contarTiro, comoEstaIndo, placarParaCache, placarDoCache,
@@ -1993,6 +1993,15 @@ async function principal(): Promise<'parar' | void> {
         process.env.CACA_GORJETA_ESPECULATIVA_GWEI,
         GORJETA_DA_FRENTE_GWEI);
     /**
+     * O premio minimo para a aposta valer, em dolares. Aritmetica, nao cautela:
+     * ver `APOSTA_MINIMA_USD` em `adiantar.ts` para a tabela medida.
+     * `CACA_APOSTA_MINIMA_USD=0` libera qualquer premio.
+     */
+    const APOSTA_MINIMA = new Decimal(numeroDoAmbiente(
+        'CACA_APOSTA_MINIMA_USD',
+        process.env.CACA_APOSTA_MINIMA_USD,
+        APOSTA_MINIMA_USD.toNumber()));
+    /**
      * O gas que resta, em wei. Lido de tempos em tempos, nao a cada tiro.
      *
      * Precisa existir porque a gorjeta e paga mesmo quando a transacao
@@ -3484,6 +3493,15 @@ async function principal(): Promise<'parar' | void> {
                         const naEscrita = atirarNaEscritaIminente({
                             mercadoCaiuPct: mercadoAgora(),
                             quedaDoAlvoPct: queda,
+                            // O PREMIO decide se a aposta se paga. Medido em
+                            // 2026-10-07: 7 apostas, 0 acertos, US$ 0,30 por
+                            // errada; num premio de US$ 1,80 a aposta teria de
+                            // acertar 14,3% das vezes, 51x a chance cega de
+                            // 0,282% (uma escrita a cada 355 blocos).
+                            // `lucroEstimado` e a mesma funcao que decide o
+                            // tiro: uma regra, um lugar.
+                            premioUsd: lucroEstimado(conta.dividaBase.dividedBy(1e8)),
+                            premioMinimoUsd: APOSTA_MINIMA,
                             // A bússola já sabe: `imune` é par de mesma moeda
                             // ou mesma família, onde o preço se cancela na
                             // conta da saúde. São 21.678 dos 57.811, e para

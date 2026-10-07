@@ -1430,3 +1430,49 @@ A frase passou a seguir o TIPO do tiro.
 `.tmp` cravado. Reescrito para afirmar a REGRA — cria a pasta, escreve num
 temporário dentro dela, e renomeia **esse** temporário — mais um caso novo que
 prova que duas gravações concorrentes não disputam o mesmo arquivo.
+
+### 2026-10-07, 13:49: 7 de 7 reverteram, e a conta que eu devia ter feito ANTES
+
+`gas: 0.015008 ETH` contra os 0,015821 do começo: **0,000813 ETH (~US$ 2,10) em
+7 tiros, 0 acertos.** O teto de gorjeta funcionou (US$ 0,30 por errada em vez de
+US$ 6,71), a trava de 4 por alvo/hora funcionou, o `[PULEI]` funcionou. O que
+não funcionou foi a **aritmética da aposta**, e eu não a tinha feito.
+
+    o oráculo do ETH escreve 121,7 vezes/dia (7 dias, cobertura 92,9%)
+    a Base faz 43.200 blocos/dia
+    -> uma escrita a cada 355 blocos, ou 11,8 minutos
+
+A transação especulativa vale por UM bloco. Então a chance **cega** de ela cair
+no bloco de uma escrita é 1/355 = **0,282%**. E com US$ 0,30 por errada:
+
+    prêmio US$   1,80  ->  precisa acertar 14,3%   (51x o acaso cego)
+    prêmio US$  20,00  ->  precisa acertar  1,5%   ( 5x o acaso cego)
+    prêmio US$  49,33  ->  precisa acertar  0,6%   ( 2x o acaso cego)
+    prêmio US$ 106,00  ->  precisa acertar 0,28%   (= o acaso: paga sozinho)
+
+**O bot apostou sete vezes num prêmio de US$ 1,80.** Isso perde dinheiro por
+desenho, por boa que seja a previsão. O conserto não é afinar o limiar no
+escuro — é `APOSTA_MINIMA_USD`, um piso de prêmio. Conferido nos dois alvos
+reais do dia: o que gastou os 7 tiros rende US$ 1,57 e **não aposta mais**; o de
+US$ 49,33 das 10:32 rende US$ 47,12 e **aposta**.
+
+**O piso é ESCOLHA, não medição, e está escrito como tal no código.** 0 de 7 não
+limita a taxa de acerto real (pela regra de três o teto de confiança ainda é
+~43%). US$ 20 exige que a aposta seja 5x melhor que chutar — defensável porque
+ela não é cega, mas é hipótese. `CACA_APOSTA_MINIMA_USD=0` volta ao de antes.
+
+#### E o erro de raciocínio por trás de tudo isso, que é meu
+
+`DESVIO_TIPICO_PCT = 0.10` saiu do **menor salto observado entre escritas**. Eu
+o usei como **o desvio que faz o oráculo escrever**. São duas perguntas
+diferentes, e trocar uma pela outra é o mesmo erro que este arquivo registra
+cinco vezes na regra de concentração — agora com unidade de porcentagem.
+
+O log de 12:44 mostra que o 0,10% não dispara escrita nenhuma: o desvio subiu de
+0,1566% para 0,1853% em **seis segundos** sem nenhuma escrita resetá-lo. Se
+0,10% fosse o gatilho, teria resetado na primeira leitura.
+
+**O que fecharia isto de verdade** e não está medido: a relação entre o desvio
+fora da corrente e o tempo até a próxima escrita. Precisa de histórico de preço
+fora da corrente alinhado aos eventos `AnswerUpdated` — não dá para fazer daqui
+com o que temos. Até medir, o piso de prêmio é o que impede a aposta de sangrar.

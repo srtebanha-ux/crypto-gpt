@@ -436,6 +436,38 @@ export function valeArmar(
  * O que se paga quando erra: o gas de uma reversao. O que se ganha quando
  * acerta: o alvo inteiro, que por este desenho era inalcancavel.
  */
+/**
+ * O PREMIO MINIMO PARA VALER A APOSTA, em dolares.
+ *
+ * MEDIDO em 2026-10-07, depois de 7 apostas e 0 acertos (US$ 2,10 gastos):
+ *
+ *     o oraculo do ETH escreve 121,7 vezes/dia (7 dias, cobertura 92,9%)
+ *     a Base faz 43.200 blocos/dia
+ *     -> uma escrita a cada 355 blocos, ou 11,8 minutos
+ *
+ * A transacao especulativa vale por UM bloco: entra no proximo e, se a posicao
+ * nao estiver liquidavel ali, reverte. Entao a chance CEGA de coincidir com uma
+ * escrita e 1/355 = **0,282%**.
+ *
+ * E o custo medido de uma errada e US$ 0,30 (0,000813 ETH em 7 tiros, a 0,3
+ * gwei). Para empatar num premio P, a taxa de acerto tem de ser
+ * `0,30 / (P + 0,30)`:
+ *
+ *     premio US$   1,80  ->  precisa 14,3%  (51x o acaso cego)
+ *     premio US$  20,00  ->  precisa  1,5%  ( 5x o acaso cego)
+ *     premio US$  49,33  ->  precisa  0,6%  ( 2x o acaso cego)
+ *     premio US$ 106,00  ->  precisa 0,28%  (= o acaso cego: paga sozinho)
+ *
+ * **Este piso e ESCOLHA, nao medicao** — a taxa de acerto real nao esta medida
+ * (0 de 7 nao a limita: pela regra de tres o teto de confianca ainda e ~43%).
+ * US$ 20 exige que a aposta seja 5x melhor que chutar, o que e defensavel
+ * porque ela nao e cega: ela so dispara quando o desvio do mercado JA passou do
+ * limiar e cabe no salto. Mas e uma hipotese, e esta escrita como tal.
+ *
+ * `CACA_APOSTA_MINIMA_USD` muda. Zero libera qualquer premio, como estava.
+ */
+export const APOSTA_MINIMA_USD = new Decimal(20);
+
 export function atirarNaEscritaIminente(entrada: {
     /**
      * Quanto o mercado esta ABAIXO do oraculo, em pontos percentuais. Fato
@@ -449,6 +481,15 @@ export function atirarNaEscritaIminente(entrada: {
     precoCancela?: boolean;
     /** Desligada por `CACA_ATIRAR_NA_ESCRITA=0`: ela gasta gas quando erra. */
     ligada: boolean;
+    /**
+     * O que este alvo renderia, em dolares. A aposta paga a gorjeta mesmo
+     * errando, entao premio pequeno perde dinheiro por aritmetica — ver
+     * `APOSTA_MINIMA_USD`. `undefined` nao libera: sem saber o premio nao se
+     * aposta, porque ausencia nao e autorizacao.
+     */
+    premioUsd?: Decimal | null;
+    /** O piso do premio. Padrao: `APOSTA_MINIMA_USD`. */
+    premioMinimoUsd?: Decimal;
     /** O salto que uma escrita fecha. Padrao: o p90 medido. */
     saltoDaEscrita?: Decimal;
     /** O desvio a partir do qual o oraculo escreve. Padrao: o medido. */
@@ -468,6 +509,32 @@ export function atirarNaEscritaIminente(entrada: {
     }
     if (!mercado.isFinite() || mercado.isNegative()) {
         return { atira: false, porque: `desvio de mercado inválido (${mercado.toString()})` };
+    }
+    // O PISO DO PREMIO, e e aritmetica, nao cautela.
+    //
+    // Medido: 7 apostas, 0 acertos, US$ 0,30 por errada, premio US$ 1,80. Para
+    // empatar nesse premio a aposta teria de acertar 14,3% das vezes — 51x a
+    // chance cega de 0,282% (uma escrita de oraculo a cada 355 blocos). Premio
+    // pequeno perde dinheiro por desenho, por boa que seja a previsao.
+    const piso = entrada.premioMinimoUsd ?? APOSTA_MINIMA_USD;
+    if (piso.greaterThan(0)) {
+        const premio = entrada.premioUsd;
+        if (premio === null || premio === undefined || !premio.isFinite()) {
+            return {
+                atira: false,
+                porque: 'não sei quanto este alvo rende, e sem o prêmio não dá para dizer se a aposta '
+                    + 'se paga. Ausência não é autorização',
+            };
+        }
+        if (premio.lessThan(piso)) {
+            return {
+                atira: false,
+                porque: `o alvo rende US$ ${premio.toFixed(2)} e a aposta só se paga a partir de `
+                    + `US$ ${piso.toFixed(2)}: cada errada custa ~US$ 0,30 e o oráculo escreve uma vez a `
+                    + `cada 355 blocos, então prêmio pequeno perde por aritmética `
+                    + '(CACA_APOSTA_MINIMA_USD muda isto)',
+            };
+        }
     }
     const alvo = entrada.quedaDoAlvoPct;
     if (!alvo.isFinite() || alvo.isNegative()) {
