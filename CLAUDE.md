@@ -1096,3 +1096,79 @@ A bússola fechou: `0 ainda não sei`, de 57.811 devedores — 25.055 LONG, 5.51
 SHORT, 5.564 AMBAS e **21.678 imunes (37,5%)**. Era isso que enchia a brasa de
 imune a cada deploy, e agora não enche mais: `gatilhoEm` estabilizou em 14,51%
 em vez dos 4,45% de uma bússola recém-nascida.
+
+## 2026-10-07, 10:47: o PRIMEIRO alvo de verdade, e ele era inalcançável
+
+O log dela das 10:47 trouxe `oraculoJaCaiuPct: 0.5254%` contra
+`maisFragilA: 0.3733%`. Isso ou cruzou, ou é outro ativo — e a tabela tinha
+931s, então ela não responde. Varri a corrente.
+
+**Houve uma liquidação**, no bloco 52289907, dez segundos depois do `[BLOCO]`
+das 10:32. Cobertura 100% (2 de 2 janelas de 312 blocos).
+
+    devedor     0x6b950f306f987ff8fb9808886977ca2ef3af2c28
+    garantia    WETH  (0x4200…0006)
+    dívida      USDC  (0x8335…2913)   -> sensível a preço, NÃO imune
+    dívida      US$ 2.163,90
+    cobriram    US$ 1.081,95  (metade, como a Aave permite)
+    levaram     0,438326 WETH = US$ 1.131,40  (preço do oráculo da Aave)
+    BÔNUS       4,56%  =  US$ 49,33 BRUTO
+    liquidante  0x6a60a8a1066b775233d540ed12bad0dd1eee6cc4
+    tx          0x94410b70…  transação 6 de 537 do bloco
+
+**US$ 49,33 é o primeiro alvo de verdade que este projeto mede.** Não é poeira:
+o censo de setembro varreu 9,5 dias e concluiu "zero liquidações foram ao mesmo
+tempo legíveis a tempo E valiosas o bastante para pagar o próprio gás". Esta era
+valiosa. A outra metade da frase é que decide.
+
+### A janela: ZERO, outra vez
+
+A saúde, lida com paciência depois de uma recusa do RPC que eu NÃO aceitei como
+medição (`over rate limit` é minha falha, não resposta):
+
+    bloco 52289905   HF 1.00184180   dívida US$ 2.163,90   falta cair 0,1838%
+    bloco 52289906   HF 1.00184180   dívida US$ 2.163,90   falta cair 0,1838%
+    bloco 52289907   HF 1.12846310   dívida US$ 1.081,95   LIQUIDADA
+
+Não existiu bloco nenhum em que estivesse liquidável e disponível. É o mesmo
+padrão que este arquivo mediu em 32 das 51 liquidações de setembro, agora
+confirmado sobre um prêmio de US$ 49 em vez de poeira. E a liquidação foi a
+transação **6 de 537**: quem levou pagou para estar na frente do bloco. **É
+leilão, não corrida** — e o `adiantar.ts` existe para isso.
+
+### O que isto NÃO explica, e é a parte que pode ser defeito
+
+Esta posição precisava de **0,1838%**. O log dela, no bloco 52289902 — cinco
+blocos antes —, disse `maisFragilA: "0.3733% (entre os que pagam o próprio
+gás)"`. Com US$ 2.163,90 de dívida ela paga o gás com folga, e a brasa corta em
+`gatilhoEm: 14,5090%`: se o bot tivesse lido esta posição, ela seria a PRIMEIRA
+da brasa e o `maisFragilA` teria dito 0,1838%.
+
+**Então o bot não a tinha lido.** E este devedor não emite `Borrow` há mais de
+15,6 horas (varrido daqui, 28.080 blocos), ou seja: só o cache de 3 anos o
+acharia. A pergunta que fica, e que só o log dela responde, é se ele está entre
+os 57.811 e não foi lido, ou se não está lá.
+
+### Dois becos sem saída, DECLARADOS
+
+1. **`adiantar.ts` mediu o feed CERTO.** Cheguei a suspeitar do contrário:
+   `getSourceOfAsset(WETH)` no oráculo da Aave devolve `0x9da00d23…`, e o
+   arquivo registra o agregador `0xd772f6d9…`. Rodado: `aggregator()` de
+   `0x9da00d23` **é** `0xd772f6d9b7a35cb9…`. É proxy e agregador do mesmo feed,
+   "ETH / USD", 8 casas. Não há defeito ali, e registro isto para a próxima
+   sessão não refazer a suspeita.
+
+2. **Não consegui fixar a ordem dentro do bloco, e o RPC público se contradiz.**
+   `getAssetPrice` honrou a etiqueta de bloco (US$ 2.584,2400 no 906 →
+   US$ 2.579,4415 no 907, queda de 0,1857% — que é exatamente o 0,1838% que
+   faltava). Mas `latestRound()` no agregador devolveu a MESMA rodada 83390 em
+   905, 906, 907 e 908, e `eth_getLogs` naquele bloco não trouxe nenhum
+   `AnswerUpdated` nem `NewTransmission` daquele endereço (só um, de
+   `0xeb3ad439…`, na transação 499 — depois da liquidação, e não é fonte de
+   nenhuma das 15 reservas). As duas leituras não podem estar certas: o nó
+   público não é arquivo confiável nesta profundidade. **Buraco declarado.** Para
+   fechar isto é preciso um nó de arquivo de verdade.
+
+A mecânica provável é a óbvia — a transmissão do oráculo caiu no mesmo bloco e a
+liquidação entrou atrás dela, na posição 6 — mas eu não a PROVEI, e este arquivo
+existe para separar as duas coisas.
