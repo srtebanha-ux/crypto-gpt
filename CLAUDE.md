@@ -1356,3 +1356,77 @@ regra na mão em dois lugares.
 IDÊNTICO a "não havia alvo". Foi o disjuntor mudo outra vez, no mesmo caminho.
 Custo medido do silêncio: eu pedi a linha `[BOTÕES]` três vezes para descobrir
 de fora o que aquela linha podia ter dito sozinha no instante exato.
+
+## 2026-10-07, 12:28: O BOT ATIROU. Quatro tiros reais, e quatro defeitos no log
+
+Depois de um mês, o primeiro tiro. Quatro, na verdade, no alvo
+`0x9e70b090f9f7e367c81ff54265b412e483d444f6`:
+
+    0x5f02a9fc  0x12b23852  0xb1d62c16  0x17f9fa27
+
+Todos pelo caminho novo (`[NA ESCRITA]`), todos com gorjeta de **0,300 gwei** —
+o teto medido — e `seEuPerderCusta: 0.000224 ETH (aguento mais 70)`. As quatro
+juntas custaram **0,000204 ETH (~US$ 0,53)**. O desenho da gorjeta funcionou
+exatamente como medido: a 2,84 gwei esse mesmo gasto seria 6 tentativas.
+
+As quatro reverteram, e o log mostrou quatro defeitos — três meus, criados nas
+duas horas anteriores.
+
+### 1. Dois tiros no MESMO bloco, no mesmo alvo
+
+`0xb1d62c16` e `0x17f9fa27` saíram para o bloco **52293405**, um segundo depois
+do outro. O segundo era reversão garantida com o gás pago.
+
+A causa: com a postura 'dedo no gatilho' o ciclo lê a cada **200ms** e o bloco
+da Base dura **2s** — o mesmo bloco é visitado várias vezes. E o próprio log já
+dizia `"dois tiros no mesmo alvo = o segundo reverte com o gás pago"`, mas essa
+regra só valia DENTRO de um ciclo, entre os dois contratos. **Entre ciclos do
+mesmo bloco ela não existia** — regra em dois lugares, e o segundo lugar nunca
+foi escrito. É a REGRA 3 me pegando pela quarta vez neste arquivo.
+
+`ultimoTiroNoBloco` é marcado no instante em que o tiro SAI, não quando o recibo
+volta: o recibo leva segundos e o bloco dura dois.
+
+### 2. A gravação do cache passou a disputar o mesmo arquivo temporário
+
+    [CACHE] NÃO regravei. ENOENT: rename '/app/data/devedores.json.tmp' ->
+
+Dois tiros resolveram juntos, e eu tinha acabado de fazer o placar gravar a cada
+tiro. O temporário era `${caminho}.tmp`, o MESMO para todas as gravações: a
+segunda não achou o arquivo porque a primeira já o renomeara.
+
+Perder uma gravação é o menor dos males. **Duas escritas concorrentes no mesmo
+arquivo podem se intercalar, e o `rename` publica um JSON cortado em cima de
+1.156 dias de história.** `pareceCache` barraria na leitura seguinte — mas o
+histórico já estaria perdido.
+
+Dois consertos, porque são duas causas: nome **único por gravação** (cada uma
+tem o seu arquivo, e o `rename` continua atômico) e uma **fila** em
+`regravarCache` (serializar custa nada: 20ms com 50 mil devedores, medido).
+
+### 3. A escalada de lance não serve para aposta
+
+O log subiu o lance de 40% para 80% do lucro em quatro reversões, dizendo "subo
+o lance no próximo". A escalada existe para responder *"perdi a corrida por
+lance"* — e uma aposta na escrita do oráculo que não se realizou **não é corrida
+perdida**: a posição simplesmente não cruzou. Nenhum lance evitaria aquelas
+reversões, e cada ponto de gorjeta encarece a próxima tentativa.
+
+Agora `perdasSeguidas` só sobe em tiro sobre posição JÁ liquidável.
+
+### 4. E a frase culpava a pessoa errada
+
+`[ERROU] A transação reverteu — quase sempre porque outro liquidou antes` saiu
+nas quatro. É verdade para tiro em posição já liquidável e **falso** para a
+aposta: ninguém chegou antes porque não havia o que levar. Etiqueta que não
+descreve o evento, no lugar exato que explica o gasto — o mesmo defeito que este
+arquivo persegue desde a primeira página, agora na linha que eu criei hoje.
+
+A frase passou a seguir o TIPO do tiro.
+
+### E o teste que quebrou, pela razão certa
+
+`gravarCache escreve no temporário e só depois renomeia` tinha o literal
+`.tmp` cravado. Reescrito para afirmar a REGRA — cria a pasta, escreve num
+temporário dentro dela, e renomeia **esse** temporário — mais um caso novo que
+prova que duas gravações concorrentes não disputam o mesmo arquivo.

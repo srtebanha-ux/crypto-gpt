@@ -196,6 +196,11 @@ test('lerCache distingue "não existe" de "corrompido" de "é de outra pool"', a
 });
 
 test('gravarCache escreve no temporário e só depois renomeia', async () => {
+    // Afirma a REGRA, não o nome: cria a pasta, escreve num temporário dentro
+    // dela, e renomeia ESSE temporário para o destino. O nome exato mudou em
+    // 2026-10-07 (passou a ser único por gravação) e a versão anterior deste
+    // teste quebrou por ter o literal `.tmp` cravado — a armadilha que o
+    // CLAUDE.md deste projeto já registra.
     const passos: string[] = [];
     const r = await gravarCache('/app/data/devedores.json', cacheDeMentira(), {
         mkdir: async (p) => { passos.push(`mkdir ${p}`); },
@@ -203,11 +208,40 @@ test('gravarCache escreve no temporário e só depois renomeia', async () => {
         renomear: async (a, b) => { passos.push(`renomear ${a} -> ${b}`); },
     });
     assert.equal(r.gravou, true);
-    assert.deepEqual(passos, [
-        'mkdir /app/data',
-        'escrever /app/data/devedores.json.tmp',
-        'renomear /app/data/devedores.json.tmp -> /app/data/devedores.json',
+    assert.equal(passos.length, 3);
+    assert.equal(passos[0], 'mkdir /app/data');
+    const escrito = passos[1]!.replace('escrever ', '');
+    assert.ok(escrito.startsWith('/app/data/devedores.json.'), escrito);
+    assert.ok(escrito.endsWith('.tmp'), escrito);
+    // O renomeado tem de ser EXATAMENTE o que foi escrito: renomear outro
+    // arquivo publicaria conteúdo que ninguém gravou.
+    assert.equal(passos[2], `renomear ${escrito} -> /app/data/devedores.json`);
+});
+
+test('duas gravações NÃO disputam o mesmo temporário', async () => {
+    // MEDIDO em produção, 2026-10-07 12:29. Com a gravação acontecendo a cada
+    // tiro resolvido, dois tiros terminaram juntos e o log trouxe:
+    //
+    //   [CACHE] NÃO regravei. ENOENT: rename '/app/data/devedores.json.tmp' ->
+    //
+    // A segunda não achou o temporário porque a primeira já o renomeara. Perder
+    // a gravação é o menor mal: duas escritas CONCORRENTES no mesmo arquivo
+    // podem se intercalar e o `rename` publica um JSON cortado em cima de 3
+    // anos de história.
+    const escritos: string[] = [];
+    const io = {
+        mkdir: async () => {},
+        escrever: async (p: string) => { escritos.push(p); },
+        renomear: async () => {},
+    };
+    const [a, b] = await Promise.all([
+        gravarCache('/app/data/devedores.json', cacheDeMentira(), io),
+        gravarCache('/app/data/devedores.json', cacheDeMentira(), io),
     ]);
+    assert.equal(a.gravou, true);
+    assert.equal(b.gravou, true);
+    assert.equal(escritos.length, 2);
+    assert.notEqual(escritos[0], escritos[1], 'os dois temporários não podem ser o mesmo arquivo');
 });
 
 test('gravarCache NÃO lança quando o volume não está montado — e diz isso', async () => {

@@ -403,7 +403,24 @@ export async function gravarCache(
     const mkdir = io.mkdir ?? (async (p: string) => { await fs.mkdir(p, { recursive: true }); });
     const escrever = io.escrever ?? ((p: string, c: string) => fs.writeFile(p, c, 'utf8'));
     const renomear = io.renomear ?? ((a: string, b: string) => fs.rename(a, b));
-    const temporario = `${caminho}.tmp`;
+    // NOME TEMPORARIO UNICO POR GRAVACAO.
+    //
+    // Era `${caminho}.tmp`, o MESMO para todas. Em 2026-10-07, com a gravacao
+    // passando a acontecer a cada tiro resolvido, dois tiros terminaram no mesmo
+    // instante e o log trouxe:
+    //
+    //   [CACHE] NAO regravei. ENOENT: rename '/app/data/devedores.json.tmp' ->
+    //
+    // A segunda gravacao nao achou o temporario porque a primeira ja o tinha
+    // renomeado. Perder uma gravacao e o menor dos males: duas escritas
+    // CONCORRENTES no mesmo arquivo podem se intercalar e o `rename` publica um
+    // JSON cortado em cima de 3 anos de historia. `pareceCache` barraria na
+    // leitura seguinte, mas o historico ja estaria perdido.
+    //
+    // Nome unico por gravacao resolve na raiz: cada uma tem o seu arquivo, e o
+    // `rename` continua atomico.
+    const temporario = `${caminho}.${process.pid}.${Date.now().toString(36)}`
+        + `${Math.random().toString(36).slice(2, 8)}.tmp`;
     try {
         await mkdir(path.dirname(caminho));
         await escrever(temporario, JSON.stringify(dados));

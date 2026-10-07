@@ -2340,8 +2340,22 @@ async function principal(): Promise<'parar' | void> {
      * apareceu, para o cache gravar a data certa.
      */
     const vistoEm = new Map<string, number>(Object.entries(juntos));
+    /**
+     * UMA GRAVACAO POR VEZ.
+     *
+     * `regravarCache` passou a ser chamada a cada tiro resolvido, e em
+     * 2026-10-07 dois tiros terminaram no mesmo instante: a segunda gravacao
+     * levou `ENOENT` no `rename` porque a primeira ja tinha movido o
+     * temporario. Serializar aqui custa nada (o disco leva 20ms com 50 mil
+     * devedores, medido) e tira a concorrencia do caminho.
+     */
+    let filaDeGravacao: Promise<void> = Promise.resolve();
     /** Grava o que está na memória. Chamado quando a memória muda de verdade. */
-    const regravarCache = async (motivo: string): Promise<void> => {
+    const regravarCache = (motivo: string): Promise<void> => {
+        filaDeGravacao = filaDeGravacao.then(() => gravarAgora(motivo), () => gravarAgora(motivo));
+        return filaDeGravacao;
+    };
+    const gravarAgora = async (motivo: string): Promise<void> => {
         const g = await gravarCache(CAMINHO_DO_CACHE, {
             versao: VERSAO_DO_CACHE,
             rede: REDE_ESCOLHIDA,
@@ -2388,6 +2402,22 @@ async function principal(): Promise<'parar' | void> {
     const falhasPorAlvo = new Map<string, { quantas: number; em: number }>();
     /** Quando cada poeira liquidável foi avisada. Uma vez por hora, não por ciclo. */
     const poeiraAvisadaEm = new Map<string, number>();
+    /**
+     * UM TIRO POR ALVO POR BLOCO.
+     *
+     * MEDIDO no log de 2026-10-07 12:29: o bot mandou `0xb1d62c16` e
+     * `0x17f9fa27` para o MESMO alvo no MESMO bloco 52293405, um segundo
+     * depois do outro, porque o ciclo rodou duas vezes naquele bloco (a
+     * postura 'dedo no gatilho' le a cada 200ms e o bloco dura 2s).
+     *
+     * O proprio log ja sabia: "[ESCOLHA] dois tiros no mesmo alvo = o segundo
+     * reverte com o gas pago". Mas a regra existia so DENTRO de um ciclo,
+     * entre os dois contratos — e nao ENTRE ciclos do mesmo bloco. Regra em
+     * dois lugares, de novo, e o segundo lugar nao existia.
+     *
+     * endereco -> bloco em que o ultimo tiro saiu.
+     */
+    const ultimoTiroNoBloco = new Map<string, number>();
     const ESQUECER_FALHA_MS = Number(process.env.CACA_ESQUECER_FALHA_MS ?? '3600000');
     /**
      * Teto de envios por JANELA, nao pela vida do processo.
@@ -4213,6 +4243,27 @@ async function principal(): Promise<'parar' | void> {
                     // 2026-10-07: divida US$ 2.163,90 -> estimativa US$ 47,12,
                     // e o bonus bruto que o vencedor realizou foi US$ 49,33.
                     const especulativo = vaoCruzar.has(alvo.devedor.toLowerCase());
+                    // UM TIRO POR ALVO POR BLOCO.
+                    //
+                    // Com a postura 'dedo no gatilho' o ciclo le a cada 200ms e
+                    // o bloco da Base dura 2s: o MESMO bloco e visitado varias
+                    // vezes. Em 2026-10-07 12:29 isso mandou `0xb1d62c16` e
+                    // `0x17f9fa27` para o mesmo alvo no mesmo bloco 52293405,
+                    // um segundo depois do outro. O segundo era reversao
+                    // garantida com o gas pago — e o proprio log ja dizia
+                    // "dois tiros no mesmo alvo = o segundo reverte", mas a
+                    // regra so valia DENTRO de um ciclo, entre os dois
+                    // contratos, e nao ENTRE ciclos do mesmo bloco.
+                    const chaveBloco = alvo.devedor.toLowerCase();
+                    if (ultimoTiroNoBloco.get(chaveBloco) === blocoAtual) {
+                        log.info('[JÁ ATIREI NESTE BLOCO] Não mando o segundo.', {
+                            devedor: alvo.devedor,
+                            bloco: blocoAtual,
+                            porque: 'o bloco dura 2s e o ciclo lê a cada 200ms: o segundo tiro no mesmo '
+                                + 'bloco reverte com o gás pago, sem chance nenhuma de acertar',
+                        });
+                        continue;
+                    }
                     // `alvo.dividaUsd` pode nao estar preenchido: sem divida
                     // nao se estima nada, e inventar zero aqui seria o defeito
                     // que este arquivo persegue. Nesse caso fica a medicao, e o
@@ -4410,6 +4461,11 @@ async function principal(): Promise<'parar' | void> {
                             maxFeePerGas: maxFee
                         });
                         
+                        // Marcado no instante em que SAI, nao quando o
+                        // recibo volta: o recibo leva segundos e o bloco dura
+                        // 2s — esperar por ele deixaria o segundo tiro passar,
+                        // que e exatamente o que a trava existe para impedir.
+                        ultimoTiroNoBloco.set(chaveBloco, blocoAtual);
                         log.info(`[TIRO SAIU] (${contrato.nome}) — ainda NÃO é acerto.`, {
                             bloco: blocoAtual,
                             devedor: alvo.devedor, 
@@ -4498,7 +4554,23 @@ async function principal(): Promise<'parar' | void> {
                             // Perder sobe o lance; ganhar devolve ele para a
                             // base. Assim o bot nao paga caro para sempre por
                             // uma sequencia ruim que ja passou.
-                            perdasSeguidas = desfecho === 'acertou' ? 0 : perdasSeguidas + 1;
+                            //
+                            // MAS NAO PARA O TIRO ESPECULATIVO. A escalada
+                            // existe para responder "perdi a corrida por
+                            // lance" — e uma aposta na escrita do oraculo que
+                            // nao se realizou NAO e corrida perdida: a posicao
+                            // simplesmente nao cruzou. Subir o lance ali nao
+                            // compra nada e so encarece cada errada.
+                            //
+                            // MEDIDO no log de 12:29: quatro apostas seguidas
+                            // levaram o lance de 40% para 80% do lucro, com o
+                            // log dizendo "subo o lance no proximo" sobre
+                            // reversoes que nenhum lance evitaria.
+                            if (!especulativo) {
+                                perdasSeguidas = desfecho === 'acertou' ? 0 : perdasSeguidas + 1;
+                            } else if (desfecho === 'acertou') {
+                                perdasSeguidas = 0;
+                            }
                             if (desfecho !== 'acertou') {
                                 const r = falhasPorAlvo.get(chaveDoTiro);
                                 falhasPorAlvo.set(chaveDoTiro, { quantas: (r?.quantas ?? 0) + 1, em: Date.now() });
@@ -4544,13 +4616,39 @@ async function principal(): Promise<'parar' | void> {
                                     cofre: `https://basescan.org/address/${COFRE_ESPERADO}`,
                                 });
                             } else if (desfecho === 'reverteu') {
-                                log.warn('[ERROU] A transação reverteu — quase sempre porque outro liquidou antes.', {
-                                    ...dados,
-                                    proximoLance: `${(fracaoAdaptativa({ base: fracaoBase, perdasSeguidas }) * 100).toFixed(0)}% do lucro`,
-                                    oQueIssoQuerDizer: perdasSeguidas >= 3
-                                        ? 'perdendo seguidas vezes: ou o lance ainda está baixo, ou o outro entra no bloco ANTES (aí é outro desenho)'
-                                        : 'subo o lance no próximo',
-                                });
+                                // A FRASE SEGUE O TIPO DO TIRO.
+                                //
+                                // "quase sempre porque outro liquidou antes" e
+                                // verdade para tiro em posicao JA liquidavel.
+                                // Para o especulativo e falso e engana: a
+                                // reversao ali quer dizer que a posicao nao
+                                // cruzou — a escrita do oraculo nao veio, ou
+                                // veio menor que o p90. Ninguem chegou antes
+                                // porque nao havia o que levar.
+                                //
+                                // Achado no log de 2026-10-07 12:29: quatro
+                                // apostas reverteram e o log disse "outro
+                                // chegou antes" e "subo o lance no proximo"
+                                // nas quatro. Etiqueta que nao descreve o
+                                // evento, no lugar que explica o gasto.
+                                if (especulativo) {
+                                    log.warn('[ERROU] A aposta na escrita não se realizou — a posição não cruzou.', {
+                                        ...dados,
+                                        oQueIssoQuerDizer: 'NÃO é corrida perdida: a escrita do oráculo não veio, ou '
+                                            + 'veio menor que o salto esperado. Ninguém chegou antes porque não havia '
+                                            + 'o que levar',
+                                        oLanceNaoMuda: 'subir a gorjeta não compra nada aqui — só encarece a próxima '
+                                            + 'aposta. A escalada por derrota fica para o tiro em posição já liquidável',
+                                    });
+                                } else {
+                                    log.warn('[ERROU] A transação reverteu — quase sempre porque outro liquidou antes.', {
+                                        ...dados,
+                                        proximoLance: `${(fracaoAdaptativa({ base: fracaoBase, perdasSeguidas }) * 100).toFixed(0)}% do lucro`,
+                                        oQueIssoQuerDizer: perdasSeguidas >= 3
+                                            ? 'perdendo seguidas vezes: ou o lance ainda está baixo, ou o outro entra no bloco ANTES (aí é outro desenho)'
+                                            : 'subo o lance no próximo',
+                                    });
+                                }
                             } else {
                                 log.warn('[SUMIU] A transação não foi minerada em 2 minutos.', dados);
                             }
