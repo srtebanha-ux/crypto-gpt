@@ -3957,8 +3957,38 @@ async function principal(): Promise<'parar' | void> {
                 }
 
                 // Fase 2: UM tiro, no contrato que mediu o maior lucro.
-                if (!ENVIAR || !carteira || !carteira.provider || !nonceManager) continue;
-                if (medicoes.length === 0) continue;
+                // OS DOIS PORTOES QUE ERAM MUDOS, e e o defeito que este
+                // projeto mais persegue: um `continue` seco no caminho do
+                // dinheiro. Se `CACA_ENVIAR` nao for 1, o bot media, aprovava e
+                // nao mandava — e o log ficava IDENTICO a "nao havia alvo".
+                // Igualzinho ao disjuntor, que este arquivo ja registra. Em
+                // 2026-10-07 eu pedi a linha [BOTOES] tres vezes para descobrir
+                // de fora o que esta linha podia ter dito sozinha.
+                if (!ENVIAR || !carteira || !carteira.provider || !nonceManager) {
+                    log.error('[NAO MANDEI] Tinha alvo medido e o envio está fechado.', {
+                        devedor: alvo.devedor,
+                        oQueFaltou: !ENVIAR ? 'CACA_ENVIAR não é 1 — o bot mede e nunca manda'
+                            : !carteira ? 'não há carteira (CACA_CHAVE_PRIVADA ausente ou inválida)'
+                            : !carteira.provider ? 'a carteira não tem provedor ligado'
+                            : 'o contador de nonce não subiu no boot',
+                        oQueFazer: !ENVIAR
+                            ? 'ligar CACA_ENVIAR=1 no Railway. Sem isso NENHUM tiro sai, nunca'
+                            : 'conferir a chave e o RPC no Railway',
+                        medicoes: medicoes.length,
+                    });
+                    continue;
+                }
+                if (medicoes.length === 0) {
+                    // Chega aqui quem foi escolhido para atirar e nao teve
+                    // NENHUMA medicao aproveitavel — nem a reversao de "ainda
+                    // nao cruzou". Silencio aqui apagava a unica explicacao.
+                    log.warn('[NAO MANDEI] Nenhum contrato produziu medição utilizável.', {
+                        devedor: alvo.devedor,
+                        oQueIssoQuerDizer: 'os dois contratos falharam de um jeito que não é '
+                            + '"ainda não cruzou" — pode ser rede, ou configuração do contrato',
+                    });
+                    continue;
+                }
                 medicoes.sort((a, b) => (b.lucroCru > a.lucroCru ? 1 : b.lucroCru < a.lucroCru ? -1 : 0));
                 const escolhida = medicoes[0];
                 const contrato = escolhida.contrato;
