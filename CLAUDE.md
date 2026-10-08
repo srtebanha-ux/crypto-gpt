@@ -2100,3 +2100,87 @@ US$ 188,37 — e este arquivo registra, sobre o Morpho, que *"a assimetria que a
 soma esconde"* é exatamente este erro. Se as quatro fossem 600/100/40/13, só
 uma passaria. **Buraco declarado:** a varredura dos valores individuais na
 corrente foi disparada e o RPC público não devolveu em tempo.
+
+## 2026-10-08: "ATIRAR PRA GANHAR" — a obra do Morpho começa pela CONTA
+
+Ela autorizou depois de eu dizer a verdade incômoda: nenhum ajuste de botão
+produz "atirar e ganhar" na Aave da Base, porque está medido que os alvos
+ganháveis quase não existem ali. A Aave é 12% do bolo de bônus; o Morpho é 81%.
+
+**E começa por `src/morpho.ts`, não pelo contrato, de propósito.** A REGRA 0
+proíbe pedir deploy em cima de teste unitário; construir o contrato antes de a
+conta estar conferida contra a rede seria construir em cima do meu palpite.
+
+### A primeira coisa medida CORRIGIU um número que este arquivo publicou
+
+O bônus do Morpho **é uma fórmula do LLTV**, não uma medição:
+
+    LIF = min(1,15 ; 1 / (1 − 0,3 × (1 − lltv)))
+
+E eu não pedi para ninguém acreditar na minha memória: conferi contra as SEIS
+medianas que o censo de 10 dias deste projeto mediu (cobertura 100%, 1.385
+janelas, 60 liquidações, bônus tirado dos próprios eventos sem preço externo):
+
+    LLTV    formula   censo    diferenca
+    62,5%   12,68%   16,47%    -3,79   <- divergiu
+    77,0%    7,41%    9,27%    -1,86   <- divergiu
+    86,0%    4,38%    4,40%    -0,02   BATE
+    91,5%    2,62%    2,73%    -0,11   BATE
+    94,5%    1,68%    1,68%    -0,00   BATE
+    96,5%    1,06%    1,11%    -0,05   BATE
+
+**Quatro de seis dentro de 0,11 ponto é verificação, não coincidência.** E as
+duas que divergem divergem para CIMA, e só nos LLTV baixos — que são os pares
+exóticos (cbZEC, cbDOGE, cbLTC, cbXRP), os mais voláteis. É exatamente onde a
+armadilha que o próprio censo DECLAROU morde: *"o oráculo é lido AGORA e as
+liquidações são do passado"*.
+
+**Então o "bônus de 9–16%" que este arquivo registra estava inflado pela
+deriva.** O teto do protocolo é 15%: **16,47% não é alcançável por incentivo
+nenhum.** O número certo a LLTV 62,5% é **12,68%**.
+
+A conclusão da estratégia sobrevive — 12,68% contra os 4,56% medidos no alvo
+real da Aave de 07/10 é **2,8x** — mas quem citar 16,47% vai estar citando
+deriva de oráculo como se fosse incentivo. Um teste guarda os quatro casos que
+batem, e outro exige que nada passe do teto de 15%.
+
+### O que `morpho.ts` já tem, e o que NÃO está verificado
+
+    incentivoDeLiquidacao   VERIFICADO contra 4 de 6 medianas do censo
+    saudeNoMorpho           a saúde é POR MERCADO, não por carteira como a Aave
+    quedaAteLiquidarNoMorpho  mesma regra da Aave (1 − 1/saúde), mesma ressalva
+                              de par imune
+    saudeConfere            o portão
+
+**`ESCALA_DO_ORACULO = 1e36` NÃO está verificada contra a rede**, e está escrito
+assim no código. Se ela estiver errada, a saúde sai por um fator de 10^n e o bot
+miraria em posição sadia. O portão que fecha isso é `saudeConfere`: o Morpho não
+expõe a saúde pronta como a Aave, então a conferência possível é o próprio
+protocolo aceitar ou recusar a liquidação — e a discordância vira linha de log
+em vez de tiro. É o mesmo desenho do `limiaresConferem`, que recusou 10 medições
+erradas em 09/28 em vez de imprimi-las.
+
+E `saudeConfere` grita nas DUAS direções, porque elas pedem consertos opostos:
+"eu digo liquidável e ele recusou" é escala errada gastando gás; "eu digo sadia
+e ele aceitou" é alvo passando por erro de conta.
+
+### Dívida zero é `null`, e isto não é detalhe
+
+Nem infinito, nem 1. As duas mentiriam em direções opostas — infinito esconde
+alvo, 1 inventa alvo — e este projeto perdeu dias com ausência virando número.
+
+### O que falta, na ordem, e o que está bloqueando
+
+1. **Confirmar o endereço do Morpho PELA CORRENTE** — script escrito, roda sem
+   filtro de endereço e deixa quem emite o evento se identificar. **Não vou
+   escrever o endereço de cabeça:** é o defeito do `0x80d1e0f4…` que este
+   arquivo registra na REGRA 0.
+2. Verificar `ESCALA_DO_ORACULO` contra uma posição real.
+3. Listar os mercados de LLTV ≤ 77% e ver se há posição perto de liquidar.
+4. Só então o contrato: `liquidate` com callback (`onMorphoLiquidate`), que é
+   outro mecanismo — o callback É o empréstimo, não há `flashLoanSimple`.
+
+**Bloqueado agora:** o RPC público devolveu `request limit reached` em 28 de 28
+janelas. O primeiro script do dia voltou "0 liquidações" com **cobertura 0%** —
+e foi só porque ele declarava a cobertura que eu não publiquei "o Morpho não
+liquida". Era o defeito que dá nome a este projeto, evitado pelo hábito dele.
