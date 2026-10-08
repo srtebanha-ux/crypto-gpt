@@ -1553,17 +1553,70 @@ pode cair abaixo de US$ 5 (acerto exigido acima de 5,7%) nem passar de US$ 11,59
 por alvo/hora deixa o gasto em no máximo **US$ 1,20 por hora** com alvo ao
 alcance, contra um prêmio de US$ 11,59.
 
-### O TETO DO CAMINHO DA AAVE, agora medido e não inferido
+### O TETO DO CAMINHO DA AAVE — e eu publiquei ele 9,0x PEQUENO DEMAIS
 
-    oportunidades reais:  1 em 18,7h  =  1,28/dia  =  39/mês
-    ganhando TODAS, a US$ 11,59:   US$ 446/mês  =  R$ 2.419
-    a meta dela:                   R$ 10.000    =  US$ 1.845/mês
+Vinte minutos antes desta linha eu escrevi aqui: *"ganhando 100% das liquidações
+que valem a pena na Aave da Base, o caminho atual chega a R$ 2.419/mês — um
+quarto da meta"*. **Errado por 9,0 vezes**, e a medição certa estava sendo
+impressa pelo próprio bot, no log de boot que ela tinha acabado de colar.
 
-**Ganhando 100% das liquidações que valem a pena na Aave da Base, o caminho
-atual chega a R$ 2.419/mês — um quarto da meta.** Isso não é opinião nem
-extrapolação de janela curta: é o censo de 30 dias (a Aave é 12% do bolo de
-bônus da Base) reencontrado por um caminho independente, com 18,7 horas de
-placar do próprio bot e as três liquidações conferidas uma a uma na corrente.
+O que eu fiz: peguei **1 oportunidade em 18,7 horas** de placar, multipliquei
+por 30 dias e por US$ 11,59. Uma observação virando teto mensal.
 
-A meta exige o Morpho (81% do bolo, e bônus de 9–16% nos mercados de LLTV ≤ 77%
-contra 4,5% na Aave). Isso é contrato novo e deploy novo, e a decisão é dela.
+O que o censo do bot diz, 46,3 dias, 40 janelas, **0 falharam (cobertura 100%)**:
+
+    aconteceram            208 no total, 4,5 por dia, ~135 por mês
+    naSUAFaixa             55 de 208 — entre US$ 0,96 e SEM TETO
+    lucroQuePassouNaFaixa  US$ 6.168,41 em 46,3 dias
+                           = US$ 3.996,81/mês  =  R$ 21.663
+                           = 36 migalhas/mês, média US$ 112,15
+    asTresMaiores          US$ 1.771,48 | US$ 1.488,49 | US$ 545,61
+
+    a meta dela:  R$ 10.000 = US$ 1.845/mês = 46,2% disso = 16 das 36 migalhas
+
+Então o caminho da Aave **não** é um quarto da meta: é **2,2x** a meta, e a
+pergunta deixa de ser "dá para chegar lá?" e passa a ser "quantas das 36 a gente
+ganha?". O log do próprio bot avisa, e vale repetir: isso é OPORTUNIDADE que
+passou, não renda — cada uma ainda exige ganhar a corrida do bloco.
+
+**Os dois erros meus são a regra 4 e a regra 2 deste arquivo, juntas:**
+extrapolei de 18,7 horas (regra 4) quando o histórico de 46 dias estava
+disponível, e calculei de novo uma grandeza que o repositório **já media e já
+imprimia** (regra 2). A média de US$ 11,59 que eu usei era a de UMA liquidação;
+a média real da faixa é US$ 112,15 — 9,7x maior, porque as grandes carregam a
+soma e uma janela de 18 horas não as vê.
+
+E a decisão sobre o Morpho muda de natureza: ele continua sendo 81% do bolo com
+bônus de 9–16% nos mercados de LLTV ≤ 77%, mas **deixa de ser necessário para a
+meta.** Virou escolha de ampliar, não de sobreviver.
+
+## 2026-10-08: "por que os outros estão pegando nossos alvos?" — não é lance
+
+Ela perguntou isso depois de 7 tiros revertidos. A resposta tem duas metades, e
+as duas estão medidas; nenhuma delas é lentidão nem lance baixo.
+
+**1. Todo alvo que paga é levado DENTRO do bloco em que o oráculo escreve.**
+Os dois únicos alvos valiosos que este projeto mediu, conferidos bloco a bloco:
+
+    0x6b950f30  US$ 49,33   HF 1,00184180 em 52289905 E 52289906  ->  liquidada em 52289907
+    0xbd34e36b  US$ 11,59   HF 1,00168552 em 52330848 E 52330849  ->  liquidada em 52330850
+
+Em nenhum dos dois existiu um bloco em que a posição estivesse liquidável e
+disponível. Quem lê o estado depois do bloco minerado não perde por milissegundos
+— perde porque o instante que ele espera nunca existe. É a terceira confirmação
+da lei deste arquivo, agora com dinheiro em cima.
+
+**2. Nós não somos superados no lance. Nós nunca entramos no leilão.**
+
+    o vencedor do alvo de US$ 49,33 pagou   0,046688 gwei  (US$ 0,12 total)
+    a frente de um bloco da Base, p90        0,1366 gwei
+    o que a carteira dela aguenta pagar      2,84 gwei      = 61x o vencedor
+
+O diagnóstico de "leilão perdido" que eu carreguei por semanas estava errado nos
+dois sentidos: ela pode pagar 19x o p90 da frente do bloco, e pagar mais não
+compra nada — só reduz o número de tentativas que o saldo aguenta.
+
+**Então "ser melhor que qualquer bot" tem um significado técnico único:** estar
+DENTRO do bloco da escrita do oráculo. É o que `atirarNaEscritaIminente` tenta,
+apostando no oráculo correr atrás de um movimento que JÁ aconteceu. Não é ler
+mais rápido nem pagar mais alto — essas duas portas estão medidas e fechadas.
