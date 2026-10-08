@@ -7,6 +7,8 @@
 // testadas contra falha na primeira faixa, no meio e no fim.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
     NASCIMENTO_DO_POOL, VERSAO_DO_CACHE, CacheDeDevedores,
     cacheServe, pareceCache, ateOndeSemBuraco, deOndeSemBuraco,
@@ -362,4 +364,36 @@ test('a gravação do boot NÃO apaga as vias que o boot acabou de ler', async (
     const paraGravar = viasQueAindaImportam(juntarVias(doDisco, aprendidasAgora), devedores);
     assert.deepEqual(paraGravar, { '0xvelho1': 'imune', '0xvelho2': 'long', '0xnovo': 'short' });
     assert.equal(Object.keys(paraGravar).length, 3, 'as do disco não podem sumir');
+});
+
+test('TODA gravação do cache leva o campo `placar` — os 7 tiros apagados em 2026-10-08', () => {
+    // MEDIDO: o log das 13:06 dizia `vindoDoDisco: "7 tiro(s) contados antes
+    // deste boot"`. O das 13:34, mesmo cache, dizia "eu contei 0 tiro(s): 14
+    // saíram sem eu lembrar". Sete viraram zero entre dois boots.
+    //
+    // A causa era a gravação DO BOOT (`gravarCache` logo depois de varrer os
+    // devedores) montar o objeto do cache sem o campo `placar`. Como ela
+    // reescreve o arquivo inteiro, o campo desaparecia; o boot seguinte
+    // começava em zero e a primeira regravação publicava esse zero em cima.
+    // REGRA 3: a mesma regra em dois lugares, implementada em um.
+    //
+    // Este teste lê o CÓDIGO, e é de propósito: o defeito não era um valor
+    // errado, era um campo AUSENTE numa das duas chamadas. Nenhum teste de
+    // valor o pegaria, e foi por isso que ele passou por 1.400 testes.
+    // `join(__dirname, …)` e nao `import.meta.url`: o runner deste projeto e
+    // `node --require ts-node/register`, CommonJS, onde `import.meta` nem
+    // compila. O teste passava sozinho com `tsx` e reprovava em `npm test` —
+    // duas ferramentas, dois modulos, e so uma delas e a que vale.
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const chamadas = fonte.split(/gravarCache\(CAMINHO_DO_CACHE, \{/).slice(1);
+    assert.ok(chamadas.length >= 2, `esperava 2+ gravações, achei ${chamadas.length}`);
+    for (const [i, trecho] of chamadas.entries()) {
+        // O objeto literal vai até o `});` que o fecha.
+        const corpo = trecho.split(/\n\s*\}\);/)[0] ?? '';
+        assert.match(
+            corpo,
+            /placar:\s*placarParaCache\(/,
+            `a gravação nº ${i + 1} não leva o placar: ela apagaria a contagem dos tiros do disco`,
+        );
+    }
 });

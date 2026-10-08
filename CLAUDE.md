@@ -1793,3 +1793,89 @@ ele que deixava a frase passar. Reescrito para afirmar `null`.
 **A lição, e ela é nova:** eu testei o round-trip do campo NOVO e não testei o
 round-trip do cache QUE EXISTE. O caso que importava era o único que não dava
 para inventar — ele estava gravado no volume dela desde ontem.
+
+## 2026-10-08, 13:44: o `[PROCURA]` fechou a pergunta de 07/10, e a resposta era a IDADE DE UM NÚMERO
+
+A linha nova respondeu:
+
+    [PROCURA] 0x6b950f30…: precisa cair 8.8937%, dívida US$ 1082.02, via long
+              — BRASA (das 233 vagas): lido a cada ciclo
+
+O alvo de US$ 49,33 está na **BRASA**, lido a cada ciclo. (A dívida é
+US$ 1.082,02, a metade que sobrou do que o vencedor cobriu — a posição segue
+aberta.) Então em 07/10 a leitura ACONTECIA. O que falhou foi outra coisa.
+
+### `menorMargem` — o número que decide a postura — tinha 15 MINUTOS de idade
+
+No log de hoje, `maisFragilA` saiu **idêntico** em oito avaliações de postura:
+
+    13:31  1.2706%      13:39  1.2706%      13:43  1.2706%
+    13:32  1.2706%      13:41  1.2706%      13:44:29  <- varredura completa
+    13:34  1.2706%      13:42  1.2706%      13:44:57  0.3559%   <- mudou aqui
+
+Treze minutos de um valor congelado enquanto a brasa era lida a cada 8 segundos.
+A causa: `repartirPorFragilidade` é chamada em **um** lugar, e esse lugar é
+`if (varredura === 'completa')` — de 15 em 15 minutos.
+
+**E não é cosmética: é a decisão.** Rodado com `posturaPorMargem` e os números
+reais daquele minuto:
+
+    mercado 0,3705% + maisFragilA 1,2706% (velho)  ->  'atento'        (1000ms)
+    mercado 0,3705% + maisFragilA 0,3559% (fresco) ->  'DEDO NO GATILHO' (200ms)
+
+O mesmo mercado, duas posturas, e a diferença é a idade do número. Às 13:45:43 o
+log mostra ele armando `dedo no gatilho` — **porque a varredura tinha acabado de
+rodar.** Treze minutos antes, não teria.
+
+E fecha o buraco que este arquivo deixou aberto em 07/10: `maisFragilA: 0.3733%`
+era número velho; a posição a **0,1838%** estava na brasa e era lida. O alvo não
+estava invisível — o número que decide o ritmo é que não aprendia dele.
+
+A postura agora lê o mínimo da brasa AO VIVO, com os mesmos cortes da varredura
+(imune não decide o ritmo; poeira não decide o ritmo, pela `ehPoeira` que já
+existe; liquidável de verdade conta). `null` não sobrescreve — brasa vazia não é
+resposta sobre o mercado. E o `[POSTURA]` passou a imprimir **a idade do
+número** ao lado dele (`lido há 8s`), porque foi exatamente por não ter isso que
+eu li o `0.3733%` de 07/10 como se fosse o estado daquele instante.
+
+### E os SETE TIROS foram APAGADOS do disco. Pelo write do boot
+
+    13:06   vindoDoDisco: "7 tiro(s) contados antes deste boot"
+    13:34   tiros: "Nenhum tiro que eu lembre… eu contei 0 tiro(s):
+                    14 saíram sem eu lembrar"
+
+Mesmo cache, sete viraram zero entre dois boots.
+
+`gravarCache` é chamada em **dois** lugares. `gravarAgora` monta o objeto com
+`placar: placarParaCache(tiros)` — e tem um comentário dizendo "o placar vai em
+TODA gravação". **A gravação do BOOT não levava o campo.** Ela reescreve o
+arquivo inteiro, então o campo desaparecia do disco; o boot seguinte começava em
+zero, e a primeira `regravarCache` publicava esse zero em cima dos sete.
+
+Reproduzido com as funções reais:
+
+    1. como estava:                7 tiro(s)
+    2. depois do write do boot:    0 tiro(s)   <- APAGADO
+    3. e a regravação grava:       {"disparados":0,…}
+
+Entre apagar e restaurar havia uma **janela**, e este arquivo já registra que o
+Railway reinicia o container várias vezes por dia. Era questão de o reinício cair
+ali. Caiu. **Os sete desfechos estão perdidos** — o nonce 14 prova que as
+transações saíram, e o basescan tem cada uma, mas a contagem do bot não volta.
+
+É a REGRA 3 pela **sétima** vez, e a pior forma dela: não um valor errado, um
+campo **ausente** numa das duas chamadas. Nenhum teste de valor pegaria isso, e
+foi por isso que passou por 1.400 testes. O teste novo lê o CÓDIGO e exige que
+toda chamada de `gravarCache` carregue o placar — conferido que ele reprova a
+versão de antes e aprova a de agora.
+
+#### E o teste novo passou com `tsx` e REPROVOU em `npm test`
+
+`import.meta.url` nem compila sob o runner deste projeto
+(`node --require ts-node/register`, CommonJS): `error TS1343`. Eu rodei o
+arquivo com `npx tsx --test`, vi `32 pass`, e a suíte inteira reprovou.
+
+**Duas ferramentas, dois sistemas de módulo, e só uma delas é a que vale.**
+Rodar o arquivo isolado com a ferramenta errada é a mesma classe de erro que
+este arquivo persegue: eu conferi a cópia, não o original. É `join(__dirname,
+…)` agora. 1.434 testes, 0 falhas no runner de verdade.

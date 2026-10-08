@@ -416,3 +416,27 @@ test('o piso medido exige que a aposta seja melhor que o acaso, nao igual', () =
     assert.ok(APOSTA_MINIMA_USD.lessThanOrEqualTo(106),
         'US$ 106 é onde a aposta se paga no acaso cego; acima disso o piso é pessimista demais');
 });
+
+test('a mesma queda do mercado dá posturas OPOSTAS se a margem é velha — 2026-10-08 13:45', () => {
+    // MEDIDO no log: `maisFragilA` saiu IDÊNTICO (1.2706%) das 13:31 às 13:43 —
+    // oito avaliações de postura em treze minutos — e virou 0.3559% às
+    // 13:44:57, logo depois da varredura completa das 13:44:29. A causa é
+    // `repartirPorFragilidade` rodar só dentro de `if (varredura ===
+    // 'completa')`, de 15 em 15 minutos, enquanto a brasa é lida a cada ciclo.
+    //
+    // Este teste é o que guarda a regra: NÃO é cosmética de log, é a decisão.
+    const mercado = new Decimal('0.3705');
+    const velho = posturaPorMargem(mercado, new Decimal('1.2706'), DESVIO_TIPICO_PCT);
+    const fresco = posturaPorMargem(mercado, new Decimal('0.3559'), DESVIO_TIPICO_PCT);
+    assert.equal(velho, 'atento');
+    assert.equal(fresco, 'dedo no gatilho');
+
+    // E o alvo de 07/10, que o [PROCURA] confirmou estar NA BRASA: a 0,1838%
+    // ele põe o bot no gatilho com o mesmo mercado. O número velho daquele dia
+    // (0,3733%) com o mercado de então (0,1953%) não punha.
+    assert.equal(posturaPorMargem(mercado, new Decimal('0.1838'), DESVIO_TIPICO_PCT), 'dedo no gatilho');
+    assert.equal(
+        posturaPorMargem(new Decimal('0.1953'), new Decimal('0.3733'), DESVIO_TIPICO_PCT),
+        'atento',
+    );
+});

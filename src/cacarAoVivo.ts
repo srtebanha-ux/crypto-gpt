@@ -1946,6 +1946,11 @@ async function principal(): Promise<'parar' | void> {
 
     /** A menor margem de todas, da ultima varredura: quem cai primeiro. */
     let menorMargem: Decimal | null = null;
+    // QUANDO esse numero foi lido. Sem isto, 'maisFragilA' de 8 segundos e
+    // 'maisFragilA' de 15 minutos saem iguais na tela — e foi assim que eu li
+    // `0.3733%` em 07/10 como se fosse o estado do momento. A idade do numero
+    // que decide a postura tem de estar ao lado dele.
+    let menorMargemLidaEm = 0;
     let postura: Postura = 'dormindo';
     /** O preco base do bloco, de carona no ciclo. Evita uma ida a rede na hora. */
     let baseFeeAtual: bigint | null = null;
@@ -2321,6 +2326,29 @@ async function principal(): Promise<'parar' | void> {
         ultimoBloco: ultimoBlocoDoCache,
         devedores: juntos,
         vias: viasQueAindaImportam(juntarVias(viasDoCache, todasAsViasSabidas()), juntos),
+        // O PLACAR TEM DE VIR AQUI TAMBEM, E A FALTA DELE APAGOU OS SETE TIROS.
+        //
+        // MEDIDO no log de 2026-10-08 13:34: `tiros: "Nenhum tiro que eu
+        // lembre… eu contei 0 tiro(s): 14 saíram sem eu lembrar"`. No boot das
+        // 13:06, com o MESMO cache, o log dizia `vindoDoDisco: "7 tiro(s)
+        // contados antes deste boot"`. Sete viraram zero entre dois boots.
+        //
+        // A causa: esta gravacao roda em TODO boot, logo depois de varrer os
+        // devedores, e montava o objeto do cache SEM o campo `placar`. Como ela
+        // reescreve o arquivo inteiro, o campo desaparecia do disco. O boot
+        // seguinte lia um cache sem placar, comecava em zero, e a primeira
+        // `regravarCache` publicava esse zero em cima dos sete. Perda
+        // definitiva: um tiro acontece algumas vezes por MES.
+        //
+        // Entre o apagar e o restaurar havia uma JANELA — e o Railway reinicia
+        // o container varias vezes por dia, o que este arquivo ja registra.
+        // Era so questao de o reinicio cair ali, e caiu.
+        //
+        // E a REGRA 3 outra vez: a mesma regra ("o cache carrega o placar") em
+        // dois lugares, implementada em um. `gravarAgora` levava, esta nao.
+        // O teste em `cacheDeDevedores.test.ts` agora exige que TODA gravacao
+        // leve o placar, para a terceira gravacao nao repetir isto.
+        placar: placarParaCache(tiros),
     });
     log.info(gravacao.gravou ? '[CACHE] Gravado.' : '[CACHE] NÃO GRAVOU — o próximo boot vai pagar tudo de novo.', {
         resultado: gravacao.porque,
@@ -3339,7 +3367,11 @@ async function principal(): Promise<'parar' | void> {
                 // nenhuma das duas dizia sobre qual conjunto estava falando.
                 maisFragilA: menorMargem === null
                     ? '—'
-                    : `${menorMargem.toFixed(4)}%` + (provaAgora().armado
+                    : `${menorMargem.toFixed(4)}% [${
+                        menorMargemLidaEm === 0
+                            ? 'da varredura completa — a brasa ainda não respondeu'
+                            : `lido há ${Math.round((Date.now() - menorMargemLidaEm) / 1000)}s`
+                    }]` + (provaAgora().armado
                         ? ' (contando os alvos de prova, que é onde ele atira)'
                         : ' (entre os que pagam o próprio gás)'),
                 proximaLeituraEm: `${ritmoDaPostura(postura, INTERVALO_MS)}ms`,
@@ -3466,6 +3498,36 @@ async function principal(): Promise<'parar' | void> {
             // que a transacao do vencedor executa: quem espera para reagir chega
             // sempre depois. Medido em 2026-09-28, em 32 de 43 liquidacoes.
             const vaoCruzar = new Set<string>();
+            // A MARGEM QUE DECIDE O RITMO, LIDA AO VIVO.
+            //
+            // MEDIDO no log de 2026-10-08: `maisFragilA` saiu IDENTICO —
+            // `1.2706%` — das 13:31 as 13:43, oito avaliacoes de postura em
+            // treze minutos, enquanto a brasa era lida a cada ciclo. Virou
+            // `0.3559%` as 13:44:57, logo depois da varredura completa das
+            // 13:44:29. Porque `repartirPorFragilidade` roda em UM lugar, e
+            // esse lugar e `if (varredura === 'completa')`: de 15 em 15 minutos.
+            //
+            // E NAO E COSMETICA, E A DECISAO. Rodado com `posturaPorMargem` e
+            // os numeros reais daquele minuto:
+            //
+            //     mercado 0,3705% + maisFragilA 1,2706% (velho)  -> 'atento'
+            //     mercado 0,3705% + maisFragilA 0,3559% (fresco) -> 'DEDO NO GATILHO'
+            //
+            // O mesmo mercado, duas posturas, e a diferenca e a idade do
+            // numero. As 13:45:43 ele armou — porque a varredura tinha acabado
+            // de rodar. Treze minutos antes, nao teria.
+            //
+            // E e a explicacao do alvo de 07/10, que este arquivo deixou em
+            // aberto: `maisFragilA: 0.3733%` era numero velho, e a posicao a
+            // 0,1838% ESTAVA na brasa, lida a cada ciclo — o `[PROCURA]` de
+            // hoje confirmou a camada. A leitura acontecia; o numero que decide
+            // o ritmo e que nao aprendia dela.
+            //
+            // Isto NAO substitui a varredura: ela ve os 61 mil e a brasa ve
+            // 233. Mas a brasa sao os 233 MAIS PERTO que passam o piso, entao
+            // o minimo global esta dentro dela entre varreduras — e um numero
+            // de 8 segundos e melhor que um de 15 minutos em qualquer direcao.
+            let menorAoVivo: Decimal | null = null;
             const inicioDaBrasa = moedas.length + 2;
             for (let i = 0; i < brasa.length; i++) {
                 const dadoConta = resp[inicioDaBrasa + i];
@@ -3475,6 +3537,27 @@ async function principal(): Promise<'parar' | void> {
                     const saude = conta.saude;
                     registrarDeriva(historicoDeSaude, brasa[i]!, saude, Date.now());
                     const queda = quedaAteLiquidar(saude);
+                    // O minimo AO VIVO, para a postura. Ver o comentario longo
+                    // em `menorAoVivo`, acima do laco.
+                    //
+                    // Os cortes seguem os da varredura, nao sao novos:
+                    //   - IMUNE nao decide o ritmo. A varredura ordena imunes
+                    //     para o fim, entao `ordenados[0]` nunca e um deles a
+                    //     menos que tudo seja imune. Acelerar o bot por quem o
+                    //     preco nao derruba era o defeito das 16:58 de 28/09.
+                    //   - POEIRA nao decide o ritmo. Uma posicao liquidavel e
+                    //     impossivel tem `queda` ZERO para sempre: ela prenderia
+                    //     a postura em 'dedo no gatilho' e 200ms de ciclo
+                    //     eternamente, por um alvo que nao pode ser atirado.
+                    //     O corte e `ehPoeira`, a mesma funcao do laco abaixo —
+                    //     nao um piso novo (REGRA 3).
+                    //   - Liquidavel de VERDADE (queda zero e nao poeira) CONTA:
+                    //     ali o ritmo mais rapido e exatamente o certo.
+                    if (queda !== null && oQueSeSabeDaVia(brasa[i]!) !== 'imune'
+                        && !ehPoeira(conta.dividaBase.dividedBy(1e8))
+                        && (menorAoVivo === null || queda.lessThan(menorAoVivo))) {
+                        menorAoVivo = queda;
+                    }
                     if (queda !== null && queda.isZero()) {
                         // POEIRA LIQUIDAVEL E LACO INFINITO.
                         //
@@ -3593,6 +3676,20 @@ async function principal(): Promise<'parar' | void> {
                 } catch {}
             }
 
+            // A POSTURA PASSA A LER O NUMERO DE 8 SEGUNDOS, NAO O DE 15 MINUTOS.
+            //
+            // Fica DEPOIS do laco e ANTES de `qualVarredura` de propósito: a
+            // decisao de varrer tambem olha `margemDaBrasa`, e misturar as duas
+            // idades na mesma decisao foi o que criou este defeito.
+            //
+            // `null` nao sobrescreve: brasa vazia, ou toda imune/poeira, nao e
+            // resposta sobre o mercado — ai o numero da varredura, velho, e o
+            // melhor que existe. Ausencia nao vira zero (nem viraria 'dedo no
+            // gatilho' de graca).
+            if (menorAoVivo !== null) {
+                menorMargem = menorAoVivo;
+                menorMargemLidaEm = Date.now();
+            }
             const maiorQueda = maiorQuedaDesdeABase(precosDaBase, precos);
             const varredura = qualVarredura(
                 maiorQueda,
