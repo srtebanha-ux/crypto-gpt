@@ -6,7 +6,7 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
-import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, type Postura } from './adiantar';
+import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI } from './prontidao';
 import {
     lerRecibo, placarVazio, contarTiro, comoEstaIndo, placarParaCache, placarDoCache,
@@ -4859,6 +4859,38 @@ async function principal(): Promise<'parar' | void> {
                             lance: `${(fracao * 100).toFixed(0)}% do lucro (${perdasSeguidas} derrotas seguidas)`,
                             sobrariaParaMim: lucroUsd === null ? 'sem cotação' : `US$ ${sobraDepoisDaGorjeta(lucroUsd, fracao).toFixed(2)}`,
                             seEuPerderCusta: `${new Decimal(custoSePerder.toString()).dividedBy(1e18).toFixed(6)} ETH (aguento mais ${aguenta})`,
+                            // A ARITMETICA DA APOSTA, NO INSTANTE DA APOSTA.
+                            //
+                            // MEDIDO no log de 2026-10-08 19:20: 0,005467 ETH
+                            // em 31 apostas (US$ 0,446 por errada), ZERO
+                            // acertos, enquanto US$ 753,48 em quatro
+                            // oportunidades passavam na brasa. Eu precisei de
+                            // um script para descobrir que o piso de US$ 10
+                            // liberava apostas que exigem acertar 15,8x mais
+                            // que o acaso — e isso tinha de estar na linha que
+                            // explica o gasto, no segundo em que ele acontece.
+                            //
+                            // 1x ou menos = "paga sozinho": acima desse premio
+                            // apostar AS CEGAS ja tem valor esperado positivo,
+                            // e a previsao deixa de ser premissa.
+                            ...(especulativo && lucroUsd !== null && precoDoEth() !== null
+                                ? (() => {
+                                    const custoUsd = new Decimal(custoSePerder.toString())
+                                        .dividedBy(1e18).mul(precoDoEth()!);
+                                    const piso = premioQueSePagaNoAcaso(custoUsd);
+                                    const vezes = quantasVezesOAcaso(lucroUsd, custoUsd);
+                                    return {
+                                        aApostaSePaga: vezes === null
+                                            ? 'não dá para dizer: sem prêmio estimado'
+                                            : vezes.lessThanOrEqualTo(1)
+                                                ? `SIM, no acaso puro: US$ ${lucroUsd.toFixed(2)} de prêmio contra `
+                                                  + `US$ ${piso.toFixed(2)} que o custo exige (${vezes.toFixed(2)}x o acaso)`
+                                                : `NÃO no acaso: preciso acertar ${vezes.toFixed(1)}x mais que `
+                                                  + `chutar. O prêmio que se pagaria sozinho é US$ ${piso.toFixed(2)}, `
+                                                  + `e este é US$ ${lucroUsd.toFixed(2)}`,
+                                    };
+                                })()
+                                : {}),
                             arrisquei: saldoUsd === null || lucroUsd === null || saldoUsd.lessThanOrEqualTo(0)
                                 ? `${(risco * 100).toFixed(0)}% do gás (risco básico: sem cotação para comparar)`
                                 : `${(risco * 100).toFixed(0)}% do gás, porque o prêmio é ${lucroUsd.dividedBy(saldoUsd).toFixed(1)}x o saldo`,

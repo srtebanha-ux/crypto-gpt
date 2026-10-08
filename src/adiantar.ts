@@ -481,6 +481,64 @@ export function valeArmar(
  */
 export const APOSTA_MINIMA_USD = new Decimal(10);
 
+/**
+ * BLOCOS DA BASE POR ESCRITA DO ORACULO — o denominador da chance cega.
+ *
+ * MEDIDO nos eventos `AnswerUpdated` do ETH/USD, 7 dias, cobertura 92,9%:
+ * 121,7 escritas/dia contra 43.200 blocos/dia da Base. Era um numero que vivia
+ * so em comentario; medicao que nao e constante de codigo nao trabalha.
+ */
+export const BLOCOS_POR_ESCRITA = 355;
+
+/**
+ * O PREMIO EM QUE A APOSTA SE PAGA SEM ACREDITAR NA PREVISAO.
+ *
+ * A transacao especulativa vale por UM bloco, entao a chance CEGA de ela cair
+ * no bloco de uma escrita e `1 / BLOCOS_POR_ESCRITA` = 0,282%. Acima deste
+ * premio, apostar as cegas ja tem valor esperado positivo — a previsao deixa de
+ * ser premissa e passa a ser so vantagem.
+ *
+ * ESTA FUNCAO EXISTE PORQUE O PISO NAO DEVIA SER MINHA ESCOLHA. Em 07/10 eu
+ * cravei US$ 20 e ele barrou a unica oportunidade do dia (US$ 11,59); em 08/10
+ * baixei para US$ 10 e o bot gastou US$ 13,83 em 31 apostas enquanto
+ * US$ 753,48 passavam. Os dois numeros eram meus. Este sai do custo que o bot
+ * MEDE e da cadencia que o censo MEDE, e remede quando qualquer um dos dois
+ * mudar.
+ *
+ * MEDIDO no log de 2026-10-08 19:20: 0,005467 ETH em 31 tiros = US$ 0,446 por
+ * errada, o que poe o piso que se paga em **US$ 158,35**. Para comparar, as
+ * quatro oportunidades daquelas 4,6 horas tinham media de US$ 188,37 — ou seja,
+ * ELAS pagavam sozinhas, e o piso de US$ 10 liberava apostas que exigiam
+ * acertar 15,8x mais que o acaso.
+ *
+ * Ela decide o piso. Esta funcao so impede que a decisao seja tomada no escuro.
+ */
+export function premioQueSePagaNoAcaso(
+    custoPorErradaUsd: Decimal,
+    blocosPorEscrita: number = BLOCOS_POR_ESCRITA,
+): Decimal {
+    if (!custoPorErradaUsd.isFinite() || custoPorErradaUsd.lessThanOrEqualTo(0)) return new Decimal(0);
+    if (!Number.isFinite(blocosPorEscrita) || blocosPorEscrita <= 0) return new Decimal(0);
+    return custoPorErradaUsd.mul(blocosPorEscrita);
+}
+
+/**
+ * Quantas vezes melhor que o acaso a previsao precisa ser, para este premio.
+ *
+ * `1` ou menos quer dizer "paga sozinho". E o numero que responde "vale
+ * apostar nisto?" sem precisar de fe na previsao.
+ */
+export function quantasVezesOAcaso(
+    premioUsd: Decimal,
+    custoPorErradaUsd: Decimal,
+    blocosPorEscrita: number = BLOCOS_POR_ESCRITA,
+): Decimal | null {
+    if (!premioUsd.isFinite() || premioUsd.lessThanOrEqualTo(0)) return null;
+    const piso = premioQueSePagaNoAcaso(custoPorErradaUsd, blocosPorEscrita);
+    if (piso.lessThanOrEqualTo(0)) return null;
+    return piso.dividedBy(premioUsd);
+}
+
 export function atirarNaEscritaIminente(entrada: {
     /**
      * Quanto o mercado esta ABAIXO do oraculo, em pontos percentuais. Fato

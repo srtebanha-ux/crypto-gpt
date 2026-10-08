@@ -4,6 +4,7 @@ import { Decimal } from 'decimal.js';
 import {
     precoDeQueda, quemCaiPrimeiro, jaCairamNoMercado, desvioDoOraculo,
     qualPostura, ritmoDaPostura, custoDaVigiliaEmCUs, DESVIO_TIPICO_PCT,
+    premioQueSePagaNoAcaso, quantasVezesOAcaso,
     atirarNaEscritaIminente, SALTO_P50_PCT, SALTO_P90_PCT, SALTO_MAX_PCT, APOSTA_MINIMA_USD,
 } from './adiantar';
 
@@ -439,4 +440,32 @@ test('a mesma queda do mercado dá posturas OPOSTAS se a margem é velha — 202
         posturaPorMargem(new Decimal('0.1953'), new Decimal('0.3733'), DESVIO_TIPICO_PCT),
         'atento',
     );
+});
+
+test('o piso que se paga no acaso sai do custo MEDIDO, não da minha escolha', () => {
+    // MEDIDO no log de 2026-10-08 19:20: 0,005467 ETH em 31 tiros, ETH a
+    // US$ 2.529,30 => US$ 0,446 por errada. A chance cega é 1/355 = 0,282%.
+    const custo = new Decimal('0.005467').dividedBy(31).mul(2529.30);
+    const piso = premioQueSePagaNoAcaso(custo);
+    // US$ 158,35: acima disso, apostar ÀS CEGAS já tem valor esperado positivo.
+    assert.ok(piso.greaterThan(155) && piso.lessThan(162), `piso ${piso.toFixed(2)}`);
+
+    // As quatro oportunidades daquelas 4,6 horas: média US$ 188,37. Elas pagam
+    // sozinhas — e é por isso que o problema não era o prêmio das que passaram.
+    const quatro = quantasVezesOAcaso(new Decimal('188.37'), custo)!;
+    assert.ok(quatro.lessThan(1), `média das 4: ${quatro.toFixed(2)}x o acaso`);
+
+    // O piso que estava valendo (US$ 10) exigia acertar 15,8x mais que o acaso.
+    const dez = quantasVezesOAcaso(APOSTA_MINIMA_USD, custo)!;
+    assert.ok(dez.greaterThan(15), `piso de US$ 10: ${dez.toFixed(1)}x o acaso`);
+
+    // E a REGRA, não os literais: o piso cresce com o custo do gás e encolhe
+    // quando o oráculo escreve mais. Os dois são medidos, então ele remede.
+    assert.ok(premioQueSePagaNoAcaso(custo.mul(2)).equals(piso.mul(2)));
+    assert.ok(premioQueSePagaNoAcaso(custo, 710).equals(piso.mul(2)));
+
+    // Entrada torta não vira número: zero, não NaN nem um piso inventado.
+    assert.equal(premioQueSePagaNoAcaso(new Decimal(0)).toNumber(), 0);
+    assert.equal(premioQueSePagaNoAcaso(new Decimal(-1)).toNumber(), 0);
+    assert.equal(quantasVezesOAcaso(new Decimal(0), custo), null);
 });

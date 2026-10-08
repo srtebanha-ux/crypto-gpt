@@ -1974,3 +1974,73 @@ estado.** Agora ela descreve o ciclo que a imprimiu.
 `tiros: "Nenhum tiro que eu lembre… 14 saíram sem eu lembrar"`. Os sete foram
 apagados do disco antes do conserto; ele impede a próxima perda, não desfaz
 esta. O nonce 14 e o basescan continuam sendo a prova de que saíram.
+
+## 2026-10-08, 19:20: 31 apostas, US$ 13,83 queimados, e US$ 753,48 passando na brasa
+
+O log mais importante até agora, e os números são todos dele:
+
+    gas        0.015008 -> 0.009541 ETH   = 0,005467 ETH (US$ 13,83) em 31 tiros
+    tiros      "31 de 31 reverteram, e TODOS eram aposta na escrita do oráculo"
+    desdeOBoot 4,6 horas | aconteceram 12 | valiamAPena 4 | US$ 753,48
+    ondeEuEstava  { brasa: 4 }   <- o bot estava olhando as QUATRO
+
+A frase nova funcionou (o tipo do tiro está registrado e ela não culpa mais a
+concorrência), o `naListaQuente: "1470 (todos lidos nesta varredura completa)"`
+funcionou. **E a estratégia está perdendo dinheiro por aritmética.**
+
+### O ritmo de queima, rodado
+
+    por tiro        0,000176 ETH = US$ 0,446
+    por hora        0,001188 ETH = US$ 3,01
+    saldo restante  0,009541 ETH = US$ 24,13 = 54 tiros
+    >>> O SALDO ACABA EM 8,0 HORAS neste ritmo
+
+### E 0 de 31 não prova nada — nem contra, nem a favor
+
+    chance CEGA por tiro:                    0,282%  (1/355, medido em 7 dias)
+    acertos esperados em 31 tiros cegos:     0,087
+
+**Zero de 31 é exatamente o que o acaso daria.** Não condena a previsão e não
+dá uma única evidência de que ela seja boa. Para somar 3 acertos seriam
+necessários 213 tiros mesmo se a previsão fosse **5x melhor** que chutar — e
+213 tiros custam US$ 95,01 contra um saldo de US$ 24,13. **O experimento não
+cabe nesta carteira:** ela acaba antes de responder a pergunta.
+
+### O PISO NÃO DEVIA SER MINHA ESCOLHA, e agora não é
+
+Em 07/10 cravei US$ 20 e ele barrou a única oportunidade do dia (US$ 11,59).
+Em 08/10 baixei para US$ 10 e o bot gastou US$ 13,83 em 31 apostas. **Os dois
+números eram meus.** Rodado com o custo que o bot mede:
+
+    premio      acerto exigido   vs o acaso cego
+    US$   10       4,461%          15,8x
+    US$   20       2,230%           7,9x
+    US$   50       0,892%           3,2x
+    US$  100       0,446%           1,6x
+    US$  158       0,282%           1,00x   <- a fronteira
+    US$  188       0,237%           0,84x   <- PAGA SOZINHO
+    US$  500       0,089%           0,32x   <- PAGA SOZINHO
+
+**`premioQueSePagaNoAcaso` sai do custo MEDIDO e da cadência MEDIDA**, e remede
+quando o gás subir ou o oráculo escrever mais. Acima de US$ 158,35 apostar **às
+cegas** já tem valor esperado positivo — a previsão deixa de ser premissa e
+passa a ser só vantagem.
+
+E o número que fecha o argumento: **as quatro oportunidades daquelas 4,6 horas
+tinham média de US$ 188,37.** Elas pagavam sozinhas. O problema nunca foi o
+prêmio das que passaram — foi o piso de US$ 10 liberando apostas em alvos que
+exigiam acertar 15,8x mais que o acaso, gastando a munição que as de US$ 188
+precisavam.
+
+### E a linha que explica o gasto agora traz a conta
+
+Eu precisei de um script para descobrir isso. Era informação que tinha de estar
+no `[NA ESCRITA]`, no segundo em que o dinheiro sai:
+
+    aApostaSePaga: "NÃO no acaso: preciso acertar 15,8x mais que chutar.
+                    O prêmio que se pagaria sozinho é US$ 158,35, e este é US$ 10,40"
+
+**Não mudei o piso.** A decisão é dela — ela já me corrigiu sobre piso uma vez,
+com razão, e o custo de errar para cima (desligar a estratégia) é tão real
+quanto o de errar para baixo (sangrar). O que mudou é que a decisão deixou de
+ser tomada no escuro.
