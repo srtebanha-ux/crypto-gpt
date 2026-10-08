@@ -365,8 +365,46 @@ export function montarPlacar(
  * Existe para o placar nao virar uma tabela que ninguem sabe ler. O balde
  * maior diz o que consertar, e cada um pede um conserto diferente.
  */
-export function oQueIssoQuerDizer(placar: PlacarDasPerdidas, pisoUsado?: Decimal | null): string {
+/**
+ * BLOCOS DA BASE POR LIQUIDACAO DA AAVE — a regua que diz se a janela responde.
+ *
+ * MEDIDO pelo censo do proprio bot em 2026-10-08, 46,3 dias, 40 janelas, ZERO
+ * falharam (cobertura 100%): 209 liquidacoes = 4,51 por dia. A Base faz 43.200
+ * blocos por dia, entao uma liquidacao a cada ~9.580 blocos.
+ *
+ * Nao e numero meu: sai da linha `[MERCADO]` que este bot imprime em todo boot.
+ * Se o censo remedir, este numero remede junto — e a regra 2 deste projeto, que
+ * manda usar a medicao que ja existe em vez de escrever a formula ao lado.
+ */
+export const BLOCOS_POR_LIQUIDACAO = 9_580;
+
+export function oQueIssoQuerDizer(
+    placar: PlacarDasPerdidas,
+    pisoUsado?: Decimal | null,
+    blocosNaJanela?: number,
+): string {
     if (placar.valiam.length === 0) {
+        // "NAO TEVE" SOBRE UM BLOCO E AUSENCIA COM CARA DE RESPOSTA.
+        //
+        // MEDIDO no log de 2026-10-08 13:06: a linha saiu
+        // `janela: "blocos 52337728–52337728"` — UM bloco, dois segundos — e a
+        // frase concluiu "Nao foi velocidade nem cobertura: nao teve". No MESMO
+        // log, quinze linhas abaixo, o censo dizia `aUltima: "15 minutos atras"`.
+        // Duas linhas do mesmo boot discordando sobre o mesmo mundo.
+        //
+        // Com uma liquidacao a cada ~9.580 blocos, um bloco tem 0,01% de chance
+        // de conter uma. Concluir "nao teve" dali e afirmar o silencio de uma
+        // janela onde o silencio era o resultado esperado.
+        //
+        // A conta e a esperanca: quantas a janela DEVERIA ter visto. Abaixo de
+        // uma, a janela nao responde a pergunta — e dizer isso e a resposta.
+        if (blocosNaJanela !== undefined && blocosNaJanela < BLOCOS_POR_LIQUIDACAO) {
+            const esperadas = blocosNaJanela / BLOCOS_POR_LIQUIDACAO;
+            return `Nenhuma nesta janela de ${blocosNaJanela.toLocaleString('pt-BR')} bloco(s) — e ela é CURTA`
+                + ` demais para concluir: o normal é uma liquidação a cada ~${BLOCOS_POR_LIQUIDACAO.toLocaleString('pt-BR')}`
+                + ` blocos, então aqui eu esperaria ${esperadas.toFixed(3)}. Silêncio era o resultado provável;`
+                + ' quem responde "tem alvo ou não" é o acumulado desde o boot, não esta linha.';
+        }
         // O piso entra na frase porque "na sua faixa de lucro" e a parte que
         // pode estar errada, e sem o numero ninguem consegue conferir.
         const piso = pisoUsado === undefined

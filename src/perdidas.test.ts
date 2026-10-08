@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import { comparaPremio,
-    lucroEstimado, emDolar, ondeEuEstava, montarPlacar, oQueIssoQuerDizer,
+    lucroEstimado, emDolar, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, BLOCOS_POR_LIQUIDACAO,
     type Perdida, type Cobertura,
     ehPoeira,
 } from './perdidas';
@@ -221,4 +221,25 @@ test('ehPoeira e lucroEstimado concordam sempre — senao sao duas regras', () =
             `divergiram em US$ ${d}: são duas regras onde devia ser uma`,
         );
     }
+});
+
+test('"não teve" exige janela que pudesse ter tido — o log de 2026-10-08 13:06', () => {
+    // MEDIDO: a linha saiu `janela: "blocos 52337728–52337728"` — UM bloco — e
+    // concluiu "Não foi velocidade nem cobertura: não teve". No MESMO boot, o
+    // censo dizia `aUltima: "15 minutos atrás"`. Duas linhas discordando.
+    const vazio = montarPlacar([], null);
+    const umBloco = oQueIssoQuerDizer(vazio, null, 1);
+    assert.ok(!umBloco.includes('não teve'), umBloco);
+    assert.ok(umBloco.includes('CURTA'), umBloco);
+    // E a frase mostra a conta, para quem lê poder discordar dela.
+    assert.ok(umBloco.includes('0.000'), umBloco);
+
+    // Janela longa o bastante volta a concluir: a regra não é "nunca conclua",
+    // é "conclua quando a janela pudesse ter respondido".
+    const longa = oQueIssoQuerDizer(vazio, null, BLOCOS_POR_LIQUIDACAO * 3);
+    assert.ok(longa.includes('não teve'), longa);
+
+    // Sem a janela (quem chama não a passou) a frase é a de antes: perder a
+    // ressalva é barato, inventar um tamanho de janela não.
+    assert.ok(oQueIssoQuerDizer(vazio, null).includes('não teve'));
 });

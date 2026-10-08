@@ -1687,3 +1687,63 @@ duas perguntas diferentes (seleção em dívida, tiro em lucro) e o piso da sele
 depois recusa, gastando vaga de vigília, e não deixa de fora nenhum que ele
 atiraria. **Não é defeito, e registro para a próxima sessão não "consertar"**
 uma das duas pontas e criar o desencontro que hoje não existe.
+
+## 2026-10-08, 13:06: o alvo ESTAVA na memória. Foi a leitura
+
+A pergunta que travou a estratégia desde 07/10 foi respondida por uma variável
+de ambiente, em uma linha, sem deploy de ferramenta e sem varredura:
+
+    [PROCURA] 0x6b950f306f987ff8fb9808886977ca2ef3af2c28:
+      "está na memória, visto no bloco 52076237, via long.
+       Então se não apareceu na brasa, foi a LEITURA que falhou"
+
+O alvo de US$ 49,33 **estava** na lista de 61.771 desde o bloco 52076237, com a
+via já resolvida. Não é buraco de cobertura do cache. A hipótese que eu carregava
+— "só o cache de 3 anos o acharia, e talvez não esteja lá" — está morta.
+
+### E o que o `[PROCURA]` NÃO dizia, que é o conserto
+
+"Foi a leitura que falhou" não diz QUAL leitura, e são três camadas com três
+consertos diferentes e três preços:
+
+    brasa             233 vagas      lida a cada ciclo
+    lista quente    1.443 esperando  LÊ SÓ 250 por ciclo (CACA_TETO_QUENTE)
+    completa       61.771            a cada 15 min
+
+Afirmar qual das três barrou, sem medir, seria exatamente o erro que este
+arquivo registra mais vezes — eu afirmando o mecanismo sem seguir o valor. Então
+o `[PROCURA]` passou a sair TAMBÉM na varredura completa, dizendo a camada, a
+`queda` que está valendo, a dívida e a via. Com isso a resposta deixa de ser
+inferência minha:
+
+- aparece na BRASA com queda pequena e o bot não atirou → não é leitura nenhuma,
+  é um portão do tiro;
+- aparece na LISTA QUENTE → é o teto de 250, e o conserto é o teto;
+- FORA das duas → é a varredura de 15 minutos;
+- sem medição na varredura → posição fechada, ou a leitura dele falhou no ciclo.
+
+### E a frase que afirmava "não teve" sobre DOIS SEGUNDOS
+
+No mesmo boot, duas linhas discordando sobre o mesmo mundo:
+
+    [PLACAR]   janela: "blocos 52337728–52337728"   <- UM bloco
+               "Não foi velocidade nem cobertura: não teve."
+    [MERCADO]  aUltima: "15 minutos atrás"
+
+O censo do próprio bot mede 209 liquidações em 46,3 dias com cobertura 100% =
+4,51/dia. A Base faz 43.200 blocos/dia, então **uma liquidação a cada ~9.580
+blocos**: um bloco tem 0,01% de chance de conter uma. Concluir "não teve" dali é
+publicar como achado o silêncio de uma janela onde o silêncio era o resultado
+esperado — ausência com cara de resposta, na linha que existe para medir
+ausência.
+
+`BLOCOS_POR_LIQUIDACAO = 9.580` **não é número meu**: sai da linha `[MERCADO]`
+que o bot imprime em todo boot, e remede quando o censo remedir. A frase agora
+mostra a conta (`eu esperaria 0.000`) para quem lê poder discordar dela, e manda
+a pergunta para o acumulado desde o boot, que é quem pode respondê-la.
+
+Rodado contra os valores reais deste log, as três frases novas:
+
+    1 bloco      -> "é CURTA demais para concluir… eu esperaria 0.000"
+    450 blocos   -> "… eu esperaria 0.047"
+    43.200       -> "não teve"   (a regra não é nunca concluir)

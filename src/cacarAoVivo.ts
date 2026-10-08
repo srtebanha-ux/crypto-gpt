@@ -3231,7 +3231,8 @@ async function principal(): Promise<'parar' | void> {
                 lucroQuePassou: `US$ ${desdeOBoot.lucro.toFixed(2)}`,
                 ondeEuEstava: desdeOBoot.porCobertura,
             },
-            oQueIssoQuerDizer: oQueIssoQuerDizer(placar, faixaAgora === null ? new Decimal(20) : pisoDoPlacar),
+            oQueIssoQuerDizer: oQueIssoQuerDizer(
+                placar, faixaAgora === null ? new Decimal(20) : pisoDoPlacar, ate - de + 1),
             asTresMaiores: placar.valiam.slice(0, 3).map((x) => ({
                 divida: x.dividaUsd === null ? 'sem cotação' : `US$ ${x.dividaUsd.toFixed(0)}`,
                 lucro: `US$ ${x.lucroUsd!.toFixed(2)}`,
@@ -3847,6 +3848,47 @@ async function principal(): Promise<'parar' | void> {
                         );
                         brasa = camadas.brasa;
                         quentes = camadas.quentes;
+                        // EM QUE CAMADA O ALVO PROCURADO ESTA, AGORA.
+                        //
+                        // A primeira versao do `[PROCURA]` respondia "esta na
+                        // memoria" ou "nao esta", e no boot de 2026-10-08 13:06
+                        // ela respondeu: o alvo de US$ 49,33 ESTAVA na memoria,
+                        // visto no bloco 52076237. A frase terminava em "foi a
+                        // LEITURA que falhou" — e nao dizia QUAL leitura.
+                        //
+                        // Sao tres camadas com tres consertos diferentes:
+                        // a brasa (233 vagas, lida todo ciclo), a lista quente
+                        // (1.443 esperando, 250 lidos por ciclo) e a varredura
+                        // completa (todos, a cada 15 min). Dizer "a leitura
+                        // falhou" sem dizer onde deixa o conserto no palpite —
+                        // e palpite sobre qual portao barrou e exatamente o
+                        // erro que este arquivo registra mais vezes.
+                        //
+                        // Com a medicao ao lado: a `queda` que esta valendo e a
+                        // posicao na fila. Se o alvo aparece na brasa com queda
+                        // pequena e o bot ainda nao atirou, o problema nao e
+                        // leitura nenhuma — e um portao do tiro.
+                        if (procurar.length > 0) {
+                            const naBrasaAgora = new Set(brasa.map((d) => d.toLowerCase()));
+                            const naQuenteAgora = new Set(quentes.map((d) => d.toLowerCase()));
+                            const porDevedor = new Map(medidos.map((m) => [m.devedor.toLowerCase(), m]));
+                            log.info('[PROCURA] Em que camada está, nesta varredura.', Object.fromEntries(
+                                procurar.map((d) => {
+                                    const m = porDevedor.get(d);
+                                    if (m === undefined) {
+                                        return [d, 'está na lista de devedores mas NÃO saiu medição nesta varredura'
+                                            + ' — posição fechada (dívida zerada) ou a leitura dele falhou neste ciclo'];
+                                    }
+                                    const onde = naBrasaAgora.has(d) ? `BRASA (das ${brasa.length} vagas): lido a cada ciclo`
+                                        : naQuenteAgora.has(d) ? `LISTA QUENTE (${quentes.length} esperando, teto de leitura ${
+                                            TETO_DA_LISTA_QUENTE > 0 ? TETO_DA_LISTA_QUENTE : 'nenhum'})`
+                                        : 'FORA das duas: só a varredura completa o lê, a cada '
+                                            + `${Math.round(MINUTOS_ENTRE_COMPLETAS)} min`;
+                                    return [d, `precisa cair ${m.queda.toFixed(4)}%, dívida ${
+                                        m.dividaUsd === null ? 'não lida' : `US$ ${m.dividaUsd.toFixed(2)}`
+                                    }, via ${m.via ?? 'não resolvida'} — ${onde}`];
+                                })));
+                        }
                         // Quem saiu da brasa leva o historico embora. Sem isso
                         // uma posicao que voltasse teria amostras de dois
                         // regimes diferentes na mesma reta, e a reta inventaria
