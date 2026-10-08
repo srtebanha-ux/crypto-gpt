@@ -1515,3 +1515,55 @@ Conferido com a função de verdade:
     dívida US$    0,00  ->  renderia −US$ 0,30   POEIRA (os dois casos de hoje)
     dívida US$   10,00  ->  renderia −US$ 0,08   POEIRA
     dívida US$ 2.163,90 ->  renderia  US$ 47,12  vale a fila
+
+## 2026-10-08: 18,7 horas de placar — a LEI do projeto confirmada, e o meu piso errado
+
+O log trouxe o primeiro placar longo, e dois números decidem tudo:
+
+    [POEIRA]  quantas: 361        <- o conserto de ontem achou 361, não uma
+    desdeOBoot  18,7 horas
+      aconteceram      3
+      valiamAPena      1
+      lucroQuePassou   US$ 11,59
+      ondeEuEstava     { brasa: 1 }   <- o bot ESTAVA olhando
+
+Varri as três na corrente, cobertura 87,0% (94 de 108 janelas de 312 blocos), e
+medi a saúde **dois blocos antes** de cada uma:
+
+    0xdc9dd1c7  bloco 52307770  dívida US$   0,87  renderia −US$ 0,28  TINHA JANELA
+    0xbd34e36b  bloco 52330850  dívida US$ 539,88  renderia  US$ 11,59 JANELA ZERO
+    0x99772b56  bloco 52332795  dívida US$   0,31  renderia −US$ 0,29  TINHA JANELA
+
+**É a lei deste arquivo, medida pela terceira vez e com dados de hoje:** *se vale
+dinheiro, é levada no mesmo bloco; se sobra tempo, é porque não vale nada.* As
+duas com janela eram poeira. A única que pagava — HF 1,00168552 nos blocos
+52330848 **e** 52330849, faltando 0,1683% — foi liquidada no 52330850.
+
+### E O PISO QUE EU PUS ONTEM BARROU EXATAMENTE ELA
+
+`APOSTA_MINIMA_USD = 20` recusou um prêmio de **US$ 11,59** que faltava 0,1683%
+— dentro do salto p90 de 0,2216%, o caso EXATO para o qual
+`atirarNaEscritaIminente` existe. Vinte e quatro horas depois de criar a regra,
+o piso que eu escolhi para protegê-la a desligou.
+
+**Um piso que barra a única oportunidade do dia não protege nada: desliga a
+estratégia com outro nome.** US$ 10 agora, e o teste guarda os dois lados — não
+pode cair abaixo de US$ 5 (acerto exigido acima de 5,7%) nem passar de US$ 11,59
+(o caso real medido). O custo é limitado e conhecido: a trava de 4 tentativas
+por alvo/hora deixa o gasto em no máximo **US$ 1,20 por hora** com alvo ao
+alcance, contra um prêmio de US$ 11,59.
+
+### O TETO DO CAMINHO DA AAVE, agora medido e não inferido
+
+    oportunidades reais:  1 em 18,7h  =  1,28/dia  =  39/mês
+    ganhando TODAS, a US$ 11,59:   US$ 446/mês  =  R$ 2.419
+    a meta dela:                   R$ 10.000    =  US$ 1.845/mês
+
+**Ganhando 100% das liquidações que valem a pena na Aave da Base, o caminho
+atual chega a R$ 2.419/mês — um quarto da meta.** Isso não é opinião nem
+extrapolação de janela curta: é o censo de 30 dias (a Aave é 12% do bolo de
+bônus da Base) reencontrado por um caminho independente, com 18,7 horas de
+placar do próprio bot e as três liquidações conferidas uma a uma na corrente.
+
+A meta exige o Morpho (81% do bolo, e bônus de 9–16% nos mercados de LLTV ≤ 77%
+contra 4,5% na Aave). Isso é contrato novo e deploy novo, e a decisão é dela.

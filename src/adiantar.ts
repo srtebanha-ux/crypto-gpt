@@ -460,13 +460,26 @@ export function valeArmar(
  *
  * **Este piso e ESCOLHA, nao medicao** — a taxa de acerto real nao esta medida
  * (0 de 7 nao a limita: pela regra de tres o teto de confianca ainda e ~43%).
- * US$ 20 exige que a aposta seja 5x melhor que chutar, o que e defensavel
- * porque ela nao e cega: ela so dispara quando o desvio do mercado JA passou do
- * limiar e cabe no salto. Mas e uma hipotese, e esta escrita como tal.
+ *
+ * E ELE JA FOI US$ 20, POR UM DIA, E ESTAVA ALTO DEMAIS. Medido em 2026-10-08
+ * com 18,7 horas de placar: aconteceram TRES liquidacoes na Aave da Base e
+ * exatamente UMA valia a pena — `0xbd34e36b…`, divida US$ 539,88, **premio
+ * US$ 11,59**, faltando 0,1683% (dentro do salto p90 de 0,2216%). Era o caso
+ * exato para o qual esta regra existe, e o piso de US$ 20 a RECUSOU.
+ *
+ * Um piso que barra a unica oportunidade do dia nao protege nada: desliga a
+ * estrategia com outro nome.
+ *
+ * US$ 10 cobre o que de fato aparece. A US$ 11,59 a aposta empata com 2,52% de
+ * acerto, 9x a chance cega de 0,282%. Continua hipotese — mas o custo dela e
+ * limitado e CONHECIDO: a trava de 4 tentativas por alvo por hora deixa o gasto
+ * maximo em 4 x US$ 0,30 = **US$ 1,20 por hora** em que haja alvo ao alcance.
+ * Contra um premio de US$ 11,59 esse bilhete vale comprar — e e a unica forma
+ * de medir a taxa de acerto, que nada mais produz.
  *
  * `CACA_APOSTA_MINIMA_USD` muda. Zero libera qualquer premio, como estava.
  */
-export const APOSTA_MINIMA_USD = new Decimal(20);
+export const APOSTA_MINIMA_USD = new Decimal(10);
 
 export function atirarNaEscritaIminente(entrada: {
     /**

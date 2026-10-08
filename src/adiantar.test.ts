@@ -405,8 +405,14 @@ test('o piso medido exige que a aposta seja melhor que o acaso, nao igual', () =
     //   premio US$ 1,80 -> 14,3% (51x o acaso)   US$ 20 -> 1,5% (5x)
     // US$ 20 é escolha, não medição — a taxa real não está medida. O teste
     // guarda a ORDEM de grandeza, para a próxima sessão não baixar sem medir.
-    assert.ok(APOSTA_MINIMA_USD.greaterThanOrEqualTo(10),
-        'abaixo de US$ 10 a aposta precisa acertar mais de 3% — 10x o acaso cego');
+    assert.ok(APOSTA_MINIMA_USD.greaterThanOrEqualTo(5),
+        'abaixo de US$ 5 a aposta precisa acertar mais de 5,7% — 20x o acaso cego');
+    // E O LIMITE DE CIMA, que me pegou: em 2026-10-08, com 18,7 horas de
+    // placar, a ÚNICA oportunidade real da janela rendia US$ 11,59. Um piso de
+    // US$ 20 a recusou — barrou a única chance do dia. Piso acima de US$ 11,59
+    // desliga a estratégia com outro nome.
+    assert.ok(APOSTA_MINIMA_USD.lessThanOrEqualTo(new Decimal('11.59')),
+        'o piso não pode barrar a oportunidade real medida em 2026-10-08 (US$ 11,59)');
     assert.ok(APOSTA_MINIMA_USD.lessThanOrEqualTo(106),
         'US$ 106 é onde a aposta se paga no acaso cego; acima disso o piso é pessimista demais');
 });
