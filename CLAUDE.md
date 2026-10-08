@@ -2184,3 +2184,46 @@ alvo, 1 inventa alvo — e este projeto perdeu dias com ausência virando númer
 janelas. O primeiro script do dia voltou "0 liquidações" com **cobertura 0%** —
 e foi só porque ele declarava a cobertura que eu não publiquei "o Morpho não
 liquida". Era o defeito que dá nome a este projeto, evitado pelo hábito dele.
+
+### 2026-10-08, 19:51: o deploy confirmou o conserto do placar, e achei o MESMO furo meu
+
+O boot trouxe a prova de que a gravação do placar está consertada:
+
+    [CACHE] O placar dos tiros que sobreviveu ao deploy.
+            vindoDoDisco: "31 tiro(s) contados antes deste boot"
+
+Antes deste conserto, esta linha nem saía — a gravação do boot apagava o campo
+e o boot seguinte começava em zero. **Os 31 atravessaram um deploy.** E com
+eles: o `[PROCURA]` nas duas camadas, o `maisFragilA "[lido há 1s]"`, o
+`naListaQuente "1469 (todos lidos nesta varredura completa)"` e o `[PLACAR]`
+recusando concluir sobre uma janela de 2 blocos.
+
+E o censo remediu: **221 liquidações, 59 na faixa dela, US$ 6.876,41 em 46,3
+dias = US$ 4.455,91/mês, 38 migalhas/mês** (era US$ 3.996,81 e 36). O número
+anda, e é por isso que ele mora no log e não num comentário meu.
+
+**E aí eu fui procurar o piso da aposta no `[BOTÕES]` e ele NÃO ESTAVA.**
+
+É o mesmo furo que o capítulo das 18:03 deste arquivo registra: em 28/09 eu
+previ `inteiroDe US$ 49,27`, a produção deu US$ 34,63, e a causa era
+`CACA_RISCO_MAXIMO=0.8` no Railway dela contra 0.6 aqui — o conserto foi o log
+DIZER com que botões decidiu. Hoje eu criei o piso calculado, que é o número
+que decide se o tiro especulativo sai, **e não o pus na linha que existe
+exatamente para isso.** Eu não tinha como saber, do log dela, se o piso
+calculado estava valendo ou se uma variável antiga o anulava.
+
+Agora o `[BOTÕES]` diz as duas coisas, porque são perguntas diferentes — qual
+piso está valendo, e DE ONDE ele veio:
+
+    pisoDaAposta: "US$ 158.03 — CALCULADO: é o prêmio em que a aposta se paga
+                   no acaso puro (custo por errada × 355 blocos entre
+                   escritas). Apague CACA_APOSTA_MINIMA_USD para deixar assim;
+                   defina para mandar à mão"
+
+    ou, se a variável existir:
+    "US$ 10.00 — ESCRITO em CACA_APOSTA_MINIMA_USD, e ele MANDA.
+     O calculado seria US$ 158.03"
+
+**Isto importa na prática:** se `CACA_APOSTA_MINIMA_USD=10` estiver no Railway,
+o conserto de hoje não faz nada — a variável manda. E até esta linha existir,
+nem eu nem ela tinham como ver isso no log.

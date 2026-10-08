@@ -2127,6 +2127,33 @@ async function principal(): Promise<'parar' | void> {
     // vez e nem ela nem eu tínhamos como conferir se pegaram.
     log.info('[BOTÕES] Com o que eu subi.', {
         politica: comoLerAPolitica(POLITICA),
+        // O PISO DA APOSTA TEM DE ESTAR AQUI, e ele nao estava.
+        //
+        // Esta linha existe por um capitulo inteiro do CLAUDE.md: em 28/09 eu
+        // previ `inteiroDe US$ 49,27` e a producao deu US$ 34,63, e a causa era
+        // `CACA_RISCO_MAXIMO=0.8` no Railway dela contra 0.6 aqui. O conserto
+        // foi o log DIZER com que botoes decidiu.
+        //
+        // E no boot de 2026-10-08 19:51 eu olhei esta linha procurando o piso
+        // da aposta — o numero que agora decide se o tiro especulativo sai — e
+        // ele NAO ESTAVA. Eu nao tinha como saber, do log dela, se o piso
+        // calculado estava valendo ou se uma variavel antiga o anulava. O
+        // mesmo furo, na mesma linha, criado por mim no mesmo dia.
+        //
+        // Ele diz as DUAS coisas, porque sao perguntas diferentes: qual piso
+        // esta valendo, e de onde ele veio.
+        pisoDaAposta: ATIRAR_NA_ESCRITA
+            ? (() => {
+                const calculado = pisoQueSePaga();
+                return APOSTA_MINIMA_ESCOLHIDA !== null
+                    ? `US$ ${APOSTA_MINIMA_ESCOLHIDA.toFixed(2)} — ESCRITO em `
+                      + `CACA_APOSTA_MINIMA_USD, e ele MANDA. O calculado seria `
+                      + `US$ ${calculado.toFixed(2)} (o prêmio em que a aposta se paga no acaso puro)`
+                    : `US$ ${calculado.toFixed(2)} — CALCULADO: é o prêmio em que a aposta `
+                      + 'se paga no acaso puro (custo por errada × 355 blocos entre escritas). '
+                      + 'Apague CACA_APOSTA_MINIMA_USD para deixar assim; defina para mandar à mão';
+            })()
+            : 'não se aplica: CACA_ATIRAR_NA_ESCRITA=0, a aposta está desligada',
         ritmo: `ciclo ${INTERVALO_MS}ms dormindo | varredura completa a cada ${MINUTOS_ENTRE_COMPLETAS} min`,
         listas: `teto da lista quente ${TETO_DA_LISTA_QUENTE > 0 ? TETO_DA_LISTA_QUENTE : 'sem teto'} | `
             + `pedaço de varredura ${PEDACO} blocos (pedido; o medido sai na linha [RPC])`,
