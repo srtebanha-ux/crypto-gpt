@@ -193,8 +193,48 @@ test('os especulativos atravessam o disco, e cache velho não quebra', () => {
     const volta = placarDoCache(JSON.parse(JSON.stringify(placarParaCache(p))));
     assert.equal(volta.especulativos, 1);
     assert.equal(volta.disparados, 2);
-    // Cache gravado antes de 2026-10-08 não tem o campo: zero, não NaN.
-    assert.equal(placarDoCache({ disparados: 5, reverteu: 5 }).especulativos, 0);
+    // Cache gravado antes de 2026-10-08 não tem o campo: `null` — "não
+    // registrei" —, e NÃO zero. Esta linha afirmava zero, e era ela que
+    // deixava a frase errada passar: ver o teste "cache SEM o campo não
+    // escolhe lado", que é o caso real de produção.
+    assert.equal(placarDoCache({ disparados: 5, reverteu: 5 }).especulativos, null);
     // E um campo adulterado não pode afirmar mais apostas do que tiros.
     assert.equal(placarDoCache({ disparados: 2, reverteu: 2, especulativos: 99 }).especulativos, 2);
+});
+
+test('cache SEM o campo não escolhe lado — o defeito do log de 13:14', () => {
+    // MEDIDO: com o conserto JÁ no ar, o log das 13:14 imprimiu a frase errada
+    // outra vez. Os sete tiros foram contados antes de o campo existir,
+    // voltaram do disco como `0 especulativos`, e `0 >= 7` é falso — então a
+    // frase caiu no ramo "outro chegou antes" e afirmou com confiança
+    // exatamente o que o conserto existia para impedir. Para sempre, porque
+    // aquele cache nunca vai aprender o tipo deles.
+    //
+    // Campo ausente virando zero, e o zero publicado como fato positivo:
+    // a assinatura deste projeto, cometida DENTRO do conserto dela.
+    const velho = placarDoCache({ disparados: 7, reverteu: 7, lucroEstimadoUsd: '0' });
+    assert.equal(velho.especulativos, null);
+    const frase = comoEstaIndo(velho, 14);
+    assert.ok(!frase.includes('outro chegou antes'), frase);
+    assert.ok(frase.includes('NÃO REGISTREI'), frase);
+    assert.ok(frase.includes('7 de 7'), frase);
+
+    // Zero REGISTRADO continua sendo resposta: sete corridas perdidas de
+    // verdade dizem "outro chegou antes", e é a frase certa para elas.
+    const medidoZero = placarDoCache({ disparados: 7, reverteu: 7, especulativos: 0 });
+    assert.equal(medidoZero.especulativos, 0);
+    assert.ok(comoEstaIndo(medidoZero).includes('outro chegou antes'));
+
+    // Campo torto é `null`, não um número inventado: não sei é melhor que sei errado.
+    assert.equal(placarDoCache({ disparados: 2, reverteu: 2, especulativos: '1' }).especulativos, null);
+    assert.equal(placarDoCache({ disparados: 2, reverteu: 2, especulativos: -3 }).especulativos, null);
+    assert.equal(placarDoCache({ disparados: 2, reverteu: 2, especulativos: 1.5 }).especulativos, null);
+
+    // E `null` não vai ao disco: a ausência no arquivo já diz "não registrei".
+    assert.equal('especulativos' in placarParaCache(velho), false);
+
+    // Um tiro novo em cima do cache antigo adota o zero e passa a registrar.
+    const depois = contarTiro(velho, 'reverteu', null, true);
+    assert.equal(depois.especulativos, 1);
+    assert.ok(comoEstaIndo(depois).includes('1 eram aposta'), comoEstaIndo(depois));
 });

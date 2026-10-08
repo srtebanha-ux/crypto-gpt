@@ -57,8 +57,22 @@ export interface PlacarDosTiros {
      * lance maior ou ciclo mais curto; a da aposta pede alvo mais valioso ou
      * previsao melhor, e lance maior so a encarece. Uma frase que troca uma
      * pela outra manda consertar a coisa errada.
+     *
+     * `null` E "NAO REGISTREI", E NAO ZERO — e a distincao custou um deploy.
+     *
+     * A primeira versao deste campo fazia o cache antigo voltar com zero. O
+     * log de 2026-10-08 13:14, com o conserto JA no ar, imprimiu a frase
+     * errada outra vez: os sete tiros foram contados antes de o campo existir,
+     * voltaram como `0 especulativos`, e `0 >= 7` e falso — entao a frase caiu
+     * no ramo "outro chegou antes" e afirmou, com confianca, exatamente o que
+     * o conserto existia para impedir. Para sempre, porque aquele cache nunca
+     * vai aprender o tipo deles.
+     *
+     * E a assinatura deste projeto cometida DENTRO do conserto dela: campo
+     * ausente virando zero, e o zero publicado como fato positivo. Ausencia
+     * com cara de resposta.
      */
-    especulativos: number;
+    especulativos: number | null;
 }
 
 export function placarVazio(): PlacarDosTiros {
@@ -83,7 +97,10 @@ export function contarTiro(
 ): PlacarDosTiros {
     const novo: PlacarDosTiros = { ...p, lucroEstimadoUsd: p.lucroEstimadoUsd, disparados: p.disparados + 1 };
     novo[d] += 1;
-    if (especulativo) novo.especulativos += 1;
+    // Contar a partir de `null` adota o zero: o que nao foi registrado antes
+    // continua nao registrado, e o que esta sendo contado agora conta.
+    if (especulativo) novo.especulativos = (p.especulativos ?? 0) + 1;
+    else if (novo.especulativos === null) novo.especulativos = 0;
     if (d === 'acertou' && lucroUsd !== null) novo.lucroEstimadoUsd = p.lucroEstimadoUsd.plus(lucroUsd);
     return novo;
 }
@@ -113,7 +130,10 @@ export function placarParaCache(p: PlacarDosTiros): PlacarNoDisco {
         reverteu: p.reverteu,
         sumiu: p.sumiu,
         lucroEstimadoUsd: p.lucroEstimadoUsd.toString(),
-        especulativos: p.especulativos,
+        // `null` nao vai ao disco: ausencia no arquivo JA significa
+        // "nao registrei", e gravar `null` seria dizer a mesma coisa duas
+        // vezes de formas que podem divergir.
+        ...(p.especulativos === null ? {} : { especulativos: p.especulativos }),
     };
 }
 
@@ -147,12 +167,20 @@ export function placarDoCache(x: unknown): PlacarDosTiros {
         reverteu,
         sumiu,
         lucroEstimadoUsd: lucro,
+        // AUSENTE E `null`, NAO ZERO. Ver a docstring do campo: foi este
+        // default que fez a frase errada sair de novo com o conserto no ar.
+        // Um valor torto (texto, negativo, fracionario) tambem e `null`: nao
+        // sei e melhor que sei errado.
+        //
         // Teto no total: um campo adulterado nao pode fazer "especulativos"
         // passar de "disparados" e a frase afirmar mais apostas do que tiros.
-        especulativos: Math.min(
-            inteiro(c.especulativos),
-            Math.max(inteiro(c.disparados), acertou + reverteu + sumiu),
-        ),
+        especulativos: typeof c.especulativos === 'number'
+            && Number.isInteger(c.especulativos) && c.especulativos >= 0
+            ? Math.min(
+                c.especulativos,
+                Math.max(inteiro(c.disparados), acertou + reverteu + sumiu),
+            )
+            : null,
     };
 }
 
@@ -200,6 +228,20 @@ export function comoEstaIndo(p: PlacarDosTiros, nonce?: number | null): string {
         // "outro chegou antes" sobre uma aposta que nao cruzou e etiqueta que
         // nao descreve o evento, e manda consertar o lance quando o que falta
         // e alvo valioso.
+        //
+        // E NAO REGISTRADO NAO ESCOLHE LADO. Os sete tiros de 07/10 foram
+        // contados antes de o campo existir: a frase sobre eles tem de dizer
+        // que nao sabe, e nao cair no ramo "outro chegou antes" por falta de
+        // dado. Quem le precisa poder distinguir "medi e foi corrida" de
+        // "nao registrei o tipo".
+        if (p.especulativos === null) {
+            return comConferencia(
+                `${p.reverteu} de ${p.disparados} reverteram, e eu NÃO REGISTREI o tipo deles`
+                + ' — foram contados antes de eu passar a separar aposta de corrida, então não sei'
+                + ' se ninguém chegou antes (aposta que não cruzou) ou se perdi a corrida. Os dois'
+                + ' pedem conserto oposto, e os próximos tiros saem com o tipo.',
+            );
+        }
         const todasAposta = p.especulativos >= p.disparados;
         if (todasAposta) {
             return comConferencia(

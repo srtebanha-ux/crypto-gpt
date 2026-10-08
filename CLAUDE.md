@@ -1747,3 +1747,49 @@ Rodado contra os valores reais deste log, as três frases novas:
     1 bloco      -> "é CURTA demais para concluir… eu esperaria 0.000"
     450 blocos   -> "… eu esperaria 0.047"
     43.200       -> "não teve"   (a regra não é nunca concluir)
+
+### 2026-10-08, 13:14: o conserto estava NO AR e a frase errada saiu de novo
+
+O log trouxe o `US$ 0.00` novo funcionando nos degraus — e a mesma frase que eu
+tinha acabado de consertar:
+
+    tiros: "7 de 7 reverteram: outro chegou antes. É corrida perdida por pouco…"
+
+**O defeito é meu, dentro do conserto dele, e é a assinatura deste arquivo.**
+
+`especulativos` é lido do cache. Os sete tiros foram contados em 07/10, antes do
+campo existir. O arquivo não tem o campo, e eu fiz a ausência virar **zero**.
+`0 >= 7` é falso, `0 > 0` é falso — então a frase caiu no ramo final e afirmou,
+com confiança, exatamente o que o conserto existia para impedir. **Para sempre,
+porque aquele cache nunca vai aprender o tipo deles.**
+
+Campo ausente virando zero, e o zero publicado como fato positivo. É a mesma
+forma que `lucroCru = 0n` sendo lido como "não mediu", que o `pisoUsado` caindo
+no default, que a cobertura dizendo 100% com todas as janelas falhando. Está
+escrito na primeira página deste arquivo e eu a cometi no parágrafo seguinte ao
+que a descreve.
+
+**`especulativos` agora é `number | null`, e `null` quer dizer "não registrei".**
+A frase, rodada contra o cache REAL dela (os 7 tiros como estão no volume):
+
+    7 de 7 reverteram, e eu NÃO REGISTREI o tipo deles — foram contados antes de
+    eu passar a separar aposta de corrida, então não sei se ninguém chegou antes
+    (aposta que não cruzou) ou se perdi a corrida. Os dois pedem conserto oposto,
+    e os próximos tiros saem com o tipo.
+
+Quatro regras que os testes guardam, porque cada uma é um jeito de o `null`
+virar número outra vez:
+
+    ausente no disco        -> null          (o caso real dela)
+    zero REGISTRADO         -> 0             e aí "outro chegou antes" é a resposta certa
+    campo torto ('1', -3, 1.5) -> null       não sei é melhor que sei errado
+    null NÃO vai ao disco                    a ausência já diz "não registrei"
+    tiro novo em cima de null -> adota 0 e passa a contar
+
+E o teste que eu mesmo tinha escrito duas horas antes — *"cache gravado antes de
+2026-10-08 não tem o campo: zero, não NaN"* — **afirmava o default errado**. Era
+ele que deixava a frase passar. Reescrito para afirmar `null`.
+
+**A lição, e ela é nova:** eu testei o round-trip do campo NOVO e não testei o
+round-trip do cache QUE EXISTE. O caso que importava era o único que não dava
+para inventar — ele estava gravado no volume dela desde ontem.
