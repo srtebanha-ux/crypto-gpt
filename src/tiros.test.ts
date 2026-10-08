@@ -160,3 +160,41 @@ test('o placar diz ESTIMADO, não "no cofre"', () => {
     assert.ok(frase.includes('confira o cofre'), frase);
     assert.ok(!frase.includes('no cofre.'), 'não pode afirmar que o dinheiro está lá');
 });
+
+test('7 apostas revertidas NÃO dizem "outro chegou antes" — o caso real de 2026-10-08', () => {
+    // MEDIDO: o log das 12:29 imprimiu "7 de 7 reverteram: outro chegou antes.
+    // É corrida perdida por pouco" sobre os SETE tiros especulativos de 07/10.
+    // Ninguém chegou antes: a posição nunca cruzou. Em 07/10 eu consertei
+    // exatamente essa frase na linha [ERROU] e deixei a gêmea solta aqui.
+    let p = placarVazio();
+    for (let i = 0; i < 7; i++) p = contarTiro(p, 'reverteu', null, true);
+    const frase = comoEstaIndo(p);
+    assert.ok(!frase.includes('outro chegou antes'), frase);
+    assert.ok(frase.includes('não cruzou'), frase);
+    assert.ok(frase.includes('7 de 7'), frase);
+    // E diz o que NÃO consertar: lance maior não evitaria nenhuma.
+    assert.ok(frase.includes('lance maior'), frase);
+});
+
+test('mistura de aposta e corrida separa as duas, porque pedem conserto oposto', () => {
+    let p = placarVazio();
+    for (let i = 0; i < 3; i++) p = contarTiro(p, 'reverteu', null, true);
+    for (let i = 0; i < 2; i++) p = contarTiro(p, 'reverteu', null, false);
+    const frase = comoEstaIndo(p);
+    assert.ok(frase.includes('3 eram aposta'), frase);
+    assert.ok(frase.includes('2 em posição já liquidável'), frase);
+    assert.ok(frase.includes('outro chegou antes'), frase);
+});
+
+test('os especulativos atravessam o disco, e cache velho não quebra', () => {
+    let p = placarVazio();
+    p = contarTiro(p, 'reverteu', null, true);
+    p = contarTiro(p, 'reverteu', null, false);
+    const volta = placarDoCache(JSON.parse(JSON.stringify(placarParaCache(p))));
+    assert.equal(volta.especulativos, 1);
+    assert.equal(volta.disparados, 2);
+    // Cache gravado antes de 2026-10-08 não tem o campo: zero, não NaN.
+    assert.equal(placarDoCache({ disparados: 5, reverteu: 5 }).especulativos, 0);
+    // E um campo adulterado não pode afirmar mais apostas do que tiros.
+    assert.equal(placarDoCache({ disparados: 2, reverteu: 2, especulativos: 99 }).especulativos, 2);
+});

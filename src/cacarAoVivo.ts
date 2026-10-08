@@ -729,6 +729,23 @@ export function comoLerABussola(c: Record<Via | 'naoSeSabe', number>): string {
  * um log nao tem teste, e uma tabela que muda de forma em silencio faz a
  * decisao virar adivinhacao.
  */
+/**
+ * O premio em dolar, com casas que nao apaguem o valor.
+ *
+ * MEDIDO no log de 2026-10-08 12:39: a linha saiu
+ * `1%: 2 alcanço/1 valem (US$ 0, maior US$ 0 a 0.30%)`. O contador esta certo
+ * — `quantosValem` so sobe com lucro ACIMA de zero — e o `toFixed(0)` apagou
+ * um premio de centavos. O resultado le como contradicao: "um alvo vale, e
+ * vale zero". Quem le nao consegue separar "arredondou" de "o contador
+ * quebrou", e as duas pedem acoes opostas.
+ *
+ * Nao e cosmetico: e a mesma familia que este arquivo persegue — etiqueta que
+ * nao descreve o conjunto. Abaixo de US$ 10 as casas decidem se ha alvo.
+ */
+export function premioEmDolar(v: Decimal): string {
+    return v.abs().lessThan(10) ? v.toFixed(2) : v.toFixed(0);
+}
+
 export function comoLerAsQuedas(degraus: Degrau[]): string {
     if (degraus.length === 0) return 'nada medido';
     // `alcanca` e `valem` sao numeros diferentes, e a diferenca e a resposta
@@ -739,8 +756,8 @@ export function comoLerAsQuedas(degraus: Degrau[]): string {
     // porque a soma escondia a forma: "3 valem US$ 91" parecia tres de US$ 30,
     // e era uma de US$ 66 a 1,44% de cair.
     return degraus
-        .map((d) => `${d.quedaPct}%: ${d.quantos} alcanço/${d.quantosValem} valem (US$ ${d.lucroUsd.toFixed(0)}${
-            d.maior === null ? '' : `, maior US$ ${d.maior.lucroUsd.toFixed(0)} a ${d.maior.quedaPct.toFixed(2)}%`
+        .map((d) => `${d.quedaPct}%: ${d.quantos} alcanço/${d.quantosValem} valem (US$ ${premioEmDolar(d.lucroUsd)}${
+            d.maior === null ? '' : `, maior US$ ${premioEmDolar(d.maior.lucroUsd)} a ${d.maior.quedaPct.toFixed(2)}%`
             + (d.maior.viaSabida ? ' [par MEDIDO]' : ' [par SUPOSTO: pode ser imune]')}${
             // Sem esta fração, "191 alcanço" com 190 de par desconhecido lê
             // igual a "191 alcanço" medidos um por um.
@@ -2134,6 +2151,12 @@ async function principal(): Promise<'parar' | void> {
         porQue: ouvinte === null ? 'não consegui derivar o endereço wss do RPC; sigo perguntando' : 'reajo quando o bloco nasce, não quando eu pergunto',
     });
     let posturaAnterior: Postura = 'dormindo';
+    // Ver o comentario longo no `[POSTURA]`: a oscilacao em volta do limiar do
+    // 'atento' e esperada, o comportamento esta certo, e o que se cala e a
+    // REPETICAO no log — nunca uma transicao que envolva 'dedo no gatilho'.
+    const MS_ENTRE_LINHAS_DE_POSTURA = 30_000;
+    let ultimaPosturaLogadaEm = 0;
+    let oscilacoesCaladas = 0;
     /** As vagas que sobram no multicall do ciclo depois do bloco e dos precos. */
     const vagasNaBrasa = Math.max(0, CHAMADAS_POR_MULTICALL - moedas.length - 2);
 
@@ -3268,7 +3291,46 @@ async function principal(): Promise<'parar' | void> {
         const ficouUrgente = ritmoDaPostura(nova, INTERVALO_MS) < ritmoDaPostura(postura, INTERVALO_MS);
         postura = nova;
         if (postura !== posturaAnterior) {
+            // OSCILACAO: calar o repetido, NUNCA calar o que decide.
+            //
+            // MEDIDO no log de 2026-10-08 12:29–12:36: VINTE E DUAS linhas
+            // `[POSTURA] dormindo → atento → dormindo` em oito minutos. O
+            // limiar do 'atento' e 0,06% (DESVIO_DE_ESCRITA x 0.6) e o ruido do
+            // mercado passeia em volta de 0,06% — entao ele cruza de ida e
+            // volta a cada poucos segundos.
+            //
+            // O COMPORTAMENTO esta certo e nao se mexe nele: `dormirDeOlho`
+            // fatia o sono e olha o mercado entre as fatias, acordando na hora
+            // em que a postura muda. Dormir nao atrasa nada, e subir o limiar
+            // ou colocar histerese atrasaria o ARMAR — o lado errado de errar,
+            // e o que ela proibiu desde o comeco.
+            //
+            // O que custa e o LOG: vinte e duas linhas iguais enterram o
+            // evento de verdade na tela de quem le. Entao a oscilacao entre
+            // 'dormindo' e 'atento' e CONTADA e sai junto da proxima linha, em
+            // vez de uma linha por vez.
+            //
+            // E ha uma excecao que nao se discute: qualquer transicao que
+            // envolva 'dedo no gatilho' sai SEMPRE. E a postura em que o tiro
+            // acontece, e perde-la na contagem seria calar exatamente o
+            // instante que este log existe para mostrar.
+            const decisiva = postura === 'dedo no gatilho' || posturaAnterior === 'dedo no gatilho';
+            const agoraMs = Date.now();
+            if (!decisiva && agoraMs - ultimaPosturaLogadaEm < MS_ENTRE_LINHAS_DE_POSTURA) {
+                oscilacoesCaladas++;
+                posturaAnterior = postura;
+                // A postura ao vivo continua no `[BLOCO]`, entao o estado nunca
+                // fica desconhecido — so a repeticao e que fica de fora.
+                // O retorno e o mesmo da linha publicada: calar o log nao
+                // pode mudar o ritmo do laco. Se mudasse, eu teria trocado
+                // comportamento por cosmetica.
+                return ficouUrgente;
+            }
+            const oscilou = oscilacoesCaladas;
+            oscilacoesCaladas = 0;
+            ultimaPosturaLogadaEm = agoraMs;
             log.info(`[POSTURA] ${posturaAnterior} → ${postura}`, {
+                ...(oscilou > 0 ? { oscilouAntes: `${oscilou} troca(s) iguais caladas nos últimos ${Math.round(MS_ENTRE_LINHAS_DE_POSTURA / 1000)}s — o ruído do mercado passeia em volta do limiar do 'atento'` } : {}),
                 mercadoCaiu: `${queda.toFixed(4)}%`,
                 feedEscreveEm: `${DESVIO_DE_ESCRITA.toFixed(2)}%`,
                 // Diz de QUAL camada saiu. As duas linhas do log respondiam
@@ -4610,7 +4672,7 @@ async function principal(): Promise<'parar' | void> {
                                     desfecho = erro?.receipt ? lerRecibo(erro.receipt) : 'sumiu';
                                 }
                             }
-                            tiros = contarTiro(tiros, desfecho, lucroDoTiro);
+                            tiros = contarTiro(tiros, desfecho, lucroDoTiro, especulativo);
                             // AO DISCO AGORA, e não na próxima coleta.
                             //
                             // A primeira versão da persistência da bússola

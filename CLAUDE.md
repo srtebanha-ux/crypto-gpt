@@ -1620,3 +1620,70 @@ compra nada — só reduz o número de tentativas que o saldo aguenta.
 DENTRO do bloco da escrita do oráculo. É o que `atirarNaEscritaIminente` tenta,
 apostando no oráculo correr atrás de um movimento que JÁ aconteceu. Não é ler
 mais rápido nem pagar mais alto — essas duas portas estão medidas e fechadas.
+
+## 2026-10-08, 12:39: o log diz "outro chegou antes" sobre tiro que NINGUÉM disputou
+
+Três defeitos no log de hoje, e o primeiro é a REGRA 3 pela **sexta** vez.
+
+### 1. A frase do placar culpava a concorrência pelos sete tiros especulativos
+
+    tiros: "7 de 7 reverteram: outro chegou antes. É corrida perdida por pouco,
+            não falta de alvo."
+
+Os sete eram `[NA ESCRITA]` — aposta na escrita do oráculo. Ninguém chegou
+antes: a posição nunca cruzou e não havia o que levar. **Em 07/10 eu consertei
+exatamente esta frase na linha `[ERROU]`** — "a frase passou a seguir o TIPO do
+tiro", está escrito acima neste arquivo — **e deixei a gêmea solta no placar**,
+porque o placar não sabia o tipo. Consertei uma ponta e a outra continuou
+publicando o diagnóstico invertido, em letras maiores, na linha de resumo que
+ela lê primeiro.
+
+As duas reversões pedem conserto **oposto**: corrida perdida pede lance maior ou
+ciclo mais curto; aposta que não cruzou pede alvo mais valioso, e lance maior só
+encarece a próxima. A frase mandava arrumar a coisa errada.
+
+`PlacarDosTiros.especulativos` conta, atravessa o disco (campo opcional: cache
+velho continua servindo, e um valor adulterado é limitado ao total) e a frase
+segue o tipo, com três formas — todas aposta, mistura, todas corrida.
+
+### 2. "1 alvo vale, e vale US$ 0"
+
+    1%: 2 alcanço/1 valem (US$ 0, maior US$ 0 a 0.30% [par MEDIDO])
+
+O contador está **certo** — `quantosValem` só sobe com lucro acima de zero — e o
+`toFixed(0)` apagou um prêmio de centavos. O resultado lê como contradição, e
+quem lê não consegue separar "arredondou" de "o contador quebrou": as duas pedem
+ações opostas. Abaixo de US$ 10 as casas decidem se existe alvo. O teste afirma
+a REGRA (se o degrau diz que alguém vale, o dólar publicado é maior que zero) e
+três literais antigos foram corrigidos — um deles escondia **US$ 1,72 atrás de
+"US$ 2"**.
+
+### 3. Vinte e duas linhas de `[POSTURA]` em oito minutos
+
+`dormindo → atento → dormindo`, sem parar, entre 12:29 e 12:36. O limiar do
+'atento' é 0,06% (`DESVIO_DE_ESCRITA × 0,6`) e o ruído do mercado passeia em
+volta de 0,06%.
+
+**O comportamento está certo e NÃO foi mexido.** `dormirDeOlho` fatia o sono e
+olha o mercado entre as fatias, acordando no instante da troca — dormir não
+atrasa nada. Subir o limiar ou colocar histerese atrasaria o ARMAR, que é o lado
+errado de errar e o que ela proibiu desde o começo. O que custa é o log:
+vinte e duas linhas iguais enterram o evento de verdade. Agora a oscilação é
+contada e sai junto da próxima linha (`oscilouAntes`), com uma exceção que não
+se discute: **qualquer transição que envolva 'dedo no gatilho' sai sempre** — é
+a postura em que o tiro acontece. E o retorno da função é o mesmo com log ou sem
+log, senão eu teria trocado comportamento por cosmética.
+
+### E um defeito que eu fui medir e NÃO existia
+
+O log tem dois pisos, e pareciam a mesma regra em contradição:
+
+    [BLOCO]   "44036 devem menos de US$ 33.70 e não pagariam o próprio gás"
+    [PLACAR]  pisoUsado "US$ 0.96 — contado contra o piso da faixa de tiro de agora"
+
+Rodado com as funções de verdade: `lucroEstimado(US$ 33,70)` = **US$ 0,44**. São
+duas perguntas diferentes (seleção em dívida, tiro em lucro) e o piso da seleção
+é o MAIS FROUXO dos dois — o lado seguro: admite alvo que o portão do tiro
+depois recusa, gastando vaga de vigília, e não deixa de fora nenhum que ele
+atiraria. **Não é defeito, e registro para a próxima sessão não "consertar"**
+uma das duas pontas e criar o desencontro que hoje não existe.

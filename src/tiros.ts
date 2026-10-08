@@ -42,10 +42,30 @@ export interface PlacarDosTiros {
      * entre si, nao para contar dinheiro.
      */
     lucroEstimadoUsd: Decimal;
+    /**
+     * Quantos dos `disparados` foram APOSTA na escrita do oraculo, e nao tiro
+     * sobre posicao ja liquidavel.
+     *
+     * MEDIDO em 2026-10-08: o log imprimiu "7 de 7 reverteram: outro chegou
+     * antes. E corrida perdida por pouco" sobre os SETE tiros especulativos do
+     * dia anterior. Ninguem chegou antes: a posicao nunca cruzou, e nao havia
+     * o que levar. Em 07/10 eu consertei exatamente essa frase na linha
+     * `[ERROU]`, que ja segue o tipo do tiro — e deixei a GEMEA solta no
+     * placar, porque o placar nao sabia o tipo. REGRA 3, sexta vez.
+     *
+     * As duas reversoes pedem conserto OPOSTO: a de corrida perdida pede
+     * lance maior ou ciclo mais curto; a da aposta pede alvo mais valioso ou
+     * previsao melhor, e lance maior so a encarece. Uma frase que troca uma
+     * pela outra manda consertar a coisa errada.
+     */
+    especulativos: number;
 }
 
 export function placarVazio(): PlacarDosTiros {
-    return { disparados: 0, acertou: 0, reverteu: 0, sumiu: 0, lucroEstimadoUsd: new Decimal(0) };
+    return {
+        disparados: 0, acertou: 0, reverteu: 0, sumiu: 0,
+        lucroEstimadoUsd: new Decimal(0), especulativos: 0,
+    };
 }
 
 /**
@@ -55,9 +75,15 @@ export function placarVazio(): PlacarDosTiros {
  * tres desfechos, entao somar no desfecho garante que o total e o denominador
  * e nunca fique menor que a soma das partes.
  */
-export function contarTiro(p: PlacarDosTiros, d: DesfechoDoTiro, lucroUsd: Decimal | null): PlacarDosTiros {
+export function contarTiro(
+    p: PlacarDosTiros,
+    d: DesfechoDoTiro,
+    lucroUsd: Decimal | null,
+    especulativo = false,
+): PlacarDosTiros {
     const novo: PlacarDosTiros = { ...p, lucroEstimadoUsd: p.lucroEstimadoUsd, disparados: p.disparados + 1 };
     novo[d] += 1;
+    if (especulativo) novo.especulativos += 1;
     if (d === 'acertou' && lucroUsd !== null) novo.lucroEstimadoUsd = p.lucroEstimadoUsd.plus(lucroUsd);
     return novo;
 }
@@ -76,6 +102,8 @@ export interface PlacarNoDisco {
     sumiu: number;
     /** TEXTO, nao numero: ver a docstring de `placarParaCache`. */
     lucroEstimadoUsd: string;
+    /** Opcional: cache gravado antes de 2026-10-08 nao tem o campo. */
+    especulativos?: number;
 }
 
 export function placarParaCache(p: PlacarDosTiros): PlacarNoDisco {
@@ -85,6 +113,7 @@ export function placarParaCache(p: PlacarDosTiros): PlacarNoDisco {
         reverteu: p.reverteu,
         sumiu: p.sumiu,
         lucroEstimadoUsd: p.lucroEstimadoUsd.toString(),
+        especulativos: p.especulativos,
     };
 }
 
@@ -118,6 +147,12 @@ export function placarDoCache(x: unknown): PlacarDosTiros {
         reverteu,
         sumiu,
         lucroEstimadoUsd: lucro,
+        // Teto no total: um campo adulterado nao pode fazer "especulativos"
+        // passar de "disparados" e a frase afirmar mais apostas do que tiros.
+        especulativos: Math.min(
+            inteiro(c.especulativos),
+            Math.max(inteiro(c.disparados), acertou + reverteu + sumiu),
+        ),
     };
 }
 
@@ -161,6 +196,26 @@ export function comoEstaIndo(p: PlacarDosTiros, nonce?: number | null): string {
     // inteiro com memoria do boot de agora.
     if (p.disparados === 0) return comConferencia('Nenhum tiro que eu lembre.');
     if (p.acertou === 0 && p.reverteu > 0) {
+        // A FRASE SEGUE O TIPO DO TIRO. Ver a docstring de `especulativos`:
+        // "outro chegou antes" sobre uma aposta que nao cruzou e etiqueta que
+        // nao descreve o evento, e manda consertar o lance quando o que falta
+        // e alvo valioso.
+        const todasAposta = p.especulativos >= p.disparados;
+        if (todasAposta) {
+            return comConferencia(
+                `${p.reverteu} de ${p.disparados} reverteram, e TODOS eram aposta na escrita do oráculo:`
+                + ' ninguém chegou antes — a posição não cruzou e não havia o que levar.'
+                + ' Isso não é corrida perdida: lance maior não evitaria nenhuma delas, só encareceria a próxima.',
+            );
+        }
+        if (p.especulativos > 0) {
+            const corrida = p.disparados - p.especulativos;
+            return comConferencia(
+                `${p.reverteu} de ${p.disparados} reverteram: ${p.especulativos} eram aposta na escrita do oráculo`
+                + ` (a posição não cruzou) e ${corrida} em posição já liquidável (aí sim outro chegou antes).`
+                + ' Os dois pedem conserto diferente.',
+            );
+        }
         return comConferencia(`${p.reverteu} de ${p.disparados} reverteram: outro chegou antes. É corrida perdida por pouco, não falta de alvo.`);
     }
     const taxa = ((p.acertou / p.disparados) * 100).toFixed(0);

@@ -596,7 +596,7 @@ test('a linha que ela vai ler tem forma travada', () => {
     ];
     assert.equal(
         comoLerAsQuedas(oQueUmaQuedaRenderia(medidos, [2, 5])),
-        '2%: 1 alcanço/1 valem (US$ 2, maior US$ 2 a 1.16% [par SUPOSTO: pode ser imune], mas 1 de 1 são PALPITE: par ainda não resolvido)'
+        '2%: 1 alcanço/1 valem (US$ 1.72, maior US$ 1.72 a 1.16% [par SUPOSTO: pode ser imune], mas 1 de 1 são PALPITE: par ainda não resolvido)'
         + ' | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00% [par SUPOSTO: pode ser imune], mas 2 de 2 são PALPITE: par ainda não resolvido)',
     );
 });
@@ -614,7 +614,7 @@ test('sem palpite nenhum a linha NÃO carrega a ressalva', () => {
     assert.equal(linha.includes('PALPITE'), false, linha);
     assert.equal(
         linha,
-        '2%: 1 alcanço/1 valem (US$ 2, maior US$ 2 a 1.16% [par MEDIDO]) | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00% [par MEDIDO])',
+        '2%: 1 alcanço/1 valem (US$ 1.72, maior US$ 1.72 a 1.16% [par MEDIDO]) | 5%: 2 alcanço/2 valem (US$ 89, maior US$ 87 a 4.00% [par MEDIDO])',
     );
 });
 
@@ -887,7 +887,7 @@ test('degrau sem ninguém que valha não inventa um maior', () => {
     const [d] = oQueUmaQuedaRenderia(medidos, [2]);
     assert.equal(d!.quantosValem, 0);
     assert.equal(d!.maior, null);
-    assert.equal(comoLerAsQuedas([d!]), '2%: 1 alcanço/0 valem (US$ 0, mas 1 de 1 são PALPITE: par ainda não resolvido)');
+    assert.equal(comoLerAsQuedas([d!]), '2%: 1 alcanço/0 valem (US$ 0.00, mas 1 de 1 são PALPITE: par ainda não resolvido)');
 });
 
 test('modo prova: o RITMO segue o alvo em que o bot atira, não o que passa o piso', () => {
@@ -1285,4 +1285,23 @@ test('o MAIOR diz se ELE é medido, não só a fração do degrau', () => {
         { devedor: '0xSABIDO', queda: new Decimal(0.9), dividaUsd: new Decimal(10), via: 'long' as const },
     ];
     assert.match(comoLerAsQuedas(oQueUmaQuedaRenderia(suposto, [1])), /\[par SUPOSTO: pode ser imune\]/);
+});
+
+test('um alvo que vale nunca sai como "US$ 0" — o log de 2026-10-08 12:39', () => {
+    // MEDIDO: a linha saiu `1%: 2 alcanço/1 valem (US$ 0, maior US$ 0 a 0.30%)`.
+    // O contador estava certo (só sobe com lucro acima de zero) e o toFixed(0)
+    // apagou um prêmio de centavos. Quem lê não consegue separar "arredondou"
+    // de "o contador quebrou", e as duas pedem ações opostas.
+    //
+    // A REGRA, e não o literal: se o degrau diz que alguém vale, o dólar
+    // publicado tem de ser maior que zero.
+    const medidos = [
+        { devedor: '0xMIGALHA', queda: new Decimal('0.30'), dividaUsd: new Decimal('80'), via: 'long' as const },
+    ];
+    const degraus = oQueUmaQuedaRenderia(medidos, [1]);
+    assert.equal(degraus[0].quantosValem, 1);
+    assert.ok(degraus[0].lucroUsd.greaterThan(0));
+    const linha = comoLerAsQuedas(degraus);
+    assert.ok(!/1 valem \(US\$ 0,/.test(linha), linha);
+    assert.ok(!/maior US\$ 0 /.test(linha), linha);
 });
