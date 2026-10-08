@@ -7,7 +7,7 @@ import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeE
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO } from './prontidao';
 import {
     lerRecibo, placarVazio, contarTiro, comoEstaIndo, placarParaCache, placarDoCache,
 } from './tiros';
@@ -2053,10 +2053,51 @@ async function principal(): Promise<'parar' | void> {
      * ver `APOSTA_MINIMA_USD` em `adiantar.ts` para a tabela medida.
      * `CACA_APOSTA_MINIMA_USD=0` libera qualquer premio.
      */
-    const APOSTA_MINIMA = new Decimal(numeroDoAmbiente(
-        'CACA_APOSTA_MINIMA_USD',
-        process.env.CACA_APOSTA_MINIMA_USD,
-        APOSTA_MINIMA_USD.toNumber()));
+    const APOSTA_MINIMA_ESCOLHIDA = process.env.CACA_APOSTA_MINIMA_USD !== undefined
+        ? new Decimal(numeroDoAmbiente(
+            'CACA_APOSTA_MINIMA_USD',
+            process.env.CACA_APOSTA_MINIMA_USD,
+            APOSTA_MINIMA_USD.toNumber()))
+        : null;
+    /**
+     * "NAO EXISTE PERDER, E SIM SO ACERTAR" — a frase dela, em codigo.
+     *
+     * O piso da aposta era um numero MEU, e as duas vezes que eu o escolhi ele
+     * errou: US$ 20 em 07/10 barrou a unica oportunidade do dia (US$ 11,59), e
+     * US$ 10 em 08/10 deixou o bot queimar US$ 13,83 em 31 apostas enquanto
+     * US$ 753,48 passavam na brasa.
+     *
+     * Agora ele e CALCULADO: `premioQueSePagaNoAcaso` devolve o premio acima do
+     * qual apostar AS CEGAS ja tem valor esperado positivo — custo por errada
+     * vezes 355 blocos entre escritas do oraculo (os dois medidos). Acima dele
+     * a previsao deixa de ser premissa e passa a ser so vantagem.
+     *
+     * E ISTO NAO E CAUTELA, e o contrario: gastar US$ 0,45 num alvo de US$ 10
+     * nao e agressao — e jogar fora o tiro que o alvo de US$ 188 precisava, e
+     * deixar a carteira vazia quando ele chegar. Medido hoje: as quatro
+     * oportunidades de 4,6 horas tinham media de US$ 188,37 e pagavam sozinhas;
+     * as 31 apostas que saíram exigiam acertar 15,8x mais que o acaso.
+     *
+     * O piso ANDA com o gas: se a Base encarecer, ele sobe; se o oraculo passar
+     * a escrever mais, ele desce. Nenhuma sessao futura precisa re-escolher.
+     *
+     * `CACA_APOSTA_MINIMA_USD` continua mandando, inclusive `=0` para liberar
+     * qualquer premio. A conta fica no log de qualquer jeito.
+     */
+    const pisoQueSePaga = (): Decimal => {
+        const preco = precoDoEth();
+        if (preco === null) return APOSTA_MINIMA_USD;
+        const custoWei = custoDeUmaDerrota(
+            BigInt(Math.round(TETO_GORJETA_ESPECULATIVA_GWEI * 1e9)),
+            baseFeeAtual ?? 20_000_000n,
+            GAS_MEDIDO_DE_UMA_REVERSAO,
+        );
+        const custoUsd = new Decimal(custoWei.toString()).dividedBy(1e18).mul(preco);
+        const piso = premioQueSePagaNoAcaso(custoUsd);
+        // Sem cotacao ou com conta torta volta ao numero escrito, que e
+        // conhecido — ausencia nao vira zero nem vira piso infinito.
+        return piso.isFinite() && piso.greaterThan(0) ? piso : APOSTA_MINIMA_USD;
+    };
     /**
      * O gas que resta, em wei. Lido de tempos em tempos, nao a cada tiro.
      *
@@ -3681,7 +3722,7 @@ async function principal(): Promise<'parar' | void> {
                             // `lucroEstimado` e a mesma funcao que decide o
                             // tiro: uma regra, um lugar.
                             premioUsd: lucroEstimado(conta.dividaBase.dividedBy(1e8)),
-                            premioMinimoUsd: APOSTA_MINIMA,
+                            premioMinimoUsd: APOSTA_MINIMA_ESCOLHIDA ?? pisoQueSePaga(),
                             // A bússola já sabe: `imune` é par de mesma moeda
                             // ou mesma família, onde o preço se cancela na
                             // conta da saúde. São 21.678 dos 57.811, e para

@@ -2044,3 +2044,59 @@ no `[NA ESCRITA]`, no segundo em que o dinheiro sai:
 com razão, e o custo de errar para cima (desligar a estratégia) é tão real
 quanto o de errar para baixo (sangrar). O que mudou é que a decisão deixou de
 ser tomada no escuro.
+
+### "não existe perder, e sim só acertar" — a frase dela virou o portão
+
+Ela respondeu isso quando eu pedi a decisão do piso. Não é "não tenha cautela":
+é o critério, e dá para escrever em código.
+
+**O piso deixou de ser número meu.** `premioQueSePagaNoAcaso` devolve o prêmio
+acima do qual apostar **às cegas** já tem valor esperado positivo — custo por
+errada vezes 355 blocos entre escritas. Acima dele a previsão deixa de ser
+premissa e passa a ser só vantagem. Rodado com os números do log:
+
+    baseFee 0,005 gwei -> errada US$ 0,424  PISO US$ 150,62
+    baseFee 0,020 gwei -> errada US$ 0,445  PISO US$ 158,03   <- a do log
+    baseFee 0,050 gwei -> errada US$ 0,487  PISO US$ 172,85
+    baseFee 0,300 gwei -> errada US$ 0,835  PISO US$ 296,31
+
+O piso **anda com o gás**: encarece a Base, ele sobe; o oráculo escreve mais,
+ele desce. Nenhuma sessão futura precisa re-escolher — e as duas vezes que EU
+escolhi, errei nas duas direções. `CACA_APOSTA_MINIMA_USD` continua mandando.
+
+E isto não é cautela, é o contrário: **gastar US$ 0,45 num alvo de US$ 10 não é
+agressão — é jogar fora o tiro que o alvo de US$ 188 precisava**, e deixar a
+carteira vazia quando ele chegar.
+
+#### E o repositório estava CERTO onde eu quase estraguei
+
+`custoDeUmaDerrota` com o default do repositório dá 0,000224 ETH; a produção
+gastou **0,000176** — o default superestima 1,27x, porque supõe que a reversão
+gasta o gás da caçada inteira, e ela reverte antes.
+
+Minha primeira reação foi corrigir `GAS_DE_UMA_REVERSAO`. **Errado.** Esse
+número serve o **freio de sobrevivência** ("aguento mais N derrotas"), e ali
+errar para CIMA é o lado seguro — o próprio arquivo registra que com 150k o
+freio dizia "aguento 6" quando a verdade era 1.
+
+O piso da aposta quer o oposto: errar para cima sobe o piso, barra alvo e
+desliga a estratégia — foi o que US$ 20 fez em 07/10.
+
+**Duas perguntas, dois lados seguros OPOSTOS, dois números.** É a primeira vez
+neste arquivo em que manter dois é o certo, e a REGRA 3 não se aplica porque ela
+manda juntar o que calcula a MESMA coisa — juntar estes faria um dos dois errar
+para o lado que ele existe para evitar. `GAS_MEDIDO_DE_UMA_REVERSAO = 550.000`
+(derivado dos 31 reverts; faixa 440.887–578.213 pela baseFee, e o número exato
+está no `gasUsed` dos recibos) e um teste exige que ele continue MENOR que o do
+freio.
+
+#### O que este piso CUSTA, declarado
+
+Com US$ 158 ele também barraria a oportunidade de US$ 47,12 de 07/10 (3,35x o
+acaso) e a de US$ 11,59 (13,6x). São oportunidades reais que ficam de fora.
+
+**E eu não sei se as quatro de hoje passariam**, só que a MÉDIA delas é
+US$ 188,37 — e este arquivo registra, sobre o Morpho, que *"a assimetria que a
+soma esconde"* é exatamente este erro. Se as quatro fossem 600/100/40/13, só
+uma passaria. **Buraco declarado:** a varredura dos valores individuais na
+corrente foi disparada e o RPC público não devolveu em tempo.

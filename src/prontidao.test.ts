@@ -19,7 +19,7 @@ import {
     tetoDeGasQueNaoEstrangulaOLance, GORJETA_QUE_GANHA_O_LEILAO_WEI,
     GAS_TIPICO_DE_UMA_CACADA,
     GORJETA_DA_FRENTE_GWEI,
-} from './prontidao';
+    GAS_MEDIDO_DE_UMA_REVERSAO,} from './prontidao';
 
 const D = (n: number | string) => new Decimal(n);
 const ETH = D(2646.93);
@@ -1475,4 +1475,35 @@ test('o teto NAO aumenta uma gorjeta pequena', () => {
         assert.equal(comTeto.prioridadeWei, semTeto.prioridadeWei,
             'gorjeta que ja cabe no teto nao pode mudar');
     }
+});
+
+test('o gás da reversão é DOIS números, e juntá-los faria um errar para o lado errado', () => {
+    // A primeira vez neste projeto em que manter dois números é o CERTO, e por
+    // isso o teste existe: a REGRA 3 manda juntar o que calcula a mesma coisa,
+    // e estes dois calculam a mesma grandeza para perguntas com lados seguros
+    // OPOSTOS.
+    //
+    // GAS_DE_UMA_REVERSAO serve o freio de sobrevivência ("aguento mais N
+    // derrotas"): errar para CIMA é seguro — com 150k o freio dizia "aguento 6"
+    // quando a verdade era 1.
+    //
+    // GAS_MEDIDO_DE_UMA_REVERSAO serve o piso da aposta: errar para cima sobe o
+    // piso, barra alvo e DESLIGA a estratégia — foi o que o piso de US$ 20 fez
+    // em 07/10 com a única oportunidade do dia.
+    assert.ok(
+        GAS_MEDIDO_DE_UMA_REVERSAO < GAS_DE_UMA_REVERSAO,
+        'o derivado dos 31 reverts tem de ser MENOR que o do freio, senão o freio '
+        + 'deixou de errar para o lado seguro',
+    );
+    // DERIVADO de produção em 2026-10-08: 0,005467 ETH em 31 reverts com
+    // gorjeta de 0,300 gwei dá 440.887–578.213 de gás, pela baseFee.
+    assert.ok(GAS_MEDIDO_DE_UMA_REVERSAO >= 440_000n && GAS_MEDIDO_DE_UMA_REVERSAO <= 580_000n);
+
+    // E o custo que cada um produz, para o número ficar visível no teste:
+    const comFreio = custoDeUmaDerrota(300_000_000n, 20_000_000n, GAS_DE_UMA_REVERSAO);
+    const comMedido = custoDeUmaDerrota(300_000_000n, 20_000_000n, GAS_MEDIDO_DE_UMA_REVERSAO);
+    assert.ok(comFreio > comMedido);
+    // O medido tem de bater com os 0,000176 ETH que a produção gastou por errada.
+    const ethMedido = Number(comMedido) / 1e18;
+    assert.ok(ethMedido > 0.00016 && ethMedido < 0.00019, `${ethMedido}`);
 });

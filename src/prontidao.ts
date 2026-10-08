@@ -378,6 +378,42 @@ export function sobraDepoisDaGorjeta(lucroUsd: Decimal, fracao: number): Decimal
 export const GAS_DE_UMA_REVERSAO = GAS_TIPICO_DE_UMA_CACADA;
 
 /**
+ * O gas que uma reversao gasta DE VERDADE — e por que NAO e o de cima.
+ *
+ * DERIVADO dos 31 reverts reais de 2026-10-08: 0,005467 ETH / 31 =
+ * 0,00017636 ETH por errada, com a gorjeta no teto medido de 0,300 gwei. A
+ * baseFee da Base e pequena e variavel, entao o gas sai numa faixa e nao num
+ * ponto:
+ *
+ *     baseFee 0,005 gwei  ->  578.213
+ *     baseFee 0,020 gwei  ->  551.109   <- a baseFee que o log mostrou
+ *     baseFee 0,050 gwei  ->  503.871
+ *     baseFee 0,100 gwei  ->  440.887
+ *
+ * 550.000 e o meio dessa faixa. **E uma DERIVACAO, nao uma leitura:** o numero
+ * exato esta no `gasUsed` dos 31 recibos, e quem quiser fechar isto le os
+ * recibos no basescan.
+ *
+ * E AGORA A PARTE QUE IMPORTA, porque e a primeira vez neste projeto em que
+ * manter DOIS numeros e o certo:
+ *
+ * `GAS_DE_UMA_REVERSAO` serve o FREIO DE SOBREVIVENCIA ("aguento mais N
+ * derrotas"). Ali errar para CIMA e o lado seguro — com 150k o freio dizia
+ * "aguento 6" quando a verdade era 1, e liberava um tiro que leva metade da
+ * carteira. Por isso ele supoe a cacada inteira.
+ *
+ * Este numero serve o PISO DA APOSTA (`premioQueSePagaNoAcaso`). Ali errar
+ * para cima sobe o piso, barra alvo, e DESLIGA a estrategia — exatamente o que
+ * aconteceu em 07/10 com o piso de US$ 20 contra a unica oportunidade do dia.
+ * O lado seguro e o OPOSTO.
+ *
+ * Duas perguntas, dois lados seguros opostos, dois numeros. A REGRA 3 deste
+ * projeto manda juntar o que calcula a MESMA coisa — e juntar estes dois faria
+ * um dos dois errar para o lado que ele existe para evitar.
+ */
+export const GAS_MEDIDO_DE_UMA_REVERSAO = 550_000n;
+
+/**
  * O que UMA derrota custa, em wei.
  *
  * Gorjeta e cobrada mesmo perdendo: prioridade se paga pelo gas consumido,
