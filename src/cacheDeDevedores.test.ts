@@ -366,34 +366,67 @@ test('a gravação do boot NÃO apaga as vias que o boot acabou de ler', async (
     assert.equal(Object.keys(paraGravar).length, 3, 'as do disco não podem sumir');
 });
 
-test('TODA gravação do cache leva o campo `placar` — os 7 tiros apagados em 2026-10-08', () => {
-    // MEDIDO: o log das 13:06 dizia `vindoDoDisco: "7 tiro(s) contados antes
-    // deste boot"`. O das 13:34, mesmo cache, dizia "eu contei 0 tiro(s): 14
-    // saíram sem eu lembrar". Sete viraram zero entre dois boots.
+test('TODO campo do cache aparece em TODO gravador — a classe inteira, não o caso', () => {
+    // POR QUE ESTE TESTE EXISTE, e por que ele lê o CÓDIGO em vez de valores.
     //
-    // A causa era a gravação DO BOOT (`gravarCache` logo depois de varrer os
-    // devedores) montar o objeto do cache sem o campo `placar`. Como ela
-    // reescreve o arquivo inteiro, o campo desaparecia; o boot seguinte
-    // começava em zero e a primeira regravação publicava esse zero em cima.
-    // REGRA 3: a mesma regra em dois lugares, implementada em um.
+    // MEDIDO em 2026-10-08: o log das 13:06 dizia `vindoDoDisco: "7 tiro(s)
+    // contados antes deste boot"`. O das 13:34, mesmo cache, dizia "eu contei
+    // 0 tiro(s): 14 saíram sem eu lembrar". Sete tiros reais apagados do disco.
     //
-    // Este teste lê o CÓDIGO, e é de propósito: o defeito não era um valor
-    // errado, era um campo AUSENTE numa das duas chamadas. Nenhum teste de
-    // valor o pegaria, e foi por isso que ele passou por 1.400 testes.
-    // `join(__dirname, …)` e nao `import.meta.url`: o runner deste projeto e
+    // A causa: `gravarCache` é chamada em DOIS lugares e reescreve o arquivo
+    // inteiro. Eu adicionei o campo `placar` a um deles (`gravarAgora`), com um
+    // comentário dizendo "o placar vai em TODA gravação", e NÃO adicionei ao
+    // outro — a gravação do boot. O campo desaparecia do disco em todo deploy;
+    // o boot seguinte começava em zero e a primeira regravação publicava esse
+    // zero em cima dos sete.
+    //
+    // É a sétima vez que a REGRA 3 pega este projeto, e na pior forma: não um
+    // valor errado, um campo AUSENTE numa das chamadas. Nenhum teste de valor
+    // pega isso — passou por 1.400 deles. E a mesma coisa já tinha acontecido
+    // com `vias` em 2026-10-06, por isso a bússola morria a cada deploy.
+    //
+    // Então este teste não guarda o `placar`: guarda a CLASSE. Todo campo que a
+    // interface declara tem de aparecer em toda chamada de `gravarCache`, ou a
+    // suíte reprova. O próximo campo opcional que alguém adicionar a um
+    // gravador só — e vai acontecer — para aqui em vez de apagar dado dela.
+    // O QUE ESTE TESTE NÃO PEGA, declarado para ninguém confiar demais nele:
+    // ele olha a PRESENÇA do campo, não o valor. Uma gravação que escreva
+    // `devedores: {}` ou passe a variável errada passa por aqui. Ele mata uma
+    // classe — campo esquecido num gravador — e só ela.
+    const dir = __dirname;
+    const interfaceDoCache = readFileSync(join(dir, 'cacheDeDevedores.ts'), 'utf8');
+    // `join(__dirname, …)` e não `import.meta.url`: o runner deste projeto é
     // `node --require ts-node/register`, CommonJS, onde `import.meta` nem
-    // compila. O teste passava sozinho com `tsx` e reprovava em `npm test` —
-    // duas ferramentas, dois modulos, e so uma delas e a que vale.
-    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
-    const chamadas = fonte.split(/gravarCache\(CAMINHO_DO_CACHE, \{/).slice(1);
-    assert.ok(chamadas.length >= 2, `esperava 2+ gravações, achei ${chamadas.length}`);
-    for (const [i, trecho] of chamadas.entries()) {
-        // O objeto literal vai até o `});` que o fecha.
+    // compila (TS1343). O teste passou com `npx tsx` e reprovou em `npm test` —
+    // conferir a cópia em vez do original é o defeito que este arquivo persegue.
+    const corpoDaInterface = interfaceDoCache
+        .split('export interface CacheDeDevedores {')[1]!
+        .split('\n}')[0]!;
+    // Só a profundidade 0: `placar` conta, `placar.disparados` não — o que se
+    // perde ao esquecer um campo é o campo de cima inteiro.
+    const campos = [...corpoDaInterface.matchAll(/^ {4}([a-zA-Z_][a-zA-Z0-9_]*)\??:/gm)]
+        .map((m) => m[1]!);
+    assert.ok(campos.length >= 7, `esperava 7+ campos na interface, achei ${campos.length}: ${campos}`);
+
+    const caca = readFileSync(join(dir, 'cacarAoVivo.ts'), 'utf8');
+    const gravacoes = caca.split(/gravarCache\(CAMINHO_DO_CACHE, \{/).slice(1);
+    assert.ok(gravacoes.length >= 2, `esperava 2+ gravações, achei ${gravacoes.length}`);
+
+    const faltando: string[] = [];
+    for (const [i, trecho] of gravacoes.entries()) {
+        // O objeto literal vai até o `});` que o fecha, na indentação dele.
         const corpo = trecho.split(/\n\s*\}\);/)[0] ?? '';
-        assert.match(
-            corpo,
-            /placar:\s*placarParaCache\(/,
-            `a gravação nº ${i + 1} não leva o placar: ela apagaria a contagem dos tiros do disco`,
-        );
+        for (const campo of campos) {
+            if (!new RegExp(`(^|[^a-zA-Z0-9_.])${campo}\\s*:`, 'm').test(corpo)) {
+                faltando.push(`gravação nº ${i + 1} não leva \`${campo}\``);
+            }
+        }
     }
+    assert.deepEqual(
+        faltando, [],
+        'Um gravador de cache está deixando campo de fora. Ele reescreve o arquivo '
+        + 'INTEIRO, então o campo desaparece do disco e o próximo boot começa sem ele '
+        + '— foi assim que os sete tiros de 2026-10-07 se perderam. '
+        + `Faltando: ${faltando.join('; ')}`,
+    );
 });

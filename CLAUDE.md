@@ -1879,3 +1879,35 @@ arquivo com `npx tsx --test`, vi `32 pass`, e a suíte inteira reprovou.
 Rodar o arquivo isolado com a ferramenta errada é a mesma classe de erro que
 este arquivo persegue: eu conferi a cópia, não o original. É `join(__dirname,
 …)` agora. 1.434 testes, 0 falhas no runner de verdade.
+
+## 2026-10-08, fim: o teste que mata a CLASSE, porque ela já me pegou duas vezes
+
+Ela perguntou: *"lembra que eu falei pra você parar de errar?"*. Lembro, e hoje
+eu errei quatro vezes, três delas com a MESMA forma: **eu conferi a coisa nova e
+não conferi a que já existe.**
+
+    especulativos com default zero  -> testei o round-trip do campo NOVO,
+                                       não o do cache que está no volume dela
+    placar fora do write do boot    -> adicionei o campo a UM dos dois gravadores
+    import.meta no teste            -> rodei com `tsx`, não com o runner do projeto
+
+E o segundo já tinha acontecido: em 2026-10-06 a **bússola** morria a cada deploy
+porque `vias` estava num gravador só. Mesma classe, campo diferente, dois dias de
+distância. Prometer não repetir já falhou — então o conserto é mecânico.
+
+`src/cacheDeDevedores.test.ts` agora lê o CÓDIGO: pega os nomes dos campos da
+interface `CacheDeDevedores` (só profundidade 0 — o que se perde ao esquecer um
+campo é o campo de cima inteiro) e exige que **todo** campo apareça em **toda**
+chamada de `gravarCache`. Conferido nos dois sentidos que importam:
+
+    com o código de ONTEM (placar fora do boot)   -> REPROVA, dizendo "não leva `placar`"
+    com um campo NOVO que ninguém gravou          -> REPROVA nas duas gravações, pelo nome
+    com o código de hoje                          -> passa
+
+Por que lê o código e não valores: o defeito não era um valor errado, era um
+campo **ausente** numa das chamadas. Nenhum teste de valor o pega — este passou
+por 1.400 deles e custou sete tiros reais.
+
+**E o que ele NÃO pega, declarado:** ele olha a PRESENÇA do campo, não o valor.
+Uma gravação que escreva `devedores: {}` ou passe a variável errada passa por
+aqui. Ele mata uma classe — campo esquecido num gravador — e só ela.
