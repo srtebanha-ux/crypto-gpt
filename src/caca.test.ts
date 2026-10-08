@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
+import { CUSTO_DA_LISTA_QUENTE_MS } from './cacarAoVivo';
+import { ritmoDaPostura as oRitmo, type Postura as TipoDePostura } from './adiantar';
 import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, poolParaVender, SEM_VENDA, pisoDoLucroEmUnidadesCruas, oPrecoCancela, oQueUmaQuedaRenderia, comoLerAsQuedas,
     viaDeQuebra, oQueUmaAltaRenderia, altaEquivalente, contarVias, comoLerABussola, familiaDoAtivo,
     cabemNoCiclo, hostDoRpc } from './cacarAoVivo';
@@ -1304,4 +1306,31 @@ test('um alvo que vale nunca sai como "US$ 0" — o log de 2026-10-08 12:39', ()
     const linha = comoLerAsQuedas(degraus);
     assert.ok(!/1 valem \(US\$ 0,/.test(linha), linha);
     assert.ok(!/maior US\$ 0 /.test(linha), linha);
+});
+
+test('o teto da lista quente segue o ORÇAMENTO do ciclo, não o nome da postura', () => {
+    // MEDIDO no log dela de 2026-10-08 14:28, com o RPC dela: 248 multicalls,
+    // rede 50.742ms somados, parede 8.370ms (~6x paralelo) => ~205ms por
+    // multicall. A brasa lê 233 alvos num multicall, em 118–211ms. Então a
+    // lista quente inteira (1.437) são ~7 multicalls: UMA rodada, ~205ms.
+    //
+    // O teto lia 250 e deixava 1.187 fora — justamente na varredura 'quentes',
+    // que só roda quando o mercado JÁ andou o bastante para alcançar quem está
+    // fora da brasa.
+    const quentes = Array.from({ length: 1437 }, (_, i) => `0x${i.toString(16).padStart(40, '0')}`);
+    const semTeto = cabemNoCiclo(quentes, 0);
+    assert.equal(semTeto.lidos.length, 1437);
+    assert.equal(semTeto.ficaramFora, 0);
+    const comTeto = cabemNoCiclo(quentes, 250);
+    assert.equal(comTeto.lidos.length, 250);
+    assert.equal(comTeto.ficaramFora, 1187);
+
+    // A REGRA, e não os nomes: o teto vale quando o ciclo é mais curto que o
+    // custo medido. Escrever `postura === 'dedo no gatilho'` sincronizaria na
+    // mão uma conta que `ritmoDaPostura` já faz — e se o ritmo de alguma
+    // postura mudar, a comparação por nome responderia a pergunta de antes.
+    const cabe = (p: TipoDePostura) => oRitmo(p, 8000) > CUSTO_DA_LISTA_QUENTE_MS;
+    assert.equal(cabe('dormindo'), true, 'com 8000ms de ciclo, 205ms cabem');
+    assert.equal(cabe('atento'), true, 'com 1000ms de ciclo, 205ms cabem');
+    assert.equal(cabe('dedo no gatilho'), false, 'com 200ms de ciclo, 205ms NÃO cabem');
 });

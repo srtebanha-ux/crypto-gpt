@@ -1133,6 +1133,40 @@ async function chamarCruComPaciencia(
 export const TETO_DA_LISTA_QUENTE = Math.floor(numeroDoAmbiente('CACA_TETO_QUENTE', process.env.CACA_TETO_QUENTE, 50));
 
 /**
+ * O que custa ler a LISTA QUENTE INTEIRA, em ms de parede.
+ *
+ * MEDIDO no log de producao de 2026-10-08 14:28, com o RPC dela:
+ *
+ *     varredura completa  61.772 alvos | 248 multicalls
+ *                         rede 50.742ms somados | parede 8.370ms  -> ~6x paralelo
+ *                         => ~205ms por multicall
+ *     ciclo da brasa         233 alvos | 1 multicall | parede 118–211ms
+ *
+ * A lista quente tinha 1.437 esperando e o teto lia 250: **1.187 nao eram
+ * vistos**. Os 1.437 inteiros sao ~7 multicalls, que e UMA rodada paralela —
+ * uns 205ms.
+ *
+ * E o orcamento do ciclo, por `ritmoDaPostura`:
+ *
+ *     dormindo        8000ms   cabe 39x
+ *     atento          1000ms   cabe  4,9x
+ *     dedo no gatilho  200ms   NAO cabe
+ *
+ * Entao o teto cai fora quando ha tempo e volta a valer no gatilho. Nao e
+ * cautela: a varredura 'quentes' so roda quando o mercado JA andou o bastante
+ * para alcancar quem esta fora da brasa, e era exatamente ali que o teto
+ * cegava 1.187 posicoes. No gatilho o corte e certo por outra razao — ali o
+ * alvo ja esta identificado e a brasa decide o tiro; gastar 205ms relendo a
+ * lista quente custa o bloco.
+ *
+ * E um numero medido tem data de validade de DIAS neste projeto (o teto do
+ * `eth_getLogs` mudou tres vezes em cinco dias). Se o RPC ficar mais lento,
+ * este numero sobe e o teto volta a valer em 'atento' tambem — o que e a
+ * resposta certa, nao um defeito.
+ */
+export const CUSTO_DA_LISTA_QUENTE_MS = 205;
+
+/**
  * Os que cabem no teto, e quantos ficaram fora.
  *
  * Pura e exportada para poder ser testada: um `slice` solto no meio do laco
@@ -3762,7 +3796,52 @@ async function principal(): Promise<'parar' | void> {
                 // completa cortar seria perder o censo, que e outra coisa.
                 const corte = varredura === 'completa'
                     ? { lidos: devedores, ficaramFora: 0 }
-                    : cabemNoCiclo(quentes);
+                    // O TETO DA LISTA QUENTE SEGUE A POSTURA, porque o
+                    // orcamento do ciclo segue a postura.
+                    //
+                    // MEDIDO no log dela de 2026-10-08 14:28, com o RPC dela:
+                    //
+                    //     varredura completa  61.772 alvos | 248 multicalls
+                    //                         rede 50.742ms somados
+                    //                         parede 8.370ms  -> ~6x paralelo
+                    //                         => ~205ms por multicall
+                    //     ciclo da brasa         233 alvos | 1 multicall
+                    //                         parede 118–211ms
+                    //
+                    // A lista quente tem 1.437 esperando e o teto le 250: mil
+                    // cento e oitenta e sete nao sao vistos. Ler os 1.437
+                    // inteiros sao ~7 multicalls — UMA rodada paralela, uns
+                    // 205ms.
+                    //
+                    // E o orcamento do ciclo, por postura (`ritmoDaPostura`):
+                    //
+                    //     dormindo        8000ms   cabe 39x
+                    //     atento          1000ms   cabe  4,9x
+                    //     dedo no gatilho  200ms   NAO cabe: 205ms estoura
+                    //
+                    // Entao o teto cai fora quando ha tempo e volta a valer no
+                    // gatilho. E isso e o inverso de cautela: a varredura
+                    // 'quentes' so roda quando o mercado JA andou o bastante
+                    // para alcancar quem esta fora da brasa — e era exatamente
+                    // ali que o teto cegava 1.187 posicoes.
+                    //
+                    // No gatilho o corte e certo por outra razao, nao por medo:
+                    // ali o alvo ja esta identificado e a brasa (233) e quem
+                    // decide o tiro. Gastar 205ms relendo a lista quente custa
+                    // o bloco.
+                    // A pergunta e o ORCAMENTO, nao o nome da postura: "os
+                    // ~205ms cabem no ciclo?". Escrever `postura === 'dedo no
+                    // gatilho'` seria sincronizar na mao uma regra que
+                    // `ritmoDaPostura` ja calcula — e se o ritmo de alguma
+                    // postura mudar, a comparacao por nome continuaria
+                    // respondendo a pergunta de antes. (O TypeScript recusou a
+                    // versao por nome, e tinha razao por outro motivo.)
+                    : cabemNoCiclo(
+                        quentes,
+                        ritmoDaPostura(postura, INTERVALO_MS) <= CUSTO_DA_LISTA_QUENTE_MS
+                            ? TETO_DA_LISTA_QUENTE
+                            : 0,
+                    );
                 const aLer = corte.lidos;
                 if (aLer.length > 0) {
                     const loteGigante = await lerEmLote(aLer.map((d) => ({
@@ -4042,9 +4121,26 @@ async function principal(): Promise<'parar' | void> {
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
                             alvosChecados: aLer.length,
                             naBrasa: brasa.length,
-                            naListaQuente: TETO_DA_LISTA_QUENTE > 0 && quentes.length > TETO_DA_LISTA_QUENTE
-                            ? `${quentes.length}, mas LI SÓ ${TETO_DA_LISTA_QUENTE} (teto CACA_TETO_QUENTE) — ${quentes.length - TETO_DA_LISTA_QUENTE} não foram vistos neste ciclo`
-                            : `${quentes.length} (todos lidos)`,
+                            // A ETIQUETA DESCREVE ESTE CICLO, com o corte que
+                            // ELE usou — e nao o teto cravado.
+                            //
+                            // MEDIDO no log dela de 2026-10-08 14:28: a MESMA
+                            // linha imprimiu `alvosChecados: 61772` e
+                            // `naListaQuente: "1437, mas LI SÓ 250 — 1187 não
+                            // foram vistos neste ciclo"`. Numa varredura
+                            // COMPLETA `aLer` e a lista inteira: os 1.437
+                            // foram lidos, dentro dos 61.772. A frase afirmava
+                            // cegueira num ciclo que viu tudo.
+                            //
+                            // A causa era ler `TETO_DA_LISTA_QUENTE` em vez de
+                            // `corte.ficaramFora`, que e o que de fato ficou
+                            // fora. Mesma forma do `naListaQuente: "1324
+                            // (todos lidos)"` que este arquivo ja registra: a
+                            // ternaria conferia o teto em vez do estado.
+                            naListaQuente: corte.ficaramFora > 0
+                                ? `${quentes.length}, mas LI SÓ ${corte.lidos.length} — `
+                                  + `${corte.ficaramFora} não foram vistos neste ciclo (teto CACA_TETO_QUENTE)`
+                                : `${quentes.length} (todos lidos nesta varredura completa)`,
                             // A resposta para "por que 23h sem nada": nao e o
                             // bot que esta cego, e a lista que e de po. Sem
                             // este numero "naBrasa 234" parecia 234 alvos.

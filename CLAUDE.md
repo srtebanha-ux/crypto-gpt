@@ -1911,3 +1911,66 @@ por 1.400 deles e custou sete tiros reais.
 **E o que ele NÃO pega, declarado:** ele olha a PRESENÇA do campo, não o valor.
 Uma gravação que escreva `devedores: {}` ou passe a variável errada passa por
 aqui. Ele mata uma classe — campo esquecido num gravador — e só ela.
+
+## 2026-10-08, 14:28: os três consertos apareceram no log — e sobrou UM buraco medido
+
+O log dela confirma os três:
+
+    maisFragilA  "1.3452% [lido há 4s]"   <- a idade do número, ao lado dele
+                 1.1888% (varredura) -> 1.3452% -> 1.2631%   a posição andou e ele VIU
+    oscilouAntes "3 troca(s) iguais caladas nos últimos 30s"
+    degraus      "US$ 0.00" em vez de "US$ 0"
+
+A segunda linha é a prova de que o conserto da postura é real e não cosmético:
+entre a varredura das 14:28 e a leitura das 14:30 a posição ficou 0,16 ponto
+mais segura, e o número mudou sozinho. Antes ele ficaria em 1,1888% por quinze
+minutos.
+
+### O teto da lista quente cegava 1.187 posições, e o log mediu o custo
+
+    naListaQuente: "1437, mas LI SÓ 250 (teto CACA_TETO_QUENTE) — 1187 não foram vistos"
+
+Medido no log DELA, com o RPC DELA:
+
+    varredura completa  61.772 alvos | 248 multicalls
+                        rede 50.742ms somados | parede 8.370ms  -> ~6x paralelo
+                        => ~205ms por multicall
+    ciclo da brasa         233 alvos | 1 multicall | parede 118–211ms
+
+Os 1.437 inteiros são ~7 multicalls: **uma rodada paralela, uns 205ms.** E o
+orçamento do ciclo, por `ritmoDaPostura`:
+
+    dormindo        8000ms   cabe 39x
+    atento          1000ms   cabe  4,9x
+    dedo no gatilho  200ms   NÃO cabe
+
+Então o teto cai fora quando há tempo e volta a valer no gatilho. **Não é
+cautela:** a varredura 'quentes' só roda quando o mercado JÁ andou o bastante
+para alcançar quem está fora da brasa — era exatamente ali que o teto cegava.
+No gatilho o corte é certo por outra razão: o alvo já está identificado e a
+brasa decide o tiro; gastar 205ms relendo a lista quente custa o bloco.
+
+**E a regra está escrita como ORÇAMENTO, não como nome de postura.** A primeira
+versão era `postura === 'dedo no gatilho'` — o TypeScript a recusou, e tinha
+razão por outro motivo: comparar pelo nome sincroniza na mão uma conta que
+`ritmoDaPostura` já faz, e se o ritmo de alguma postura mudar a comparação
+continuaria respondendo a pergunta de antes. É a REGRA 3 evitada antes de
+acontecer, pela primeira vez neste arquivo.
+
+### E a etiqueta dessa mesma linha afirmava cegueira num ciclo que viu TUDO
+
+    alvosChecados: 61772
+    naListaQuente: "1437, mas LI SÓ 250 — 1187 não foram vistos neste ciclo"
+
+As duas na MESMA linha. Numa varredura completa `aLer` é a lista inteira: os
+1.437 foram lidos, dentro dos 61.772. A causa era a frase ler
+`TETO_DA_LISTA_QUENTE` — o teto cravado — em vez de `corte.ficaramFora`, que é
+o que de fato ficou de fora. Mesma forma do `naListaQuente: "1324 (todos
+lidos)"` que este arquivo já registra: **a ternária conferia o teto em vez do
+estado.** Agora ela descreve o ciclo que a imprimiu.
+
+### O placar continua em ZERO, e isso é correto
+
+`tiros: "Nenhum tiro que eu lembre… 14 saíram sem eu lembrar"`. Os sete foram
+apagados do disco antes do conserto; ele impede a próxima perda, não desfaz
+esta. O nonce 14 e o basescan continuam sendo a prova de que saíram.
