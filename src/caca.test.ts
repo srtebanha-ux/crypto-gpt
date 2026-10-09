@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { CUSTO_DA_LISTA_QUENTE_MS } from './cacarAoVivo';
 import { ritmoDaPostura as oRitmo, type Postura as TipoDePostura } from './adiantar';
 import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, poolParaVender, SEM_VENDA, pisoDoLucroEmUnidadesCruas, oPrecoCancela, oQueUmaQuedaRenderia, comoLerAsQuedas,
@@ -1333,4 +1335,41 @@ test('o teto da lista quente segue o ORÇAMENTO do ciclo, não o nome da postura
     assert.equal(cabe('dormindo'), true, 'com 8000ms de ciclo, 205ms cabem');
     assert.equal(cabe('atento'), true, 'com 1000ms de ciclo, 205ms cabem');
     assert.equal(cabe('dedo no gatilho'), false, 'com 200ms de ciclo, 205ms NÃO cabem');
+});
+
+test('o env só pode ENDURECER o piso da aposta, nunca descer abaixo do equilíbrio', () => {
+    // POR QUE ESTE TESTE EXISTE: eu não tenho como ver o Railway dela. Se
+    // `CACA_APOSTA_MINIMA_USD=10` (o valor que eu mesmo escrevi em 08/10)
+    // estivesse lá, o piso calculado seria INERTE e a sangria voltaria no
+    // primeiro movimento de mercado. Um conserto que depende de um valor que
+    // eu não consigo conferir não é conserto, é esperança.
+    //
+    // MEDIDO: 31 apostas, US$ 13,83, zero acertos, com o piso em US$ 10
+    // liberando alvos que exigiam acertar 15,8x mais que o acaso.
+    //
+    // A regra, e ela é a que o código implementa: o piso efetivo é o MAIOR
+    // entre o equilíbrio e o escrito. A variável exige MAIS, nunca menos.
+    const pisoEfetivo = (escolhido: Decimal | null, equilibrio: Decimal, aceitaNegativa = false) => {
+        if (escolhido === null) return equilibrio;
+        if (aceitaNegativa) return escolhido;
+        return Decimal.max(escolhido, equilibrio);
+    };
+    const equilibrio = new Decimal('158.03'); // o medido em 08/10
+    // o caso REAL que eu não consigo ver: variável frouxa não afrouxa o piso
+    assert.equal(pisoEfetivo(new Decimal(10), equilibrio).toFixed(2), '158.03');
+    assert.equal(pisoEfetivo(new Decimal(0), equilibrio).toFixed(2), '158.03');
+    // e endurecer continua funcionando: a decisão dela de exigir mais vale
+    assert.equal(pisoEfetivo(new Decimal(500), equilibrio).toFixed(2), '500.00');
+    // sem variável, o calculado manda
+    assert.equal(pisoEfetivo(null, equilibrio).toFixed(2), '158.03');
+    // e a porta de escape existe, com nome que ninguém abre por acidente
+    assert.equal(pisoEfetivo(new Decimal(10), equilibrio, true).toFixed(2), '10.00');
+
+    // E o CÓDIGO tem de implementar isto, não só este teste: o defeito seria um
+    // `??` em vez de um `max`, que é exatamente o que estava lá antes.
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    assert.match(fonte, /premioMinimoUsd:\s*pisoDaAposta\(\)/,
+        'o portão da aposta tem de ler `pisoDaAposta()`, não a variável crua');
+    assert.match(fonte, /Decimal\.max\(APOSTA_MINIMA_ESCOLHIDA,\s*equilibrio\)/,
+        'o piso efetivo tem de ser o MAIOR entre o escrito e o equilíbrio');
 });

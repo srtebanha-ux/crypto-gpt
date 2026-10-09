@@ -2099,6 +2099,45 @@ async function principal(): Promise<'parar' | void> {
         return piso.isFinite() && piso.greaterThan(0) ? piso : APOSTA_MINIMA_USD;
     };
     /**
+     * O PISO QUE DE FATO VALE — e o `env` so pode ENDURECE-LO.
+     *
+     * POR QUE ISTO E UM PORTAO E NAO UMA PREFERENCIA. Ate aqui
+     * `CACA_APOSTA_MINIMA_USD` mandava sozinha, e eu NAO TENHO COMO VER o
+     * Railway dela: se a variavel estivesse em 10 (o valor que eu mesmo
+     * escrevi em 08/10), o piso calculado seria inerte e a sangria voltaria no
+     * primeiro movimento de mercado. Um conserto que depende de um valor que
+     * eu nao consigo conferir nao e conserto — e esperanca.
+     *
+     * MEDIDO em 2026-10-08: 31 apostas, US$ 13,83, ZERO acertos, com o piso em
+     * US$ 10 liberando alvos que exigiam acertar **15,8x mais que o acaso**.
+     * Nao foi bug, nao foi oportunidade que fugiu: foi a REGRA DE DECISAO
+     * errada, e a regra era minha.
+     *
+     * Entao o piso efetivo e o MAIOR entre:
+     *   - `premioQueSePagaNoAcaso`: o premio acima do qual apostar as cegas ja
+     *     tem valor esperado positivo (custo medido por errada x 355 blocos
+     *     entre escritas do oraculo). Abaixo dele a aposta perde dinheiro por
+     *     aritmetica, por boa que seja a previsao.
+     *   - o que ela escrever em `CACA_APOSTA_MINIMA_USD`.
+     *
+     * Ou seja: a variavel continua mandando para EXIGIR MAIS, e deixa de poder
+     * autorizar uma aposta de valor esperado negativo. "Nao existe perder, e
+     * sim so acertar" — as palavras dela — deixa de ser configuracao e passa a
+     * ser estrutura.
+     *
+     * E a porta de escape existe, com nome que ninguem abre por acidente:
+     * `CACA_ACEITA_APOSTA_NEGATIVA=1`. Ela nao e cautela removida — e a decisao
+     * dela, declarada, em vez de um numero esquecido num painel.
+     */
+    const ACEITA_APOSTA_NEGATIVA = process.env.CACA_ACEITA_APOSTA_NEGATIVA === '1';
+    const pisoDaAposta = (): Decimal => {
+        const equilibrio = pisoQueSePaga();
+        if (APOSTA_MINIMA_ESCOLHIDA === null) return equilibrio;
+        if (ACEITA_APOSTA_NEGATIVA) return APOSTA_MINIMA_ESCOLHIDA;
+        return Decimal.max(APOSTA_MINIMA_ESCOLHIDA, equilibrio);
+    };
+
+    /**
      * O gas que resta, em wei. Lido de tempos em tempos, nao a cada tiro.
      *
      * Precisa existir porque a gorjeta e paga mesmo quando a transacao
@@ -2144,14 +2183,25 @@ async function principal(): Promise<'parar' | void> {
         // esta valendo, e de onde ele veio.
         pisoDaAposta: ATIRAR_NA_ESCRITA
             ? (() => {
-                const calculado = pisoQueSePaga();
-                return APOSTA_MINIMA_ESCOLHIDA !== null
-                    ? `US$ ${APOSTA_MINIMA_ESCOLHIDA.toFixed(2)} — ESCRITO em `
-                      + `CACA_APOSTA_MINIMA_USD, e ele MANDA. O calculado seria `
-                      + `US$ ${calculado.toFixed(2)} (o prêmio em que a aposta se paga no acaso puro)`
-                    : `US$ ${calculado.toFixed(2)} — CALCULADO: é o prêmio em que a aposta `
-                      + 'se paga no acaso puro (custo por errada × 355 blocos entre escritas). '
-                      + 'Apague CACA_APOSTA_MINIMA_USD para deixar assim; defina para mandar à mão';
+                const equilibrio = pisoQueSePaga();
+                const vale = pisoDaAposta();
+                const comum = `o ponto de equilíbrio é US$ ${equilibrio.toFixed(2)} `
+                    + '(custo por errada × 355 blocos entre escritas: abaixo dele a aposta '
+                    + 'perde dinheiro por aritmética)';
+                if (APOSTA_MINIMA_ESCOLHIDA === null) {
+                    return `US$ ${vale.toFixed(2)} — CALCULADO, nenhuma variável escrita. ${comum}`;
+                }
+                if (ACEITA_APOSTA_NEGATIVA) {
+                    return `US$ ${vale.toFixed(2)} — ESCRITO em CACA_APOSTA_MINIMA_USD e `
+                        + 'CACA_ACEITA_APOSTA_NEGATIVA=1 permitiu descer abaixo do equilíbrio. '
+                        + `ATENÇÃO: ${comum}`;
+                }
+                return vale.greaterThan(APOSTA_MINIMA_ESCOLHIDA)
+                    ? `US$ ${vale.toFixed(2)} — o EQUILÍBRIO mandou: `
+                      + `CACA_APOSTA_MINIMA_USD=${APOSTA_MINIMA_ESCOLHIDA.toFixed(2)} é mais frouxo `
+                      + `que ele e a variável só pode ENDURECER. ${comum}`
+                    : `US$ ${vale.toFixed(2)} — ESCRITO em CACA_APOSTA_MINIMA_USD, e ele é mais `
+                      + `exigente que o equilíbrio. ${comum}`;
             })()
             : 'não se aplica: CACA_ATIRAR_NA_ESCRITA=0, a aposta está desligada',
         ritmo: `ciclo ${INTERVALO_MS}ms dormindo | varredura completa a cada ${MINUTOS_ENTRE_COMPLETAS} min`,
@@ -3749,7 +3799,7 @@ async function principal(): Promise<'parar' | void> {
                             // `lucroEstimado` e a mesma funcao que decide o
                             // tiro: uma regra, um lugar.
                             premioUsd: lucroEstimado(conta.dividaBase.dividedBy(1e8)),
-                            premioMinimoUsd: APOSTA_MINIMA_ESCOLHIDA ?? pisoQueSePaga(),
+                            premioMinimoUsd: pisoDaAposta(),
                             // A bússola já sabe: `imune` é par de mesma moeda
                             // ou mesma família, onde o preço se cancela na
                             // conta da saúde. São 21.678 dos 57.811, e para

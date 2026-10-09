@@ -2283,3 +2283,173 @@ inteiro é construído sobre essa frase significar algo.
 
 A regra que sai: **`# cancelled` conta como `# fail`.** Uma promessa pendurada
 num teste é um `await` que o código de produção também vai fazer.
+
+## 2026-10-09: "voce é o dono e sua unica opçao é ganhar" — o contrato do Morpho
+
+Ela me mandou assumir a posição de dono e decidir. Decidi duas coisas, e as
+duas ao mesmo tempo, porque o tempo é meu e o dinheiro é dela:
+
+**1. A medição que decide, rodando.** Não é "o Morpho é maior" — isso já está
+medido (81% do bolo). É: **o alvo do Morpho é ALCANÇÁVEL?** Na Aave, 32 de 43
+liquidações foram levadas no MESMO bloco em que ficaram liquidáveis, e é por
+isso que ler-e-reagir não ganha lá. Se o Morpho for igual, o contrato novo
+reconstrói o mesmo problema num lago maior. O CLAUDE.md declarava este buraco
+em 28,1% de cobertura; `.tmp/aJanelaDoMorpho.ts` existe para fechá-lo, e mede
+de graça a `ESCALA_DO_ORACULO` (se ela está certa, a saúde de quem FOI
+liquidado sai perto de 1 no bloco anterior).
+
+**2. `contracts/CacadorMorpho.sol`, escrito em paralelo.** Se a medição voltar
+boa, deploy no mesmo dia. Se voltar ruim, perdi horas minhas e nenhum centavo
+dela. Compila em **4.423 bytes** (teto do EVM: 24.576).
+
+### O mecanismo é outro, e é a parte que a próxima sessão precisa saber
+
+Na Aave: `flashLoanSimple` empresta, paga-se a dívida, leva-se a garantia,
+vende, devolve. O empréstimo é um passo separado.
+
+**No Morpho o callback É o empréstimo.** `liquidate` transfere a garantia para
+cá, chama `onMorphoLiquidate`, e **só depois** puxa o token da dívida da nossa
+conta. Dentro do callback a garantia já está na mão e nada foi pago — o
+trabalho é converter garantia em dívida e autorizar o Morpho a puxar. Não
+existe `flashLoan` aqui e não é preciso: a sequência do próprio `liquidate` já
+dá o crédito.
+
+### O que foi herdado do V2 sem discussão, e por quê
+
+    cofre IMUTÁVEL          a chave mora no Railway: quem a roubar pode mandar
+                            caçar, não pode escolher para onde o dinheiro vai
+    amountOutMin ≠ zero     o piso vai para o ROUTER, que recusa ANTES de
+                            executar, em vez de a gente reverter pagando gás
+    approve zerando antes    USDT e parentes revertem sem isso
+    piso conferido no fim    com os DOIS números no erro, senão o log não diz
+                            se faltou pouco ou muito
+
+E três coisas que nasceram de defeitos que este arquivo registra:
+
+- **`poolDeVenda == address(0)` pula a venda**, e não é caso de borda: quando
+  garantia e dívida são o MESMO token, vender é vender inclusive o que se
+  precisa para pagar. Mediu-se isso na Aave em 8 alvos de moeda única; aqui a
+  regra nasce junto.
+- **Um de `seizedAssets`/`repaidShares`, nunca os dois** — e o portão está
+  aqui, não só no Morpho, para a reversão dizer QUAL foi o erro. Reversão sem
+  motivo legível custou a este projeto o capítulo do `naoCruzouAinda`.
+- **O `data` do callback é CONFERÊNCIA, não fonte.** O que manda é o storage
+  da caça; o que chega de fora no instante em que o Morpho chama é tratado como
+  de fora. Três portões no callback: `msg.sender == morpho`, `caca.viva`, e o
+  `data` tem de decodificar.
+
+### E o que NÃO está verificado, declarado no próprio contrato
+
+**O nome e a assinatura do callback** (`onMorphoLiquidate(uint256,bytes)`,
+seletor `0xcf7ea196`). Se eu errei, ele **FALHA FECHADO**: o Morpho chamaria
+função que não existe, não há `fallback`, e a transação inteira reverte. Erra
+para o lado que custa gás, nunca para o lado que perde a garantia.
+
+A verificação de verdade é barata e é a próxima: **o seletor `0xcf7ea196` tem
+de aparecer no `eth_getCode` do Morpho Blue.** Se o Morpho chama esse callback,
+o seletor está no código dele. Um `eth_getCode` responde — e o endereço do
+Morpho sai da varredura, não da minha memória.
+
+**A `ESCALA_DO_ORACULO` não entra neste contrato**, e isso é de propósito: aqui
+quem decide se a posição está quebrada é o PRÓPRIO Morpho, dentro de
+`liquidate`. Se a nossa conta estiver errada, o custo é gás numa reversão — não
+um tiro em posição sadia que "passa".
+
+**Nenhum endereço está escrito no contrato.** Todos vêm do construtor.
+Endereço de cabeça é o defeito do `0x80d1e0f4…` que a REGRA 0 registra, só que
+em hexadecimal.
+
+## 2026-10-09, AUDITORIA: por que estávamos perdendo dinheiro, com a evidência
+
+Ela passou um mandato: pare o vazamento antes de adicionar funcionalidade,
+assuma cada diagnóstico com evidência/causa-raiz/conserto/teste, e seja preciso
+sobre o que é implementado, testado, simulado e observado.
+
+### 1. Quantos caminhos deste código conseguem gastar dinheiro
+
+Grep por `sendTransaction` em `src/`, fora de teste: **dois arquivos**.
+
+    src/cacarAoVivo.ts:4900     <- o caçador, atrás de CACA_ENVIAR === '1'
+    src/flashArbExecutor.ts:311 <- NÃO roda em produção
+
+`package.json` → `caca:prod` é `node dist/cacarAoVivo.js`, e nada mais. O
+`flashArbExecutor` exige `FLASH_ARB_LIVE` + `FLASH_ARB_CONFIRM` próprios e não
+está no script de produção. **Um único caminho de envio, OBSERVADO em
+produção** (as 31 transações saíram por ele).
+
+### 2. A contabilidade da perda, só com saldos lidos nos logs dela
+
+    07/10 início    0.015821 ETH    0 tiros
+    07/10 13:49     0.015008 ETH    7 tiros
+    08/10 19:20     0.009541 ETH   31 tiros
+
+    QUEIMADO: 0,006280 ETH = US$ 15,45 em 31 tiros (US$ 0,498 por tiro)
+
+(Em 08/10 19:51 o saldo subiu para 0,011142 — **ela colocou ETH, não foi
+ganho.** Confundir os dois seria o pior número que eu poderia publicar.)
+
+### 3. A classificação que ela pediu, e a causa raiz é MINHA
+
+    bug no código ............... 0 tiros   o caminho de envio funcionou: as 31
+                                            saíram e foram minadas
+    oportunidade que fugiu ...... 0 tiros   nenhuma chegou a ficar liquidável —
+                                            o log registra o tipo "aposta"
+    transação revertida ........ 31 tiros   mas reverter é o desfecho ESPERADO
+                                            da aposta: é o sintoma, não a causa
+    REGRA DE DECISÃO ERRADA .... 31 tiros   <<< A CAUSA RAIZ
+
+**O piso de US$ 10 que eu escolhi liberava alvos que exigiam acertar 15,8x mais
+que o acaso.** Não foi bug, não foi azar, não foi o mercado: foi a regra de
+decisão, e a regra era minha. O número que fecha o argumento:
+
+    gastei US$ 15,45  e deixei US$ 753,48 na mesa
+    (4 oportunidades na brasa, média US$ 188,37, convertidas: 0)
+
+### 4. O conserto, e por que o de ONTEM era esperança e não conserto
+
+Ontem eu fiz o piso ser calculado (`premioQueSePagaNoAcaso`). **Mas
+`CACA_APOSTA_MINIMA_USD` continuava mandando sozinha — e eu NÃO TENHO COMO VER
+o Railway dela.** Se a variável estivesse em 10 (o valor que eu mesmo escrevi
+em 08/10), o piso calculado seria inerte e a sangria voltaria no primeiro
+movimento de mercado.
+
+Um conserto que depende de um valor que eu não consigo conferir não é conserto.
+
+**Agora o piso efetivo é o MAIOR entre o equilíbrio e o escrito**: a variável
+pode EXIGIR MAIS e deixou de poder autorizar aposta de valor esperado negativo.
+A porta de escape existe com nome que ninguém abre por acidente —
+`CACA_ACEITA_APOSTA_NEGATIVA=1` — e aí é decisão dela, declarada, em vez de um
+número esquecido num painel.
+
+"Não existe perder, e sim só acertar" — as palavras dela — deixou de ser
+configuração e passou a ser estrutura.
+
+E o teste exige as duas coisas: a REGRA (variável frouxa não afrouxa o piso) e
+o CÓDIGO (`Decimal.max`, não `??` — porque `??` é exatamente o que estava lá).
+
+### 5. O que está IMPLEMENTADO, TESTADO, SIMULADO e OBSERVADO
+
+    piso efetivo = max(equilíbrio, escrito)     implementado + testado
+    piso calculado do custo medido             implementado + testado + OBSERVADO
+                                                (o [BOTÕES] passou a imprimi-lo)
+    placar sobrevive ao deploy                 OBSERVADO em produção 19:51
+                                                ("31 tiro(s) contados antes deste boot")
+    postura lê o mínimo da brasa ao vivo       OBSERVADO ("[lido há 1s]", e o número
+                                                mudou sozinho entre varreduras)
+    orçamento corta a perna da Binance         implementado + testado (22/22, cinco
+                                                rodadas sem cancelar); NÃO observado
+    CacadorMorpho.sol                          compila em 4.423 bytes. NADA testado
+                                                contra a rede. NÃO deployado.
+
+### 6. O que continua INCERTO, e eu não vou fingir que não está
+
+- **Se o vazamento parou de verdade, eu não posso afirmar.** O que eu sei: o
+  gás está em 0,011142 ETH parado desde 19:51, e o mercado está quieto
+  (`maisPerto: 1,6473%` contra um desvio máximo de 0,18%). **"Não atirou porque
+  o portão barrou" e "não atirou porque não havia alvo" são indistinguíveis
+  neste log.** O `[BOTÕES]` do próximo boot responde.
+- **A janela do Morpho** — a medição está rodando e é ela que decide se o
+  contrato vale. 28,1% de cobertura não decidia nada.
+- **O seletor do callback do Morpho** (`0xcf7ea196`) não foi conferido contra o
+  `eth_getCode` do Morpho. Falha fechado se eu errei, mas não está provado.
+- **A `ESCALA_DO_ORACULO`** continua não verificada.
