@@ -2881,3 +2881,100 @@ falhas, 0 cancelados` — rodada única, arquivo próprio, conferido.
 
 E a lição que fica, porque é nova: **a contagem total é parte do resultado.**
 "0 falhas" com total diferente do esperado não é aprovação, é outro experimento.
+
+## 2026-10-09, 20:34: o modo de observação não observava, e a causa era `if (ENVIAR)`
+
+Ela mandou tratar como incidente RECORRENTE e, antes de editar, reconstruir o
+fluxo: carregamento de configuração, endereço e assinador, saldo e nonce,
+faixa econômica, decisão/montagem/assinatura/transmissão. E **"não atribua o
+problema à minha configuração sem evidência"**.
+
+O log dela, com `CACA_ENVIAR=0`, dizia:
+
+    [EM SECO] envio: "não há carteira (CACA_CHAVE_PRIVADA ausente ou inválida):
+              sem ela não existe endereço de origem"
+
+**A causa não era a configuração dela.** Era o código, em
+`src/cacarAoVivo.ts:1734`:
+
+    if (ENVIAR) {
+        const chave = process.env.CACA_CHAVE_PRIVADA;
+        ...
+        carteira = new Wallet(chave, provider);
+        donoCarteira = carteira.address;
+        nonceManager = new LocalNonceManager(provider, donoCarteira);
+    }
+
+Três coisas DIFERENTES nascendo no mesmo `if`: o **endereço público**, o
+**acesso de leitura** e o **assinador**. Desligar o envio apagava as três.
+Sem endereço não há saldo nem nonce; sem saldo não há faixa; sem faixa não há
+decisão. **O diagnóstico que existe para conferir o caminho do tiro era
+desligado pela mesma chave que ela precisava desligar para poder conferi-lo
+com segurança.**
+
+E os consumidores herdaram o acoplamento: o saldo era lido por
+`carteira.provider.getBalance(...)` em quatro lugares, e o `from` da
+estimativa de gás vinha de `await carteira.getAddress()`. Ler pelo provedor
+DA CARTEIRA é leitura amarrada em assinatura — sem chave, o saldo ficava
+"ainda não li" para sempre, e era por isso que o piso caía no default.
+
+### A separação, e o que cada uma pode
+
+    endereço público   CACA_ENDERECO_PUBLICO (validado por `getAddress`) ou
+                       derivado da chave. Se os dois existirem e discordarem,
+                       o da CHAVE manda — é dela que o gás sai — e a
+                       discordância vira linha de log, nunca silêncio
+    acesso de leitura  um JsonRpcProvider próprio. Lê saldo e nonce. Não assina
+    assinador          a chave, e SÓ com CACA_ENVIAR=1
+
+**A falta de autorização impede assinar e transmitir. Não impede observar.**
+Com um endereço público e sem chave nenhuma, o bot lê saldo, lê nonce, calcula
+a faixa, decide, monta o `cacar()` e entrega ao interceptador.
+
+E a recusa quando o envio está AUTORIZADO e não há assinador é explícita nos
+dois lugares: `'parar'` no boot (configuração que só uma reimplantação
+conserta) e `continue` no caminho quente — **sem desvio e sem reservar
+nonce**, porque adiantar o contador sem mandar desarma `provaAgora()` para
+sempre.
+
+Nenhum valor secreto entra em log: só o nome da variável e o defeito.
+
+### O que os testes guardam, e o que eles NÃO provam
+
+`src/contaSeparada.test.ts`, seis casos. Quatro leem o CÓDIGO, de propósito:
+o defeito era **estrutural** — um bloco no lugar errado — e nenhum teste de
+valor o pega. Foi assim que passou por 1.467 testes. É a mesma razão do teste
+que lê os gravadores do cache.
+
+    (1) leitor, endereço e nonce NÃO nascem dentro de `if (ENVIAR) {`
+    (2) `carteira` só é atribuída sob ENVIAR, e nasce nula
+    (3) nenhum `getBalance` fora do leitor; nenhum `carteira.provider`
+    (4) envio autorizado sem assinador: recusa, `continue`, zero `getNextNonce`
+    (5) dado essencial ausente -> piso INFINITO e aposta recusada DIZENDO o quê
+    (6) o `[CONTA]` do boot diz as três coisas, e não diz segredo
+
+**Declarado:** `cacarAoVivo.ts` sobe o bot ao ser importado, então não há como
+invocar o laço quente dentro de um teste. A prova de que o caminho montado
+roda de ponta a ponta sem gastar é o `[OBSERVANDO]` no log DELA — produção, e
+está marcado como observado ou não observado, nunca como testado.
+
+### E os dois testes que afirmavam o acoplamento
+
+`caca.test.ts` exigia `if (!carteira || !donoCarteira) {` no ensaio em seco —
+isto é, **o teste guardava o defeito**. Corrigidos para a regra nova (o que
+para o ensaio é a falta de ENDEREÇO) com um `assert` extra que proíbe a volta
+do antigo. Teste que afirma o acoplamento é teste que impede o conserto.
+
+### E um defeito achado varrendo os consumidores da faixa, não a mensagem
+
+Ela pediu para revisar **todos os consumidores**, não um conjunto de
+substituições de texto. Os cinco chamadores de `faixaQueAtira` tratam `null`
+explicitamente — menos `src/olharAgora.ts`, que imprimia:
+
+    faixa calculada AQUI: até SEM TETO
+
+`faixa === null` é **indeterminada** ("não consigo dizer"); `faixa.ate ===
+null` é **sem teto** ("atira em qualquer prêmio acima do piso"). As duas
+viravam a mesma frase, e são conclusões OPOSTAS: uma é ausência, a outra é a
+resposta mais permissiva que existe. É a assinatura deste arquivo, na
+ferramenta que a REGRA 0 manda rodar antes de pedir deploy.

@@ -219,8 +219,17 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
     });
     // Daqui nao se ve o ambiente do Railway. Entao a faixa sai com os botoes ao
     // lado, para ela poder comparar com o log em vez de acreditar.
+    // `faixa === null` e INDETERMINADA ("nao consigo dizer"); `faixa.ate ===
+    // null` e SEM TETO ("atira em qualquer premio acima do piso"). As duas
+    // viravam a mesma frase, e sao conclusoes opostas: uma e ausencia, a outra
+    // e a resposta mais permissiva que existe.
     const teto = faixa?.ate ?? null;
-    console.log(`faixa calculada AQUI: até ${teto === null ? 'SEM TETO' : `US$ ${teto.toFixed(2)}`}`);
+    // INDETERMINADA nao pode cair no ramo permissivo: `teto === null` significa
+    // "sem teto" para quem le abaixo, e classificaria TODO alvo como ATIRA.
+    const faixaIndeterminada = faixa === null;
+    console.log(`faixa calculada AQUI: ${faixa === null
+        ? 'INDETERMINADA — faltou cotação ou saldo, e sem eles não há faixa (não é "sem teto")'
+        : `até ${faixa.ate === null ? 'SEM TETO' : `US$ ${faixa.ate.toFixed(2)}`}`}`);
     console.log(`  com: ${comoLerAPolitica(politica)}`);
     console.log('  >>> confira com o `atiroNaFaixaDe` do log: se não bater, o Railway tem outros valores\n');
 
@@ -233,7 +242,7 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
     for (const m of movs) {
         const alvo = m.tipo === 'saiu' ? null : m.alvo;
         const dentro = alvo && alvo.lucroUsd.greaterThan(0) && (teto === null || alvo.lucroUsd.lessThanOrEqualTo(teto));
-        console.log(`${dentro ? '>> ATIRA  ' : '   fora   '}${comoLerOMovimento(m)}`);
+        console.log(`${faixaIndeterminada ? '   ?????  ' : dentro ? '>> ATIRA  ' : '   fora   '}${comoLerOMovimento(m)}`);
     }
     const faltaram = naoForamLidos(antes, lidosAgora);
     if (faltaram.length > 0) console.log(`\n${faltaram.length} não foram lidos agora (NÃO quer dizer que sumiram): ${faltaram.slice(0, 5).map((d) => d.slice(0, 10) + '…').join(', ')}`);
@@ -245,14 +254,18 @@ async function lerContas(lista: string[], ateQuedaPct: number): Promise<{ alvos:
     const r = resumir(vivos, teto);
     const emReais = (d: Decimal) => `R$ ${d.mul(BRL).toFixed(0)}`;
     console.log('\n--- RESUMO ---');
-    if (r.naFaixa.length === 0) {
+    if (faixaIndeterminada) {
+        console.log('NÃO SEI dizer em quais ele atiraria: a faixa está indeterminada (faltou cotação '
+            + 'ou saldo). Tudo o que dependeria dela fica indeterminado também — contagem, soma na '
+            + 'faixa e comparação com o teto.');
+    } else if (r.naFaixa.length === 0) {
         console.log('O bot não atiraria em NENHUM destes hoje.');
     } else {
         const m = r.naFaixa[0]!;
         console.log(`MELHOR que ele atira hoje: ${m.devedor.slice(0, 10)}… vale US$ ${m.lucroUsd.toFixed(2)} (${emReais(m.lucroUsd)}), precisa cair ${m.queda!.toFixed(3)}%`);
         console.log(`Na faixa: ${r.naFaixa.length} alvos somando US$ ${r.somaNaFaixa.toFixed(2)} (${emReais(r.somaNaFaixa)}) — mas cai UM por vez`);
     }
-    if (r.melhorForaDaFaixa) {
+    if (r.melhorForaDaFaixa && !faixaIndeterminada) {
         const f = r.melhorForaDaFaixa;
         console.log(`FORA do alcance, o maior: ${f.devedor.slice(0, 10)}… vale US$ ${f.lucroUsd.toFixed(2)} (${emReais(f.lucroUsd)}) a ${f.queda!.toFixed(3)}%`);
         console.log(`  para alcançar esse, o teto teria de ir de ${teto === null ? 'sem teto' : `US$ ${teto.toFixed(2)}`} para US$ ${f.lucroUsd.toFixed(2)}`);
