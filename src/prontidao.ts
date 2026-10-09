@@ -394,6 +394,26 @@ export const GAS_DE_UMA_REVERSAO = GAS_TIPICO_DE_UMA_CACADA;
  * exato esta no `gasUsed` dos 31 recibos, e quem quiser fechar isto le os
  * recibos no basescan.
  *
+ * ====================================================================
+ * 2026-10-09: LIDO NOS RECIBOS. Eram 39 erradas, nao 31, e o gas e OUTRO.
+ * ====================================================================
+ *
+ * As transacoes foram reconstruidas pelo nonce (6 a 44, cobertura 100%, zero
+ * nonce sem transacao achada) e cada recibo lido:
+ *
+ *     gasUsed    media 372.202 | p50 337.471 | p90 499.316 | min 302.984 | max 499.316
+ *     custo      0,004680 ETH nas 39  ->  0,00011999 ETH por errada
+ *     taxa L1    0,1% do total (0,000003 ETH nas 39) — nao e a conta que falta
+ *
+ * A derivacao de 550.000 errava **1,48x para cima** porque partia de um custo
+ * por errada que eu tirei de diferenca de SALDO (0,005467 ETH / 31), e os
+ * saldos do log nao fecham com os recibos. Recibo e medicao; diferenca de
+ * saldo e inferencia.
+ *
+ * O numero certo para ESTE uso e a MEDIA (372.202), nao a mediana nem o
+ * maximo: o piso da aposta compara valor ESPERADO, e o estimador do valor
+ * esperado do custo e a media.
+ *
  * E AGORA A PARTE QUE IMPORTA, porque e a primeira vez neste projeto em que
  * manter DOIS numeros e o certo:
  *
@@ -411,7 +431,7 @@ export const GAS_DE_UMA_REVERSAO = GAS_TIPICO_DE_UMA_CACADA;
  * projeto manda juntar o que calcula a MESMA coisa — e juntar estes dois faria
  * um dos dois errar para o lado que ele existe para evitar.
  */
-export const GAS_MEDIDO_DE_UMA_REVERSAO = 550_000n;
+export const GAS_MEDIDO_DE_UMA_REVERSAO = 372_202n;
 
 /**
  * O que UMA derrota custa, em wei.
@@ -1008,8 +1028,53 @@ export function comoLerAPolitica(p: ReturnType<typeof politicaDoTiro>): string {
  * 0,3 gwei e 2,2x o p90 das seis primeiras posicoes e 6,4x o que o vencedor
  * pagou — folga de sobra para ganhar — e deixa uma errada em US$ 0,71, que
  * sao 57 tentativas com este saldo.
+ *
+ * ====================================================================
+ * 2026-10-09: A GORJETA NAO COMPRA POSICAO NENHUMA NA BASE. MEDIDO.
+ * ====================================================================
+ *
+ * Tudo acima supoe que pagar mais compra lugar na frente do bloco. **Nao
+ * compra.** Medido nos 33 blocos em que o bot DE FATO atirou (as 39
+ * transacoes reconstruidas pelo nonce, cobertura 100%):
+ *
+ *     Spearman entre POSICAO e GORJETA:  medio +0,300   (min -0,039  max +0,570)
+ *     se o bloco fosse leilao por lance: perto de -1
+ *
+ *     a nossa posicao mediana pagando 0,300 gwei: 766
+ *     das 1.943 transacoes a nossa FRENTE no bloco 52341747: 1.825 pagaram MENOS
+ *     95% das transacoes de um bloco pagam menos de 0,02 gwei — e entram
+ *
+ * O sinal POSITIVO e o achado: posicoes mais tardias tendem a pagar MAIS, nao
+ * menos. O sequenciador da Base nao reordena por lance; ele enfileira na ordem
+ * em que a transacao CHEGA. Entao o lance decide se a transacao entra, nao
+ * onde ela cai.
+ *
+ * Isto derruba a conclusao que o CLAUDE.md registra — *"e leilao, nao
+ * corrida"* — e inverte a consequencia pratica: quem levou o alvo de
+ * US$ 49,33 na posicao 6 de 537 pagando 0,046688 gwei nao ganhou um leilao,
+ * **chegou antes**. A disputa e de LATENCIA.
+ *
+ * E o preco de ter acreditado no contrario esta medido: 39 erradas a 0,300
+ * gwei custaram 0,004680 ETH. A 0,020 gwei teriam custado 0,000581 ETH — oito
+ * vezes menos municao queimada em troca de ZERO posicao.
+ *
+ * **0,020 gwei** e a escolha, e ela tambem e medida: fica acima do p50 do que
+ * o campo inteiro paga naqueles mesmos blocos (0,008 a 0,019 gwei), entao
+ * passa mais da metade da fila na admissao, e 95% do bloco paga menos que
+ * isso. Nao e economia: e parar de pagar por uma coisa que nao esta a venda.
+ * `CACA_GORJETA_ESPECULATIVA_GWEI` ajusta.
  */
-export const GORJETA_DA_FRENTE_GWEI = 0.3;
+export const GORJETA_DA_FRENTE_GWEI = 0.02;
+
+/**
+ * A correlacao MAXIMA entre posicao no bloco e gorjeta que ainda e compativel
+ * com "o bloco nao e leilao por lance".
+ *
+ * Existe como constante porque a medicao acima e a UNICA base da gorjeta de
+ * 0,020 gwei: se um dia a Base passar a reordenar por lance, o rho fica
+ * negativo e a decisao muda. Quem remedir compara com isto.
+ */
+export const RHO_MEDIDO_POSICAO_X_GORJETA = 0.300;
 
 export function decidirTiro(e: Parameters<typeof decidirTiroUmaVez>[0]): DecisaoDoTiro {
     const normal = decidirTiroUmaVez(e);

@@ -15,7 +15,49 @@ const cacadorV2Interface = new Interface([
 export const SELETOR_LUCRO_INSUFICIENTE = id('LucroInsuficiente(uint256,uint256)').slice(0, 10);
 
 export const PISO_IMPOSSIVEL = 99999999999999999999999999999999999999999999n;
-export const COBRIR_O_MAXIMO = PISO_IMPOSSIVEL; 
+export const COBRIR_O_MAXIMO = PISO_IMPOSSIVEL;
+
+/**
+ * O PISO DE LUCRO EXIGIDO NO CONTRATO, em centesimos de por cento da divida
+ * coberta — a ultima linha de defesa, a que nao depende de nenhuma conta minha.
+ *
+ * POR QUE ELE EXISTE, e e um defeito MEDIDO nas 39 transacoes de 07-08/10:
+ * **todas sairam com `minProfit = 0`.** O `input` de cada uma foi decodificado
+ * com a interface deste arquivo e o sexto argumento era zero nas 39.
+ *
+ * A causa: `piso = lucroCru * 80 / 100`, e no tiro ESPECULATIVO a medicao por
+ * `eth_call` reverte por construcao (a Aave recusa posicao sadia), entao
+ * `lucroCru` e `0n` e o piso tambem. Ou seja: no unico caminho que manda
+ * dinheiro as cegas, o portao de "resultado minimo verificavel no contrato"
+ * estava DESLIGADO. Se alguma daquelas 39 tivesse cruzado, o contrato teria
+ * aceitado executar com lucro zero — pagando gas, vendendo garantia e
+ * devolvendo o emprestimo para ficar com nada.
+ *
+ * 150 centesimos (1,5%) nao e numero escolhido no ar. O bonus REALIZADO medido
+ * no alvo real da Aave de 2026-10-07 (`0x6b950f30`, US$ 49,33 sobre US$ 1.081,95
+ * cobertos) foi **4,56%**, e `CUSTO_DA_VENDA` medido no pool da Aerodrome e
+ * 0,59% — sobra ~3,9%. 1,5% fica MUITO abaixo do que um acerto legitimo
+ * entrega (nao barra o ganho) e MUITO acima de zero (barra a execucao que nao
+ * paga nada). A unidade fecha sozinha: `lucro` no contrato e
+ * `emCaixa - aDevolver` no ativo da DIVIDA, e `debtToCover` e no mesmo ativo.
+ */
+export const PISO_NO_CONTRATO_BPS = 150n;
+
+/**
+ * O piso que vai NO ENVIO. `null` em `lucroMedidoCru` quer dizer "a medicao
+ * nao produziu numero" — que e o caso do tiro especulativo — e ai o piso sai da
+ * divida coberta, nunca de zero.
+ *
+ * Com medicao: 80% dela, como sempre foi. Mas nunca MENOS que o piso da
+ * cobertura: uma medicao de centavos num alvo grande nao autoriza executar de
+ * graca.
+ */
+export function pisoNoContrato(quantoCobrir: bigint, lucroMedidoCru: bigint | null): bigint {
+    const daCobertura = quantoCobrir > 0n ? (quantoCobrir * PISO_NO_CONTRATO_BPS) / 10_000n : 0n;
+    if (lucroMedidoCru === null || lucroMedidoCru <= 0n) return daCobertura;
+    const daMedicao = (lucroMedidoCru * 80n) / 100n;
+    return daMedicao > daCobertura ? daMedicao : daCobertura;
+}
 
 export function codificarCacaV1(alvo: {
     garantia: string;

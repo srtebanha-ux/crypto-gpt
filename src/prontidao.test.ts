@@ -19,6 +19,7 @@ import {
     tetoDeGasQueNaoEstrangulaOLance, GORJETA_QUE_GANHA_O_LEILAO_WEI,
     GAS_TIPICO_DE_UMA_CACADA,
     GORJETA_DA_FRENTE_GWEI,
+    RHO_MEDIDO_POSICAO_X_GORJETA,
     GAS_MEDIDO_DE_UMA_REVERSAO,} from './prontidao';
 
 const D = (n: number | string) => new Decimal(n);
@@ -1448,14 +1449,38 @@ test('o teto corta a gorjeta do tiro especulativo, e o normal fica agressivo', (
     assert.equal(comTeto.atira, true, comTeto.porque);
 });
 
-test('o teto medido GANHA a frente do bloco com folga', () => {
-    // Nao serve um teto que economiza e perde a corrida. Os numeros medidos:
-    const p90DaFrente = 0.136577;
-    const oQueOVencedorPagou = 0.046688;
-    assert.ok(GORJETA_DA_FRENTE_GWEI > p90DaFrente,
-        `${GORJETA_DA_FRENTE_GWEI} tem de passar o p90 da frente (${p90DaFrente})`);
-    assert.ok(GORJETA_DA_FRENTE_GWEI > oQueOVencedorPagou * 3,
-        'e tem de ser pelo menos 3x o que o vencedor de 2026-10-07 pagou');
+test('a GORJETA NÃO COMPRA POSIÇÃO na Base, e o teto segue essa medição', () => {
+    // ESTE TESTE AFIRMAVA O CONTRÁRIO ATÉ 2026-10-09, e o que ele afirmava
+    // estava errado: "o teto medido GANHA a frente do bloco com folga", exigindo
+    // `GORJETA_DA_FRENTE_GWEI > p90 da frente (0,136577)`.
+    //
+    // MEDIDO nos 33 blocos em que o bot de fato atirou (39 transações
+    // reconstruídas pelo nonce, cobertura 100%):
+    //
+    //     Spearman posição × gorjeta:  médio +0,300  (min −0,039  max +0,570)
+    //     nossa posição mediana pagando 0,300 gwei:  766
+    //     no bloco 52341747: das 1.943 à nossa frente, 1.825 pagaram MENOS
+    //     95% das transações de um bloco pagam < 0,02 gwei — e entram
+    //
+    // Correlação POSITIVA é o oposto de leilão: o sequenciador enfileira por
+    // ordem de CHEGADA e não reordena por lance. Então pagar mais não compra
+    // lugar — compra só menos tentativas.
+    assert.ok(RHO_MEDIDO_POSICAO_X_GORJETA > 0,
+        'se o rho medido virar negativo, o bloco passou a ser leilão e esta regra cai');
+    // A gorjeta tem de ficar na ordem do que o CAMPO paga, não acima da frente.
+    const p50DoCampo = 0.019; // o maior p50 medido nos 33 blocos
+    assert.ok(GORJETA_DA_FRENTE_GWEI >= p50DoCampo,
+        `${GORJETA_DA_FRENTE_GWEI} tem de passar o p50 do campo (${p50DoCampo})`);
+    assert.ok(GORJETA_DA_FRENTE_GWEI <= 0.05,
+        'e NÃO pode voltar a pagar pela frente do bloco: isso não está à venda');
+
+    // E o que a mudança vale, em munição: as 39 erradas custaram 0,004680 ETH
+    // a 0,300 gwei. O mesmo gás a 0,020 gwei custa uma fração.
+    const antes = custoDeUmaDerrota(300_000_000n, 20_000_000n, GAS_MEDIDO_DE_UMA_REVERSAO);
+    const agora = custoDeUmaDerrota(
+        BigInt(Math.round(GORJETA_DA_FRENTE_GWEI * 1e9)), 20_000_000n, GAS_MEDIDO_DE_UMA_REVERSAO);
+    assert.ok(Number(antes) / Number(agora) > 5,
+        `a errada tem de ficar pelo menos 5x mais barata (ficou ${(Number(antes) / Number(agora)).toFixed(1)}x)`);
 });
 
 test('o teto NAO aumenta uma gorjeta pequena', () => {
@@ -1495,15 +1520,18 @@ test('o gás da reversão é DOIS números, e juntá-los faria um errar para o l
         'o derivado dos 31 reverts tem de ser MENOR que o do freio, senão o freio '
         + 'deixou de errar para o lado seguro',
     );
-    // DERIVADO de produção em 2026-10-08: 0,005467 ETH em 31 reverts com
-    // gorjeta de 0,300 gwei dá 440.887–578.213 de gás, pela baseFee.
-    assert.ok(GAS_MEDIDO_DE_UMA_REVERSAO >= 440_000n && GAS_MEDIDO_DE_UMA_REVERSAO <= 580_000n);
+    // LIDO nos 39 recibos em 2026-10-09 (nonce 6..44, cobertura 100%):
+    // gasUsed média 372.202, p50 337.471, min 302.984, max 499.316. O 550.000
+    // anterior era DERIVAÇÃO de diferença de saldo e errava 1,48x para cima.
+    assert.ok(GAS_MEDIDO_DE_UMA_REVERSAO >= 302_984n && GAS_MEDIDO_DE_UMA_REVERSAO <= 499_316n,
+        'tem de ficar DENTRO da faixa lida nos recibos, não numa derivação');
 
     // E o custo que cada um produz, para o número ficar visível no teste:
     const comFreio = custoDeUmaDerrota(300_000_000n, 20_000_000n, GAS_DE_UMA_REVERSAO);
     const comMedido = custoDeUmaDerrota(300_000_000n, 20_000_000n, GAS_MEDIDO_DE_UMA_REVERSAO);
     assert.ok(comFreio > comMedido);
-    // O medido tem de bater com os 0,000176 ETH que a produção gastou por errada.
+    // Com a gorjeta de 0,300 gwei que a produção pagou, o custo tem de bater com
+    // o que os recibos somaram: 0,004680 ETH / 39 = 0,00011999 ETH por errada.
     const ethMedido = Number(comMedido) / 1e18;
-    assert.ok(ethMedido > 0.00016 && ethMedido < 0.00019, `${ethMedido}`);
+    assert.ok(ethMedido > 0.00011 && ethMedido < 0.00013, `${ethMedido}`);
 });

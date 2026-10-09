@@ -19,7 +19,7 @@ import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodifica
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, decodificarAggregate3Rapido, partirEmPedacos } from './multicall';
 import { naoCruzouAinda, codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
-import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
+import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
 import { EscadaDeRpc, listaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import {
@@ -4590,8 +4590,20 @@ async function principal(): Promise<'parar' | void> {
                         continue;
                     }
 
-                    const piso = (lucroCruValido * 80n) / 100n;
-                    
+                    // O PISO QUE VAI NO CONTRATO — e ele estava em ZERO nas 39
+                    // transacoes de 07-08/10, medido no `input` de cada uma.
+                    //
+                    // Era `lucroCruValido * 80 / 100`, e no tiro ESPECULATIVO a
+                    // medicao reverte por construcao (a Aave recusa posicao
+                    // sadia): `lucroCru` e `0n`, logo o piso era `0n`. O portao
+                    // de resultado minimo VERIFICAVEL NO CONTRATO — o unico que
+                    // nao depende de conta minha — estava desligado justamente
+                    // no caminho que manda dinheiro as cegas.
+                    //
+                    // `pisoNoContrato` nunca devolve zero com cobertura
+                    // positiva: sem medicao, o piso sai da divida coberta.
+                    const piso = pisoNoContrato(cobrir(alvo), lucroCruValido > 0n ? lucroCruValido : null);
+
                     const envio = contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,

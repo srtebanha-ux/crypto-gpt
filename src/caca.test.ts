@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AbiCoder, id } from 'ethers';
-import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
+import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_NO_CONTRATO_BPS, PISO_IMPOSSIVEL, COBRIR_O_MAXIMO, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO } from './caca';
 import { Decimal } from 'decimal.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1383,5 +1383,57 @@ test('o env só pode ENDURECER o piso da aposta, nunca descer abaixo do equilíb
             !codigo.some((l) => /CACA_ACEITA_APOSTA_NEGATIVA|APOSTA_SEM_PISO/.test(l)),
             `${arquivo} não pode ter chave de ambiente que autorize aposta de valor esperado negativo`,
         );
+    }
+});
+
+test('o piso do contrato NUNCA sai zero — era zero nas 39 transações reais', () => {
+    // O DEFEITO, medido em 2026-10-09 decodificando o `input` das 39 transações
+    // com a interface deste arquivo: o sexto argumento (`minProfit`) era ZERO
+    // nas 39. A causa é `piso = lucroCru * 80 / 100` com `lucroCru = 0n`, que é
+    // o que a medição por `eth_call` devolve no tiro ESPECULATIVO — a Aave
+    // reverte em posição sadia, por construção.
+    //
+    // Ou seja: no único caminho que manda dinheiro às cegas, o portão de
+    // resultado mínimo verificável NO CONTRATO estava desligado.
+    const cobrir = 1_081_950_000n; // US$ 1.081,95 em USDC (6 casas), o alvo real
+
+    // A REGRA ANTIGA, reproduzida: sem medição, piso zero.
+    assert.equal((0n * 80n) / 100n, 0n, 'é isto que ia no envio das 39');
+
+    // A REGRA DE AGORA: sem medição, o piso sai da cobertura.
+    const semMedicao = pisoNoContrato(cobrir, null);
+    assert.ok(semMedicao > 0n, 'aposta sem medição não pode mandar piso zero');
+    assert.equal(semMedicao, (cobrir * PISO_NO_CONTRATO_BPS) / 10_000n);
+    // 1,5% de US$ 1.081,95 = US$ 16,23 — e o bônus realizado naquele alvo foi
+    // US$ 49,33 (4,56%). O piso fica abaixo do ganho legítimo e muito acima de
+    // zero: barra a execução que não paga nada, não o acerto.
+    assert.equal(Number(semMedicao) / 1e6, 16.22925);
+
+    // Medição zero é o MESMO caso de ausência: `0n` é falso em JavaScript e já
+    // custou um capítulo a este projeto.
+    assert.equal(pisoNoContrato(cobrir, 0n), semMedicao);
+
+    // Com medição grande, manda a medição (80% dela, como sempre foi).
+    const medido = 50_000_000n; // US$ 50
+    assert.equal(pisoNoContrato(cobrir, medido), (medido * 80n) / 100n);
+
+    // Com medição PEQUENA, o piso da cobertura é o que vale: uma medição de
+    // centavos num alvo grande não autoriza executar de graça.
+    assert.equal(pisoNoContrato(cobrir, 1_000n), semMedicao);
+
+    // Cobertura zero não inventa piso nem explode.
+    assert.equal(pisoNoContrato(0n, null), 0n);
+});
+
+test('o piso do contrato cresce com a cobertura e é o MESMO ativo', () => {
+    // `lucro` no contrato é `emCaixa - aDevolver` no ativo da DÍVIDA, e
+    // `debtToCover` é no mesmo ativo: a unidade fecha sem preço nenhum, que é a
+    // razão de o piso ser fração da cobertura e não dólares.
+    for (const [cobrir, esperado] of [
+        [1_000_000n, 15_000n],          // US$ 1 em USDC -> US$ 0,015
+        [1_000_000_000n, 15_000_000n],  // US$ 1.000      -> US$ 15,00
+        [10n ** 18n, 15n * 10n ** 15n], // 1 WETH         -> 0,015 WETH
+    ] as [bigint, bigint][]) {
+        assert.equal(pisoNoContrato(cobrir, null), esperado, `cobertura ${cobrir}`);
     }
 });
