@@ -2075,6 +2075,46 @@ async function principal(): Promise<'parar' | void> {
      *
      * `CACA_APOSTA_MINIMA_USD` continua mandando, inclusive `=0` para liberar
      * qualquer premio. A conta fica no log de qualquer jeito.
+     *
+     * ====================================================================
+     * 2026-10-09: EU ERREI O DIAGNOSTICO. OS PREMIOS NAO ERAM MIGALHA.
+     * ====================================================================
+     *
+     * Tudo que este bloco diz sobre "as 31 apostas num premio de US$ 10,40" vale
+     * para OITO das 39, nao para 31. As 39 transacoes foram reconstruidas pelo
+     * nonce (6..44, cobertura 100%) e o `input` de cada uma decodificado; para cada
+     * alvo foi lida a divida no bloco ANTERIOR ao tiro, que e a informacao que o
+     * bot tinha:
+     *
+     *     alvo        tiros   divida US$    premio US$   falta cair
+     *     0x9e70b090      8        95,26          1,80     0,1169%   <- a migalha
+     *     0x616abe14      5       485,47         10,39     0,1609%
+     *     0x33a7ec10      4     5.596,48        121,15     0,1990%
+     *     0x12f16a0a      3     7.826,04        168,44     0,1513%
+     *     0x07a145db      5    14.015,95        296,49     0,1464%
+     *     0xda0d95c6      4    20.462,48        424,79     0,1900%
+     *     0x16b00db7      5    60.913,50      1.112,56     0,2077%
+     *     0x66bb6c29      5   151.916,73      1.932,39     0,0615%
+     *
+     * E AI A CONTA SE INVERTE. Somando premio x chance CEGA (1/355) contra o custo
+     * pago, as 39 apostas tinham VALOR ESPERADO POSITIVO:
+     *
+     *     premio esperado no acaso cego ... US$ 54,82
+     *     custo pago (recibos) ............ US$ 11,77
+     *     valor esperado .................. +US$ 43,05
+     *     acertos esperados em 39 tiros ... 0,110
+     *
+     * Perdemos US$ 11,86 porque 0 de 0,110 acerto esperado caiu. Isso e VARIANCIA,
+     * nao regra errada. A unica aposta de valor esperado negativo foram as 8 da
+     * migalha de US$ 1,80 (EV -US$ 2,36), e e essa que o piso barra.
+     *
+     * O "US$ 10,40" que eu citei como se fosse a populacao era UMA linha do log —
+     * o alvo `0x616abe14`, um de oito. Extrapolei de uma linha, que e a regra 4
+     * deste projeto, na auditoria que existia para achar erro meu.
+     *
+     * O premio aqui e `lucroEstimado`, com AGIO de 5% SUPOSTO (o bonus realizado
+     * medido no unico alvo real foi 4,56%) e GAS_USD de 0,3 — entao a coluna e
+     * estimativa, uns 9% otimista. Nao muda a ordem de grandeza nem a conclusao.
      */
     /** O custo de UMA errada, em dolares, com os botoes de agora. */
     const custoPorErradaUsd = (): Decimal => custoDeUmaErradaUsd(
@@ -4650,6 +4690,28 @@ async function principal(): Promise<'parar' | void> {
                     // RPC lento. Nada abaixo disto muda de comportamento: quem
                     // responde em 300ms continua respondendo em 300ms.
                     const MS_PARA_ESTIMAR = numeroDoAmbiente('CACA_MS_ESTIMAR', process.env.CACA_MS_ESTIMAR, 800);
+                    /**
+                     * E NO TIRO ESPECULATIVO A ESTIMATIVA NAO E ESPERADA.
+                     *
+                     * MEDIDO em 2026-10-09, nas 39 transacoes reais: TODAS
+                     * sairam com `gas: 5.000.000`, que e o teto de quem NAO tem
+                     * estimativa. Ou seja, `eth_estimateGas` nunca produziu
+                     * numero num tiro de verdade — e nao podia: o comentario
+                     * acima diz, com medicao de 2026-09-30, que ele devolve
+                     * `execution reverted` em alvo que ainda nao cruzou, e o
+                     * tiro especulativo e exatamente isso, por definicao.
+                     *
+                     * O que muda e o PRECO dessa espera. Medido no mesmo dia:
+                     * a ordem dentro do bloco da Base NAO segue a gorjeta
+                     * (Spearman +0,300 em 33 blocos) — ela segue a ordem de
+                     * CHEGADA. Entao milissegundo e a unica coisa que compra
+                     * posicao, e esperar por uma resposta que nao pode vir
+                     * gasta ate 800ms de uma janela de 2.000ms.
+                     *
+                     * O saldo CONTINUA sendo lido: ele e o freio de
+                     * sobrevivencia, nao um dado de conveniencia.
+                     */
+                    const especulativo = vaoCruzar.has(alvo.devedor.toLowerCase());
                     // O SALDO VAI DE CARONA NA ESTIMATIVA, pedido dela em
                     // 2026-10-03: "ler o saldo atual de ETH da carteira do
                     // enviador ANTES de construir o tiro".
@@ -4672,6 +4734,9 @@ async function principal(): Promise<'parar' | void> {
                     // soluço de RPC.
                     const [estimado, saldoAgora] = await Promise.all([
                         (async (): Promise<bigint | null> => {
+                            // Aposta nao espera: a estimativa nao pode existir
+                            // em posicao sadia, e o milissegundo compra posicao.
+                            if (especulativo) return null;
                             try {
                                 const resposta = await Promise.race([
                                     chamar<string>('eth_estimateGas', [{
@@ -4746,7 +4811,8 @@ async function principal(): Promise<'parar' | void> {
                     // propria Aave devolveu. Conferido contra o alvo real de
                     // 2026-10-07: divida US$ 2.163,90 -> estimativa US$ 47,12,
                     // e o bonus bruto que o vencedor realizou foi US$ 49,33.
-                    const especulativo = vaoCruzar.has(alvo.devedor.toLowerCase());
+                    // (`especulativo` ja foi decidido antes da estimativa de
+                    // gas, que ele dispensa — ver o bloco de `MS_PARA_ESTIMAR`.)
                     // UM TIRO POR ALVO POR BLOCO.
                     //
                     // Com a postura 'dedo no gatilho' o ciclo le a cada 200ms e

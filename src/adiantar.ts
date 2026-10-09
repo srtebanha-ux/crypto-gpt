@@ -512,6 +512,46 @@ export const BLOCOS_POR_ESCRITA = 355;
  * acertar 15,8x mais que o acaso.
  *
  * Ela decide o piso. Esta funcao so impede que a decisao seja tomada no escuro.
+ *
+ * ====================================================================
+ * 2026-10-09: EU ERREI O DIAGNOSTICO. OS PREMIOS NAO ERAM MIGALHA.
+ * ====================================================================
+ *
+ * Tudo que este bloco diz sobre "as 31 apostas num premio de US$ 10,40" vale
+ * para OITO das 39, nao para 31. As 39 transacoes foram reconstruidas pelo
+ * nonce (6..44, cobertura 100%) e o `input` de cada uma decodificado; para cada
+ * alvo foi lida a divida no bloco ANTERIOR ao tiro, que e a informacao que o
+ * bot tinha:
+ *
+ *     alvo        tiros   divida US$    premio US$   falta cair
+ *     0x9e70b090      8        95,26          1,80     0,1169%   <- a migalha
+ *     0x616abe14      5       485,47         10,39     0,1609%
+ *     0x33a7ec10      4     5.596,48        121,15     0,1990%
+ *     0x12f16a0a      3     7.826,04        168,44     0,1513%
+ *     0x07a145db      5    14.015,95        296,49     0,1464%
+ *     0xda0d95c6      4    20.462,48        424,79     0,1900%
+ *     0x16b00db7      5    60.913,50      1.112,56     0,2077%
+ *     0x66bb6c29      5   151.916,73      1.932,39     0,0615%
+ *
+ * E AI A CONTA SE INVERTE. Somando premio x chance CEGA (1/355) contra o custo
+ * pago, as 39 apostas tinham VALOR ESPERADO POSITIVO:
+ *
+ *     premio esperado no acaso cego ... US$ 54,82
+ *     custo pago (recibos) ............ US$ 11,77
+ *     valor esperado .................. +US$ 43,05
+ *     acertos esperados em 39 tiros ... 0,110
+ *
+ * Perdemos US$ 11,86 porque 0 de 0,110 acerto esperado caiu. Isso e VARIANCIA,
+ * nao regra errada. A unica aposta de valor esperado negativo foram as 8 da
+ * migalha de US$ 1,80 (EV -US$ 2,36), e e essa que o piso barra.
+ *
+ * O "US$ 10,40" que eu citei como se fosse a populacao era UMA linha do log —
+ * o alvo `0x616abe14`, um de oito. Extrapolei de uma linha, que e a regra 4
+ * deste projeto, na auditoria que existia para achar erro meu.
+ *
+ * O premio aqui e `lucroEstimado`, com AGIO de 5% SUPOSTO (o bonus realizado
+ * medido no unico alvo real foi 4,56%) e GAS_USD de 0,3 — entao a coluna e
+ * estimativa, uns 9% otimista. Nao muda a ordem de grandeza nem a conclusao.
  */
 export function premioQueSePagaNoAcaso(
     custoPorErradaUsd: Decimal,

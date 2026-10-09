@@ -234,3 +234,35 @@ contract RoteadorAerodromeFalso {
         amounts[1] = saida;
     }
 }
+
+/**
+ * Agregador de preco FALSO, para o teste em FORK da Base.
+ *
+ * Existe porque a validacao do caminho vencedor nunca foi feita: as 39
+ * transacoes reais de 07-08/10 reverteram todas por a posicao nao ter cruzado,
+ * entao NUNCA se provou que o contrato consegue completar uma liquidacao.
+ *
+ * No fork, o `runtimeCode` deste contrato e escrito por cima do endereco que o
+ * oraculo da Aave usa como fonte do ativo (`hardhat_setCode`), e o preco e
+ * posto direto na SLOT 0 (`hardhat_setStorageAt`). Por isso `resposta` e a
+ * PRIMEIRA variavel: ela tem de ocupar a slot 0.
+ */
+contract OraculoFalso {
+    int256 public resposta;
+
+    function latestAnswer() external view returns (int256) {
+        return resposta;
+    }
+
+    function latestRoundData()
+        external
+        view
+        returns (uint80, int256, uint256, uint256, uint80)
+    {
+        return (1, resposta, block.timestamp, block.timestamp, 1);
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 8;
+    }
+}

@@ -10,3 +10,7 @@ dist/
 
 # Scripts de medição de uma vez só. Não são código do bot.
 .tmp/
+
+# Artefatos do teste em fork (hardhat). O teste e versionado, a saida nao.
+.tmp/artifacts/
+.tmp/hhcache/

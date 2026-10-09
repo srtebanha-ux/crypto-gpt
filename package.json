@@ -26,6 +26,7 @@
     "smoke-test-order": "ts-node src/smokeTestOrder.ts",
     "smoke-test-order:prod": "node dist/smokeTestOrder.js",
     "typecheck": "tsc -p . --noEmit",
+    "fork": "hardhat test",
     "test": "node --require ts-node/register --test src/*.test.ts",
     "leadlag": "ts-node src/leadLagSniffer.ts",
     "leadlag:prod": "node dist/leadLagSniffer.js",
@@ -55,6 +56,7 @@
     "@ethereumjs/util": "^9.1.0",
     "@types/node": "^20.14.0",
     "@types/ws": "^8.5.12",
+    "hardhat": "^2.22.17",
     "solc": "^0.8.26",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.4"
