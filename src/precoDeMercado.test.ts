@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Decimal } from 'decimal.js';
 import { AbiCoder } from 'ethers';
 import { simboloDaBinance, lerSymbol, lerCotacoes, quedaDoMercado,
@@ -193,4 +195,35 @@ test('lista de pares vazia não chama ninguém', async () => {
     const r = await cotacoesDeQualquerFonte([], 2000, 2500, contar);
     assert.equal(chamadas, 0);
     assert.equal(r.fonte, 'nenhuma');
+});
+
+test('o orçamento corta a perna da BINANCE também — o defeito que fazia o teste piscar', () => {
+    // MEDIDO em 2026-10-09: `cotacoesDaBinance` montava o próprio
+    // `AbortSignal.timeout(timeoutMs)` e nunca via o podão do orçamento. Como
+    // `cotacoesDeQualquerFonte` espera as TRÊS casas com `allSettled`, a perna
+    // da Binance segurava a volta inteira até o timeout DELA: um orçamento de
+    // 400ms voltava em ~2000ms.
+    //
+    // E morde todo ciclo em produção: este arquivo registra que na Railway a
+    // Binance BLOQUEIA IP de nuvem — a casa que nunca responde era exatamente
+    // a que o teto não alcançava.
+    //
+    // Este teste lê a ASSINATURA porque o defeito era um parâmetro ausente,
+    // não um valor errado: nenhum teste de valor o pega, e o teste de
+    // comportamento que devia pegá-lo CANCELAVA em 2 de 3 rodadas com
+    // "Promise resolution is still pending" em vez de reprovar limpo. Foi essa
+    // piscada que deixou um push sair com a suíte vermelha.
+    const fonte = readFileSync(join(__dirname, 'precoDeMercado.ts'), 'utf8');
+    const assinatura = fonte
+        .split('export async function cotacoesDaBinance(')[1]!
+        .split('): Promise<Map<string, Decimal>>')[0]!;
+    assert.match(assinatura, /sinal:\s*\(\)\s*=>\s*AbortSignal/,
+        'cotacoesDaBinance tem de ACEITAR o sinal de fora, senão o orçamento não a corta');
+
+    // E quem chama de dentro do orçamento tem de PASSAR o sinal. Aceitar e não
+    // passar seria o mesmo defeito com a porta aberta — é a REGRA 3 deste
+    // projeto: a regra em dois lugares, implementada em um.
+    const chamada = fonte.split("umaCasa('binance'")[1]!.split('\n),')[0]!;
+    assert.match(chamada, /cotacoesDaBinance\([^)]*pedir,\s*sinal\)/,
+        'a perna da Binance dentro do orçamento tem de receber o `sinal`');
 });

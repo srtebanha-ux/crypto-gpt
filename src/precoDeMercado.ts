@@ -104,12 +104,35 @@ export async function cotacoesDaBinance(
     timeoutMs = 2000,
     /** Injetavel para o teste nao bater na rede real. */
     pedir: typeof buscar = buscar,
+    /**
+     * O SINAL DE FORA, e ele conserta um defeito de producao.
+     *
+     * Esta funcao montava o proprio `AbortSignal.timeout(timeoutMs)` e nunca
+     * via o PODAO do orcamento de `cotacoesDeQualquerFonte`. Como lá o
+     * `Promise.allSettled` espera as TRES casas, a perna da Binance segurava
+     * a volta inteira ate o timeout DELA — o orcamento nao a cortava.
+     *
+     * E isso morde em producao todo ciclo: o cabecalho da secao do orcamento,
+     * neste mesmo arquivo, registra que **na Railway a Binance bloqueia IP de
+     * nuvem**. Ou seja, a casa que nunca responde era exatamente a que o teto
+     * nao alcancava. O orcamento de 400ms voltava em ~2000ms.
+     *
+     * ACHADO POR UM TESTE QUE PISCAVA. `o orçamento é um TETO, e uma casa
+     * pendurada não segura o ciclo` cancelava em 2 de 3 rodadas com
+     * "Promise resolution is still pending" em vez de reprovar limpo — e foi
+     * essa piscada que me deixou dar push com a suite vermelha. Teste
+     * intermitente nao e chateacao: e a suite perdendo a capacidade de
+     * responder "quebrou?".
+     *
+     * O padrao mantem o comportamento de quem chama sem o sinal.
+     */
+    sinal: () => AbortSignal = () => AbortSignal.timeout(timeoutMs),
 ): Promise<Map<string, Decimal>> {
     if (pares.length === 0) return new Map();
     const lista = encodeURIComponent(JSON.stringify([...new Set(pares)]));
     try {
         const r = await pedir(`${BINANCE}/api/v3/ticker/price?symbols=${lista}`, {
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: sinal(),
         });
         return lerCotacoes(await r.json());
     } catch {
@@ -256,7 +279,11 @@ export async function cotacoesDeQualquerFonte(
         // RESPONDERAM: preferir uma casa nao pode custar o tempo de esperar
         // por ela, que era o defeito.
         const assentados = await Promise.allSettled([
-            umaCasa('binance', async (par) => (await cotacoesDaBinance([par], porChamada, pedir)).get(par) ?? null),
+            // O `sinal` entra aqui: sem ele a perna da Binance so obedecia ao
+            // timeout dela e o orcamento nao a cortava — ver a docstring do
+            // parametro em `cotacoesDaBinance`.
+            umaCasa('binance', async (par) => (
+                await cotacoesDaBinance([par], porChamada, pedir, sinal)).get(par) ?? null),
             umaCasa('coinbase', async (par) => {
                 const eq = EQUIVALENTES[par]?.coinbase;
                 if (!eq) return null;

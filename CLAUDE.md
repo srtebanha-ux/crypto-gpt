@@ -2227,3 +2227,59 @@ piso está valendo, e DE ONDE ele veio:
 **Isto importa na prática:** se `CACA_APOSTA_MINIMA_USD=10` estiver no Railway,
 o conserto de hoje não faz nada — a variável manda. E até esta linha existir,
 nem eu nem ela tinham como ver isso no log.
+
+## 2026-10-09: eu dei PUSH com a suíte VERMELHA, e o teste que piscava era um defeito real
+
+Ela mandou o log e disse "OLHA ESSA MERDA". Antes de responder sobre o log, uma
+coisa que é culpa minha e que eu tinha deixado passar: a suíte voltou
+`1440 pass / 3 fail` e **eu dei push (`5b20a44`) sem ler a saída.**
+
+### A piscada não era chateação: era o defeito escondendo-se
+
+Os três não reprovavam — **cancelavam**:
+
+    not ok 1091 - o orçamento é um TETO, e uma casa pendurada não segura o ciclo
+    not ok 1092 - timeout maior que o orçamento não pode tornar o teto letra morta
+    not ok 1093 - lista de pares vazia não chama ninguém
+
+    # fail 0   # cancelled 3
+    error: 'Promise resolution is still pending but the event loop has already resolved'
+
+Rodado cinco vezes: passava numa, cancelava 3 em duas. E o último toque naquele
+arquivo é de dias antes — não foi mudança minha de hoje.
+
+**A causa é um defeito de produção.** `cotacoesDaBinance` montava o próprio
+`AbortSignal.timeout(timeoutMs)` e **nunca via o PODÃO** do orçamento de
+`cotacoesDeQualquerFonte`. Como lá o `Promise.allSettled` espera as TRÊS casas,
+a perna da Binance segurava a volta inteira até o timeout DELA: um orçamento de
+400ms voltava em ~2000ms. O teste pedia `gasto < 900`, a volta demorava 2s, e o
+runner cancelava antes de a asserção falhar — então o defeito saía como ruído em
+vez de como reprovação.
+
+**E morde TODO ciclo em produção.** O cabeçalho daquela mesma seção registra:
+*"na Railway a Binance bloqueia IP de nuvem, então TODO ciclo pagava a falha
+dela antes de começar"*. A casa que nunca responde era exatamente a que o teto
+não alcançava. O orçamento existia e a perna mais lenta estava fora dele.
+
+O conserto é o `sinal` entrar por parâmetro (padrão mantém quem chama sem ele).
+Cinco rodadas depois: **22/22, zero cancelado.** O teste parou de piscar porque
+a piscada era o defeito.
+
+### E o teste novo lê a ASSINATURA, pela mesma razão de ontem
+
+O defeito era um **parâmetro ausente**, não um valor errado — a mesma forma do
+`placar` fora do write do boot. Nenhum teste de valor o pega, e o teste de
+comportamento que devia pegá-lo cancelava. Então o teste novo exige duas coisas:
+que `cotacoesDaBinance` **aceite** o sinal, e que a chamada de dentro do
+orçamento o **passe**. Aceitar e não passar seria a REGRA 3 outra vez: a regra
+em dois lugares, implementada em um.
+
+### A lição, e ela é nova neste arquivo
+
+**Teste intermitente não é chateação: é a suíte perdendo a capacidade de
+responder "quebrou?".** Eu li `1440 pass` e dei push. Com três cancelando em
+duas rodadas de três, "a suíte passa" deixou de ser informação — e este projeto
+inteiro é construído sobre essa frase significar algo.
+
+A regra que sai: **`# cancelled` conta como `# fail`.** Uma promessa pendurada
+num teste é um `await` que o código de produção também vai fazer.
