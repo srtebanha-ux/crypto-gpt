@@ -2241,6 +2241,24 @@ async function principal(): Promise<'parar' | void> {
                       + `exigente que o equilíbrio. ${comum}`;
             })()
             : 'não se aplica: CACA_ATIRAR_NA_ESCRITA=0, a aposta está desligada',
+        /**
+         * A GORJETA DA APOSTA, e de onde ela veio — porque ela mudou 15x em
+         * 2026-10-09 e é ela que define o piso.
+         *
+         * MEDIDO: a ordem dentro do bloco da Base NÃO segue a gorjeta
+         * (Spearman posição × gorjeta = +0,300 em 33 blocos; num leilão por
+         * lance seria perto de −1). Pagando 0,300 gwei o bot ficou na posição
+         * mediana 766, com as transações da frente pagando MENOS. Então a
+         * gorjeta não compra posição: compra só menos tentativas.
+         */
+        gorjetaDaAposta: `${TETO_GORJETA_ESPECULATIVA_GWEI} gwei${
+            process.env.CACA_GORJETA_ESPECULATIVA_GWEI !== undefined
+                ? ' — ESCRITO em CACA_GORJETA_ESPECULATIVA_GWEI'
+                : ' — o medido (a gorjeta não compra posição na Base: Spearman +0,300)'
+        } | uma errada custa ${(() => {
+            const c = custoPorErradaUsd();
+            return c.greaterThan(0) ? `US$ ${c.toFixed(4)}` : 'não medi (sem preço do ETH)';
+        })()} com ${GAS_MEDIDO_DE_UMA_REVERSAO} de gás (média lida nos 39 recibos reais)`,
         ritmo: `ciclo ${INTERVALO_MS}ms dormindo | varredura completa a cada ${MINUTOS_ENTRE_COMPLETAS} min`,
         listas: `teto da lista quente ${TETO_DA_LISTA_QUENTE > 0 ? TETO_DA_LISTA_QUENTE : 'sem teto'} | `
             + `pedaço de varredura ${PEDACO} blocos (pedido; o medido sai na linha [RPC])`,

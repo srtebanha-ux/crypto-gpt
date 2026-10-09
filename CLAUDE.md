@@ -2453,3 +2453,204 @@ o CÓDIGO (`Decimal.max`, não `??` — porque `??` é exatamente o que estava l
 - **O seletor do callback do Morpho** (`0xcf7ea196`) não foi conferido contra o
   `eth_getCode` do Morpho. Falha fechado se eu errei, mas não está provado.
 - **A `ESCALA_DO_ORACULO`** continua não verificada.
+
+## 2026-10-09: a GORJETA não compra posição, e o caminho vencedor FUNCIONA
+
+O dia em que duas conclusões centrais deste arquivo caíram, as duas por
+medição, e em que o primeiro tiro vencedor do projeto foi executado — em fork.
+
+### As 39 transações, uma por uma (cobertura 100%)
+
+Não existe lista de transações de uma carteira no JSON-RPC, e **reversão não
+emite log**: `eth_getLogs` não as acha. O caminho honesto é o nonce, que é
+monótono — achar por partição recursiva os blocos em que ele muda e ler o bloco
+inteiro ali. Nonce 6 a 44, **zero nonce sem transação achada**:
+
+    39 transações, não 31. TODAS reverteram. 8 em 07/10 + 31 em 08/10.
+    custo real pelos recibos: 0,004680 ETH   (a taxa L1 é 0,1% disto)
+    8 alvos distintos, 3 a 8 tiros cada, todos no V1, todos a 0,300 gwei
+    saúde no bloco ANTERIOR a cada tiro: 1,00046 a 1,00208 — nenhuma cruzou
+
+A divergência "31 contra nonce 14→45" está resolvida: 45 − 14 = 31 é o que o
+placar viu; as 8 de 07/10 foram apagadas do disco pelo write do boot, e o log
+daquele dia dizia 7 — eram 8.
+
+**E o custo de US$ 15,45 que eu publiquei na auditoria está errado.** Ele saiu
+de diferença de SALDO (0,006280 ETH); os recibos somam **0,004680 ETH
+(US$ 11,86)**. Recibo é medição, diferença de saldo é inferência, e os 0,0016
+ETH que não fecham eu não consigo explicar pela corrente — com cobertura 100%
+de nonce, não há outra transação. Um dos dois números do log não é o que eu
+supus que fosse.
+
+### 1. O PREMIO NÃO ERA MIGALHA — eu extrapolei de uma linha do log
+
+Decodificando o `input` das 39 com a interface do projeto e lendo a dívida no
+bloco anterior a cada tiro:
+
+    alvo        tiros   dívida US$    prêmio US$   falta cair
+    0x9e70b090      8        95,26          1,80     0,1169%   <- a migalha
+    0x616abe14      5       485,47         10,39     0,1609%
+    0x33a7ec10      4     5.596,48        121,15     0,1990%
+    0x12f16a0a      3     7.826,04        168,44     0,1513%
+    0x07a145db      5    14.015,95        296,49     0,1464%
+    0xda0d95c6      4    20.462,48        424,79     0,1900%
+    0x16b00db7      5    60.913,50      1.112,56     0,2077%
+    0x66bb6c29      5   151.916,73      1.932,39     0,0615%
+
+Somando prêmio × chance cega (1/355) contra o custo pago, as 39 apostas tinham
+**valor esperado +US$ 43,05** (prêmio esperado US$ 54,82 contra US$ 11,77 de
+custo). Perdemos porque 0 de **0,110** acerto esperado caiu: é variância, não
+regra errada. Só as 8 da migalha de US$ 1,80 eram de VE negativo.
+
+O "US$ 10,40" que eu citei na auditoria como se fosse a população era UMA linha
+do log — o alvo `0x616abe14`, um de oito. **Extrapolei de uma linha dentro da
+auditoria que existia para achar erro meu.** É a regra 4 deste arquivo.
+
+### 2. A GORJETA NÃO COMPRA POSIÇÃO NA BASE
+
+Medido nos 33 blocos em que o bot de fato atirou:
+
+    Spearman entre POSIÇÃO e GORJETA:  médio +0,300  (min −0,039  max +0,570)
+    se o bloco fosse leilão por lance: perto de −1
+
+    nossa posição mediana pagando 0,300 gwei: 766
+    bloco 52341747: das 1.943 à nossa frente, 1.825 pagaram MENOS
+    95% das transações de um bloco pagam < 0,02 gwei — e entram
+
+Correlação POSITIVA é o oposto de leilão: o sequenciador enfileira por ordem de
+**chegada** e não reordena por lance. Isso derruba a conclusão
+*"é leilão, não corrida"* que este arquivo registra em duas seções, e inverte a
+consequência: quem levou o alvo de US$ 49,33 na posição 6 de 537 pagando
+0,046688 gwei **chegou antes**. A disputa é de LATÊNCIA.
+
+`GORJETA_DA_FRENTE_GWEI` foi de 0,3 para **0,02** (acima do p50 do campo nos
+mesmos blocos). O efeito no piso, rodado:
+
+    0,300 gwei -> errada US$ 0,3018 -> piso US$ 107,14
+    0,020 gwei -> errada US$ 0,0377 -> piso US$  13,39
+
+    o alvo real de 07/10, US$ 47,12 -> 0,28x o acaso  >>> PASSOU A APOSTAR
+    o alvo real de 08/10, US$ 11,59 -> 1,16x o acaso      continua de fora
+
+E `GAS_MEDIDO_DE_UMA_REVERSAO` foi de 550.000 (derivado de saldo) para
+**372.202** (média lida nos 39 recibos; faixa 302.984–499.316).
+
+### 3. O PISO NO CONTRATO ESTAVA EM ZERO nas 39 transações
+
+O sexto argumento de `cacar` era `0` nas 39. A causa: `piso = lucroCru*80/100`
+com `lucroCru = 0n`, que é o que a medição por `eth_call` devolve no tiro
+especulativo — a Aave reverte em posição sadia, por construção. **O portão de
+resultado mínimo verificável NO CONTRATO estava desligado justamente no caminho
+que manda dinheiro às cegas.** Se alguma tivesse cruzado, o contrato aceitaria
+executar com lucro zero.
+
+`pisoNoContrato` nunca devolve zero com cobertura positiva: sem medição o piso é
+1,5% da dívida coberta, na unidade do ativo da dívida (bônus realizado medido
+4,56%, custo de venda medido 0,59% — sobra ~3,9%, então 1,5% não barra acerto).
+
+### 4. E A APOSTA NÃO ESPERA MAIS PELO `eth_estimateGas`
+
+As 39 saíram com `gas: 5.000.000` — o teto de quem NÃO tem estimativa. Ela
+nunca produziu número num tiro real, e não pode: a chamada reverte em posição
+sadia. Esperar até 800ms por uma resposta impossível gastava 40% da janela de um
+bloco, e milissegundo é a única coisa que compra posição. O saldo continua sendo
+lido: ele é freio de sobrevivência, não conveniência.
+
+### 5. O TIRO VENCEDOR FUNCIONA — provado em fork, pela primeira vez
+
+`npm run fork` (hardhat, fork da Base no topo). O compilador não baixa neste
+ambiente, então a config aponta para o solc 0.8.26 que já está no
+`node_modules` — compilar com o do projeto é mais fiel que baixar outro.
+
+Aave real, pool da Aerodrome real, **contrato publicado real** (`0x9066b0ba…`, o
+mesmo das 39), devedores reais. O único fingimento é o preço: a fonte do WETH no
+oráculo da Aave vira `OraculoFalso` e cai em passos.
+
+    alvo        queda  dívida US$   estimado  REALIZADO  razão  ágio implícito
+    0x66bb6c29   4,6%  132.917,53   1.843,33   5.013,89   2,72x      6,61%
+    0xda0d95c6   5,9%   20.465,47     424,84   1.075,01   2,53x     10,51%
+    0x07a145db  11,4%    7.009,04     151,18     613,55   4,06x      8,75%
+    0x12f16a0a  12,2%    3.913,61      85,04     364,49   4,29x      9,31%
+
+    gás de um tiro VENCEDOR: 580.473 a 679.930
+
+Quatro de cinco completaram. O que isto fecha, pela execução e não por leitura:
+o `flashLoanSimple` é devolvido; a venda no pool real cabe; o `LucroInsuficiente`
+não barra acerto legítimo (pediu 1.137, deu 5.308); o lucro vai ao **cofre**.
+
+**E `lucroEstimado` erra para BAIXO de 2,5x a 4,3x.** É o lado seguro para um
+piso — prêmio subestimado nunca autoriza aposta que não se paga — e agora está
+medido em vez de suposto. O ágio implícito é 6,6% a 10,5%, não os 5% assumidos,
+e parte vem de a Aave deixar cobrir 100% da dívida abaixo de saúde 0,95 (dois
+dos quatro cobriram a dívida inteira). Um teste guarda a DIREÇÃO: se alguma
+sessão futura "otimizar" o prêmio para cima, `realizado/estimado >= 0.9`
+reprova.
+
+**O que isto NÃO prova:** 4,6% de queda é muito maior que o salto de uma escrita
+de oráculo (0,10 a 0,22% medidos). Prova o MECANISMO, não que o cruzamento seja
+alcançável.
+
+### 6. O MORPHO BLUE, identificado pela corrente, e o contrato validado
+
+O `eth_getLogs` recusou 23 de 24 janelas e a varredura por "contratos mais
+chamados" não o achou em 40 blocos (806 distintos, 276 testados). Então o
+endereço entrou como **hipótese** e a corrente deu o veredicto, por superfície
+de interface — o contrário do defeito do `0x80d1e0f4…`, que eu publiquei sem
+conferir:
+
+    0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb   15.623 bytes
+    os 10 seletores da superfície do Morpho Blue: TODOS no bytecode
+    responde owner() e isLltvEnabled(62,5%) = true
+    e o seletor 0xcf7ea196 de onMorphoLiquidate(uint256,bytes) ESTÁ no código
+    dele: o nome do callback que o .sol declarava como NÃO VERIFICADO confere
+
+E o teste de ponta a ponta usa o Morpho REAL. A descoberta de mercados está
+bloqueada pelo RPC, mas `createMarket` é permissionless: o teste cria o próprio
+mercado, pega USDC vendendo WETH no pool real, monta um devedor, derruba o
+oráculo e liquida pelo nosso contrato.
+
+    devedor: 10 WETH de garantia, 15.500 USDC de dívida
+    NOSSA saúde a US$ 2.500: 1,00806452  (e o Morpho aceitou o borrow: > 1)
+    NOSSA saúde a US$ 2.000: 0,80645161  (liquidável)
+    cacar(2 WETH) -> SUCESSO | gasUsed 390.911 | +915,19 USDC no cofre
+
+    modos de falha, todos recusados:
+      estranho chamando cacar ....... NaoEDono
+      estranho chamando o callback .. ChamadaInesperada
+      os dois argumentos zero ....... UmDosDoisZero
+      os dois cheios ................ UmDosDoisZero
+      piso impossível ............... recusado pelo router, antes de executar
+
+Isto fecha as quatro incertezas declaradas no `.sol`: endereço, assinatura do
+callback, **ESCALA_DO_ORACULO = 1e36** (a nossa conta concorda com o
+aceita/recusa do Morpho nos DOIS lados) e unidades/permissões/pagamento.
+
+**DECLARADO:** os 915 USDC estão inflados pela divergência entre o oráculo falso
+(US$ 2.000) e o preço real do pool. O valor não é alpha; o mecanismo é o que
+está provado.
+
+### O veredicto econômico de hoje, sem enfeite
+
+**Hipótese ainda não comprovada, e agora o experimento cabe na carteira.**
+
+    o mecanismo do tiro vencedor ....... PROVADO em fork (Aave e Morpho)
+    a economia da aposta ............... VE POSITIVO já no acaso cego para
+                                         prêmio acima de US$ 13,39
+    a previsão do cruzamento ........... 0 de 39, e 0,110 era o esperado cego:
+                                         nenhuma evidência, nem a favor nem contra
+    o que falta .................... acertos. E eles custam 8x menos que ontem:
+                                     0,0377 contra 0,3018 por tentativa
+
+A carteira aguentava ~37 tentativas a 0,300 gwei; aguenta ~295 a 0,020. O
+experimento que não cabia passou a caber, sem aumentar risco — baixando o preço
+de errar.
+
+### E a latência passou a ser a obra, não a gorjeta
+
+Se a ordem no bloco é por chegada, "ser melhor que qualquer bot" tem um
+significado só: **chegar primeiro no bloco da escrita do oráculo**. Já foram
+tirados 800ms (a estimativa de gás que não podia responder). O que sobra no
+caminho crítico, e está medido como custo e não como defeito: a medição por
+`eth_call` dos dois contratos antes de enviar. Ela é o portão que distingue
+"ainda não cruzou" de "meu contrato quebrou" — tirá-la seria enfraquecer
+controle para produzir atividade, e isso não se faz.
