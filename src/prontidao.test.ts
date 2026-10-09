@@ -24,6 +24,7 @@ import {
     chanceDeSerOTopoDaFatia,
     gorjetaQueMaximizaOValor,
     premioQueSePagaComAFatia,
+    fracaoDasEscritasQueFecham,
     GAS_MEDIDO_DE_UMA_REVERSAO,} from './prontidao';
 
 const D = (n: number | string) => new Decimal(n);
@@ -1640,4 +1641,48 @@ test('o teto da gorjeta vale para os DOIS tiros, e dobra a cada corrida perdida'
     const medido = custoDeUmaDerrota(teto(0), 20_000_000n, GAS_MEDIDO_DE_UMA_REVERSAO);
     assert.ok(Number(caro) / Number(medido) > 100,
         `a errada tem de ficar 100x mais barata (ficou ${(Number(caro) / Number(medido)).toFixed(0)}x)`);
+});
+
+test('a chance depende da DISTÂNCIA do alvo, não é um número plano', () => {
+    // MEDIDO em 2026-10-09, lendo `getAssetPrice(WETH)` do oráculo da Aave em
+    // 5.000 blocos CONSECUTIVOS (167 min, cobertura 100%, 5.003 pedidos, ZERO
+    // recusas): 15 escritas em 4.999 pares — uma a cada 333,3 blocos, o que
+    // CONFIRMA os 355 do código por um caminho independente. Salto p10 0,0146%
+    // / p50 0,1649% / p90 0,1960% / max 0,1995%.
+    //
+    // A escrita fecha 0,1169% em 80% dos casos e 0,1838% em 20%. O alvo real de
+    // 07/10 precisava de 0,1838%: chance por bloco 0,0600%, **4,7x menor** que
+    // a chance plana de 0,282% que o código aplicava a ele.
+    //
+    // E uma amostra de 600 blocos (3 escritas) tinha me dado "0,18% em NENHUMA
+    // escrita". Era ruído, e a incerteza declarada já dizia que seria.
+    assert.equal(fracaoDasEscritasQueFecham(0.05), 0.9);
+    assert.equal(fracaoDasEscritasQueFecham(0.1169), 0.8);
+    assert.equal(fracaoDasEscritasQueFecham(0.1683), 0.47);
+    assert.equal(fracaoDasEscritasQueFecham(0.1838), 0.2, 'o alvo real de 07/10: improvável, não impossível');
+    assert.equal(fracaoDasEscritasQueFecham(0.2077), 0, 'acima do maior salto medido: ZERO, não um palpite');
+    assert.equal(fracaoDasEscritasQueFecham(5), 0, 'e não inventa cauda para alvo distante');
+
+    // A REGRA, que é o que o teste guarda: a chance tem de CAIR com a
+    // distância, nunca subir. Se alguma remedição invertisse isso, reprova.
+    let anterior = 1.0001;
+    for (const falta of [0, 0.05, 0.1, 0.12, 0.15, 0.17, 0.179, 0.19, 0.5, 2]) {
+        const f = fracaoDasEscritasQueFecham(falta);
+        assert.ok(f <= anterior, `${falta}% devolveu ${f} depois de ${anterior}`);
+        anterior = f;
+    }
+
+    // E o EFEITO na decisão, com os números medidos: o MESMO prêmio é aposta
+    // num alvo perto e recusa num alvo longe. É isto que um número plano não
+    // consegue dizer.
+    const ambiente = { baseFeeWei: 20_000_000n, precoDoEthUsd: 2500.67, premioUsd: 188.37 };
+    const perto = gorjetaQueMaximizaOValor({ ...ambiente, faltaAoAlvoPct: 0.05 });
+    const longe = gorjetaQueMaximizaOValor({ ...ambiente, faltaAoAlvoPct: 0.2077 });
+    assert.ok(perto.evUsd > 0, `alvo perto tem de valer a aposta: ${perto.evUsd}`);
+    assert.ok(longe.evUsd < 0, `alvo além do maior salto medido NÃO vale: ${longe.evUsd}`);
+
+    // Sem distância conhecida, a conta volta a ser a de antes — o lado que não
+    // autoriza MAIS do que já autorizava.
+    const semSaber = gorjetaQueMaximizaOValor(ambiente);
+    assert.ok(semSaber.evUsd >= perto.evUsd * 0.99, 'sem distância usa a conta antiga');
 });

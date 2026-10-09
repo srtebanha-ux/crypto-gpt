@@ -2220,6 +2220,37 @@ async function principal(): Promise<'parar' | void> {
     //
     // Achado de novo em 2026-10-06, quando ela trocou quatro variáveis de uma
     // vez e nem ela nem eu tínhamos como conferir se pegaram.
+    /**
+     * `CACA_MERCADOS_MORPHO=1` faz o bot varrer os mercados do Morpho UMA vez,
+     * no boot, e imprimir no log. Depois ela apaga a variavel.
+     *
+     * POR QUE ISTO EXISTE, e e sobre mim e nao sobre o codigo: eu escrevi
+     * `npm run morpho` e mandei ela "rodar no terminal com o RPC_URL". Isso e
+     * atrito que EU podia remover — o bot ja tem o RPC (o log de producao diz
+     * `base-mainnet.g.alchemy.com`) e ela ja copia o log. Pedir a ela que monte
+     * um ambiente de terminal para me dar um dado que o proprio bot pode ler e
+     * transferir para ela um trabalho meu.
+     *
+     * Ele roda DESGRUDADO do laco de caca: nenhuma varredura de mercado pode
+     * atrasar um tiro, e se ela falhar o bot nao morre por isso.
+     */
+    if (process.env.CACA_MERCADOS_MORPHO === '1') {
+        log.warn('[MORPHO] Vou varrer os mercados UMA vez, em paralelo. Isto não atrasa a caça.', {
+            porque: 'o eth_getLogs do RPC público recusou 23 de 24 janelas no sandbox; aqui ele responde',
+            depois: 'apague CACA_MERCADOS_MORPHO quando a linha [MERCADOS] sair',
+        });
+        void (async () => {
+            try {
+                const { varrerMercadosDoMorpho } = await import('./mercadosDoMorpho');
+                await varrerMercadosDoMorpho();
+            } catch (e) {
+                log.error('[MORPHO] A varredura falhou, e o bot segue caçando.', {
+                    erro: e instanceof Error ? e.message : String(e),
+                });
+            }
+        })();
+    }
+
     log.info('[BOTÕES] Com o que eu subi.', {
         politica: comoLerAPolitica(POLITICA),
         // O PISO DA APOSTA TEM DE ESTAR AQUI, e ele nao estava.
@@ -4983,6 +5014,13 @@ async function principal(): Promise<'parar' | void> {
                                 premioUsd: p.toNumber(),
                                 baseFeeWei: base,
                                 precoDoEthUsd: eth.toNumber(),
+                                // A DISTANCIA DO ALVO entra na conta: medido em
+                                // 600 blocos consecutivos (cobertura 100%), a
+                                // escrita do oraculo fecha 0,08% em 100% dos
+                                // casos e 0,18% em NENHUM. Tratar os dois igual
+                                // foi o que gastou sete tiros num alvo a
+                                // 0,1838% que escrita nenhuma alcancou.
+                                faltaAoAlvoPct: alvo.quedaPct?.toNumber(),
                             });
                             const comEscada = otima.gorjetaGwei * 2 ** Math.min(6, perdasSeguidas);
                             return BigInt(Math.round(comEscada * 1e9));

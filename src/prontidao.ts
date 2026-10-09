@@ -1135,6 +1135,75 @@ export function chanceDeSerOTopoDaFatia(gorjetaGwei: number): number {
     return f;
 }
 
+/**
+ * A CHANCE DE UMA ESCRITA FECHAR O QUE FALTA AO ALVO, por bloco.
+ *
+ * MEDIDO em 2026-10-09 lendo `getAssetPrice(WETH)` do oraculo da Aave em 600
+ * blocos CONSECUTIVOS (cobertura 100%, zero recusas) e olhando onde o numero
+ * muda. Nao precisou de `eth_getLogs`, que esta estrangulado.
+ *
+ *     escritas: 3 em 599 pares -> uma a cada 199,7 blocos (0,501% por bloco)
+ *     salto: p10 0,0800% | p50 0,1573% | p90 0,1791% | max 0,1791%
+ *     intervalo entre escritas: 301 blocos (602s)
+ *
+ * E REFEITO na mesma noite com 5.000 blocos (167 minutos, cobertura 100%,
+ * 5.003 pedidos, ZERO recusas) — 15 escritas em vez de 3, e a amostra de 600
+ * estava enganando em duas das tres coisas:
+ *
+ *     escritas: 15 em 4.999 pares -> uma a cada 333,3 blocos (0,300% por bloco)
+ *     salto: p10 0,0146% | p50 0,1649% | p90 0,1960% | max 0,1995%
+ *     intervalo: p50 301 blocos | p90 615 | max 630
+ *
+ * A cadencia de 333,3 **CONFIRMA os 355 do codigo** (6% de diferenca, de um
+ * caminho independente: `eth_call` em bloco historico contra eventos
+ * `AnswerUpdated`). Os 199,7 da janela de 20 minutos eram ruido de amostra
+ * pequena, exatamente como a incerteza declarada dizia.
+ *
+ * E a CAUDA mudou de lado: com 3 escritas eu li "0,18% em NENHUMA"; com 15,
+ * 20% das escritas cobrem 0,1838%. A tabela abaixo e a de 15 — e um alvo a
+ * 0,1838% deixa de ser impossivel e passa a ser improvavel, que e diferente.
+ *
+ * E AQUI ESTA O QUE MUDA A DECISAO. A chance nao e um numero so: ela DEPENDE do
+ * que falta ao alvo, porque uma escrita pequena nao derruba um alvo distante.
+ *
+ *     alvo a 0,0617% -> 87% das escritas cobrem -> 0,2601% por bloco
+ *     alvo a 0,1169% -> 80% cobrem              -> 0,2400% por bloco
+ *     alvo a 0,1683% -> 47% cobrem              -> 0,1400% por bloco
+ *     alvo a 0,1838% -> 20% cobrem              -> 0,0600% por bloco
+ *     alvo a 0,2077% ->  0% cobrem              -> 0,0000% por bloco
+ *
+ * O alvo real de 07/10 precisava de **0,1838%**: 20% das escritas o cobrem, e
+ * a chance por bloco e 0,0600% — **4,7x menor** que a chance plana de 0,282%
+ * que o codigo usava para ele. Com o numero plano o bot tratava um alvo a
+ * 0,1838% igual a um de 0,06%, e eles nao sao iguais.
+ *
+ * INCERTEZA, declarada: 15 escritas. O intervalo de Wilson de 15 em 4.999 vai
+ * de 0,18% a 0,49% por bloco, e cada degrau da tabela de cauda repousa em 3 a
+ * 7 escritas. Isto nao decide o quarto decimal; decide a ORDEM, e a ordem e o
+ * que estava errada antes. O proximo refinamento e varredura mais longa, que
+ * custa so tempo de RPC — `QUANTOS` no script governa.
+ */
+export const PERFIL_DO_SALTO: ReadonlyArray<readonly [number, number]> = [
+    // [o que falta ao alvo em %, fracao das escritas que cobrem]
+    // Medido em 5.000 blocos consecutivos, cobertura 100%, 15 escritas.
+    [0.0000, 1.00], [0.0146, 0.90], [0.0617, 0.87], [0.1169, 0.80],
+    [0.1683, 0.47], [0.1838, 0.20], [0.1995, 0.07], [0.2077, 0.00],
+];
+
+/**
+ * A fracao das escritas do oraculo que fecham uma distancia de `faltaPct`.
+ *
+ * Degrau para BAIXO entre pontos medidos, e ZERO acima do maior salto visto:
+ * afirmar que uma escrita fecha 0,5% quando a maior medida fechou 0,1995%
+ * seria inventar a cauda que decide o gasto.
+ */
+export function fracaoDasEscritasQueFecham(faltaPct: number): number {
+    if (!Number.isFinite(faltaPct) || faltaPct < 0) return 0;
+    let f = 0;
+    for (const [limite, fr] of PERFIL_DO_SALTO) if (faltaPct >= limite) f = fr;
+    return f;
+}
+
 export interface EntradaDaGorjeta {
     /** O que o alvo rende, em dolares. */
     premioUsd: number;
@@ -1144,6 +1213,16 @@ export interface EntradaDaGorjeta {
     gasDaReversao?: bigint;
     /** Blocos entre escritas do oraculo. Padrao: o medido. */
     blocosPorEscrita?: number;
+    /**
+     * Quanto FALTA ao alvo, em %. Quando vem, a chance deixa de ser plana e
+     * passa a usar `fracaoDasEscritasQueFecham`: uma escrita pequena nao
+     * derruba alvo distante, e tratar os dois igual foi o que fez o bot gastar
+     * sete tiros num alvo a 0,1838% que escrita nenhuma da janela alcancou.
+     *
+     * `undefined` mantem a conta antiga (chance plana), que e o lado que NAO
+     * autoriza mais do que antes.
+     */
+    faltaAoAlvoPct?: number;
 }
 
 /**
@@ -1190,10 +1269,13 @@ export function gorjetaQueMaximizaOValor(e: EntradaDaGorjeta): {
         return { gorjetaGwei: g, chanceDeSerOTopo: CURVA_TOPO_DA_FATIA[0]![1],
             custoDaErradaUsd: custoDe(g), evUsd: Number.NEGATIVE_INFINITY };
     }
+    // A chance de a escrita FECHAR a distancia. Sem distancia conhecida, 1 —
+    // que e a conta de antes, e a que nao autoriza mais do que ela autorizava.
+    const fecha = e.faltaAoAlvoPct === undefined ? 1 : fracaoDasEscritasQueFecham(e.faltaAoAlvoPct);
     let melhor = { gorjetaGwei: 0, chanceDeSerOTopo: 0, custoDaErradaUsd: 0, evUsd: -Infinity };
     for (const [g, f] of CURVA_TOPO_DA_FATIA) {
         const c = custoDe(g);
-        const ev = (f / blocos) * e.premioUsd - c;
+        const ev = (fecha * f / blocos) * e.premioUsd - c;
         if (ev > melhor.evUsd) melhor = { gorjetaGwei: g, chanceDeSerOTopo: f, custoDaErradaUsd: c, evUsd: ev };
     }
     return melhor;

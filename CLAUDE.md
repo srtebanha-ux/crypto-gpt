@@ -2786,3 +2786,63 @@ verificação contra três commits.
 E o que salvou foi ela: a palavra "Flashblocks" na instrução. Eu não sabia que
 a Base monta o bloco em fatias, e sem isso a medição dentro da fatia não teria
 sido feita.
+
+### 2026-10-09, noite: a PROBABILIDADE deixou de ser um número plano
+
+Ela mandou: *"Calibre a probabilidade de sucesso. Mostre de onde ela vem... Se
+os dados forem insuficientes, desenvolva a coleta necessária sem enviar
+operações pagas."* O `eth_getLogs` está estrangulado, mas `eth_call` com
+etiqueta de bloco RESPONDE — então a cadência do oráculo dá para medir sem
+evento nenhum: ler `getAssetPrice(WETH)` em blocos CONSECUTIVOS e olhar onde o
+número muda.
+
+**5.000 blocos consecutivos, 167 minutos, cobertura 100%, 5.003 pedidos, ZERO
+recusas:**
+
+    escritas: 15 em 4.999 pares -> uma a cada 333,3 blocos (0,300% por bloco)
+    salto: p10 0,0146% | p50 0,1649% | p90 0,1960% | max 0,1995%
+    intervalo entre escritas: p50 301 blocos | p90 615 | max 630
+
+Os 333,3 **confirmam os 355 do código** (6% de diferença) por um caminho
+independente: `eth_call` histórico contra eventos `AnswerUpdated`. É a terceira
+vez neste projeto que um número do bot é conferido por fora e passa.
+
+**E a parte que muda a decisão: a chance DEPENDE do que falta ao alvo.**
+
+    alvo a 0,0617% -> 87% das escritas cobrem -> 0,2601% por bloco
+    alvo a 0,1169% -> 80% cobrem              -> 0,2400% por bloco
+    alvo a 0,1683% -> 47% cobrem              -> 0,1400% por bloco
+    alvo a 0,1838% -> 20% cobrem              -> 0,0600% por bloco
+    alvo a 0,2077% ->  0% cobrem              -> 0,0000% por bloco
+
+O alvo real de 07/10 precisava de 0,1838%: chance por bloco **0,0600%, 4,7x
+menor** que a chance plana de 0,282% que o código aplicava a ele. Com o número
+plano o bot tratava um alvo a 0,1838% igual a um de 0,06%.
+
+`fracaoDasEscritasQueFecham` entra no EV, e um teste guarda a REGRA (a chance
+cai com a distância, nunca sobe) em vez dos valores.
+
+**E a amostra pequena me enganou no caminho.** A primeira varredura foi de 600
+blocos, 3 escritas, e deu "uma a cada 199,7 blocos" e "0,18% em NENHUMA
+escrita". Com 15 escritas: 333,3 blocos, e 20% das escritas cobrem 0,1838%. A
+incerteza declarada na hora dizia que seria — e foi. **Um alvo a 0,1838% deixou
+de ser impossível e passou a ser improvável, que é diferente.**
+
+Incerteza que fica: 15 escritas, Wilson de 0,18% a 0,49% por bloco, e cada
+degrau da cauda repousa em 3 a 7 escritas. Isto decide a ORDEM, não o quarto
+decimal. O refinamento custa só tempo de RPC (`QUANTOS` no script).
+
+### E eu tinha transferido um trabalho meu para ela
+
+Eu escrevi `npm run morpho` e mandei ela *"rodar no terminal com o RPC_URL"* —
+pedindo que ela montasse um ambiente de terminal para me dar um dado que o
+próprio bot pode ler. Dois consertos:
+
+1. A ferramenta lê a escada que o bot JÁ usa (`listaDeRpcs`: `CACA_RPC_URL`,
+   `RPC_URL_1..9`, `CACA_RPC_URLS`), e sobe de degrau quando um provedor recusa
+   toda janela. Rodado: subiu os três degraus e recusou concluir com cobertura
+   zero, que é o comportamento certo.
+2. **`CACA_MERCADOS_MORPHO=1` faz o próprio bot varrer uma vez, no boot, e
+   imprimir no log que ela já copia.** Roda desgrudado do laço de caça: nenhuma
+   varredura pode atrasar um tiro, e se falhar o bot segue caçando. Ela liga a
+   variável, espera a linha `[MERCADOS]`, apaga a variável.

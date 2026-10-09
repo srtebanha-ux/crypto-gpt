@@ -27,7 +27,8 @@ import { Decimal } from 'decimal.js';
 import { id, AbiCoder } from 'ethers';
 import { ProxyAgent, fetch } from 'undici';
 import { createLogger } from './logger';
-import { faixasDeBlocos } from './liquidacoes';
+import { faixasDeBlocos, RPCS_PARA_TENTAR } from './liquidacoes';
+import { listaDeRpcs } from './escadaDeRpc';
 import { tamanhosASondar, PEDACO_MINIMO } from './cacarAoVivo';
 import { incentivoDeLiquidacao, bonusPct, saudeNoMorpho, ESCALA_DO_ORACULO } from './morpho';
 
@@ -128,17 +129,31 @@ export function lerCreateMarket(logs: Array<{ topics: string[]; data: string; bl
     return fora;
 }
 
-async function principal(): Promise<void> {
-    const url = process.env.RPC_URL;
-    if (!url) {
-        log.error('Preciso de RPC_URL. O publico recusa eth_getLogs (23 de 24 janelas em 2026-10-09).', {
-            comoRodar: "RPC_URL='https://base-mainnet.g.alchemy.com/v2/SUA_CHAVE' npx tsx src/mercadosDoMorpho.ts",
-            aviso: 'a chave fica na variável de ambiente e NÃO aparece em log nenhum',
-        });
-        process.exitCode = 1;
-        return;
-    }
-    const host = (() => { try { return new URL(url).host; } catch { return 'url inválida'; } })();
+export async function varrerMercadosDoMorpho(): Promise<void> {
+    /**
+     * O RPC SAI DA MESMA ESCADA QUE O BOT USA, e nao de uma variavel nova.
+     *
+     * A primeira versao desta ferramenta pedia `RPC_URL`. Isso era eu pedindo a
+     * ela que configurasse de novo um acesso que o bot JA TEM: o caçador le
+     * `CACA_RPC_URL`, `RPC_URL_1..9` e `CACA_RPC_URLS` por `listaDeRpcs`, e o
+     * log de producao de 2026-10-09 mostra `rpc: base-mainnet.g.alchemy.com`.
+     *
+     * Entao aqui a mesma funcao decide, na mesma ordem. No Railway, onde a
+     * variavel ja existe, `npm run morpho` roda SEM configurar nada. E a escada
+     * continua sendo uma escada: se o primeiro recusar, tenta o seguinte.
+     *
+     * E a REGRA 3: a lista de RPC em dois lugares seria a mesma regra em dois
+     * lugares, e a copia provaria a copia.
+     */
+    const escada = listaDeRpcs(process.env, RPCS_PARA_TENTAR.base ?? ['https://mainnet.base.org']);
+    const nomeDoHost = (u: string) => { try { return new URL(u).host; } catch { return 'url inválida'; } };
+    log.info('[RPC] A escada, na ordem em que vou tentar.', {
+        degraus: escada.map(nomeDoHost),
+        deOndeVem: 'CACA_RPC_URL, RPC_URL_1..9, CACA_RPC_URLS — as MESMAS que o caçador lê',
+        aviso: 'só o host aparece aqui: a chave fica na variável de ambiente',
+    });
+    let url = escada[0]!;
+    const host = nomeDoHost(url);
     const agente = process.env.HTTPS_PROXY ? new ProxyAgent(process.env.HTTPS_PROXY) : undefined;
     let pedidos = 0;
     const motivos = new Map<string, number>();
@@ -166,7 +181,7 @@ async function principal(): Promise<void> {
     const topoHex = await chamar('eth_blockNumber', []);
     if (topoHex === null) {
         log.error('O RPC não respondeu nem o número do bloco.', { host, motivos: [...motivos] });
-        process.exitCode = 1;
+        if (require.main === module) process.exitCode = 1;
         return;
     }
     const topo = Number.parseInt(topoHex, 16);
@@ -191,7 +206,7 @@ async function principal(): Promise<void> {
         log.error('Nenhum candidato passou. NÃO publico endereço, e não concluo nada sobre o Morpho.', {
             comoDestravar: 'MORPHO_CANDIDATOS=0x...,0x... com outros candidatos',
         });
-        process.exitCode = 1;
+        if (require.main === module) process.exitCode = 1;
         return;
     }
 
@@ -212,10 +227,34 @@ async function principal(): Promise<void> {
         if (teste !== null) { tamanho = t; break; }
     }
     if (tamanho === 0) {
-        log.error('Nenhum tamanho de janela foi aceito, nem o piso. Cobertura ZERO não é "não há mercado".', {
-            host, sondados: tamanhosASondar(JANELA_PEDIDA, PEDACO_MINIMO), motivos: [...motivos],
+        // DEGRAU SEGUINTE antes de desistir: um provedor recusar eth_getLogs
+        // nao e "a rede nao tem". Isto e a escada fazendo o trabalho dela.
+        for (const proximo of escada.slice(1)) {
+            log.warn('[RPC] Este degrau recusou TODA janela. Subo para o próximo.', {
+                recusou: nomeDoHost(url), tentando: nomeDoHost(proximo), motivos: [...motivos],
+            });
+            url = proximo;
+            for (const t of tamanhosASondar(JANELA_PEDIDA, PEDACO_MINIMO)) {
+                const teste = await chamar('eth_getLogs', [{
+                    fromBlock: `0x${(topo - t + 1).toString(16)}`,
+                    toBlock: `0x${topo.toString(16)}`,
+                    address: morpho,
+                    topics: [TOPICO_CREATE_MARKET],
+                }], 2);
+                if (teste !== null) { tamanho = t; break; }
+            }
+            if (tamanho > 0) break;
+        }
+    }
+    if (tamanho === 0) {
+        log.error('NENHUM degrau da escada aceitou janela alguma. Cobertura ZERO não é "não há mercado".', {
+            degrausTentados: escada.map(nomeDoHost),
+            sondados: tamanhosASondar(JANELA_PEDIDA, PEDACO_MINIMO),
+            motivos: [...motivos],
+            comoDestravar: 'um RPC que sirva eth_getLogs em CACA_RPC_URL ou RPC_URL_1 '
+                + '(o Railway dela já tem um: o log de produção mostra base-mainnet.g.alchemy.com)',
         });
-        process.exitCode = 1;
+        if (require.main === module) process.exitCode = 1;
         return;
     }
 
@@ -269,7 +308,7 @@ async function principal(): Promise<void> {
 }
 
 if (require.main === module) {
-    principal().catch((e) => {
+    varrerMercadosDoMorpho().catch((e) => {
         log.error('Parei.', { erro: e instanceof Error ? e.message : String(e) });
         process.exitCode = 1;
     });
