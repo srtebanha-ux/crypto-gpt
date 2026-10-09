@@ -648,7 +648,18 @@ test('a trava do tiro de prova mora no nonce, e se desarma quando o tiro sai', (
     // container — é isso que uma trava em memória não conseguiria fazer.
     const morto = tiroDeProvaArmado({ ligado: true, nonceAtual: 5, ateNonce: 4 });
     assert.equal(morto.armado, false);
-    assert.match(morto.porque, /já saiu tiro/);
+    // A TRAVA continua no nonce — ela existe para o tiro de prova não repetir,
+    // e para isso "saiu transação" é a pergunta certa.
+    assert.match(morto.porque, /já SAIU transação/);
+    // MAS A FRASE NÃO AFIRMA MAIS SUCESSO. Até 2026-10-09 ela dizia "A prova
+    // foi feita", e nonce não sabe disso: ele conta transação enviada, não
+    // acerto. Medido no mesmo dia: as 39 desta carteira saíram, o nonce foi de
+    // 6 a 45, e as 39 REVERTERAM — um nonce de 45 descrevia 39 fracassos e 6
+    // deploys. Quem sabe o desfecho é o hash e o recibo.
+    assert.ok(!/A prova foi feita/.test(morto.porque),
+        'nonce não prova acerto: as 39 saíram e as 39 reverteram');
+    assert.match(morto.porque, /NÃO diz que deu certo/);
+    assert.match(morto.porque, /hash e no recibo/);
 });
 
 test('sem a variável da trava NÃO arma: trava esquecida é gás queimado a cada deploy', () => {

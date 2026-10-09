@@ -2846,3 +2846,38 @@ próprio bot pode ler. Dois consertos:
    imprimir no log que ela já copia.** Roda desgrudado do laço de caça: nenhuma
    varredura pode atrasar um tiro, e se falhar o bot segue caçando. Ela liga a
    variável, espera a linha `[MERCADOS]`, apaga a variável.
+
+### 2026-10-09, fim: eu empurrei a suíte VERMELHA outra vez, e por um arquivo compartilhado
+
+`8b76b9a` foi empurrado com **1 teste reprovando**, e eu reportei "1463 testes,
+0 falhas". A regra que este arquivo criou hoje mesmo — *"`# cancelled` conta
+como `# fail`"*, escrita depois de `5b20a44` — não me salvou, porque o defeito
+foi outro.
+
+**Duas rodadas de `npm test` escreveram no MESMO arquivo** (`.tmp/suite.out`).
+Uma era de antes da minha mudança no `tiroDeProvaArmado`; a outra, de depois.
+Eu li o arquivo e vi `1463 pass / 0 fail` — da rodada VELHA. A rodada nova, que
+o próprio runner reportou, dizia `1465 tests / 1464 pass / 1 fail`:
+
+    not ok 1180 - a trava do tiro de prova mora no nonce, e se desarma quando o tiro sai
+
+O teste afirmava `/já saiu tiro/`, a frase que eu tinha acabado de tirar por
+afirmar sucesso a partir do nonce. **O teste estava certo em reprovar**: ele
+guardava uma frase, eu troquei a frase, e ele avisou. Eu é que li a saída errada.
+
+E o número denunciava: **1463 contra 1465**. Duas contagens diferentes do mesmo
+comando, na mesma hora. Eu vi o `0 fail` e não vi que o total não fechava.
+
+A forma é a assinatura deste arquivo com outro rosto: **eu conferi uma cópia
+velha e chamei de medição.** `.tmp/suite.out` era um nome fixo, duas escritoras,
+e o leitor não sabia de qual rodada era o conteúdo — exatamente o defeito do
+`${caminho}.tmp` que custou uma gravação de cache em 07/10, e que foi consertado
+lá com nome único por gravação. Eu consertei no cache e repeti no meu próprio
+processo de verificação.
+
+O conserto é o mesmo: **nome único por rodada**, e nunca ler contagem de um
+arquivo que outra rodada pode estar escrevendo. `1465 testes, 1465 passando, 0
+falhas, 0 cancelados` — rodada única, arquivo próprio, conferido.
+
+E a lição que fica, porque é nova: **a contagem total é parte do resultado.**
+"0 falhas" com total diferente do esperado não é aprovação, é outro experimento.
