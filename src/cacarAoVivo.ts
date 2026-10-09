@@ -3052,11 +3052,34 @@ async function principal(): Promise<'parar' | void> {
             const leitura = lerRespostaDaCaca({ ok: r.ok, dados: r.dados ?? '0x', mensagem: 'mensagem' in r ? r.mensagem : undefined });
             passos.medicao = `${leitura.desfecho}${leitura.erro ? ` (${leitura.erro})` : ''}`;
 
-            if (!ENVIAR || !carteira || !donoCarteira) {
-                passos.envio = 'ENVIAR desligado: o resto não se testa';
+            /**
+             * O `[EM SECO]` PARAVA NO `ENVIAR`, e era a MESMA regra em dois
+             * lugares — a REGRA 3, agora dentro do conserto dela.
+             *
+             * Em 2026-10-09 eu movi o portao do laco quente para o ultimo
+             * degrau, para que o modo de observacao exercitasse a decisao
+             * inteira. E DEIXEI ESTE. O log dela de 20:24, com
+             * `CACA_ENVIAR=0`, imprimiu `envio: "ENVIAR desligado: o resto nao
+             * se testa"` — ou seja, o diagnostico que existe para conferir o
+             * caminho do tiro desistia exatamente quando ela o desligou para
+             * poder conferir.
+             *
+             * Sem CARTEIRA nao ha o que conferir (nem endereco de origem para
+             * ler saldo), e esse caso continua parando aqui. A falta de
+             * AUTORIZACAO, nao.
+             */
+            if (!carteira || !donoCarteira) {
+                passos.envio = !carteira
+                    ? 'não há carteira (CACA_CHAVE_PRIVADA ausente ou inválida): sem ela não existe '
+                      + 'endereço de origem, e o resto do caminho não tem o que conferir'
+                    : 'a carteira não expôs endereço — o resto do caminho não tem o que conferir';
                 log.info('[EM SECO] Caminho conferido até onde dava.', passos);
                 return;
             }
+            passos.envio = ENVIAR
+                ? 'LIGADO: o que passar daqui vira transação de verdade'
+                : 'DESLIGADO (CACA_ENVIAR != 1) — e o resto AQUI EMBAIXO foi conferido de todo jeito: '
+                  + 'saldo, decisão, gorjeta e montagem rodam igual, e só a transmissão está travada';
 
             // Saldo: a unica coisa que so era lida dentro do tiro, e por isso
             // aparecia como "ainda não li" para sempre.
@@ -3137,6 +3160,67 @@ async function principal(): Promise<'parar' | void> {
                 `, adiantaria ${emEth6(d88.adiantadoWei)} ETH`;
             passos.numDeUS$88Atiraria = d88.atira ? 'SIM' : `NÃO — ${d88.porque}`;
             passos.adiantadoCabe = d88.adiantavelWei > base ? 'sim' : 'NÃO — não conseguiria enviar';
+
+            /**
+             * A MONTAGEM, no ensaio — e com a TRANSMISSAO INTERCEPTADA.
+             *
+             * Ela pediu em 2026-10-09: *"Demonstre isso com um cenario
+             * controlado elegivel e transmissao interceptada, sem enviar
+             * transacao real"*. O ensaio media e decidia, mas nunca MONTAVA: o
+             * `cacar()` que iria na transacao nao era construido aqui, entao a
+             * frase "o caminho de tiro inteiro conferido" nao cobria o ultimo
+             * trecho.
+             *
+             * Agora monta — piso no contrato, limite de gas, bytes do envio — e
+             * entrega ao INTERCEPTADOR, que e um objeto com a mesma forma de
+             * quem transmite e que NAO transmite: ele conta a chamada e devolve
+             * o que teria sido mandado. Se algum dia alguem puser aqui a
+             * carteira de verdade, o contador fica em 1 e o teste reprova.
+             */
+            {
+                const premioDeEnsaio = new Decimal(88);
+                const lucroCruDeEnsaio = leitura.desfecho === 'mediu' && leitura.lucroCru !== undefined
+                    ? leitura.lucroCru : null;
+                const pisoDeEnsaio = pisoNoContrato(cobrir(alvo), lucroCruDeEnsaio);
+                const envioDeEnsaio = contrato.tipo === 'V1'
+                    ? codificarCacaV1({
+                        garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
+                        quantoCobrir: cobrir(alvo), poolDeVenda: poolParaVender(alvo, poolDeVendaV1),
+                        lucroMinimo: pisoDeEnsaio,
+                    })
+                    : codificarCacaV2({
+                        garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
+                        quantoCobrir: cobrir(alvo), isStablePool: false, lucroMinimo: pisoDeEnsaio,
+                    });
+                const gasDeEnsaio = limiteDeGasDoTiro({
+                    estimadoGas: null, saldoWei: saldoDeGasWei, baseFeeWei: base,
+                });
+                const interceptados: { to: string; bytes: number }[] = [];
+                const transmissorInterceptado = {
+                    sendTransaction: async (t: { to: string; data: string }) => {
+                        interceptados.push({ to: t.to, bytes: (t.data.length - 2) / 2 });
+                        return { hash: 'INTERCEPTADO: nada foi para a rede' };
+                    },
+                };
+                // O cenario elegivel: a decisao do tiro com os numeros DESTE
+                // instante, e o envio entregue ao interceptador.
+                if (d88.atira && gasDeEnsaio.limite !== null) {
+                    await transmissorInterceptado.sendTransaction({
+                        to: contrato.endereco, data: envioDeEnsaio,
+                    });
+                }
+                passos.montagem = `${(envioDeEnsaio.length - 2) / 2} bytes de calldata, piso no contrato `
+                    + `${pisoDeEnsaio} (${(Number(pisoDeEnsaio) / 1e6).toFixed(2)} na moeda da dívida se for 6 casas)`
+                    + `, limite de gás ${gasDeEnsaio.limite ?? 'NÃO definido'}`;
+                passos.transmissaoInterceptada = interceptados.length === 1
+                    ? `MONTEI e INTERCEPTEI 1 envio para ${interceptados[0]!.to} (${interceptados[0]!.bytes} bytes). `
+                      + 'NADA foi para a rede: o destino era um interceptador, não a carteira'
+                    : d88.atira
+                        ? `nenhum envio montado — ${gasDeEnsaio.porque}`
+                        : `a decisão recusou antes da montagem: ${d88.porque}`;
+                passos.oQueIssoPROVA = 'saldo lido, decisão tomada, gorjeta calculada e transação MONTADA '
+                    + 'com CACA_ENVIAR desligado — o caminho inteiro exercitado sem gastar gás';
+            }
 
             // A fronteira da faixa das migalhas: o maior premio pelo qual este
             // saldo ainda atira. E o numero que a estrategia escolhida pede, e
@@ -3364,8 +3448,27 @@ async function principal(): Promise<'parar' | void> {
                 ? 'a faixa SUSTENTÁVEL (regra normal). O tiro de prova está armado e atira SEM TETO, '
                   + 'mas isso é UM tiro para testar — não entra nesta conta'
                 : 'a faixa sustentável (regra normal)',
+            /**
+             * SEM FAIXA, INDETERMINADA — e nao uma contagem com piso ZERO.
+             *
+             * Ela foi explicita em 2026-10-09: *"Quando faltar saldo ou outro
+             * parametro necessario, publique a classificacao economica como
+             * indeterminada. Nao substitua dados ausentes por conclusoes sobre
+             * 'minha faixa', rentabilidade ou conveniencia de esperar."*
+             *
+             * O log das 20:24 dizia `naSUAFaixa: "71 com lucro acima de zero
+             * (nao sei a faixa agora)"` — uma contagem feita com piso ZERO, com
+             * a ressalva entre parenteses. Mas 71 e um NUMERO, e numero com
+             * ressalva continua sendo lido como numero: o censo de setembro
+             * mediu "a faixa dela e aberta" assim, com piso zero, e este
+             * arquivo registra que a afirmacao nao se sustentava.
+             *
+             * Agora: sem faixa, nenhuma contagem de faixa e publicada.
+             */
             naSUAFaixa: faixa === null
-                ? `${dentroDaFaixa.length} com lucro acima de zero (não sei a faixa agora)`
+                ? 'INDETERMINADO: sem a faixa de tiro (falta saldo ou cotação) não existe piso, e '
+                  + 'contar "lucro acima de zero" seria contar com piso ZERO — a medição que já '
+                  + 'produziu a conclusão errada do censo de setembro'
                 : `${dentroDaFaixa.length} de ${achadas.length} — entre ${
                     faixa.de === null ? 'qualquer lucro' : `US$ ${faixa.de.toFixed(2)}`} e ${
                     faixa.ate === null ? 'SEM TETO' : `US$ ${faixa.ate.toFixed(2)}`}`,
@@ -3418,8 +3521,15 @@ async function principal(): Promise<'parar' | void> {
                         f.ate === null ? 'NENHUM (alcança tudo)' : `US$ ${f.ate.toFixed(0)}`} | ` +
                         `alcança ${dentro.length} valendo US$ ${soma.toFixed(2)} ` +
                         `(~US$ ${soma.dividedBy(Math.max(diasOlhados, 0.01)).mul(30).toFixed(0)}/mês) | ` +
-                        `ABRE ${novas.length} novas valendo US$ ${somaNova.toFixed(2)} — ${
+                        `${faixa === null
+                            ? 'ABRE quantas? INDETERMINADO: "novas" é o que este saldo alcança E a faixa '
+                              + 'de agora não — e a faixa de agora não é conhecida (falta saldo ou cotação)'
+                            : `ABRE ${novas.length} novas valendo US$ ${somaNova.toFixed(2)}`} — ${
                             descreverLiquidantes(cNovas)}${(() => {
+                            // Sem faixa de agora, "fatia nova" nao existe: o
+                            // veredicto de dono sairia sobre um conjunto que foi
+                            // montado contra um piso que ninguem conhece.
+                            if (faixa === null) return '';
                             if (novas.length === 0) return '';
                             // ESTE veredicto e a espinha da decisao de nao colocar
                             // dinheiro, e era ele que estava medindo barulho: com
@@ -3495,7 +3605,15 @@ async function principal(): Promise<'parar' | void> {
             })(),
             ATENCAO: 'isto é OPORTUNIDADE que passou, não renda perdida: para cada uma dessas eu ainda teria de ' +
                 'ganhar a corrida de outro liquidador. É o teto do que a faixa pode dar, não o que ela daria',
-            oQueIssoQuerDizer: dentroDaFaixa.length === 0
+            // E O VEREDICTO SOBRE ESPERAR TAMBEM FICA INDETERMINADO SEM FAIXA.
+            // "Esperar e a resposta certa" e conclusao sobre conveniencia, e ela
+            // repousa inteira no piso. Sem piso, nao e uma conclusao fraca: e
+            // nenhuma conclusao.
+            oQueIssoQuerDizer: faixa === null
+                ? 'INDETERMINADO: sem a faixa de tiro eu não classifico. Não digo que vale esperar nem '
+                  + 'que não vale — o piso é o que separa oportunidade de poeira, e ele depende do saldo '
+                  + 'e da cotação. Volta a classificar quando os dois entrarem'
+                : dentroDaFaixa.length === 0
                 ? 'NENHUMA liquidação caiu na sua faixa em todo o período. Esperar não resolve: a faixa é que está no lugar errado'
                 : naFaixaPorMes >= 20
                     ? 'a faixa tem movimento de verdade. Esperar é a resposta certa'
@@ -3596,11 +3714,15 @@ async function principal(): Promise<'parar' | void> {
                 ? 'SEM PISO NENHUM (modo prova): conto tudo, inclusive o que dá prejuízo, '
                   + 'porque é nisso que ele atira'
                 : faixaAgora === null
-                ? `US$ 20,00 — não sei a faixa agora: ${
+                // "US$ 20,00" ERA NUMERO INVENTADO. O log das 20:24 publicou
+                // `pisoUsado: "US$ 20,00 — nao sei a faixa agora"`: as duas
+                // metades da frase se contradizem, e a primeira e a que fica na
+                // cabeca de quem le. Vinte dolares nao saiu de medicao nenhuma.
+                ? `INDETERMINADO — não sei a faixa agora: ${
                     !saldoJaLido ? 'ainda não consegui ler o gás da conta_bot'
                     : saldoDeGasWei === 0n ? 'a conta_bot está sem gás'
                     : precoDoEth() === null ? 'sem cotação do ETH'
-                    : 'algum freio barra qualquer prêmio'}`
+                    : 'algum freio barra qualquer prêmio'}. Sem piso eu não classifico nada abaixo nem acima dele`
                 : `US$ ${(pisoDoPlacar ?? new Decimal(0)).toFixed(2)}`,
             aconteceram: placar.total,
             valiamAPena: placar.valiam.length,

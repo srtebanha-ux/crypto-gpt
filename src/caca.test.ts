@@ -1456,14 +1456,25 @@ test('NENHUM caminho transmite com o envio desligado — lido no CÓDIGO', () =>
     // valor pega isso — é a mesma razão do teste que lê os gravadores do cache.
     const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
 
-    // (a) UM único ponto de transmissão no caçador.
-    const transmissoes = fonte.match(/\.sendTransaction\(/g) ?? [];
-    assert.equal(transmissoes.length, 1,
-        `o caçador tem de ter UM ponto de transmissão, achei ${transmissoes.length}`);
+    // (a) QUEM pode receber um `sendTransaction` no caçador é uma lista FECHADA
+    // de dois nomes, e só um deles fala com a rede.
+    //
+    // A primeira versão deste teste exigia UMA chamada e nada mais. Ela
+    // reprovou no mesmo dia, com razão: o ensaio em seco passou a montar o
+    // envio e entregá-lo ao INTERCEPTADOR, e isso é uma segunda chamada — de
+    // propósito. Contar chamadas não era a regra certa; a regra é QUEM recebe.
+    const recebedores = [...fonte.matchAll(/(\w+)\.sendTransaction\(/g)].map((m) => m[1]!);
+    assert.deepEqual([...new Set(recebedores)].sort(), ['carteira', 'transmissorInterceptado'],
+        `só a carteira e o interceptador podem receber um envio, achei: ${[...new Set(recebedores)].join(', ')}`);
+    assert.equal(recebedores.filter((r) => r === 'carteira').length, 1,
+        'e a carteira de verdade é chamada em UM lugar só');
 
     // (b) e o `soObservando` tem de cortar ANTES dele, com `continue`.
     const idxGuarda = fonte.indexOf('if (soObservando) {');
-    const idxEnvio = fonte.indexOf('.sendTransaction(');
+    // O ÍNDICE É DO ENVIO DE VERDADE, não do primeiro `.sendTransaction(` do
+    // arquivo: o interceptador do ensaio em seco aparece ANTES no texto, e
+    // mirar nele fazia este teste dizer que o portão não protegia nada.
+    const idxEnvio = fonte.indexOf('carteira.sendTransaction(');
     assert.ok(idxGuarda > 0, 'o portão de observação tem de existir');
     assert.ok(idxGuarda < idxEnvio,
         'o portão tem de vir ANTES da transmissão, senão ele não bloqueia nada');
@@ -1492,4 +1503,76 @@ test('NENHUM caminho transmite com o envio desligado — lido no CÓDIGO', () =>
         'e a comparação é estrita com "1": qualquer outro valor NÃO autoriza');
     assert.match(fonte, /const soObservando = !ENVIAR/,
         'e o modo de observação é exatamente a ausência dessa autorização');
+});
+
+test('o ENSAIO roda saldo, decisão, gorjeta e MONTAGEM com o envio desligado', () => {
+    // Ela pediu em 2026-10-09: *"Resolva a contradição entre o modo de
+    // observação prometido e [EM SECO]: 'ENVIAR desligado: o resto não se
+    // testa'. Verifique se o saldo, a decisão, a gorjeta e a montagem são
+    // executados também nesse modo."*
+    //
+    // Era a REGRA 3 dentro do conserto dela: eu movi o portão do laço quente
+    // para o último degrau e DEIXEI o do ensaio. Com `CACA_ENVIAR=0` o
+    // diagnóstico que existe para conferir o caminho do tiro desistia
+    // exatamente quando ela o desligou para poder conferir.
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+
+    // (a) a frase que desistia não existe mais.
+    assert.ok(!/ENVIAR desligado: o resto não se testa/.test(fonte),
+        'o ensaio não pode mais desistir por falta de autorização de envio');
+
+    // (b) o que PARA o ensaio é a falta de CARTEIRA, não a falta de ENVIAR:
+    // sem carteira não há endereço de origem, e aí não há o que conferir.
+    assert.match(fonte, /if \(!carteira \|\| !donoCarteira\) \{/,
+        'o ensaio para por falta de carteira, e só');
+
+    // (c) e depois desse ponto ele lê SALDO, decide e MONTA.
+    const i = fonte.indexOf('if (!carteira || !donoCarteira) {');
+    const depois = fonte.slice(i, fonte.indexOf('[MERCADO] Censo das liquidações'));
+    assert.match(depois, /getBalance\(donoCarteira\)/, 'lê o saldo');
+    assert.match(depois, /decidirTiro\(\{/, 'toma a decisão do tiro');
+    assert.match(depois, /gorjetaQueMaximizaOValor\(\{/, 'calcula a gorjeta pela curva medida');
+    assert.match(depois, /pisoNoContrato\(cobrir\(alvo\)/, 'calcula o piso que iria no contrato');
+    assert.match(depois, /codificarCacaV1\(\{|codificarCacaV2\(\{/, 'MONTA o calldata do cacar()');
+    assert.match(depois, /limiteDeGasDoTiro\(\{/, 'dimensiona o limite de gás');
+
+    // (d) E A TRANSMISSÃO É INTERCEPTADA: o destino do envio montado é um
+    // objeto que conta a chamada e não fala com a rede. A carteira de verdade
+    // não pode aparecer nesse trecho.
+    assert.match(depois, /transmissorInterceptado/, 'o envio montado vai para o interceptador');
+    assert.ok(!/carteira\.sendTransaction/.test(depois),
+        'o ensaio NUNCA pode chamar a carteira de verdade');
+    assert.match(depois, /INTERCEPTADO: nada foi para a rede/);
+});
+
+test('o interceptador tem a MESMA forma de quem transmite, e não transmite', async () => {
+    // O cenário controlado, com as funções de verdade: um envio é montado e
+    // entregue a algo com a assinatura de `sendTransaction`. Se o objeto
+    // trocado por engano fosse a carteira, este teste não notaria — por isso
+    // ele afirma as duas coisas: que a chamada ACONTECEU (o caminho foi
+    // exercitado) e que NADA saiu (o retorno é o do interceptador).
+    const interceptados: { to: string; bytes: number }[] = [];
+    const transmissorInterceptado = {
+        sendTransaction: async (t: { to: string; data: string }) => {
+            interceptados.push({ to: t.to, bytes: (t.data.length - 2) / 2 });
+            return { hash: 'INTERCEPTADO: nada foi para a rede' };
+        },
+    };
+    // Um `cacar()` montado de verdade, com o piso de verdade.
+    const cobrir = 1_081_950_000n;
+    const envio = codificarCacaV1({
+        garantia: '0x4200000000000000000000000000000000000006',
+        divida: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+        devedor: '0x6b950f306f987ff8fb9808886977ca2ef3af2c28',
+        quantoCobrir: cobrir,
+        poolDeVenda: '0xcdac0d6c6c59727a65f871236188350531885c43',
+        lucroMinimo: pisoNoContrato(cobrir, null),
+    });
+    const r = await transmissorInterceptado.sendTransaction({
+        to: '0x9066b0ba6783322FEdE3BF5cd520C0f3A9AF3C78', data: envio,
+    });
+    assert.equal(interceptados.length, 1, 'o caminho foi exercitado até o ponto de envio');
+    assert.equal(interceptados[0]!.bytes, 196, 'e o calldata montado tem o tamanho real das 39');
+    assert.match(r.hash, /INTERCEPTADO/, 'e o que voltou NÃO é hash de transação');
+    assert.ok(!/^0x[0-9a-f]{64}$/i.test(r.hash), 'nada que pareça hash de verdade pode sair daqui');
 });
