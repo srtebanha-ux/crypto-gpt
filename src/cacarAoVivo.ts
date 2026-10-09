@@ -4910,12 +4910,35 @@ async function principal(): Promise<'parar' | void> {
                         // 0,3 ja e 2,2x o p90 da frente do bloco e 6,4x o que o
                         // vencedor do alvo de US$ 49,33 pagou.
                         //
-                        // Em posicao JA liquidavel o teto nao entra: ali o alvo
-                        // e certo, a gorjeta e paga uma vez, e perder por lance
-                        // seria perder dinheiro na mesa.
-                        tetoDaGorjetaWei: vaoCruzar.has(alvo.devedor.toLowerCase())
-                            ? BigInt(Math.round(TETO_GORJETA_ESPECULATIVA_GWEI * 1e9))
-                            : undefined,
+                        // 2026-10-09: O TETO PASSOU A VALER PARA OS DOIS TIROS.
+                        //
+                        // O que estava escrito aqui era: "em posicao JA
+                        // liquidavel o teto nao entra: ali o alvo e certo, a
+                        // gorjeta e paga uma vez, e perder por lance seria
+                        // perder dinheiro na mesa". A premissa — que lance
+                        // maior compra lugar na frente — foi MEDIDA e e FALSA.
+                        //
+                        // Spearman entre posicao no bloco e gorjeta, nos 33
+                        // blocos em que o bot atirou: +0,300 (num leilao por
+                        // lance seria perto de -1). Pagando 0,300 gwei o bot
+                        // ficou na posicao mediana 766, com 1.825 das 1.943
+                        // transacoes da frente pagando MENOS. O sequenciador da
+                        // Base enfileira por ordem de CHEGADA.
+                        //
+                        // O log dela de 2026-10-09 11:47 mostra o preco disso
+                        // no tiro NORMAL: `gorjeta 6.06 gwei (AMORDACADA —
+                        // queria 20.11), adiantaria 0.005184 ETH` num premio de
+                        // US$ 88. Seis gwei por lugar nenhum, e 46% do saldo
+                        // congelado por tiro.
+                        //
+                        // E O FEEDBACK NAO MORRE: `perdasSeguidas` so sobe em
+                        // tiro sobre posicao JA liquidavel, ou seja, so quando
+                        // uma corrida de verdade e perdida. Cada derrota dessas
+                        // DOBRA o teto. Entao sem evidencia de corrida perdida
+                        // o lance e o medido; com evidencia, ele sobe sozinho,
+                        // e a evidencia vem da corrente e nao do meu palpite.
+                        tetoDaGorjetaWei: BigInt(Math.round(
+                            TETO_GORJETA_ESPECULATIVA_GWEI * 1e9 * 2 ** Math.min(6, perdasSeguidas))),
                     });
                     const fracao = decisao.fracaoDoLucro;
                     const risco = decisao.risco;

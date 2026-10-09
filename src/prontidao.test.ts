@@ -1535,3 +1535,55 @@ test('o gás da reversão é DOIS números, e juntá-los faria um errar para o l
     const ethMedido = Number(comMedido) / 1e18;
     assert.ok(ethMedido > 0.00011 && ethMedido < 0.00013, `${ethMedido}`);
 });
+
+test('o teto da gorjeta vale para os DOIS tiros, e dobra a cada corrida perdida', () => {
+    // A PREMISSA QUE CAIU: até 2026-10-09 o teto só valia para o tiro
+    // especulativo, "porque em posição já liquidável perder por lance seria
+    // perder dinheiro na mesa". Medido: lance não compra posição na Base
+    // (Spearman posição × gorjeta = +0,300 em 33 blocos; 1.825 das 1.943
+    // transações à nossa frente pagaram MENOS que nós).
+    //
+    // O log de produção de 2026-10-09 11:47 mostrou o custo: num prêmio de
+    // US$ 88 o tiro NORMAL queria 20,11 gwei e pagou 6,06, congelando
+    // 0,005184 ETH — 46% do saldo dela por tiro.
+    const ambiente = {
+        lucroUsd: new Decimal(88),
+        precoDoEthUsd: new Decimal(2500.67),
+        saldoWei: 11_142_000_000_000_000n, // 0,011142 ETH, o saldo do log
+        baseFeeWei: 20_000_000n,
+    };
+    const teto = (perdas: number) =>
+        BigInt(Math.round(GORJETA_DA_FRENTE_GWEI * 1e9 * 2 ** Math.min(6, perdas)));
+
+    const semTeto = decidirTiro(ambiente);
+    const comTeto = decidirTiro({ ...ambiente, tetoDaGorjetaWei: teto(0) });
+    assert.ok(semTeto.prioridadeWei > comTeto.prioridadeWei,
+        'sem teto o tiro normal paga mais — senão este teste não prova nada');
+    assert.equal(comTeto.prioridadeWei, teto(0), 'o teto tem de valer no tiro normal');
+    assert.equal(comTeto.atira, true, `cortar a gorjeta não pode fechar o portão: ${comTeto.porque}`);
+
+    // E O FEEDBACK CONTINUA VIVO: cada corrida de verdade perdida dobra o teto.
+    // `perdasSeguidas` só sobe em tiro sobre posição JÁ liquidável, então isto
+    // responde a evidência da corrente, não a palpite meu.
+    assert.equal(teto(1), teto(0) * 2n);
+    assert.equal(teto(3), teto(0) * 8n);
+    // Seis derrotas depois o teto é 1,28 gwei — 27x o que o vencedor do alvo
+    // real de US$ 49,33 pagou (0,046688 gwei) e 9x o p90 da frente do bloco.
+    // Ele AINDA corta a política (que pedia 5,29 gwei neste prêmio), e isso é
+    // o certo: a política pede lance por uma premissa que a medição derrubou.
+    const depoisDeSeis = decidirTiro({ ...ambiente, tetoDaGorjetaWei: teto(6) });
+    assert.equal(depoisDeSeis.prioridadeWei, teto(6));
+    assert.ok(depoisDeSeis.prioridadeWei > comTeto.prioridadeWei * 60n,
+        'a escada tem de levar o lance a mais de 60x o medido se houver evidência');
+    assert.ok(Number(teto(6)) / 1e9 > 0.046688 * 20,
+        'e o fim da escada tem de passar com folga o que o vencedor real pagou');
+    // E o teto não cresce para sempre: 6 dobras é o fim da escada.
+    assert.equal(teto(9), teto(6));
+
+    // O que isto vale em munição, com o saldo dela: uma errada a 6,06 gwei
+    // contra uma a 0,02 gwei.
+    const caro = custoDeUmaDerrota(6_060_000_000n, 20_000_000n, GAS_MEDIDO_DE_UMA_REVERSAO);
+    const medido = custoDeUmaDerrota(teto(0), 20_000_000n, GAS_MEDIDO_DE_UMA_REVERSAO);
+    assert.ok(Number(caro) / Number(medido) > 100,
+        `a errada tem de ficar 100x mais barata (ficou ${(Number(caro) / Number(medido)).toFixed(0)}x)`);
+});

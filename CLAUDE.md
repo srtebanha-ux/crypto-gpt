@@ -2654,3 +2654,31 @@ caminho crítico, e está medido como custo e não como defeito: a medição por
 `eth_call` dos dois contratos antes de enviar. Ela é o portão que distingue
 "ainda não cruzou" de "meu contrato quebrou" — tirá-la seria enfraquecer
 controle para produzir atividade, e isso não se faz.
+
+### 2026-10-09, 11:47: o log dela mostrou o preço da premissa que caiu
+
+O log trouxe, no tiro NORMAL de um prêmio de US$ 88:
+
+    gorjeta 6.06 gwei (AMORDAÇADA — queria 20.11), adiantaria 0.005184 ETH
+    osBotoes: gás 850000 | gorjeta 0.4 do lucro | risco 0.25→0.8 | aceita prejuízo SIM
+
+**Seis gwei por lugar nenhum, e 46% do saldo congelado por tiro.** O teto medido
+só valia para o tiro especulativo, com este comentário no código: *"em posição
+já liquidável o teto não entra: ali o alvo é certo, e perder por lance seria
+perder dinheiro na mesa"*. A premissa é a mesma que caiu hoje — lance não compra
+posição na Base — então o teto passou a valer para os DOIS tiros.
+
+**E o feedback não morreu:** `perdasSeguidas` só sobe em tiro sobre posição JÁ
+liquidável, isto é, só quando uma corrida de verdade é perdida. Cada derrota
+dessas DOBRA o teto, até 6 dobras (1,28 gwei — 27x o que o vencedor do alvo real
+de US$ 49,33 pagou). Sem evidência de corrida perdida, o lance é o medido; com
+evidência, ele sobe sozinho, e a evidência vem da corrente.
+
+Medido com o saldo dela: uma errada a 6,06 gwei custa **160x** uma a 0,02 gwei.
+
+E duas coisas que o log confirmou sem eu precisar pedir:
+- **O RPC de produção é `base-mainnet.g.alchemy.com`.** Então o `eth_getLogs`
+  que me bloqueou aqui funciona LÁ: a descoberta dos mercados do Morpho pode
+  rodar como ferramenta do bot, com o log dela de saída.
+- `maisFragilA "[lido há 0s]"`, `essasDuasTabelasTem "303s de idade"` e
+  `oscilouAntes` apareceram: os consertos de 08/10 estão em produção.
