@@ -430,6 +430,71 @@ export function custoDeUmaDerrota(
 }
 
 /**
+ * A CONFIGURACAO DA APOSTA, lida do ambiente num lugar so.
+ *
+ * Existe porque a dona do bot exigiu que a prova do conserto fosse o
+ * COMPORTAMENTO inteiro — "configuracao carregada, calculo economico, decisao
+ * de enviar e resultado esperado" — e nao "existe um `Decimal.max` no codigo".
+ * Configuracao lida dentro de uma closure do cacador nao se testa de ponta a
+ * ponta; esta, sim, e e a MESMA que a producao usa (REGRA 3: um lugar).
+ *
+ * Numero torto MORRE no boot, por `numeroDoAmbiente`: `CACA_APOSTA_MINIMA_USD`
+ * com virgula decimal viraria `NaN` em silencio, e este arquivo registra o que
+ * `NaN` faz com um portao de dinheiro.
+ */
+export function politicaDaAposta(env: Record<string, string | undefined> = process.env) {
+    return {
+        /** Desligada por `CACA_ATIRAR_NA_ESCRITA=0`: a aposta gasta gas quando erra. */
+        ligada: env.CACA_ATIRAR_NA_ESCRITA !== '0',
+        /** Teto da gorjeta do tiro especulativo, em gwei. Medido, nao escolhido. */
+        tetoDaGorjetaGwei: numeroDoAmbiente(
+            'CACA_GORJETA_ESPECULATIVA_GWEI',
+            env.CACA_GORJETA_ESPECULATIVA_GWEI,
+            GORJETA_DA_FRENTE_GWEI,
+        ),
+        /**
+         * O piso ESCRITO, ou `null` quando nenhuma variavel existe.
+         *
+         * `null` NAO e zero: zero escrito e uma decisao ("qualquer premio"), e a
+         * ausencia e outra coisa ("decide a aritmetica"). Confundir as duas foi
+         * o defeito que apagou os sete tiros do placar.
+         */
+        minimaEscolhidaUsd: env.CACA_APOSTA_MINIMA_USD !== undefined
+            ? new Decimal(numeroDoAmbiente(
+                'CACA_APOSTA_MINIMA_USD', env.CACA_APOSTA_MINIMA_USD, 0))
+            : null,
+    };
+}
+
+/**
+ * O CUSTO DE UMA ERRADA, em dolares — o numerador de todo o resto.
+ *
+ * `null` no preco devolve ZERO, e zero aqui quer dizer "nao medi", nao "de
+ * graca": quem le isto tem de tratar a ausencia como falta de conta. E
+ * `pisoEfetivoDaAposta` trata — devolve piso infinito, que nao autoriza nada.
+ *
+ * Usa `GAS_MEDIDO_DE_UMA_REVERSAO` (550k, dos 31 recibos reais) e NAO o
+ * `GAS_DE_UMA_REVERSAO` do freio de sobrevivencia: aqui errar para cima sobe o
+ * piso e DESLIGA a estrategia, que foi o que US$ 20 fez em 07/10.
+ */
+export function custoDeUmaErradaUsd(
+    tetoDaGorjetaGwei: number,
+    baseFeeWei: bigint,
+    precoDoEthUsd: Decimal | null,
+): Decimal {
+    if (precoDoEthUsd === null || !precoDoEthUsd.isFinite() || precoDoEthUsd.lessThanOrEqualTo(0)) {
+        return new Decimal(0);
+    }
+    if (!Number.isFinite(tetoDaGorjetaGwei) || tetoDaGorjetaGwei < 0) return new Decimal(0);
+    const wei = custoDeUmaDerrota(
+        BigInt(Math.round(tetoDaGorjetaGwei * 1e9)),
+        baseFeeWei,
+        GAS_MEDIDO_DE_UMA_REVERSAO,
+    );
+    return new Decimal(wei.toString()).dividedBy(1e18).mul(precoDoEthUsd);
+}
+
+/**
  * A maior gorjeta que cabe no saldo, sem apostar a carteira numa tacada.
  *
  * Existe porque o limite do lance nao pode ser so economico ("quanto do lucro

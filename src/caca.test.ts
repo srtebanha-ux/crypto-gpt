@@ -6,7 +6,7 @@ import { Decimal } from 'decimal.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CUSTO_DA_LISTA_QUENTE_MS } from './cacarAoVivo';
-import { ritmoDaPostura as oRitmo, type Postura as TipoDePostura } from './adiantar';
+import { ritmoDaPostura as oRitmo, pisoEfetivoDaAposta, type Postura as TipoDePostura } from './adiantar';
 import { quantoPedirEmprestado, FATIA_COBRIVEL, maiorQuedaDesdeABase, qualVarredura, custoMensalEmCUs, repartirPorFragilidade, margemQueDecideORitmo, poolParaVender, SEM_VENDA, pisoDoLucroEmUnidadesCruas, oPrecoCancela, oQueUmaQuedaRenderia, comoLerAsQuedas,
     viaDeQuebra, oQueUmaAltaRenderia, altaEquivalente, contarVias, comoLerABussola, familiaDoAtivo,
     cabemNoCiclo, hostDoRpc } from './cacarAoVivo';
@@ -1347,29 +1347,41 @@ test('o env só pode ENDURECER o piso da aposta, nunca descer abaixo do equilíb
     // MEDIDO: 31 apostas, US$ 13,83, zero acertos, com o piso em US$ 10
     // liberando alvos que exigiam acertar 15,8x mais que o acaso.
     //
-    // A regra, e ela é a que o código implementa: o piso efetivo é o MAIOR
-    // entre o equilíbrio e o escrito. A variável exige MAIS, nunca menos.
-    const pisoEfetivo = (escolhido: Decimal | null, equilibrio: Decimal, aceitaNegativa = false) => {
-        if (escolhido === null) return equilibrio;
-        if (aceitaNegativa) return escolhido;
-        return Decimal.max(escolhido, equilibrio);
-    };
+    // ESTE TESTE FOI REESCRITO EM 2026-10-09, e o motivo é ela: a primeira
+    // versão **copiava a regra aqui dentro** (um `Decimal.max` local) e afirmava
+    // sobre a cópia. *"Não basta testar que existe Decimal.max no código."* Uma
+    // cópia provaria a cópia — a REGRA 3 do CLAUDE.md, na forma mais cara.
+    //
+    // Agora a regra é a função de verdade, `pisoEfetivoDaAposta`, e o caminho
+    // inteiro (ambiente -> custo -> piso -> decisão de enviar) está em
+    // `src/decisaoDaAposta.test.ts`, com os números reais do log.
     const equilibrio = new Decimal('158.03'); // o medido em 08/10
     // o caso REAL que eu não consigo ver: variável frouxa não afrouxa o piso
-    assert.equal(pisoEfetivo(new Decimal(10), equilibrio).toFixed(2), '158.03');
-    assert.equal(pisoEfetivo(new Decimal(0), equilibrio).toFixed(2), '158.03');
+    assert.equal(pisoEfetivoDaAposta(new Decimal(10), equilibrio.dividedBy(355), 355).toFixed(2), '158.03');
+    assert.equal(pisoEfetivoDaAposta(new Decimal(0), equilibrio.dividedBy(355), 355).toFixed(2), '158.03');
     // e endurecer continua funcionando: a decisão dela de exigir mais vale
-    assert.equal(pisoEfetivo(new Decimal(500), equilibrio).toFixed(2), '500.00');
+    assert.equal(pisoEfetivoDaAposta(new Decimal(500), equilibrio.dividedBy(355), 355).toFixed(2), '500.00');
     // sem variável, o calculado manda
-    assert.equal(pisoEfetivo(null, equilibrio).toFixed(2), '158.03');
-    // e a porta de escape existe, com nome que ninguém abre por acidente
-    assert.equal(pisoEfetivo(new Decimal(10), equilibrio, true).toFixed(2), '10.00');
+    assert.equal(pisoEfetivoDaAposta(null, equilibrio.dividedBy(355), 355).toFixed(2), '158.03');
 
-    // E o CÓDIGO tem de implementar isto, não só este teste: o defeito seria um
-    // `??` em vez de um `max`, que é exatamente o que estava lá antes.
+    // E NÃO EXISTE MAIS PORTA DE ESCAPE. A versão anterior deste teste afirmava
+    // que ela existia (`CACA_ACEITA_APOSTA_NEGATIVA`), porque eu a havia
+    // criado. Ela mandou remover: *"Não introduza nem mantenha um escape para
+    // operações de valor esperado negativo sem justificativa explícita e
+    // autorização minha."* Então o teste passou a exigir o contrário — e vale
+    // para TODO o código, não só para o nome que eu escolhi na época.
     const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
     assert.match(fonte, /premioMinimoUsd:\s*pisoDaAposta\(\)/,
         'o portão da aposta tem de ler `pisoDaAposta()`, não a variável crua');
-    assert.match(fonte, /Decimal\.max\(APOSTA_MINIMA_ESCOLHIDA,\s*equilibrio\)/,
-        'o piso efetivo tem de ser o MAIOR entre o escrito e o equilíbrio');
+    assert.match(fonte, /pisoEfetivoDaAposta\(APOSTA_MINIMA_ESCOLHIDA,\s*custoPorErradaUsd\(\)\)/,
+        'o piso efetivo tem de sair da função pura, não de uma conta repetida aqui');
+    for (const arquivo of ['cacarAoVivo.ts', 'adiantar.ts', 'prontidao.ts']) {
+        const texto = readFileSync(join(__dirname, arquivo), 'utf8');
+        // A única menção tolerada é em comentário, contando que ela foi removida.
+        const codigo = texto.split('\n').filter((l) => !l.trim().startsWith('*') && !l.trim().startsWith('//'));
+        assert.ok(
+            !codigo.some((l) => /CACA_ACEITA_APOSTA_NEGATIVA|APOSTA_SEM_PISO/.test(l)),
+            `${arquivo} não pode ter chave de ambiente que autorize aposta de valor esperado negativo`,
+        );
+    }
 });

@@ -6,8 +6,8 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
-import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO } from './prontidao';
+import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd } from './prontidao';
 import {
     lerRecibo, placarVazio, contarTiro, comoEstaIndo, placarParaCache, placarDoCache,
 } from './tiros';
@@ -2044,21 +2044,13 @@ async function principal(): Promise<'parar' | void> {
      * ver `GORJETA_DA_FRENTE_GWEI` em `prontidao.ts` para a tabela das 90
      * amostras. `CACA_GORJETA_ESPECULATIVA_GWEI` ajusta.
      */
-    const TETO_GORJETA_ESPECULATIVA_GWEI = numeroDoAmbiente(
-        'CACA_GORJETA_ESPECULATIVA_GWEI',
-        process.env.CACA_GORJETA_ESPECULATIVA_GWEI,
-        GORJETA_DA_FRENTE_GWEI);
+    const TETO_GORJETA_ESPECULATIVA_GWEI = politicaDaAposta().tetoDaGorjetaGwei;
     /**
      * O premio minimo para a aposta valer, em dolares. Aritmetica, nao cautela:
      * ver `APOSTA_MINIMA_USD` em `adiantar.ts` para a tabela medida.
      * `CACA_APOSTA_MINIMA_USD=0` libera qualquer premio.
      */
-    const APOSTA_MINIMA_ESCOLHIDA = process.env.CACA_APOSTA_MINIMA_USD !== undefined
-        ? new Decimal(numeroDoAmbiente(
-            'CACA_APOSTA_MINIMA_USD',
-            process.env.CACA_APOSTA_MINIMA_USD,
-            APOSTA_MINIMA_USD.toNumber()))
-        : null;
+    const APOSTA_MINIMA_ESCOLHIDA = politicaDaAposta().minimaEscolhidaUsd;
     /**
      * "NAO EXISTE PERDER, E SIM SO ACERTAR" — a frase dela, em codigo.
      *
@@ -2084,15 +2076,15 @@ async function principal(): Promise<'parar' | void> {
      * `CACA_APOSTA_MINIMA_USD` continua mandando, inclusive `=0` para liberar
      * qualquer premio. A conta fica no log de qualquer jeito.
      */
+    /** O custo de UMA errada, em dolares, com os botoes de agora. */
+    const custoPorErradaUsd = (): Decimal => custoDeUmaErradaUsd(
+        TETO_GORJETA_ESPECULATIVA_GWEI,
+        baseFeeAtual ?? 20_000_000n,
+        precoDoEth(),
+    );
     const pisoQueSePaga = (): Decimal => {
-        const preco = precoDoEth();
-        if (preco === null) return APOSTA_MINIMA_USD;
-        const custoWei = custoDeUmaDerrota(
-            BigInt(Math.round(TETO_GORJETA_ESPECULATIVA_GWEI * 1e9)),
-            baseFeeAtual ?? 20_000_000n,
-            GAS_MEDIDO_DE_UMA_REVERSAO,
-        );
-        const custoUsd = new Decimal(custoWei.toString()).dividedBy(1e18).mul(preco);
+        const custoUsd = custoPorErradaUsd();
+        if (custoUsd.lessThanOrEqualTo(0)) return APOSTA_MINIMA_USD;
         const piso = premioQueSePagaNoAcaso(custoUsd);
         // Sem cotacao ou com conta torta volta ao numero escrito, que e
         // conhecido — ausencia nao vira zero nem vira piso infinito.
@@ -2125,17 +2117,19 @@ async function principal(): Promise<'parar' | void> {
      * sim so acertar" — as palavras dela — deixa de ser configuracao e passa a
      * ser estrutura.
      *
-     * E a porta de escape existe, com nome que ninguem abre por acidente:
-     * `CACA_ACEITA_APOSTA_NEGATIVA=1`. Ela nao e cautela removida — e a decisao
-     * dela, declarada, em vez de um numero esquecido num painel.
+     * E NAO EXISTE ESCAPE. Eu tinha criado um — `CACA_ACEITA_APOSTA_NEGATIVA=1`
+     * — argumentando que "e a decisao dela, declarada". Ela mandou remover:
+     * *"Nao introduza nem mantenha um escape para operacoes de valor esperado
+     * negativo sem justificativa explicita e autorizacao minha."* Eu nao tinha
+     * autorizacao; eu tinha uma racionalizacao.
+     *
+     * Uma variavel de ambiente que autoriza perder dinheiro na media e um
+     * numero esquecido num painel esperando para ser esquecido. Se algum dia
+     * houver razao para apostar abaixo do equilibrio, isso volta como pedido
+     * explicito e com a razao escrita aqui — nao como chave.
      */
-    const ACEITA_APOSTA_NEGATIVA = process.env.CACA_ACEITA_APOSTA_NEGATIVA === '1';
-    const pisoDaAposta = (): Decimal => {
-        const equilibrio = pisoQueSePaga();
-        if (APOSTA_MINIMA_ESCOLHIDA === null) return equilibrio;
-        if (ACEITA_APOSTA_NEGATIVA) return APOSTA_MINIMA_ESCOLHIDA;
-        return Decimal.max(APOSTA_MINIMA_ESCOLHIDA, equilibrio);
-    };
+    const pisoDaAposta = (): Decimal =>
+        pisoEfetivoDaAposta(APOSTA_MINIMA_ESCOLHIDA, custoPorErradaUsd());
 
     /**
      * O gas que resta, em wei. Lido de tempos em tempos, nao a cada tiro.
@@ -2185,16 +2179,19 @@ async function principal(): Promise<'parar' | void> {
             ? (() => {
                 const equilibrio = pisoQueSePaga();
                 const vale = pisoDaAposta();
+                // Piso sem numero quer dizer que o custo de uma errada nao foi
+                // medido (sem preco do ETH). A linha tem de dizer isso: "US$
+                // Infinity" seria etiqueta que nao descreve o estado.
+                if (!vale.isFinite()) {
+                    return 'NENHUMA APOSTA agora: não medi o custo de uma errada (sem preço do ETH no '
+                        + 'mapa do oráculo), e sem o custo não existe a conta que autoriza apostar. '
+                        + 'Volta sozinho quando o preço entrar.';
+                }
                 const comum = `o ponto de equilíbrio é US$ ${equilibrio.toFixed(2)} `
                     + '(custo por errada × 355 blocos entre escritas: abaixo dele a aposta '
                     + 'perde dinheiro por aritmética)';
                 if (APOSTA_MINIMA_ESCOLHIDA === null) {
                     return `US$ ${vale.toFixed(2)} — CALCULADO, nenhuma variável escrita. ${comum}`;
-                }
-                if (ACEITA_APOSTA_NEGATIVA) {
-                    return `US$ ${vale.toFixed(2)} — ESCRITO em CACA_APOSTA_MINIMA_USD e `
-                        + 'CACA_ACEITA_APOSTA_NEGATIVA=1 permitiu descer abaixo do equilíbrio. '
-                        + `ATENÇÃO: ${comum}`;
                 }
                 return vale.greaterThan(APOSTA_MINIMA_ESCOLHIDA)
                     ? `US$ ${vale.toFixed(2)} — o EQUILÍBRIO mandou: `

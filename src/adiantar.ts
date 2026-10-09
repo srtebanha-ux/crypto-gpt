@@ -523,6 +523,58 @@ export function premioQueSePagaNoAcaso(
 }
 
 /**
+ * O PISO QUE DE FATO VALE: o `env` so pode ENDURECER.
+ *
+ * Vive aqui, exportada e pura, porque a dona do bot exigiu — com razao — que a
+ * prova nao fosse "existe um `Decimal.max` no codigo" e sim o COMPORTAMENTO
+ * inteiro: configuracao carregada -> conta economica -> decisao de enviar.
+ * Regra que mora dentro de uma closure nao se testa de ponta a ponta.
+ *
+ * POR QUE O `env` NAO PODE AFROUXAR. MEDIDO em 2026-10-08: 31 apostas,
+ * US$ 15,45 (0,006280 ETH), ZERO acertos, com `CACA_APOSTA_MINIMA_USD=10`
+ * liberando alvos que exigiam acertar 15,8x mais que o acaso. A causa raiz nao
+ * foi bug nem azar: foi a regra de decisao, e a regra era minha.
+ *
+ * E NAO EXISTE ESCAPE. Eu havia criado `CACA_ACEITA_APOSTA_NEGATIVA=1`
+ * argumentando que seria "a decisao dela, declarada". Ela mandou remover: eu
+ * nao tinha autorizacao, tinha racionalizacao. Uma variavel que autoriza perder
+ * dinheiro na media e um numero esperando para ser esquecido num painel.
+ *
+ * `escolhidoUsd === null` quer dizer "nenhuma variavel escrita" — e aí vale o
+ * equilibrio. NAO confundir com zero: zero escrito tambem resulta no
+ * equilibrio, mas pela regra do maximo, nao por ausencia.
+ *
+ * E CUSTO QUE NAO SE MEDE DEVOLVE PISO INFINITO, ou seja: nao aposta.
+ *
+ * Isto nao e zelo — e o conserto de um defeito que EU acabei de introduzir ao
+ * extrair esta funcao. `custoPorErradaUsd` no cacador devolve ZERO quando
+ * `precoDoEth()` e `null` (o mapa de precos do oraculo da Aave ainda nao
+ * encheu), e o premio da aposta NAO depende desse preco: ele vem de
+ * `lucroEstimado(dividaBase)`, que a Aave devolve em dolar. Com equilibrio zero
+ * e nenhuma variavel escrita, o piso virava ZERO e **qualquer premio passava** —
+ * exatamente o caso US$ 10,40 que custou as 31 apostas, agora liberado por um
+ * mapa de precos vazio em vez de por uma variavel.
+ *
+ * Ausencia virando zero e o zero autorizando gasto: a assinatura deste projeto,
+ * dentro do conserto dela. O lado seguro aqui e o que o caminho quente ja usa
+ * para a mesma falta (`precoDoEth === null` -> "o piso de lucro barraria tudo"):
+ * sem conta nao se gasta.
+ */
+export function pisoEfetivoDaAposta(
+    escolhidoUsd: Decimal | null,
+    custoPorErradaUsd: Decimal,
+    blocosPorEscrita: number = BLOCOS_POR_ESCRITA,
+): Decimal {
+    const equilibrio = premioQueSePagaNoAcaso(custoPorErradaUsd, blocosPorEscrita);
+    // Equilibrio zero nao e "de graca": e "nao consegui medir o custo". O custo
+    // de uma errada nunca e zero de verdade — gas e preco sao os dois positivos.
+    if (equilibrio.lessThanOrEqualTo(0)) return new Decimal(Infinity);
+    if (escolhidoUsd === null) return equilibrio;
+    if (!escolhidoUsd.isFinite() || escolhidoUsd.isNegative()) return equilibrio;
+    return Decimal.max(escolhidoUsd, equilibrio);
+}
+
+/**
  * Quantas vezes melhor que o acaso a previsao precisa ser, para este premio.
  *
  * `1` ou menos quer dizer "paga sozinho". E o numero que responde "vale
@@ -588,6 +640,17 @@ export function atirarNaEscritaIminente(entrada: {
     // chance cega de 0,282% (uma escrita de oraculo a cada 355 blocos). Premio
     // pequeno perde dinheiro por desenho, por boa que seja a previsao.
     const piso = entrada.premioMinimoUsd ?? APOSTA_MINIMA_USD;
+    // PISO QUE NAO E NUMERO quer dizer "nao consegui medir o custo de uma
+    // errada" (ver `pisoEfetivoDaAposta`). Sem o custo nao existe a aritmetica
+    // que autoriza a aposta, e a frase tem de DIZER isso em vez de publicar
+    // "a aposta se paga a partir de US$ Infinity".
+    if (!piso.isFinite()) {
+        return {
+            atira: false,
+            porque: 'não consegui medir o custo de uma errada (sem preço do ETH), e sem ele não há '
+                + 'a conta que autoriza apostar. Ausência não é autorização',
+        };
+    }
     if (piso.greaterThan(0)) {
         const premio = entrada.premioUsd;
         if (premio === null || premio === undefined || !premio.isFinite()) {
