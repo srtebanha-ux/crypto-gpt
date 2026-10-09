@@ -266,3 +266,19 @@ contract OraculoFalso {
         return 8;
     }
 }
+
+/**
+ * Oraculo FALSO do Morpho, para o teste de ponta a ponta em fork.
+ *
+ * O Morpho Blue chama `price()` e espera o preco na escala de 1e36 ajustada
+ * pelos decimais dos dois tokens. A `resposta` e a PRIMEIRA variavel de
+ * propósito: no fork o preco e posto direto na slot 0 com
+ * `hardhat_setStorageAt`, que e como se simula a escrita do oraculo.
+ */
+contract OraculoMorphoFalso {
+    uint256 public resposta;
+
+    function price() external view returns (uint256) {
+        return resposta;
+    }
+}
