@@ -28,6 +28,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Decimal from 'decimal.js';
 import { atirarNaEscritaIminente, pisoEfetivoDaAposta } from './adiantar';
+import { oQueFazerComOEnvio, podeAssinar, type EntradaDoDegrau } from './degrauFinal';
 
 const fonte = () => readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
 
@@ -83,9 +84,10 @@ test('(4) envio AUTORIZADO sem assinador: recusa explícita, sem desvio e sem ga
     // uma reimplantacao conserta.
     assert.match(f, /if \(ENVIAR && carteira === null\) \{/,
         'o boot tem de recusar envio autorizado sem assinador');
+    // E o COMPORTAMENTO dessa recusa esta no caso (7), nas 16 combinacoes.
 
     // No CAMINHO QUENTE: a recusa vem ANTES de reservar nonce e de transmitir.
-    const idxRecusa = f.indexOf("log.error('[NAO MANDEI] Envio autorizado e NÃO há assinador. Não transmito.'");
+    const idxRecusa = f.indexOf("if (oQueFazer.acao !== 'transmitir' || !carteira) {");
     const idxNonce = f.indexOf('await nonceManager.getNextNonce();');
     const idxEnvio = f.indexOf('carteira.sendTransaction(');
     assert.ok(idxRecusa > 0, 'a recusa tem de existir no caminho quente');
@@ -143,4 +145,77 @@ test('(6) o log do boot DIZ as três coisas separadas, e por que', () => {
     // E NUNCA o valor do segredo.
     assert.ok(!/CACA_CHAVE_PRIVADA\s*\}|\$\{chave\}|chave\b\s*,/.test(linha),
         'o valor da chave não entra no log — só o nome da variável e o defeito');
+});
+
+test('(7) o ÚLTIMO DEGRAU, nas 16 combinações: só UMA assina', () => {
+    // O TESTE CONTROLADO que ela pediu, e sem depender de aparecer alvo real:
+    // a decisão do último degrau é uma função, produção chama ela, e aqui ela é
+    // exercitada em TODAS as combinações em vez de na que eu lembrar de
+    // escrever. Um interceptador que devolve 'INTERCEPTADO' não provava isto.
+    const ENDERECO = '0x3D310384d674532f5D41cF2D43B03001F3515AE8';
+    const combos: EntradaDoDegrau[] = [];
+    for (const envioAutorizado of [false, true]) {
+        for (const temAssinador of [false, true]) {
+            for (const temContadorDeNonce of [false, true]) {
+                for (const enderecoPublico of [null, ENDERECO]) {
+                    combos.push({ envioAutorizado, temAssinador, temContadorDeNonce, enderecoPublico });
+                }
+            }
+        }
+    }
+    assert.equal(combos.length, 16);
+
+    for (const c of combos) {
+        const r = oQueFazerComOEnvio(c);
+        // A INVARIANTE: transmitir exige autorização E assinador. Qualquer
+        // outra combinação que transmita é contorno do bloqueio de envio.
+        if (r.acao === 'transmitir') {
+            assert.ok(podeAssinar(c), `transmitiu sem poder assinar: ${JSON.stringify(c)}`);
+            assert.ok(c.temContadorDeNonce && c.enderecoPublico !== null);
+        }
+        // E toda recusa DIZ o que faltou — recusa muda foi o disjuntor mudo.
+        assert.ok(r.porque.length > 20, `desfecho sem motivo legível: ${JSON.stringify(c)}`);
+    }
+    // Exatamente UMA das 16 assina.
+    assert.equal(combos.filter((c) => oQueFazerComOEnvio(c).acao === 'transmitir').length, 1);
+    // Com endereço, nonce e envio desligado: OBSERVA — com ou sem chave.
+    for (const temAssinador of [false, true]) {
+        assert.equal(oQueFazerComOEnvio({
+            envioAutorizado: false, temAssinador, temContadorDeNonce: true, enderecoPublico: ENDERECO,
+        }).acao, 'observar', 'observar não pode depender de ter chave');
+    }
+    // Envio LIGADO e sem assinador: recusa explícita, nomeando a variável.
+    const semChave = oQueFazerComOEnvio({
+        envioAutorizado: true, temAssinador: false, temContadorDeNonce: true, enderecoPublico: ENDERECO,
+    });
+    assert.equal(semChave.acao, 'recusar');
+    assert.match(semChave.porque, /CACA_CHAVE_PRIVADA/);
+    assert.match(semChave.porque, /não reservo nonce/);
+    // Sem endereço: a recusa fala de ENDEREÇO, não de chave — foi essa troca
+    // que fez o log culpar a configuração dela por um defeito do código.
+    const semEndereco = oQueFazerComOEnvio({
+        envioAutorizado: false, temAssinador: true, temContadorDeNonce: true, enderecoPublico: null,
+    });
+    assert.equal(semEndereco.acao, 'recusar');
+    assert.match(semEndereco.porque, /CACA_ENDERECO_PUBLICO/);
+});
+
+test('(8) produção usa ESTA função, e `armados` não chega perto do envio', () => {
+    const f = fonte();
+    // (a) o degrau final de produção é a função, não uma cópia dela.
+    assert.match(f, /from '\.\/degrauFinal'/, 'produção importa o degrau final');
+    assert.match(f, /oQueFazerComOEnvio\(\{/, 'e o chama');
+    assert.ok(!/if \(soObservando\)/.test(f),
+        'a decisão inline não pode voltar — a cópia provaria a cópia');
+
+    // (b) `armados` é LEITURA ADIANTADA, e não toca o caminho do envio.
+    // `armar()` lê dívida e garantia dos 8 mais frágeis da brasa e guarda por
+    // 5s; quem entra no caminho do tiro são os `caidos`, e esses passam pelos
+    // mesmos portões. Se `alvosArmados` aparecer entre o portão e a
+    // transmissão, a leitura adiantada virou atalho.
+    const idxGuarda = f.indexOf("if (oQueFazer.acao === 'observar') {");
+    const idxEnvio = f.indexOf('carteira.sendTransaction(');
+    assert.ok(idxGuarda > 0 && idxGuarda < idxEnvio);
+    assert.ok(!/alvosArmados/.test(f.slice(idxGuarda, idxEnvio)),
+        'a leitura adiantada não pode aparecer no trecho que transmite');
 });

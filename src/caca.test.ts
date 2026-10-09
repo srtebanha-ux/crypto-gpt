@@ -1469,8 +1469,12 @@ test('NENHUM caminho transmite com o envio desligado — lido no CÓDIGO', () =>
     assert.equal(recebedores.filter((r) => r === 'carteira').length, 1,
         'e a carteira de verdade é chamada em UM lugar só');
 
-    // (b) e o `soObservando` tem de cortar ANTES dele, com `continue`.
-    const idxGuarda = fonte.indexOf('if (soObservando) {');
+    // (b) e o portao de observacao tem de cortar ANTES dele, com `continue`.
+    // CORRIGIDO EM 2026-10-09: era `if (soObservando) {`, decisao inline. Agora
+    // o degrau final e `oQueFazerComOEnvio` em `degrauFinal.ts` — producao e
+    // teste chamam a MESMA funcao, e o comportamento e exercitado nas 16
+    // combinacoes em `contaSeparada.test.ts`.
+    const idxGuarda = fonte.indexOf("if (oQueFazer.acao === 'observar') {");
     // O ÍNDICE É DO ENVIO DE VERDADE, não do primeiro `.sendTransaction(` do
     // arquivo: o interceptador do ensaio em seco aparece ANTES no texto, e
     // mirar nele fazia este teste dizer que o portão não protegia nada.
@@ -1501,7 +1505,7 @@ test('NENHUM caminho transmite com o envio desligado — lido no CÓDIGO', () =>
         'CACA_ENVIAR tem de ser lido em UM lugar: duas leituras divergem no dia em que uma muda');
     assert.match(fonte, /const ENVIAR = process\.env\.CACA_ENVIAR === '1'/,
         'e a comparação é estrita com "1": qualquer outro valor NÃO autoriza');
-    assert.match(fonte, /const soObservando = !ENVIAR/,
+    assert.match(fonte, /envioAutorizado: ENVIAR/,
         'e o modo de observação é exatamente a ausência dessa autorização');
 });
 

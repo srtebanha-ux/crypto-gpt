@@ -22,6 +22,7 @@ import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './re
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
+import { oQueFazerComOEnvio } from './degrauFinal';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
     lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
@@ -4987,7 +4988,17 @@ async function principal(): Promise<'parar' | void> {
                  * Sem CARTEIRA nao ha o que montar (nem endereco de origem),
                  * entao esse caso continua cortando aqui.
                  */
-                const soObservando = !ENVIAR;
+                // O ULTIMO DEGRAU mora em `degrauFinal.ts`, e producao e teste
+                // chamam A MESMA funcao. Ela estava inline aqui, e um laco
+                // quente nao e importavel: a unica prova possivel era ler o
+                // codigo, e ela pediu prova de COMPORTAMENTO pelo caminho
+                // compartilhado com producao.
+                const degrau = () => oQueFazerComOEnvio({
+                    envioAutorizado: ENVIAR,
+                    temAssinador: carteira !== null,
+                    temContadorDeNonce: nonceManager !== null,
+                    enderecoPublico: donoCarteira,
+                });
                 // MONTAR precisa de ENDERECO e NONCE. Assinador, nao: ele e
                 // exigido no ultimo degrau, logo antes de transmitir.
                 if (!donoCarteira || !nonceManager) {
@@ -5502,7 +5513,8 @@ async function principal(): Promise<'parar' | void> {
                      * mandar desarma `provaAgora()` para sempre. Observando,
                      * le-se o conhecido.
                      */
-                    if (soObservando) {
+                    const oQueFazer = degrau();
+                    if (oQueFazer.acao === 'observar') {
                         log.warn('[OBSERVANDO] A transação está MONTADA e NÃO vai sair.', {
                             devedor: alvo.devedor,
                             contrato: contrato.nome,
@@ -5517,8 +5529,7 @@ async function principal(): Promise<'parar' | void> {
                             custoSeErrar: `${emEth(custoSePerder)} ETH`,
                             nonceQueUsaria: nonceManager.nonceConhecido(),
                             bytesDoEnvio: (envio.length - 2) / 2,
-                            porQueNaoSai: 'CACA_ENVIAR não é 1. A decisão inteira rodou; só a transmissão está '
-                                + 'bloqueada, no último degrau',
+                            porQueNaoSai: oQueFazer.porque,
                             oQueIssoPROVA: 'que o caminho do dinheiro foi exercitado de ponta a ponta sem gastar',
                         });
                         continue;
@@ -5526,10 +5537,10 @@ async function principal(): Promise<'parar' | void> {
                     // ENVIO AUTORIZADO E SEM ASSINADOR: recusa EXPLICITA, e
                     // nenhum desvio. O nonce nao e reservado — adiantar o
                     // contador sem mandar desarma `provaAgora()` para sempre.
-                    if (!carteira) {
-                        log.error('[NAO MANDEI] Envio autorizado e NÃO há assinador. Não transmito.', {
+                    if (oQueFazer.acao !== 'transmitir' || !carteira) {
+                        log.error('[NAO MANDEI] Não transmito, e o motivo é este.', {
                             devedor: alvo.devedor,
-                            oQueFaltou: 'CACA_CHAVE_PRIVADA ausente ou inválida',
+                            porque: oQueFazer.porque,
                             oQueEuNAOFiz: 'não assinei, não transmiti e não reservei nonce',
                         });
                         continue;
