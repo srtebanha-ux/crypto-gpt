@@ -33,19 +33,76 @@ export function listaDeRpcs(
     env: Record<string, string | undefined>,
     padroes: string[],
 ): string[] {
-    const fora: string[] = [];
+    return escadaDeRpcs(env, padroes).degraus;
+}
+
+/**
+ * URL QUEBRADA NÃO É DEGRAU, e o log dela de 2026-10-09 20:09 provou que isso
+ * importa:
+ *
+ *     "degraus":["base-mainnet.g.alchemy.com","mainnet.base.orghttps",
+ *                "mainnet.base.org","base-rpc.publicnode.com","base.llamarpc.com"]
+ *
+ * **`mainnet.base.orghttps` não existe.** São duas URLs coladas sem separador
+ * numa variável de ambiente — e ela entrou na escada como DEGRAU 2. Quer dizer:
+ * quando a Alchemy falhar duas vezes seguidas, o bot troca para um host que não
+ * resolve, gasta as duas falhas de transporte DELE, e só então chega num
+ * provedor que funciona. Redundância que parece existir e não existe — e o
+ * minuto em que o RPC cai é o minuto em que as liquidações acontecem.
+ *
+ * Então a lista passa a RECUSAR o que não é URL de verdade, e a dizer o que
+ * recusou. Silêncio aqui era a escada mentindo sobre o próprio tamanho.
+ *
+ * O teste de "é URL de verdade" é o `URL` do próprio Node (não uma regex
+ * minha), mais três exigências que o caso dela mostra: protocolo http(s), host
+ * com ponto, e nenhum `http` no meio do host — que é a assinatura de duas URLs
+ * coladas.
+ */
+export function escadaDeRpcs(
+    env: Record<string, string | undefined>,
+    padroes: string[],
+): { degraus: string[]; recusados: { url: string; porque: string }[] } {
+    const degraus: string[] = [];
+    const recusados: { url: string; porque: string }[] = [];
     const juntar = (u: string | undefined) => {
         const limpo = (u ?? '').trim();
         if (limpo === '') return;
+        const mal = porQueNaoServe(limpo);
+        if (mal !== null) {
+            if (!recusados.some((r) => r.url === limpo)) recusados.push({ url: limpo, porque: mal });
+            return;
+        }
         // Repetido não é redundância: dois nomes apontando para o mesmo host
         // dariam uma escada de dois degraus que caem juntos.
-        if (!fora.includes(limpo)) fora.push(limpo);
+        if (!degraus.includes(limpo)) degraus.push(limpo);
     };
     juntar(env.CACA_RPC_URL);
     for (let i = 1; i <= 9; i += 1) juntar(env[`RPC_URL_${i}`]);
     for (const u of (env.CACA_RPC_URLS ?? '').split(',')) juntar(u);
     for (const u of padroes) juntar(u);
-    return fora;
+    return { degraus, recusados };
+}
+
+/** `null` quando serve. A frase, quando não — e ela diz o que consertar. */
+export function porQueNaoServe(url: string): string | null {
+    let u: URL;
+    try {
+        u = new URL(url);
+    } catch {
+        return 'não é uma URL que o Node consiga ler';
+    }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+        return `protocolo "${u.protocol}" não serve para JSON-RPC: use https://`;
+    }
+    if (!u.hostname.includes('.')) return `o host "${u.hostname}" não tem ponto: não é um domínio`;
+    // DUAS URLS COLADAS: o caso real dela. `https://a.orghttps://b.com` vira
+    // host "a.orghttps" com o resto no caminho, e nenhum DNS resolve isso.
+    if (/https?$/i.test(u.hostname)) {
+        return `o host termina em "http(s)" — são DUAS URLs coladas sem separador. `
+            + 'Separe por vírgula em CACA_RPC_URLS, ou use RPC_URL_1 e RPC_URL_2';
+    }
+    if (u.hostname.includes('..')) return `o host "${u.hostname}" tem ponto duplo`;
+    return null;
 }
 
 /**

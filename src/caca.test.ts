@@ -1444,3 +1444,52 @@ test('o piso do contrato cresce com a cobertura e é o MESMO ativo', () => {
         assert.equal(pisoNoContrato(cobrir, null), esperado, `cobertura ${cobrir}`);
     }
 });
+
+test('NENHUM caminho transmite com o envio desligado — lido no CÓDIGO', () => {
+    // INCIDENTE de 2026-10-09: ela mandou bloquear envios pagos e exigiu que o
+    // modo de observação rodasse a MESMA lógica de decisão e montagem,
+    // travando só no ponto final. Antes, `CACA_ENVIAR != 1` cortava ANTES da
+    // decisão — o bot não exercitava nada do caminho do dinheiro.
+    //
+    // Este teste lê o código porque o defeito seria ESTRUTURAL: um
+    // `sendTransaction` novo em outro lugar, fora do portão. Nenhum teste de
+    // valor pega isso — é a mesma razão do teste que lê os gravadores do cache.
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+
+    // (a) UM único ponto de transmissão no caçador.
+    const transmissoes = fonte.match(/\.sendTransaction\(/g) ?? [];
+    assert.equal(transmissoes.length, 1,
+        `o caçador tem de ter UM ponto de transmissão, achei ${transmissoes.length}`);
+
+    // (b) e o `soObservando` tem de cortar ANTES dele, com `continue`.
+    const idxGuarda = fonte.indexOf('if (soObservando) {');
+    const idxEnvio = fonte.indexOf('.sendTransaction(');
+    assert.ok(idxGuarda > 0, 'o portão de observação tem de existir');
+    assert.ok(idxGuarda < idxEnvio,
+        'o portão tem de vir ANTES da transmissão, senão ele não bloqueia nada');
+    const entre = fonte.slice(idxGuarda, idxEnvio);
+    assert.match(entre, /continue;/, 'o portão de observação tem de sair do laço');
+    // O CORPO do portão, que é do `if` até o `continue` dele. Olhar o trecho
+    // inteiro até a transmissão pegaria o `getNextNonce` do caminho REAL, que
+    // é justamente o que o portão impede de alcançar.
+    const corpo = entre.slice(0, entre.indexOf('continue;'));
+
+    // (c) e observando NÃO se consome nonce: `getNextNonce` adianta o contador,
+    // e adiantar sem mandar desarma `provaAgora()` para sempre. Este arquivo
+    // registra o dia em que um diagnóstico gastou a munição que ia conferir.
+    assert.match(corpo, /nonceConhecido\(\)/, 'observando lê o nonce, não o adianta');
+    assert.ok(!/getNextNonce/.test(corpo),
+        'o corpo do portão de observação não pode chamar getNextNonce');
+    // E o caminho REAL, depois do portão, é o único que adianta o contador.
+    assert.match(entre.slice(entre.indexOf('continue;')), /getNextNonce/,
+        'quem transmite de verdade adianta o nonce — senão o nonce fura');
+
+    // (d) o portão do envio é o `CACA_ENVIAR` lido num lugar só.
+    const leituras = fonte.match(/process\.env\.CACA_ENVIAR/g) ?? [];
+    assert.equal(leituras.length, 1,
+        'CACA_ENVIAR tem de ser lido em UM lugar: duas leituras divergem no dia em que uma muda');
+    assert.match(fonte, /const ENVIAR = process\.env\.CACA_ENVIAR === '1'/,
+        'e a comparação é estrita com "1": qualquer outro valor NÃO autoriza');
+    assert.match(fonte, /const soObservando = !ENVIAR/,
+        'e o modo de observação é exatamente a ausência dessa autorização');
+});

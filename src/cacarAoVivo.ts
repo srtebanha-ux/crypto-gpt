@@ -21,7 +21,7 @@ import { naoCruzouAinda, codificarUserReserveData, decodificarUserReserveData, C
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
-import { EscadaDeRpc, listaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
+import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
     lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
@@ -860,8 +860,9 @@ const CONTRATOS_ATIVOS = [
  * no boot. O failover que existia aqui antes era de uma vez: escolhia no boot e
  * nunca mais olhava.
  */
+const ESCADA_LIDA = escadaDeRpcs(process.env, RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [REDE.rpc]);
 const ESCADA = new EscadaDeRpc(
-    listaDeRpcs(process.env, RPCS_PARA_TENTAR[REDE_ESCOLHIDA] ?? [REDE.rpc]),
+    ESCADA_LIDA.degraus,
     {
         falhasParaTrocar: Number(process.env.CACA_FALHAS_PARA_TROCAR ?? '2'),
         voltarAoPrimarioMs: Number(process.env.CACA_VOLTAR_AO_PRIMARIO_MS ?? '300000'),
@@ -1706,6 +1707,18 @@ async function principal(): Promise<'parar' | void> {
         comoAdicionar: ESCADA.quantos() > 1
             ? 'já tem redundância'
             : 'defina RPC_URL_2 no Railway — com um só provedor, ele caindo é o bot cego',
+        // DEGRAU RECUSADO TEM DE APARECER. No log de 2026-10-09 20:09 a escada
+        // dela tinha `mainnet.base.orghttps` — duas URLs coladas — como DEGRAU
+        // 2. Ela parecia ter 5 degraus e tinha 4: quando a Alchemy falhasse, o
+        // bot iria para um host que nao resolve, gastaria as falhas DELE e so
+        // depois chegaria num provedor vivo. Redundancia que parece existir.
+        ...(ESCADA_LIDA.recusados.length > 0
+            ? {
+                RECUSEI: ESCADA_LIDA.recusados.map((r) => `${r.url} — ${r.porque}`),
+                oQueIssoCusta: 'a escada tem um degrau MENOS do que a configuração sugere. '
+                    + 'Conserte a variável e o degrau volta',
+            }
+            : {}),
     });
     if (!topo) return;
 
@@ -1870,6 +1883,29 @@ async function principal(): Promise<'parar' | void> {
     });
     /** O preco mais recente de cada moeda, usado para valorar a garantia. */
     const precos = new Map<string, Decimal>();
+    /**
+     * O QUE O BOT VIU O ORACULO FAZER — coleta ativa, custo zero.
+     *
+     * `PERFIL_DO_SALTO` em `prontidao.ts` veio de 5.000 blocos e 15 escritas, e
+     * 15 escritas decidem a ORDEM e nao o quarto decimal. Refinar por varredura
+     * custa tempo de RPC; refinar DAQUI nao custa nada, porque o preco do
+     * oraculo ja passa por este laco em todo ciclo.
+     *
+     * O que fica guardado e o minimo para remedir: os saltos, as lacunas entre
+     * escritas, e a janela EFETIVAMENTE observada. A linha `[ORACULO]` publica
+     * isso com a janela ao lado — sem a janela, a amostra nao diz nada.
+     *
+     * Em memoria, de proposito: isto nao decide tiro nenhum, e um disco a mais
+     * no caminho quente e risco sem retorno. O que decide e a constante medida,
+     * e ela so muda por commit, depois de alguem LER esta linha.
+     */
+    const oraculoVisto = {
+        saltos: [] as number[],
+        lacunas: [] as number[],
+        ultimoBloco: 0,
+        primeiroBloco: 0,
+        anunciadoEm: 0,
+    };
     /** O preco de cada moeda na ultima varredura completa: a regua do gatilho. */
     const precosDaBase = new Map<string, Decimal>();
     /** Quando a ultima varredura completa aconteceu, em relogio e nao em bloco. */
@@ -2251,6 +2287,30 @@ async function principal(): Promise<'parar' | void> {
         })();
     }
 
+    /**
+     * QUAL COMMIT ESTA RODANDO — e eu tive de INFERIR isso pelas frases do log.
+     *
+     * No incidente de 2026-10-09 ela pediu: *"Identifique o commit e o artefato
+     * que estao rodando no Railway"*. Eu nao tinha como: o log nao dizia. Tive
+     * de deduzir pela presenca de uma linha nova e pela ausencia de um texto
+     * velho, o que e inferencia minha sobre o estado dela — exatamente o que
+     * este arquivo persegue.
+     *
+     * O Railway expoe `RAILWAY_GIT_COMMIT_SHA` e companhia. Quando faltar, a
+     * linha diz que NAO SABE, em vez de calar: ausencia declarada.
+     */
+    log.info('[VERSÃO] O que está rodando, e não o que eu acho que está.', {
+        commit: process.env.RAILWAY_GIT_COMMIT_SHA
+            ?? process.env.GIT_COMMIT_SHA
+            ?? process.env.SOURCE_COMMIT
+            ?? 'NÃO SEI — nenhuma variável de commit no ambiente',
+        branch: process.env.RAILWAY_GIT_BRANCH ?? 'não sei',
+        mensagemDoCommit: process.env.RAILWAY_GIT_COMMIT_MESSAGE ?? 'não sei',
+        artefato: `${process.argv[1] ?? 'desconhecido'} (node ${process.version})`,
+        deploy: process.env.RAILWAY_DEPLOYMENT_ID ?? 'não sei',
+        porQueIssoEstaAqui: 'sem esta linha, saber o que roda em produção é inferência por frase de log',
+    });
+
     log.info('[BOTÕES] Com o que eu subi.', {
         politica: comoLerAPolitica(POLITICA),
         // O PISO DA APOSTA TEM DE ESTAR AQUI, e ele nao estava.
@@ -2304,14 +2364,40 @@ async function principal(): Promise<'parar' | void> {
          * mediana 766, com as transações da frente pagando MENOS. Então a
          * gorjeta não compra posição: compra só menos tentativas.
          */
-        gorjetaDaAposta: `${TETO_GORJETA_ESPECULATIVA_GWEI} gwei${
-            process.env.CACA_GORJETA_ESPECULATIVA_GWEI !== undefined
-                ? ' — ESCRITO em CACA_GORJETA_ESPECULATIVA_GWEI'
-                : ' — o medido (a gorjeta não compra posição na Base: Spearman +0,300)'
-        } | uma errada custa ${(() => {
-            const c = custoPorErradaUsd();
-            return c.greaterThan(0) ? `US$ ${c.toFixed(4)}` : 'não medi (sem preço do ETH)';
-        })()} com ${GAS_MEDIDO_DE_UMA_REVERSAO} de gás (média lida nos 39 recibos reais)`,
+        /**
+         * A GORJETA DA APOSTA — e esta linha publicava uma afirmacao que eu
+         * JA TINHA RETIRADO.
+         *
+         * Ela dizia "a gorjeta nao compra posicao na Base: Spearman +0,300".
+         * O +0,300 e real, a leitura dele era minha e estava invertida: a minha
+         * funcao da posto 0 a MAIOR gorjeta, entao leilao perfeito da rho +1.
+         * Medido dentro da fatia de Flashblock: rho +0,997, p10 a p90 = 1,000.
+         * A gorjeta ORDENA dentro da fatia.
+         *
+         * Agora a linha diz a curva medida e a gorjeta que o premio pede, em
+         * vez de uma conclusao sobre mecanismo.
+         */
+        gorjetaDaAposta: ((): string => {
+            const eth = precoDoEth();
+            if (eth === null) {
+                return 'não dá para dizer agora: sem preço do ETH no mapa do oráculo não há conta. '
+                    + 'Volta sozinho quando o preço entrar';
+            }
+            const exemplos = [47.12, 188.37, 1932.39].map((p) => {
+                const o = gorjetaQueMaximizaOValor({
+                    premioUsd: p, baseFeeWei: baseFeeAtual ?? 20_000_000n, precoDoEthUsd: eth.toNumber(),
+                });
+                return `US$ ${p} -> ${o.gorjetaGwei} gwei (topo da fatia em `
+                    + `${(100 * o.chanceDeSerOTopo).toFixed(0)}%, errada US$ ${o.custoDaErradaUsd.toFixed(4)})`;
+            });
+            return `CRESCE com o prêmio, pela curva medida em 554 fatias de Flashblock: ${
+                exemplos.join(' | ')}${
+                process.env.CACA_GORJETA_ESPECULATIVA_GWEI !== undefined
+                    ? ` — e CACA_GORJETA_ESPECULATIVA_GWEI=${process.env.CACA_GORJETA_ESPECULATIVA_GWEI} `
+                      + 'só vale onde o prêmio não é conhecido'
+                    : ''
+            }. Gás de uma errada: ${GAS_MEDIDO_DE_UMA_REVERSAO} (média lida nos 39 recibos reais)`;
+        })(),
         ritmo: `ciclo ${INTERVALO_MS}ms dormindo | varredura completa a cada ${MINUTOS_ENTRE_COMPLETAS} min`,
         listas: `teto da lista quente ${TETO_DA_LISTA_QUENTE > 0 ? TETO_DA_LISTA_QUENTE : 'sem teto'} | `
             + `pedaço de varredura ${PEDACO} blocos (pedido; o medido sai na linha [RPC])`,
@@ -3027,7 +3113,25 @@ async function principal(): Promise<'parar' | void> {
                 ? 'LIGADO: atira mesmo dando prejuízo. É o único alvo legível a tempo (medido em 2026-09-28)'
                 : 'desligado: só atira com lucro acima de zero — e nenhum alvo legível a tempo tem isso';
             const emEth6 = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
-            const d88 = decidirTiro({ ...ambiente, lucroUsd: new Decimal(88) });
+            // O ENSAIO USA A MESMA GORJETA QUE O TIRO, e nao usava.
+            //
+            // O log dela de 2026-10-09 20:09 imprimiu `numDeUS$88: gorjeta
+            // 6.09 gwei (AMORDACADA — queria 20.30)` DEPOIS de o teto medido
+            // entrar no caminho quente: este `decidirTiro` nao recebia
+            // `tetoDaGorjetaWei`, entao a linha que existe para mostrar o que o
+            // bot FARIA mostrava o que ele deixou de fazer. REGRA 3 deste
+            // arquivo: a mesma regra em dois lugares, implementada em um.
+            const tetoDoEnsaio = ((): bigint | undefined => {
+                const eth = precoDoEth();
+                if (eth === null) return undefined;
+                const o = gorjetaQueMaximizaOValor({
+                    premioUsd: 88, baseFeeWei: base, precoDoEthUsd: eth.toNumber(),
+                });
+                return BigInt(Math.round(o.gorjetaGwei * 2 ** Math.min(6, perdasSeguidas) * 1e9));
+            })();
+            const d88 = decidirTiro({
+                ...ambiente, lucroUsd: new Decimal(88), tetoDaGorjetaWei: tetoDoEnsaio,
+            });
             passos.numDeUS$88 = `gorjeta ${(Number(d88.prioridadeWei) / 1e9).toFixed(2)} gwei` +
                 (d88.amordaca.amordacado ? ` (AMORDAÇADA — queria ${(Number(d88.desejadaWei) / 1e9).toFixed(2)})` : ' (inteira)') +
                 `, adiantaria ${emEth6(d88.adiantadoWei)} ETH`;
@@ -3746,7 +3850,35 @@ async function principal(): Promise<'parar' | void> {
                 const bruto = resp[i + 2];
                 if (!bruto) continue;
                 try {
-                    precos.set(moedas[i].toLowerCase(), new Decimal(BigInt(bruto).toString()));
+                    const moeda = moedas[i].toLowerCase();
+                    const novoPreco = new Decimal(BigInt(bruto).toString());
+                    // O OBSERVADOR DO ORACULO, de graca.
+                    //
+                    // A curva que decide o tiro especulativo
+                    // (`PERFIL_DO_SALTO`) foi medida em 5.000 blocos, 15
+                    // escritas. Quinze amostras decidem a ORDEM, nao o quarto
+                    // decimal, e refinar pedia varredura — tempo de RPC.
+                    //
+                    // Mas o bot JA le este preco em todo ciclo. Entao a coleta
+                    // nao custa uma chamada: basta olhar quando o numero MUDA.
+                    // Isto e o "processo ativo" de coleta, e ele vive aqui
+                    // porque aqui o dado passa de qualquer jeito.
+                    if (moeda === '0x4200000000000000000000000000000000000006') {
+                        const antes = precos.get(moeda);
+                        if (antes !== undefined && antes.greaterThan(0) && !antes.equals(novoPreco)
+                            && blocoAtual > oraculoVisto.ultimoBloco) {
+                            const salto = novoPreco.minus(antes).dividedBy(antes).abs().mul(100);
+                            oraculoVisto.saltos.push(salto.toNumber());
+                            if (oraculoVisto.ultimoBloco > 0) {
+                                oraculoVisto.lacunas.push(blocoAtual - oraculoVisto.ultimoBloco);
+                            }
+                            oraculoVisto.ultimoBloco = blocoAtual;
+                        } else if (antes === undefined || oraculoVisto.ultimoBloco === 0) {
+                            oraculoVisto.ultimoBloco = blocoAtual;
+                            oraculoVisto.primeiroBloco = blocoAtual;
+                        }
+                    }
+                    precos.set(moeda, novoPreco);
                 } catch {}
             }
 
@@ -4640,16 +4772,40 @@ async function principal(): Promise<'parar' | void> {
                 // Igualzinho ao disjuntor, que este arquivo ja registra. Em
                 // 2026-10-07 eu pedi a linha [BOTOES] tres vezes para descobrir
                 // de fora o que esta linha podia ter dito sozinha.
-                if (!ENVIAR || !carteira || !carteira.provider || !nonceManager) {
-                    log.error('[NAO MANDEI] Tinha alvo medido e o envio está fechado.', {
+                /**
+                 * O MODO DE OBSERVACAO, pedido por ela em 2026-10-09 como
+                 * incidente: *"faca o modo de observacao executar a mesma
+                 * logica de decisao e montagem do envio real, bloqueando a
+                 * transmissao no ponto final"*.
+                 *
+                 * O QUE ESTAVA ERRADO. Com `CACA_ENVIAR != 1` este `continue`
+                 * cortava AQUI — antes da medicao virar decisao, antes de a
+                 * gorjeta ser calculada, antes de o `cacar()` ser montado.
+                 * Entao o bot com envio desligado nao exercitava nada do
+                 * caminho que gasta dinheiro: ele parava no degrau anterior a
+                 * ele. "Observar" assim nao observa a decisao; observa a
+                 * ausencia dela.
+                 *
+                 * AGORA: sem autorizacao de envio o laco SEGUE — mede, decide,
+                 * calcula lance, monta a transacao — e para no ULTIMO degrau,
+                 * no `sendTransaction`, publicando o que teria mandado.
+                 *
+                 * E o NONCE nao e consumido: `provaAgora()` e a trava de um
+                 * tiro so se desarmam se o contador andar, e este arquivo
+                 * registra o dia em que um diagnostico gastou a municao que ele
+                 * existia para conferir. Observando, le-se `nonceConhecido()`.
+                 *
+                 * Sem CARTEIRA nao ha o que montar (nem endereco de origem),
+                 * entao esse caso continua cortando aqui.
+                 */
+                const soObservando = !ENVIAR;
+                if (!carteira || !carteira.provider || !nonceManager) {
+                    log.error('[NAO MANDEI] Tinha alvo medido e não há como montar o envio.', {
                         devedor: alvo.devedor,
-                        oQueFaltou: !ENVIAR ? 'CACA_ENVIAR não é 1 — o bot mede e nunca manda'
-                            : !carteira ? 'não há carteira (CACA_CHAVE_PRIVADA ausente ou inválida)'
+                        oQueFaltou: !carteira ? 'não há carteira (CACA_CHAVE_PRIVADA ausente ou inválida)'
                             : !carteira.provider ? 'a carteira não tem provedor ligado'
                             : 'o contador de nonce não subiu no boot',
-                        oQueFazer: !ENVIAR
-                            ? 'ligar CACA_ENVIAR=1 no Railway. Sem isso NENHUM tiro sai, nunca'
-                            : 'conferir a chave e o RPC no Railway',
+                        oQueFazer: 'conferir a chave e o RPC no Railway',
                         medicoes: medicoes.length,
                     });
                     continue;
@@ -5144,6 +5300,38 @@ async function principal(): Promise<'parar' | void> {
                         });
                     }
 
+                    /**
+                     * O PONTO FINAL — e e aqui que a observacao para.
+                     *
+                     * Tudo acima JA rodou: medicao, `decidirTiro`, gorjeta
+                     * otima, limite de gas, piso do contrato, `cacar()`
+                     * codificado. O que nao roda e a transmissao.
+                     *
+                     * `getNextNonce()` ADIANTA o contador, e adiantar sem
+                     * mandar desarma `provaAgora()` para sempre. Observando,
+                     * le-se o conhecido.
+                     */
+                    if (soObservando) {
+                        log.warn('[OBSERVANDO] A transação está MONTADA e NÃO vai sair.', {
+                            devedor: alvo.devedor,
+                            contrato: contrato.nome,
+                            para: contrato.endereco,
+                            tipoDoTiro: especulativo ? 'aposta na escrita do oráculo' : 'posição já liquidável',
+                            premio: lucroUsd === null ? 'sem cotação' : `US$ ${lucroUsd.toFixed(2)}`,
+                            gorjeta: `${(Number(prioridadePorGas) / 1e9).toFixed(4)} gwei`,
+                            tetoDoLance: `${(Number(maxFee) / 1e9).toFixed(4)} gwei`,
+                            limiteDeGas: limiteGas.toString(),
+                            pisoNoContrato: piso.toString(),
+                            adiantaria: `${emEth(adiantadoExigido(limiteGas, maxFee))} ETH`,
+                            custoSeErrar: `${emEth(custoSePerder)} ETH`,
+                            nonceQueUsaria: nonceManager.nonceConhecido(),
+                            bytesDoEnvio: (envio.length - 2) / 2,
+                            porQueNaoSai: 'CACA_ENVIAR não é 1. A decisão inteira rodou; só a transmissão está '
+                                + 'bloqueada, no último degrau',
+                            oQueIssoPROVA: 'que o caminho do dinheiro foi exercitado de ponta a ponta sem gastar',
+                        });
+                        continue;
+                    }
                     const nonceAtual = await nonceManager.getNextNonce();
                     const msDoTiro = Date.now() - inicioDoCiclo;
                     enviados += 1;

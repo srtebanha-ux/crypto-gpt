@@ -779,9 +779,28 @@ export function tiroDeProvaArmado(entrada: {
         return { armado: false, porque: 'CACA_TIRO_DE_PROVA_ATE_NONCE não foi definido — sem trava eu não armo' };
     }
     if (entrada.nonceAtual > entrada.ateNonce) {
+        /**
+         * "A PROVA FOI FEITA" SAIU DAQUI, e e um conserto de 2026-10-09 pedido
+         * por ela: *"Remova a conclusao de sucesso baseada apenas no nonce.
+         * Exija hash, recibo, status e resultado economico"*.
+         *
+         * O nonce conta TRANSACOES SAIDAS. Ele nao sabe se a transacao foi
+         * minada, se reverteu, nem se rendeu um centavo. E a medicao de
+         * 2026-10-09 mostrou exatamente o buraco: as 39 transacoes desta
+         * carteira sairam, o nonce subiu de 6 para 45, e **todas as 39
+         * reverteram**. Um nonce de 45 descrevia 39 fracassos e 6 deploys.
+         *
+         * A trava CONTINUA valendo — ela existe para o tiro de prova nao
+         * repetir, e para isso "saiu transacao" e a pergunta certa. O que muda
+         * e a FRASE: ela deixa de afirmar prova e passa a dizer o que o nonce
+         * de fato sabe, e onde esta a resposta que ele nao tem.
+         */
         return {
             armado: false,
-            porque: `já saiu tiro: nonce ${entrada.nonceAtual} passou de ${entrada.ateNonce}. A prova foi feita`,
+            porque: `o nonce ${entrada.nonceAtual} passou de ${entrada.ateNonce}: já SAIU transação desta `
+                + 'carteira, então a trava de um tiro só fechou. Isso NÃO diz que deu certo — nonce conta '
+                + 'transação enviada, não acerto. Em 2026-10-09 as 39 desta carteira saíram e as 39 '
+                + 'reverteram. O desfecho está no hash e no recibo, e o placar é quem o guarda',
         };
     }
     return {
