@@ -7,7 +7,7 @@ import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeE
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
-import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd } from './prontidao';
+import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd, gorjetaQueMaximizaOValor, premioQueSePagaComAFatia, chanceDeSerOTopoDaFatia } from './prontidao';
 import {
     lerRecibo, placarVazio, contarTiro, comoEstaIndo, placarParaCache, placarDoCache,
 } from './tiros';
@@ -2168,8 +2168,30 @@ async function principal(): Promise<'parar' | void> {
      * houver razao para apostar abaixo do equilibrio, isso volta como pedido
      * explicito e com a razao escrita aqui — nao como chave.
      */
-    const pisoDaAposta = (): Decimal =>
-        pisoEfetivoDaAposta(APOSTA_MINIMA_ESCOLHIDA, custoPorErradaUsd());
+    /**
+     * O PISO, agora com a chance de GANHAR na conta.
+     *
+     * `pisoEfetivoDaAposta` multiplica o custo por 355, o que supoe que cruzar
+     * e ganhar (F = 1). Medido em 2026-10-09: dentro da fatia de Flashblock a
+     * gorjeta ordena exatamente (rho +0,997), e a 0,020 gwei a gente e o topo
+     * em 34% das fatias. Com F = 1 o piso saia US$ 13,22 e AUTORIZAVA aposta
+     * de valor esperado negativo — o oposto do que ele existe para fazer.
+     *
+     * `premioQueSePagaComAFatia` busca o premio em que o MELHOR EV possivel
+     * cruza zero, com a gorjeta otima para cada premio. E o `env` continua so
+     * podendo ENDURECER.
+     */
+    const pisoDaAposta = (): Decimal => {
+        const preco = precoDoEth();
+        if (preco === null) return new Decimal(Infinity);
+        const comFatia = premioQueSePagaComAFatia({
+            baseFeeWei: baseFeeAtual ?? 20_000_000n,
+            precoDoEthUsd: preco.toNumber(),
+        });
+        if (!Number.isFinite(comFatia)) return new Decimal(Infinity);
+        const base = new Decimal(comFatia);
+        return APOSTA_MINIMA_ESCOLHIDA === null ? base : Decimal.max(APOSTA_MINIMA_ESCOLHIDA, base);
+    };
 
     /**
      * O gas que resta, em wei. Lido de tempos em tempos, nao a cada tiro.
@@ -4937,8 +4959,34 @@ async function principal(): Promise<'parar' | void> {
                         // DOBRA o teto. Entao sem evidencia de corrida perdida
                         // o lance e o medido; com evidencia, ele sobe sozinho,
                         // e a evidencia vem da corrente e nao do meu palpite.
-                        tetoDaGorjetaWei: BigInt(Math.round(
-                            TETO_GORJETA_ESPECULATIVA_GWEI * 1e9 * 2 ** Math.min(6, perdasSeguidas))),
+                        // E O VALOR DELE E A GORJETA OTIMA DESTE PREMIO, nao um
+                        // teto fixo. Medido em 2026-10-09: a gorjeta ordena
+                        // DENTRO da fatia de Flashblock (rho +0,997, p10 a p90
+                        // = 1,000), e `F(g)` — a chance de ser o topo da fatia
+                        // — vai de 26% a 0,01 gwei a 82% a 1,28. Entao a
+                        // gorjeta que maximiza o valor esperado CRESCE com o
+                        // premio: 0,02 gwei em US$ 47, 0,05 em US$ 188, 0,65 em
+                        // US$ 1.932. Um teto fixo erra nos dois extremos, e eu
+                        // errei nos dois em dois dias: 0,4 do lucro dava 6,06
+                        // gwei num premio de US$ 88, e o meu teto de 0,020
+                        // deixava US$ 1,6 de EV na mesa no premio de US$ 1.932.
+                        //
+                        // `perdasSeguidas` (que so sobe em corrida de verdade
+                        // perdida) multiplica: evidencia de derrota sobe o lance.
+                        tetoDaGorjetaWei: ((): bigint | undefined => {
+                            const p = lucroUsd;
+                            const eth = ethUsd;
+                            if (p === null || eth === null) {
+                                return BigInt(Math.round(TETO_GORJETA_ESPECULATIVA_GWEI * 1e9));
+                            }
+                            const otima = gorjetaQueMaximizaOValor({
+                                premioUsd: p.toNumber(),
+                                baseFeeWei: base,
+                                precoDoEthUsd: eth.toNumber(),
+                            });
+                            const comEscada = otima.gorjetaGwei * 2 ** Math.min(6, perdasSeguidas);
+                            return BigInt(Math.round(comEscada * 1e9));
+                        })(),
                     });
                     const fracao = decisao.fracaoDoLucro;
                     const risco = decisao.risco;

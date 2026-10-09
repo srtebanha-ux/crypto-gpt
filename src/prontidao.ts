@@ -1067,6 +1067,167 @@ export function comoLerAPolitica(p: ReturnType<typeof politicaDoTiro>): string {
 export const GORJETA_DA_FRENTE_GWEI = 0.02;
 
 /**
+ * ====================================================================
+ * 2026-10-09, MAIS TARDE: EU LI O SINAL DO RHO AO CONTRARIO.
+ * ====================================================================
+ *
+ * Tudo que o bloco acima diz — "a gorjeta nao compra posicao", "o
+ * sequenciador nao reordena por lance", "e corrida, nao leilao" — **esta
+ * errado, e o erro e de SINAL.**
+ *
+ * A minha funcao de Spearman da posto 0 a MAIOR gorjeta. Com essa convencao,
+ * ordem decrescente perfeita (= leilao perfeito) da rho **+1**, nao -1. Eu li
+ * o +0,305 do bloco inteiro como "positivo, logo o oposto de leilao". E o
+ * contrario: e leilao fraco.
+ *
+ * E a Base monta o bloco em FATIAS (Flashblocks de ~200ms). Medido nos mesmos
+ * 33 blocos, quebrando o bloco onde a gorjeta SOBE:
+ *
+ *     rho DENTRO da fatia:  medio +0,997   p10 = p50 = p90 = 1,000
+ *     fatias por bloco:     22,5 (min 10, max 69)
+ *     tamanho da fatia:     p50 25 transacoes, p90 157
+ *
+ * +1,000 em p10 ATE p90 quer dizer ordem decrescente PERFEITA em
+ * praticamente toda fatia: **dentro da fatia, a gorjeta ordena exatamente.**
+ * O +0,305 do bloco inteiro e a assinatura de ~22 fatias ordenadas
+ * concatenadas por tempo — e eu tomei essa assinatura por prova do contrario.
+ *
+ * ENTAO OS DOIS VALEM, e nao um ou outro:
+ *   - a FATIA em que voce cai e decidida pela CHEGADA (latencia);
+ *   - o LUGAR dentro da fatia e decidido pelo LANCE.
+ *
+ * A pergunta certa nunca foi "o lance compra posicao" (compra) e sim "quanto
+ * custa ser o TOPO da fatia em que a gente cai". Medido nas 554 fatias de 5+
+ * transacoes dos blocos em que o bot atirou — `F(g)` e a fracao das fatias em
+ * que uma gorjeta `g` seria a maior:
+ *
+ *     0,005 gwei -> 11%        0,30 gwei -> 66%
+ *     0,010 gwei -> 26%        0,65 gwei -> 75%
+ *     0,020 gwei -> 34%        1,28 gwei -> 82%
+ *     0,050 gwei -> 47%        4,60 gwei -> 90%
+ *     0,100 gwei -> 52%       10,00 gwei -> 94%
+ *
+ * E as nossas 39, a 0,300 gwei: fomos o topo da fatia em **15 de 39**, com
+ * mediana de 1 transacao acima de nos. Cortar para 0,020 teria derrubado isso
+ * de 66% para 34% das fatias — **eu reduzi a chance de ganhar pela metade**
+ * achando que nao reduzia nada.
+ */
+export const CURVA_TOPO_DA_FATIA: ReadonlyArray<readonly [number, number]> = [
+    [0.005, 0.11], [0.01, 0.26], [0.02, 0.34], [0.05, 0.47], [0.10, 0.52],
+    [0.30, 0.66], [0.65, 0.75], [1.28, 0.82], [4.60, 0.90], [10.0, 0.94],
+];
+
+/**
+ * A chance de esta gorjeta ser a MAIOR da fatia em que a transacao cair.
+ *
+ * Degrau, nao interpolacao: entre dois pontos medidos devolve o de BAIXO. Uma
+ * curva suave entre medicoes seria numero meu passando por medicao, que e o
+ * defeito que este projeto persegue.
+ *
+ * E ela e um TETO da chance de ganhar, nao a chance de ganhar: ser o topo da
+ * sua fatia nao impede um concorrente de estar numa fatia ANTERIOR. O que ela
+ * mede e a parte que o lance controla.
+ */
+export function chanceDeSerOTopoDaFatia(gorjetaGwei: number): number {
+    if (!Number.isFinite(gorjetaGwei) || gorjetaGwei < 0) return 0;
+    let f = 0;
+    for (const [g, p] of CURVA_TOPO_DA_FATIA) if (gorjetaGwei >= g) f = p;
+    return f;
+}
+
+export interface EntradaDaGorjeta {
+    /** O que o alvo rende, em dolares. */
+    premioUsd: number;
+    baseFeeWei: bigint;
+    precoDoEthUsd: number;
+    /** O gas que uma errada gasta. Padrao: o medido nos 39 recibos. */
+    gasDaReversao?: bigint;
+    /** Blocos entre escritas do oraculo. Padrao: o medido. */
+    blocosPorEscrita?: number;
+}
+
+/**
+ * A GORJETA QUE MAXIMIZA O VALOR ESPERADO — e ela CRESCE com o premio.
+ *
+ * `EV = (1/blocos) x F(g) x premio - (g + baseFee) x gas x precoDoEth`
+ *
+ * O primeiro termo e o ganho: a chance cega de cair no bloco da escrita vezes
+ * a chance de ser o topo da fatia. O segundo e o que a errada custa, e a
+ * errada acontece em quase toda tentativa.
+ *
+ * Rodado com os numeros medidos (gas 372.202, baseFee 0,020 gwei, ETH
+ * US$ 2.500,67, 355 blocos entre escritas):
+ *
+ *     premio US$   11,59 -> 0,010 gwei | EV -US$ 0,0194  <- nao aposta
+ *     premio US$   47,12 -> 0,020 gwei | EV +US$ 0,0079
+ *     premio US$  100,00 -> 0,050 gwei | EV +US$ 0,0660
+ *     premio US$  188,37 -> 0,050 gwei | EV +US$ 0,1842
+ *     premio US$  424,79 -> 0,120 gwei | EV +US$ 0,5090
+ *     premio US$ 1112,56 -> 0,300 gwei | EV +US$ 1,7839
+ *     premio US$ 1932,39 -> 0,650 gwei | EV +US$ 3,4589
+ *
+ * Isto corrige os DOIS extremos que este arquivo registra: `0,4 x lucro` dava
+ * 6,06 gwei num premio de US$ 88 (gasto 100x maior que o otimo) e o meu teto
+ * de 0,020 gwei deixava US$ 1,6 de EV na mesa no premio de US$ 1.932.
+ */
+export function gorjetaQueMaximizaOValor(e: EntradaDaGorjeta): {
+    gorjetaGwei: number; chanceDeSerOTopo: number; custoDaErradaUsd: number; evUsd: number;
+} {
+    const gas = e.gasDaReversao ?? GAS_MEDIDO_DE_UMA_REVERSAO;
+    const blocos = Number.isFinite(e.blocosPorEscrita) && (e.blocosPorEscrita ?? 0) > 0
+        ? e.blocosPorEscrita! : 355;
+    const base = Number(e.baseFeeWei) / 1e9;
+    const custoDe = (g: number) => ((g + base) * Number(gas) * e.precoDoEthUsd) / 1e9;
+    const naoDaParaDecidir = !Number.isFinite(e.premioUsd) || e.premioUsd <= 0
+        || !Number.isFinite(e.precoDoEthUsd) || e.precoDoEthUsd <= 0;
+    if (naoDaParaDecidir) {
+        // Sem premio ou sem preco nao existe a conta. Devolve o piso medido e
+        // EV negativo: quem le tem de tratar como "nao sei", nao como "de graca".
+        // EV MENOS INFINITO, nao `-custo`: com preco zero o custo tambem sai
+        // zero, e `-0` passaria por "nao da prejuizo". Ausencia de conta nao
+        // pode virar autorizacao — e a assinatura de defeito deste projeto.
+        const g = CURVA_TOPO_DA_FATIA[0]![0];
+        return { gorjetaGwei: g, chanceDeSerOTopo: CURVA_TOPO_DA_FATIA[0]![1],
+            custoDaErradaUsd: custoDe(g), evUsd: Number.NEGATIVE_INFINITY };
+    }
+    let melhor = { gorjetaGwei: 0, chanceDeSerOTopo: 0, custoDaErradaUsd: 0, evUsd: -Infinity };
+    for (const [g, f] of CURVA_TOPO_DA_FATIA) {
+        const c = custoDe(g);
+        const ev = (f / blocos) * e.premioUsd - c;
+        if (ev > melhor.evUsd) melhor = { gorjetaGwei: g, chanceDeSerOTopo: f, custoDaErradaUsd: c, evUsd: ev };
+    }
+    return melhor;
+}
+
+/**
+ * O PISO DA APOSTA, agora com a chance de GANHAR dentro da conta.
+ *
+ * O piso que eu publiquei de manha era `custo x 355` — e isso supoe que cruzar
+ * e ganhar, ou seja `F = 1`. Nao e: dentro da fatia quem paga mais vai na
+ * frente, e `F(0,020) = 34%`. Supor F=1 produziu um piso de US$ 13,22, que
+ * **autoriza aposta de valor esperado negativo** — exatamente o que ela proibiu.
+ *
+ * O piso certo e o premio em que o MELHOR EV possivel cruza zero. Com os
+ * numeros medidos: **US$ 38,13**, com a gorjeta otima de 0,010 gwei ali.
+ *
+ * Os tres pisos que este projeto ja teve, para a proxima sessao ver a conta:
+ *
+ *     US$ 158,03  gorjeta 0,300 fixa, F=1 suposto   (08/10, cego para F)
+ *     US$  13,22  gorjeta 0,020 fixa, F=1 suposto   (09/10 manha, errado)
+ *     US$  38,13  gorjeta otima, F MEDIDO           (09/10, este)
+ */
+export function premioQueSePagaComAFatia(e: Omit<EntradaDaGorjeta, 'premioUsd'>): number {
+    let lo = 0.01; let hi = 100_000;
+    const paga = (premio: number) => gorjetaQueMaximizaOValor({ ...e, premioUsd: premio }).evUsd >= 0;
+    if (!paga(hi)) return Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 60; i++) {
+        const m = (lo + hi) / 2;
+        if (paga(m)) hi = m; else lo = m;
+    }
+    return hi;
+}
+
+/**
  * A correlacao MAXIMA entre posicao no bloco e gorjeta que ainda e compativel
  * com "o bloco nao e leilao por lance".
  *

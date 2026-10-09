@@ -20,6 +20,10 @@ import {
     GAS_TIPICO_DE_UMA_CACADA,
     GORJETA_DA_FRENTE_GWEI,
     RHO_MEDIDO_POSICAO_X_GORJETA,
+    CURVA_TOPO_DA_FATIA,
+    chanceDeSerOTopoDaFatia,
+    gorjetaQueMaximizaOValor,
+    premioQueSePagaComAFatia,
     GAS_MEDIDO_DE_UMA_REVERSAO,} from './prontidao';
 
 const D = (n: number | string) => new Decimal(n);
@@ -1449,7 +1453,7 @@ test('o teto corta a gorjeta do tiro especulativo, e o normal fica agressivo', (
     assert.equal(comTeto.atira, true, comTeto.porque);
 });
 
-test('a GORJETA NÃO COMPRA POSIÇÃO na Base, e o teto segue essa medição', () => {
+test('a GORJETA COMPRA POSIÇÃO DENTRO da fatia — eu li o sinal do rho ao contrário', () => {
     // ESTE TESTE AFIRMAVA O CONTRÁRIO ATÉ 2026-10-09, e o que ele afirmava
     // estava errado: "o teto medido GANHA a frente do bloco com folga", exigindo
     // `GORJETA_DA_FRENTE_GWEI > p90 da frente (0,136577)`.
@@ -1465,22 +1469,72 @@ test('a GORJETA NÃO COMPRA POSIÇÃO na Base, e o teto segue essa medição', (
     // Correlação POSITIVA é o oposto de leilão: o sequenciador enfileira por
     // ordem de CHEGADA e não reordena por lance. Então pagar mais não compra
     // lugar — compra só menos tentativas.
+    // O ERRO ERA DE SINAL. A minha função de Spearman dá posto 0 à MAIOR
+    // gorjeta, então ordem decrescente perfeita — leilão perfeito — dá rho
+    // **+1**, não −1. Eu li o +0,305 do bloco inteiro como "positivo, logo o
+    // oposto de leilão". É o contrário.
+    //
+    // E a Base monta o bloco em FATIAS (Flashblocks ~200ms). Medido nos mesmos
+    // 33 blocos, quebrando onde a gorjeta sobe: rho DENTRO da fatia +0,997,
+    // com p10 = p50 = p90 = 1,000, em 573 fatias. Ordem decrescente perfeita.
     assert.ok(RHO_MEDIDO_POSICAO_X_GORJETA > 0,
-        'se o rho medido virar negativo, o bloco passou a ser leilão e esta regra cai');
-    // A gorjeta tem de ficar na ordem do que o CAMPO paga, não acima da frente.
-    const p50DoCampo = 0.019; // o maior p50 medido nos 33 blocos
-    assert.ok(GORJETA_DA_FRENTE_GWEI >= p50DoCampo,
-        `${GORJETA_DA_FRENTE_GWEI} tem de passar o p50 do campo (${p50DoCampo})`);
-    assert.ok(GORJETA_DA_FRENTE_GWEI <= 0.05,
-        'e NÃO pode voltar a pagar pela frente do bloco: isso não está à venda');
+        'rho positivo é leilão FRACO no bloco inteiro — a assinatura de fatias '
+        + 'ordenadas concatenadas por tempo, não prova de ausência de leilão');
 
-    // E o que a mudança vale, em munição: as 39 erradas custaram 0,004680 ETH
-    // a 0,300 gwei. O mesmo gás a 0,020 gwei custa uma fração.
-    const antes = custoDeUmaDerrota(300_000_000n, 20_000_000n, GAS_MEDIDO_DE_UMA_REVERSAO);
-    const agora = custoDeUmaDerrota(
-        BigInt(Math.round(GORJETA_DA_FRENTE_GWEI * 1e9)), 20_000_000n, GAS_MEDIDO_DE_UMA_REVERSAO);
-    assert.ok(Number(antes) / Number(agora) > 5,
-        `a errada tem de ficar pelo menos 5x mais barata (ficou ${(Number(antes) / Number(agora)).toFixed(1)}x)`);
+    // A curva medida tem de ser monótona: mais lance, mais chance de ser o topo.
+    let anterior = -1;
+    for (const [g, f] of CURVA_TOPO_DA_FATIA) {
+        assert.ok(f > anterior, `F tem de crescer com a gorjeta (${g} gwei)`);
+        anterior = f;
+    }
+    // E os dois pontos que decidem: 0,020 gwei topa 34% das fatias, 0,300 topa
+    // 66%. Cortar de 0,300 para 0,020 reduz a chance de ganhar PELA METADE —
+    // foi isso que eu fiz de manhã achando que não custava nada.
+    assert.equal(chanceDeSerOTopoDaFatia(0.02), 0.34);
+    assert.equal(chanceDeSerOTopoDaFatia(0.3), 0.66);
+    assert.ok(chanceDeSerOTopoDaFatia(0.3) / chanceDeSerOTopoDaFatia(0.02) > 1.9,
+        'o corte que eu fiz dividia a chance por quase dois');
+    // Degrau, não interpolação: entre medições devolve a de BAIXO.
+    assert.equal(chanceDeSerOTopoDaFatia(0.29), chanceDeSerOTopoDaFatia(0.1));
+    assert.equal(chanceDeSerOTopoDaFatia(0), 0);
+    assert.equal(chanceDeSerOTopoDaFatia(-1), 0);
+    assert.equal(chanceDeSerOTopoDaFatia(Number.NaN), 0);
+});
+
+test('a gorjeta ÓTIMA cresce com o prêmio, e o piso inclui a chance de GANHAR', () => {
+    // Os números medidos: gás 372.202 (39 recibos), baseFee 0,020 gwei, ETH
+    // US$ 2.500,67 (log de produção de 2026-10-09 11:47), 355 blocos entre
+    // escritas do oráculo (7 dias, cobertura 92,9%).
+    const ambiente = { baseFeeWei: 20_000_000n, precoDoEthUsd: 2500.67 };
+    const otima = (premioUsd: number) => gorjetaQueMaximizaOValor({ ...ambiente, premioUsd });
+
+    // CRESCE com o prêmio — é isto que um teto fixo não consegue fazer.
+    const pequeno = otima(47.12);
+    const grande = otima(1932.39);
+    assert.ok(grande.gorjetaGwei > pequeno.gorjetaGwei,
+        `prêmio maior pede lance maior (${pequeno.gorjetaGwei} vs ${grande.gorjetaGwei})`);
+    assert.equal(pequeno.gorjetaGwei, 0.02);
+    assert.equal(grande.gorjetaGwei, 0.65);
+
+    // E o teto fixo de 0,020 gwei que eu tinha posto deixa valor na mesa no
+    // prêmio grande — a prova de que a correção não é cosmética.
+    const comTetoFixo = (0.34 / 355) * 1932.39 - ((0.02 + 0.02) * 372202 * 2500.67) / 1e9;
+    assert.ok(grande.evUsd - comTetoFixo > 1,
+        `o teto fixo deixava mais de US$ 1 de EV na mesa (deixava ${(grande.evUsd - comTetoFixo).toFixed(2)})`);
+
+    // O PISO: com F = 1 suposto ele dava US$ 13,22 e autorizava EV NEGATIVO.
+    // Com F medido o piso é US$ 38,13 — e os dois alvos reais ficam de lados
+    // opostos dele, que é a única maneira de o número ser verificável.
+    const piso = premioQueSePagaComAFatia(ambiente);
+    assert.ok(piso > 37 && piso < 39, `piso ${piso.toFixed(2)}`);
+    assert.ok(otima(47.12).evUsd > 0, 'o alvo real de 07/10 tem de passar');
+    assert.ok(otima(11.59).evUsd < 0, 'o de 08/10 tem de ficar de fora: EV negativo em TODA gorjeta');
+    assert.ok(otima(piso * 0.9).evUsd < 0 && otima(piso * 1.1).evUsd > 0,
+        'o piso tem de ser a fronteira de verdade, não um número ao lado dela');
+
+    // Sem preço do ETH não existe conta: EV negativo, nunca "de graça".
+    assert.ok(gorjetaQueMaximizaOValor({ ...ambiente, premioUsd: 1000, precoDoEthUsd: 0 }).evUsd < 0);
+    assert.ok(otima(0).evUsd < 0);
 });
 
 test('o teto NAO aumenta uma gorjeta pequena', () => {

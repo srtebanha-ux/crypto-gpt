@@ -1373,8 +1373,15 @@ test('o env só pode ENDURECER o piso da aposta, nunca descer abaixo do equilíb
     const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
     assert.match(fonte, /premioMinimoUsd:\s*pisoDaAposta\(\)/,
         'o portão da aposta tem de ler `pisoDaAposta()`, não a variável crua');
-    assert.match(fonte, /pisoEfetivoDaAposta\(APOSTA_MINIMA_ESCOLHIDA,\s*custoPorErradaUsd\(\)\)/,
-        'o piso efetivo tem de sair da função pura, não de uma conta repetida aqui');
+    // 2026-10-09, tarde: o piso passou a incluir a chance de GANHAR. O
+    // `pisoEfetivoDaAposta` multiplica o custo por 355, o que supõe F = 1
+    // (cruzar = ganhar). Medido: dentro da fatia de Flashblock a gorjeta
+    // ordena (rho +0,997) e a 0,020 gwei a gente é o topo em 34% das fatias.
+    // Com F = 1 o piso dava US$ 13,22 e AUTORIZAVA valor esperado negativo.
+    assert.match(fonte, /premioQueSePagaComAFatia\(\{/,
+        'o piso tem de sair da função que inclui a chance de ser o topo da fatia');
+    assert.match(fonte, /Decimal\.max\(APOSTA_MINIMA_ESCOLHIDA,\s*base\)/,
+        'e o env só pode ENDURECER: o piso efetivo é o MAIOR dos dois');
     for (const arquivo of ['cacarAoVivo.ts', 'adiantar.ts', 'prontidao.ts']) {
         const texto = readFileSync(join(__dirname, arquivo), 'utf8');
         // A única menção tolerada é em comentário, contando que ela foi removida.

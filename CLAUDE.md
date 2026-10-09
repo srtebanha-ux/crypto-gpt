@@ -2682,3 +2682,107 @@ E duas coisas que o log confirmou sem eu precisar pedir:
   rodar como ferramenta do bot, com o log dela de saída.
 - `maisFragilA "[lido há 0s]"`, `essasDuasTabelasTem "303s de idade"` e
   `oscilouAntes` apareceram: os consertos de 08/10 estão em produção.
+
+### 2026-10-09, à noite: EU LI O SINAL DO RHO AO CONTRÁRIO. A gorjeta compra posição
+
+Ela mandou: *"não use correlação agregada como prova causal. Avalie se a
+economia por tentativa pode reduzir a probabilidade de sucesso"*. Fui medir, e
+**a conclusão de hoje à tarde está errada — por um erro de sinal meu.**
+
+A minha função de Spearman dá posto 0 à MAIOR gorjeta. Com essa convenção,
+ordem decrescente perfeita — um leilão perfeito — dá rho **+1**, não −1. Eu li
+o `+0,305` do bloco inteiro como *"positivo, logo o oposto de leilão"*. É o
+contrário: é leilão fraco.
+
+E a Base monta o bloco em **fatias** (Flashblocks de ~200ms). Medido nos MESMOS
+33 blocos, quebrando o bloco onde a gorjeta sobe:
+
+    rho DENTRO da fatia:  médio +0,997   p10 = p50 = p90 = 1,000   (573 fatias)
+    fatias por bloco:     22,5 (min 10, max 69)
+    tamanho da fatia:     p50 25 transações, p90 157
+
+`+1,000` de p10 até p90 é ordem decrescente **perfeita** em praticamente toda
+fatia. O `+0,305` do bloco inteiro é a assinatura de ~22 fatias ordenadas
+concatenadas por tempo — e eu tomei essa assinatura como prova do contrário.
+
+**Então os dois valem, e não um ou outro:** a fatia em que você cai é decidida
+pela CHEGADA; o lugar dentro da fatia é decidido pelo LANCE.
+
+### Quanto custa ser o topo da própria fatia — `F(g)`, medido em 554 fatias
+
+    0,005 gwei -> 11%        0,30 gwei -> 66%
+    0,010 gwei -> 26%        0,65 gwei -> 75%
+    0,020 gwei -> 34%        1,28 gwei -> 82%
+    0,050 gwei -> 47%        4,60 gwei -> 90%
+    0,100 gwei -> 52%       10,00 gwei -> 94%
+
+As nossas 39, a 0,300 gwei: fomos o topo da fatia em **15 de 39**, mediana de 1
+transação acima. **Cortar para 0,020 gwei derrubava isso de 66% para 34% das
+fatias: eu reduzi a chance de ganhar pela metade achando que não custava nada.**
+
+### A gorjeta ótima CRESCE com o prêmio — e um teto fixo erra nos dois extremos
+
+`EV = (1/355) × F(g) × prêmio − (g + baseFee) × gás × preçoDoETH`
+
+    prêmio US$   11,59 -> 0,010 gwei | EV −US$ 0,0194   <- não aposta
+    prêmio US$   47,12 -> 0,020 gwei | EV +US$ 0,0079
+    prêmio US$  188,37 -> 0,050 gwei | EV +US$ 0,1842
+    prêmio US$  424,79 -> 0,120 gwei | EV +US$ 0,5090
+    prêmio US$ 1932,39 -> 0,650 gwei | EV +US$ 3,4589
+
+Isto corrige os dois erros que este arquivo registra em dois dias: `0,4 × lucro`
+dava **6,06 gwei** num prêmio de US$ 88 (100x acima do ótimo), e o meu teto de
+**0,020** deixava US$ 1,6 de EV na mesa no prêmio de US$ 1.932.
+
+### E O PISO ESTAVA ERRADO NOS TRÊS: ele supunha que cruzar é GANHAR
+
+`premioQueSePagaNoAcaso` é `custo × 355`, o que supõe `F = 1`.
+
+    US$ 158,03  gorjeta 0,300 fixa, F=1 suposto   (08/10)
+    US$  13,22  gorjeta 0,020 fixa, F=1 suposto   (09/10 manhã — AUTORIZAVA EV NEGATIVO)
+    US$  38,13  gorjeta ótima, F MEDIDO           (09/10 noite, este)
+
+O piso de US$ 13,22 que eu publiquei de manhã liberava apostas de valor
+esperado **negativo** — exatamente o que ela proibiu por escrito. O certo é o
+prêmio em que o MELHOR EV possível cruza zero: **US$ 38,13**. Os dois alvos
+reais ficam em lados opostos dele, que é a única forma de o número ser
+verificável: US$ 47,12 passa (+US$ 0,0079), US$ 11,59 não (−US$ 0,0194 na
+melhor gorjeta possível).
+
+### As três afirmações de hoje, RECLASSIFICADAS
+
+**1. "Perdemos por variância" — SOBREVIVE, com o número corrigido.** Com F
+medido em vez de suposto:
+
+    EV das 39 que eu publiquei (F=1):   +US$ 43,21
+    EV das 39 com F medido (0,66):      +US$ 24,57
+    acertos esperados:  0,073  (eu disse 0,110)
+    chance de ZERO acertos em 39:  93,0%
+
+Continua variância — zero em 39 era o resultado mais provável — mas **2 dos 8
+alvos (13 dos 39 tiros) eram de EV negativo em qualquer gorjeta**, não um só.
+
+**2. "A gorjeta não compra posição" — FALSA. Retirada.** Compra posição dentro
+da fatia, e é isso que a curva `F(g)` mede.
+
+**3. "Sem aumentar risco" — IMPRECISA.** O custo por tentativa agora depende do
+prêmio, e com a carteira de 0,011142 ETH (US$ 27,87):
+
+    prêmio US$    10 -> 0,005 gwei -> 1.197 tentativas
+    prêmio US$   188 -> 0,050 gwei ->   427 tentativas
+    prêmio US$ 1.932 -> 0,650 gwei ->    44 tentativas
+
+Alvo grande custa mais por tentativa **porque vale pagar mais**. O certo é:
+o preço de errar passou a ser proporcional ao que está em jogo.
+
+### A lição, e ela é a mais caveira deste arquivo
+
+Eu usei uma **correlação agregada como prova causal** e publiquei três commits
+em cima dela, incluindo um que cortava a chance de ganhar pela metade. O que me
+pegou não foi falta de medição — foi não ter perguntado *"qual é o sinal de rho
+num leilão perfeito, com a MINHA convenção de posto?"*. Trinta segundos de
+verificação contra três commits.
+
+E o que salvou foi ela: a palavra "Flashblocks" na instrução. Eu não sabia que
+a Base monta o bloco em fatias, e sem isso a medição dentro da fatia não teria
+sido feita.
