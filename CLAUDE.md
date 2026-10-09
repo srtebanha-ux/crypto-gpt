@@ -2978,3 +2978,64 @@ null` é **sem teto** ("atira em qualquer prêmio acima do piso"). As duas
 viravam a mesma frase, e são conclusões OPOSTAS: uma é ausência, a outra é a
 resposta mais permissiva que existe. É a assinatura deste arquivo, na
 ferramenta que a REGRA 0 manda rodar antes de pedir deploy.
+
+### 2026-10-09, 22:40: o modo de observação rodou INTEIRO, aqui, sem chave nenhuma
+
+Ela mandou: *"oQueFazerComOEnvio executa assinatura/transmissão ou apenas
+retorna uma decisão? Se apenas retorna, complemente com um teste do chamador
+usado em produção, com dependências interceptadas"*. Está certa: ela **só
+decide**. E o chamador é o laço quente, que não é importável.
+
+A saída não foi refatorar (ela proibiu mexer no código antes de concluir a
+verificação desta revisão): foi **rodar o artefato de produção aqui**, com
+`CACA_ENDERECO_PUBLICO` e **sem `CACA_CHAVE_PRIVADA`**, e deixar o próprio bot
+exercitar o caminho.
+
+    node dist/cacarAoVivo.js
+      ATIVAR_CACARAOVIVO=1  CACA_ENVIAR=0
+      CACA_ENDERECO_PUBLICO=0x3D310384d674532f5D41cF2D43B03001F3515AE8
+      CACA_RPC_URL=https://mainnet.base.org
+      CACA_CACHE=.tmp/dadosLocais/devedores.json   <- cache semeado com 1 devedor
+                                                      real e cobertura completa,
+                                                      senão a varredura de 3 anos
+                                                      nunca chega no ensaio
+
+    [CONTA]   endereço 0x3D31…5AE8, de CACA_ENDERECO_PUBLICO
+              leitura ligada em mainnet.base.org
+              assinador NÃO: CACA_CHAVE_PRIVADA ausente
+    saldo     0.011142 ETH, lido no boot  <- com o envio desligado e sem chave
+    [EM SECO] "Caminho de tiro INTEIRO conferido"
+              nonce 45 (lido, não reservado)
+              montagem 196 bytes, piso no contrato 8.118.397, limite 5.000.000
+              transmissaoInterceptada: "MONTEI e INTERCEPTEI 1 envio para
+              0x9066b0ba… NADA foi para a rede"
+    nonce na corrente, antes e depois: 45 e 45
+    [TIRO SAIU]: 0 ocorrências
+
+**Isto fecha o que nenhum teste unitário fechava:** a montagem roda, a decisão
+roda, o saldo é lido — e assinatura, transmissão e reserva de nonce não
+acontecem. O cache semeado é o único artifício, e ele só decide QUAL alvo entra
+no ensaio.
+
+E apareceu um comportamento que eu não teria previsto, correto e novo:
+
+    pisoDaAposta: "NENHUMA APOSTA agora: não medi o custo de uma errada (sem
+                   preço do ETH no mapa do oráculo), e sem o custo não existe a
+                   conta que autoriza apostar"
+
+É o `pisoEfetivoDaAposta` devolvendo infinito em vez de zero — o defeito que eu
+introduzi e consertei de manhã, agora observado recusando por si, no artefato,
+sem teste nenhum no caminho.
+
+### E a lição sobre VERSÃO, que é dela e não minha
+
+Eu disse "o build falhou em 429, logo roda o `c7f4dad`". Ela respondeu: *"Uma
+tentativa de build falhada não identifica, sozinha, qual versão está rodando."*
+Está certo — build que falha não troca o que roda, mas também não diz o que
+roda; o que estava no ar podia ser qualquer deploy anterior bem-sucedido.
+
+O discriminador honesto é positivo, não negativo: **com `6e14a11` no ar e
+`CACA_ENDERECO_PUBLICO` definida, o boot TEM de imprimir `[CONTA]` e o `gas`
+NÃO pode ser "ainda não li"** — provado acima no artefato. O log das 21:20
+tem `gas: "ainda não li"` e nenhuma `[CONTA]`, e `6e14a11` só existe desde
+21:18:58. É disso que sai a conclusão, não da falha do build.
