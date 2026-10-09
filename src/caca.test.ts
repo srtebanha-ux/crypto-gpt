@@ -1521,15 +1521,22 @@ test('o ENSAIO roda saldo, decisão, gorjeta e MONTAGEM com o envio desligado', 
     assert.ok(!/ENVIAR desligado: o resto não se testa/.test(fonte),
         'o ensaio não pode mais desistir por falta de autorização de envio');
 
-    // (b) o que PARA o ensaio é a falta de CARTEIRA, não a falta de ENVIAR:
-    // sem carteira não há endereço de origem, e aí não há o que conferir.
-    assert.match(fonte, /if \(!carteira \|\| !donoCarteira\) \{/,
-        'o ensaio para por falta de carteira, e só');
+    // (b) o que PARA o ensaio é a falta de ENDEREÇO, não a falta de ENVIAR nem
+    // a de ASSINADOR. CORRIGIDO EM 2026-10-09: este teste exigia `!carteira`, e
+    // era o acoplamento que criou o incidente — sem chave, o ensaio desistia
+    // antes de ler saldo, decidir e montar. Sem ENDEREÇO não há origem para ler
+    // saldo nem nonce, e aí sim não há o que conferir.
+    assert.match(fonte, /if \(!donoCarteira\) \{/,
+        'o ensaio para por falta de endereço público, e só');
+    assert.ok(!/if \(!carteira \|\| !donoCarteira\) \{/.test(fonte),
+        'o ensaio não pode parar por falta de assinador: observar não precisa de chave');
 
     // (c) e depois desse ponto ele lê SALDO, decide e MONTA.
-    const i = fonte.indexOf('if (!carteira || !donoCarteira) {');
+    const i = fonte.indexOf('if (!donoCarteira) {');
     const depois = fonte.slice(i, fonte.indexOf('[MERCADO] Censo das liquidações'));
-    assert.match(depois, /getBalance\(donoCarteira\)/, 'lê o saldo');
+    // Pelo LEITOR, nao pelo provedor da carteira: ler saldo pela carteira era o
+    // acoplamento que deixava o saldo em "ainda nao li" para sempre sem chave.
+    assert.match(depois, /leitor\.getBalance\(donoCarteira\)/, 'lê o saldo pelo leitor');
     assert.match(depois, /decidirTiro\(\{/, 'toma a decisão do tiro');
     assert.match(depois, /gorjetaQueMaximizaOValor\(\{/, 'calcula a gorjeta pela curva medida');
     assert.match(depois, /pisoNoContrato\(cobrir\(alvo\)/, 'calcula o piso que iria no contrato');

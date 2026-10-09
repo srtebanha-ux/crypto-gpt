@@ -1,6 +1,6 @@
 // Arquivo: src/cacarAoVivo.ts
 import { Decimal } from 'decimal.js';
-import { Wallet, JsonRpcProvider } from 'ethers';
+import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
 import { createLogger } from './logger';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
@@ -1731,19 +1731,87 @@ async function principal(): Promise<'parar' | void> {
     // resto do bot migrava para outro RPC: dai `chamar()` lia de um no vivo
     // enquanto getBalance e sendTransaction falavam com um no morto. O bot
     // media tudo certo e nao enviava nada.
-    if (ENVIAR) {
-        const chave = process.env.CACA_CHAVE_PRIVADA;
-        if (!chave) {
-            log.error('Falta a chave privada.', {});
-            return 'parar';
+    // ── TRES COISAS DIFERENTES, e por um mes elas eram UMA SO ──
+    //
+    // ACHADO EM 2026-10-09, no log dela das 20:34: com `CACA_ENVIAR=0` o
+    // `[EM SECO]` imprimiu "nao ha carteira (CACA_CHAVE_PRIVADA ausente ou
+    // invalida)". A CAUSA NAO ERA A CONFIGURACAO DELA: era este bloco, que
+    // nascia INTEIRO dentro de `if (ENVIAR)`. Desligar o envio apagava o
+    // ENDERECO e o ACESSO DE LEITURA junto com o ASSINADOR — e sem endereco
+    // nao ha saldo, nonce, nem montagem. O diagnostico que existe para
+    // conferir o caminho do tiro era desligado pela MESMA chave que ela
+    // precisava desligar para poder conferi-lo com seguranca.
+    //
+    //   endereco publico   de onde se le saldo e nonce. Fonte EXPLICITA.
+    //   acesso de leitura  o provedor. Nao assina nada.
+    //   assinador          a chave. SO com autorizacao de envio.
+    //
+    // A falta de autorizacao impede ASSINAR e TRANSMITIR. Nao impede observar.
+    const leitor = new JsonRpcProvider(rpc);
+    let porQueSemEndereco: string | null = null;
+    const enderecoEscrito = (process.env.CACA_ENDERECO_PUBLICO ?? '').trim();
+    if (enderecoEscrito !== '') {
+        try {
+            donoCarteira = getAddress(enderecoEscrito);
+        } catch {
+            // O VALOR nao vai para o log. So o nome da variavel e o defeito.
+            porQueSemEndereco = 'CACA_ENDERECO_PUBLICO não é um endereço válido';
         }
-        const provider = new JsonRpcProvider(rpc);
-        carteira = new Wallet(chave, provider);
-        donoCarteira = carteira.address;
-        nonceManager = new LocalNonceManager(provider, donoCarteira);
-        await nonceManager.sync();
-        log.info('Carteira carregada com Nonce Manager atômico.', { endereco: donoCarteira });
     }
+    const chave = process.env.CACA_CHAVE_PRIVADA;
+    let porQueSemAssinador: string | null = chave ? null : 'CACA_CHAVE_PRIVADA ausente';
+    if (chave) {
+        try {
+            const assinador = new Wallet(chave, leitor);
+            // Quem ASSINA decide de onde o gas sai, entao o endereco da chave
+            // manda sobre o escrito. Discordar e erro de configuracao e vira
+            // linha de log — nunca silencio, e nunca o valor da chave.
+            if (donoCarteira !== null && donoCarteira !== assinador.address) {
+                log.error('O endereço escrito e o da chave DISCORDAM.', {
+                    escritoEmCACA_ENDERECO_PUBLICO: donoCarteira,
+                    oDaChave: assinador.address,
+                    oQueEuFaco: 'uso o da chave — é dela que o gás sai',
+                });
+            }
+            donoCarteira = assinador.address;
+            porQueSemEndereco = null;
+            if (ENVIAR) carteira = assinador;
+            else porQueSemAssinador = 'a chave existe, mas CACA_ENVIAR != 1: não guardo assinador nenhum';
+        } catch {
+            porQueSemAssinador = 'CACA_CHAVE_PRIVADA não decodifica como chave privada';
+        }
+    }
+    if (ENVIAR && carteira === null) {
+        // Envio autorizado sem assinador e configuracao que so uma
+        // reimplantacao conserta: 'parar' esta certo AQUI, e so aqui.
+        log.error('Envio AUTORIZADO e não há assinador. Não reinicio sozinho.', {
+            porQue: porQueSemAssinador,
+            oQueFazer: 'defina CACA_CHAVE_PRIVADA, ou deixe CACA_ENVIAR=0 para só observar',
+        });
+        return 'parar';
+    }
+    if (donoCarteira !== null) {
+        nonceManager = new LocalNonceManager(leitor, donoCarteira);
+        try {
+            await nonceManager.sync();
+        } catch (e) {
+            log.error('Não consegui ler o nonce no boot.', { erro: (e as Error).message });
+        }
+    }
+    log.info('[CONTA] O que existe, separado em três.', {
+        enderecoPublico: donoCarteira ?? `NÃO SEI — ${porQueSemEndereco ?? 'nem CACA_ENDERECO_PUBLICO nem CACA_CHAVE_PRIVADA'}`,
+        deOndeVeioOEndereco: donoCarteira === null ? 'de lugar nenhum'
+            : chave && porQueSemAssinador !== 'CACA_CHAVE_PRIVADA não decodifica como chave privada'
+                ? 'da chave privada' : 'de CACA_ENDERECO_PUBLICO',
+        acessoDeLeitura: `ligado em ${hostDoRpc(rpc)} — lê saldo e nonce sem assinar nada`,
+        assinador: carteira !== null ? 'CARREGADO: pode assinar e transmitir' : `NÃO: ${porQueSemAssinador}`,
+        oQueIssoPERMITE: donoCarteira === null
+            ? 'nada do caminho do tiro: sem endereço não há saldo nem nonce para conferir'
+            : 'ler saldo e nonce, decidir e montar a transação. Assinar e transmitir, só com assinador',
+        comoObservarSemChave: donoCarteira === null
+            ? 'defina CACA_ENDERECO_PUBLICO com o endereço da conta_bot (público, não é segredo)'
+            : 'já dá',
+    });
 
 
     let dataProvider: string | null = null;
@@ -2850,9 +2918,9 @@ async function principal(): Promise<'parar' | void> {
     // Uma ida a rede no boot, uma vez, para o resto do processo saber quanto
     // tem. Se falhar, `saldoJaLido` fica falso e quem depende dele continua
     // dizendo "nao sei" em vez de assumir zero.
-    if (carteira !== null && donoCarteira !== null) {
+    if (donoCarteira !== null) {
         try {
-            saldoDeGasWei = await (carteira.provider as JsonRpcProvider).getBalance(donoCarteira);
+            saldoDeGasWei = await leitor.getBalance(donoCarteira);
             saldoLidoEm = Date.now();
             saldoJaLido = true;
             log.info('Gás na conta_bot, lido no boot.', {
@@ -3068,11 +3136,10 @@ async function principal(): Promise<'parar' | void> {
              * ler saldo), e esse caso continua parando aqui. A falta de
              * AUTORIZACAO, nao.
              */
-            if (!carteira || !donoCarteira) {
-                passos.envio = !carteira
-                    ? 'não há carteira (CACA_CHAVE_PRIVADA ausente ou inválida): sem ela não existe '
-                      + 'endereço de origem, e o resto do caminho não tem o que conferir'
-                    : 'a carteira não expôs endereço — o resto do caminho não tem o que conferir';
+            if (!donoCarteira) {
+                passos.envio = 'não sei o endereço da conta_bot (nem CACA_ENDERECO_PUBLICO nem '
+                    + 'CACA_CHAVE_PRIVADA): sem endereço de origem não há saldo nem nonce para conferir. '
+                    + 'ASSINADOR não é o que falta aqui — o endereço é';
                 log.info('[EM SECO] Caminho conferido até onde dava.', passos);
                 return;
             }
@@ -3084,7 +3151,7 @@ async function principal(): Promise<'parar' | void> {
             // Saldo: a unica coisa que so era lida dentro do tiro, e por isso
             // aparecia como "ainda não li" para sempre.
             try {
-                saldoDeGasWei = await (carteira.provider as JsonRpcProvider).getBalance(donoCarteira);
+                saldoDeGasWei = await leitor.getBalance(donoCarteira);
                 saldoLidoEm = Date.now();
                 saldoJaLido = true;
                 passos.saldo = `${new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6)} ETH`;
@@ -4921,13 +4988,15 @@ async function principal(): Promise<'parar' | void> {
                  * entao esse caso continua cortando aqui.
                  */
                 const soObservando = !ENVIAR;
-                if (!carteira || !carteira.provider || !nonceManager) {
+                // MONTAR precisa de ENDERECO e NONCE. Assinador, nao: ele e
+                // exigido no ultimo degrau, logo antes de transmitir.
+                if (!donoCarteira || !nonceManager) {
                     log.error('[NAO MANDEI] Tinha alvo medido e não há como montar o envio.', {
                         devedor: alvo.devedor,
-                        oQueFaltou: !carteira ? 'não há carteira (CACA_CHAVE_PRIVADA ausente ou inválida)'
-                            : !carteira.provider ? 'a carteira não tem provedor ligado'
+                        oQueFaltou: !donoCarteira
+                            ? 'não sei o endereço da conta_bot (defina CACA_ENDERECO_PUBLICO ou CACA_CHAVE_PRIVADA)'
                             : 'o contador de nonce não subiu no boot',
-                        oQueFazer: 'conferir a chave e o RPC no Railway',
+                        oQueFazer: 'conferir o endereço e o RPC no Railway',
                         medicoes: medicoes.length,
                     });
                     continue;
@@ -5089,7 +5158,7 @@ async function principal(): Promise<'parar' | void> {
                             try {
                                 const resposta = await Promise.race([
                                     chamar<string>('eth_estimateGas', [{
-                                        from: await carteira.getAddress(),
+                                        from: donoCarteira,
                                         to: contrato.endereco,
                                         data: envio,
                                     }]),
@@ -5103,7 +5172,7 @@ async function principal(): Promise<'parar' | void> {
                         (async (): Promise<bigint | null> => {
                             try {
                                 const resposta = await Promise.race([
-                                    (carteira!.provider as JsonRpcProvider).getBalance(donoCarteira!),
+                                    leitor.getBalance(donoCarteira!),
                                     new Promise<null>((r) => { const t = setTimeout(() => r(null), MS_PARA_ESTIMAR); t.unref?.(); }),
                                 ]);
                                 return resposta === null ? null : BigInt(resposta.toString());
@@ -5198,7 +5267,7 @@ async function principal(): Promise<'parar' | void> {
                     // rede, e no caminho quente ela custaria a liquidacao.
                     if (Date.now() - saldoLidoEm > 60_000) {
                         try {
-                            saldoDeGasWei = await (carteira.provider as JsonRpcProvider).getBalance(donoCarteira!);
+                            saldoDeGasWei = await leitor.getBalance(donoCarteira!);
                             saldoLidoEm = Date.now();
                             saldoJaLido = true;
                         } catch { /* seguir com o ultimo saldo conhecido */ }
@@ -5451,6 +5520,17 @@ async function principal(): Promise<'parar' | void> {
                             porQueNaoSai: 'CACA_ENVIAR não é 1. A decisão inteira rodou; só a transmissão está '
                                 + 'bloqueada, no último degrau',
                             oQueIssoPROVA: 'que o caminho do dinheiro foi exercitado de ponta a ponta sem gastar',
+                        });
+                        continue;
+                    }
+                    // ENVIO AUTORIZADO E SEM ASSINADOR: recusa EXPLICITA, e
+                    // nenhum desvio. O nonce nao e reservado — adiantar o
+                    // contador sem mandar desarma `provaAgora()` para sempre.
+                    if (!carteira) {
+                        log.error('[NAO MANDEI] Envio autorizado e NÃO há assinador. Não transmito.', {
+                            devedor: alvo.devedor,
+                            oQueFaltou: 'CACA_CHAVE_PRIVADA ausente ou inválida',
+                            oQueEuNAOFiz: 'não assinei, não transmiti e não reservei nonce',
                         });
                         continue;
                     }
