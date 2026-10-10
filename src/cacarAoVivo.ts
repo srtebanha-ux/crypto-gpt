@@ -3200,9 +3200,6 @@ async function principal(): Promise<'parar' | void> {
                     : `desligado — ${d.porque}. Esperando a saúde cruzar 1 é chegar depois: o bloco do `
                       + 'cruzamento é o mesmo em que o vencedor executa (medido em 32 de 43 liquidações)';
             })();
-            passos.aceitaPrejuizo = POLITICA.aceitaPrejuizo
-                ? 'LIGADO: atira mesmo dando prejuízo. É o único alvo legível a tempo (medido em 2026-09-28)'
-                : 'desligado: só atira com lucro acima de zero — e nenhum alvo legível a tempo tem isso';
             const emEth6 = (w: bigint) => new Decimal(w.toString()).dividedBy(1e18).toFixed(6);
             // O ENSAIO USA A MESMA GORJETA QUE O TIRO, e nao usava.
             //
@@ -3212,6 +3209,23 @@ async function principal(): Promise<'parar' | void> {
             // `tetoDaGorjetaWei`, entao a linha que existe para mostrar o que o
             // bot FARIA mostrava o que ele deixou de fazer. REGRA 3 deste
             // arquivo: a mesma regra em dois lugares, implementada em um.
+            // O LIMITE DE GAS NASCE ANTES DA DECISAO, e nao nascia.
+            //
+            // ACHADO no log dela de 2026-10-09 22:46: o ensaio imprimia
+            // `adiantaria 0.000077 ETH` (850.000 de gas, o da POLITICA) ao lado
+            // de `limite de gás 5000000` (o que a transacao de verdade carrega).
+            // Medido com as funcoes reais: o adiantamento verdadeiro e
+            // 0.000450 ETH — 5,8x o publicado. O caminho QUENTE ja passava
+            // `limiteGas` para `decidirTiro`; o ensaio, nao. REGRA 3 deste
+            // arquivo: a mesma regra em dois lugares, implementada em um.
+            //
+            // Nao muda o veredicto com o saldo dela (0,000450 cabe em 0,011142),
+            // e e por isso que passou sem ser visto: um diagnostico que
+            // subestima o congelamento em 5,8x so e inofensivo ate o saldo
+            // encostar nele.
+            const gasDeEnsaio = limiteDeGasDoTiro({
+                estimadoGas: null, saldoWei: saldoDeGasWei, baseFeeWei: base,
+            });
             const tetoDoEnsaio = ((): bigint | undefined => {
                 const eth = precoDoEth();
                 if (eth === null) return undefined;
@@ -3222,12 +3236,42 @@ async function principal(): Promise<'parar' | void> {
             })();
             const d88 = decidirTiro({
                 ...ambiente, lucroUsd: new Decimal(88), tetoDaGorjetaWei: tetoDoEnsaio,
+                // O MESMO limite que a montagem abaixo usa, e que o caminho
+                // quente usa: sem isto a conta cai no gas da politica.
+                limiteGas: gasDeEnsaio.limite ?? undefined,
             });
             passos.numDeUS$88 = `gorjeta ${(Number(d88.prioridadeWei) / 1e9).toFixed(2)} gwei` +
                 (d88.amordaca.amordacado ? ` (AMORDAÇADA — queria ${(Number(d88.desejadaWei) / 1e9).toFixed(2)})` : ' (inteira)') +
-                `, adiantaria ${emEth6(d88.adiantadoWei)} ETH`;
+                `, adiantaria ${emEth6(d88.adiantadoWei)} ETH`
+                + ` (congelado por ${gasDeEnsaio.limite ?? 'gás não definido'} de limite × `
+                + `${(Number(d88.maxFeeWei) / 1e9).toFixed(4)} gwei de teto — o MESMO limite que vai na transação)`;
             passos.numDeUS$88Atiraria = d88.atira ? 'SIM' : `NÃO — ${d88.porque}`;
             passos.adiantadoCabe = d88.adiantavelWei > base ? 'sim' : 'NÃO — não conseguiria enviar';
+            // O EFEITO MEDIDO, nao a promessa que o nome faz.
+            //
+            // O log dela de 2026-10-09 22:46 imprimia "LIGADO: atira mesmo
+            // dando prejuízo" — e isso NAO e o que a chave faz. O lucro que
+            // chega em `decidirTiro` pelo caminho quente vem do contrato como
+            // bigint SEM SINAL (`lerRespostaDaCaca`), entao prejuizo nunca
+            // passa por aqui; e `margemMinima` de 2x barra lucro pequeno antes.
+            // Medido com as funcoes reais, saldo e botoes dela (2026-10-10):
+            // lucro US$ 0 / 0,01 / 1 / 88 -> MESMA decisao com e sem a chave.
+            // Ela e INERTE nos botoes de agora, e a frase passou a dizer isso
+            // em vez de prometer um comportamento que nao existe.
+            passos.aceitaPrejuizo = ((): string => {
+                const semAChave = decidirTiro({
+                    ...ambiente, aceitaPrejuizo: false, lucroUsd: new Decimal(88),
+                    tetoDaGorjetaWei: tetoDoEnsaio, limiteGas: gasDeEnsaio.limite ?? undefined,
+                });
+                if (!POLITICA.aceitaPrejuizo) {
+                    return 'desligado: só atira com lucro acima de zero';
+                }
+                return semAChave.atira === d88.atira
+                    ? 'CACA_ACEITA_PREJUIZO=1 está definida e NÃO muda nada nestes botões: '
+                      + 'a decisão é a mesma com e sem ela (o lucro vem do contrato como inteiro sem '
+                      + 'sinal, e a margem de 2x barra antes). Pode apagar a variável'
+                    : 'CACA_ACEITA_PREJUIZO=1 está MUDANDO a decisão deste alvo — confira antes de ligar o envio';
+            })();
 
             /**
              * A MONTAGEM, no ensaio — e com a TRANSMISSAO INTERCEPTADA.
@@ -3260,9 +3304,6 @@ async function principal(): Promise<'parar' | void> {
                         garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
                         quantoCobrir: cobrir(alvo), isStablePool: false, lucroMinimo: pisoDeEnsaio,
                     });
-                const gasDeEnsaio = limiteDeGasDoTiro({
-                    estimadoGas: null, saldoWei: saldoDeGasWei, baseFeeWei: base,
-                });
                 const interceptados: { to: string; bytes: number }[] = [];
                 const transmissorInterceptado = {
                     sendTransaction: async (t: { to: string; data: string }) => {

@@ -3039,3 +3039,90 @@ O discriminador honesto é positivo, não negativo: **com `6e14a11` no ar e
 NÃO pode ser "ainda não li"** — provado acima no artefato. O log das 21:20
 tem `gas: "ainda não li"` e nenhuma `[CONTA]`, e `6e14a11` só existe desde
 21:18:58. É disso que sai a conclusão, não da falha do build.
+
+## 2026-10-10: a reconciliação do gás, e uma chave que não faz nada
+
+O log das 22:46 trouxe `48ec697` em produção, `[CONTA]`, saldo lido e montagem
+interceptada. Ela mandou fechar três pontos antes de qualquer envio.
+
+### 1. A reversão da simulação: MONTAGEM validada ≠ EXECUÇÃO validada
+
+`medicao: "revertido (execution reverted)"` no mesmo `[EM SECO]` que diz
+"caminho de tiro INTEIRO conferido" não é contradição, e a distinção importa:
+
+    montagem validada   o saldo foi lido, a decisão rodou, a gorjeta saiu, o
+                        calldata foi construído (196 bytes) e entregue ao
+                        interceptador. É o que o ensaio prova.
+    execução validada   a Aave aceitar o `liquidationCall` e o lucro chegar ao
+                        cofre. O ensaio NÃO prova isso, e não pode: a mesma
+                        linha diz `margemDoAlvo: precisa cair 1.1849%`, então a
+                        posição está SADIA e a Aave recusa por construção
+                        (`HealthFactorNotBelowThreshold`).
+
+Quem prova execução é o fork, e ele rodou hoje no bloco 52417509, com o
+contrato publicado real (`0x9066b0ba…`), Aave real e pool real — só o preço do
+WETH é forçado:
+
+    alvo 0x66bb6c29  dívida US$ 133.948,51  saúde 1.04121389 -> 0.99963986 (-4,0%)
+    cobertura 75.831,589122 USDC | piso exigido 1.137,473836 USDC
+    status SUCESSO | gasUsed 679.930 | LUCRO NO COFRE 4.472,961136 USDC
+
+Então: **execução validada em fork, montagem validada em produção, e nenhum
+envio pago em nenhuma das duas.**
+
+### 2. `aceitaPrejuizo: LIGADO` — a frase prometia o que a chave não faz
+
+Medido com as funções reais, o saldo dela (0,011142 ETH), baseFee 0,0200 gwei e
+os botões do Railway (`CACA_GAS=850000`, `CACA_RISCO_MAXIMO=0.8`):
+
+    lucro US$ 0,00  ->  não atira, COM e SEM a chave
+    lucro US$ 0,01  ->  não atira, COM e SEM
+    lucro US$ 1,00  ->  atira,     COM e SEM
+    lucro US$ 88    ->  atira,     COM e SEM
+
+**`CACA_ACEITA_PREJUIZO=1` é INERTE nestes botões.** A razão é a que este
+arquivo já registra em 2026-09-28: o lucro que chega em `decidirTiro` pelo
+caminho quente vem do contrato como bigint **sem sinal**, então prejuízo nunca
+passa por ali; e `margemMinima` de 2x barra lucro pequeno antes da chave.
+
+A frase antiga — *"LIGADO: atira mesmo dando prejuízo"* — era uma promessa de
+comportamento, não uma medição. Agora o ensaio **roda `decidirTiro` duas
+vezes**, com e sem a chave, e publica o que mudou:
+
+    "CACA_ACEITA_PREJUIZO=1 está definida e NÃO muda nada nestes botões: a
+     decisão é a mesma com e sem ela. Pode apagar a variável"
+
+E se algum dia ela MUDAR a decisão de um alvo, a frase passa a dizer isso. O
+log deixou de afirmar efeito sem medir efeito.
+
+### 3. O GÁS: três números, e um deles estava 5,8x pequeno
+
+    850.000     `CACA_GAS` — o gás da POLÍTICA, a estimativa de quanto uma
+                caçada consome. É o que o `[BOTÕES]` imprime
+    5.000.000   `limiteDeGasDoTiro` sem estimativa — o LIMITE que vai na
+                transação. Não é consumo: o nó congela `limite × maxFee` e
+                DEVOLVE o que não foi gasto
+    679.930     o gás REALMENTE consumido por um tiro vencedor, medido no fork
+                de hoje. Cabe com folga nos 5M, e é por isso que o limite alto
+                não é desperdício
+
+E o defeito: `adiantaria 0.000077 ETH` era **850.000 × maxFee**, enquanto a
+transação montada na linha seguinte carregava 5.000.000. O adiantamento
+verdadeiro é **0,000450 ETH — 5,8x o publicado.**
+
+A causa é a REGRA 3 outra vez: o caminho QUENTE já passava `limiteGas` para
+`decidirTiro` (linha 5305); o ENSAIO não passava, então a conta caía no gás da
+política. **O caminho do dinheiro estava certo; o diagnóstico é que mentia** —
+e um diagnóstico que subestima o congelamento em 5,8x só é inofensivo enquanto
+o saldo não encosta nele.
+
+Conserto: o limite nasce ANTES da decisão e é o MESMO objeto que a montagem
+usa. Conferido no artefato, com os botões dela:
+
+    adiantaria 0.000450 ETH (congelado por 5000000 de limite × 0.0900 gwei de
+    teto — o MESMO limite que vai na transação)
+
+Não muda o veredicto com este saldo (0,000450 cabe em 0,011142, e `atira`
+continua SIM) — e foi exatamente por isso que passou sem ser visto.
+
+1475 testes, 1475 passando, 0 falhas, 0 cancelados, exit 0. Build exit 0.
