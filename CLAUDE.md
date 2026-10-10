@@ -3613,3 +3613,96 @@ acima OBSERVADAS no artefato.
 **Pendentes:** `sinal` (precisa do WebSocket — Railway); `cotacao` (sem amostra:
 o mercado não foi lido nestes ciclos); inclusão (não medida por nada daqui); o
 NOME da reversão; e a política candidata de tamanho, que **não foi promovida**.
+
+## 2026-10-10: os 106ms interpretados ERRADO, e o sono que ignora o bloco
+
+Ela recusou a minha leitura: *"não use o bloco de dois segundos como orçamento
+disponível. Avalie o impacto diante da cadência de Flashblocks e da janela
+efetivamente observada."* Está certa nas três frentes, e duas delas são
+achados estruturais lidos no código.
+
+### 1. O orçamento NÃO é o bloco de 2s
+
+    Flashblock da Base             ~200ms   (medido em 2026-10-09: 22,5 fatias/bloco)
+    caminho crítico medido          106ms   (leitura 56,7 + simulação 49,7)
+    janela observada dos alvos que valem    ZERO blocos (medido 3 vezes)
+
+Contra a cadência que de fato ordena, **106ms é mais de metade de uma fatia** —
+não 5% de um orçamento. E contra a janela medida das oportunidades valiosas
+(zero blocos), nenhum orçamento existe: o instante que o desenho de ler-e-reagir
+espera não acontece. Os 106ms deixam de ser "folga" e passam a ser **metade de
+uma fatia de atraso** na única disputa que existe.
+
+### 2. O aviso é `newHeads`: BLOCO COMPLETO, não Flashblock
+
+`src/gatilhoDeBloco.ts:43` assina `eth_subscribe(['newHeads'])`. Isso avisa
+quando o **bloco** é produzido (~2s) — **não** quando uma fatia de ~200ms é
+publicada. Então a mudança de estado que cria a oportunidade pode ter ficado
+visível numa fatia **até 2 segundos antes** do nosso aviso.
+
+**Eu não tinha medido isso e vinha chamando `newHeads` de "o instante em que o
+bloco nasce"**, como se fosse a primeira disponibilidade do estado. Não é, e o
+`resumo()` do cronômetro passa a declarar.
+
+### 3. O SONO IGNORA O BLOCO — e isso é a latência de verdade fora do gatilho
+
+Lido no código: fora de 'dedo no gatilho', o ciclo espera em `dormirDeOlho`,
+que acorda por **MERCADO** (preço fora da corrente) e **nunca por bloco**.
+
+    postura            sono     o bloco interrompe?
+    dormindo          8000ms    NÃO — espera o sono terminar
+    atento            1000ms    NÃO
+    dedo no gatilho    200ms    SIM (`esperarBlocoOuTempo`)
+
+**Então um bloco que nasce no meio do sono espera até ~8 segundos** para ser
+processado. Os 106ms de caminho crítico não descrevem a latência nesses
+estados: o sono descreve. Era exatamente o que ela mandou verificar — *"não
+descarte esse tempo apenas por ser 'sono'"*.
+
+Agora isso é **medido**: o ouvinte registra a chegada durante o sono, e o
+atraso vai para a etapa `sinal` do ciclo seguinte. O log diz:
+
+    oSinalEsperouOSono: "N aviso(s) de bloco chegaram DURANTE o sono e
+                         esperaram por ele"
+
+**A interrupção é CANDIDATA e está desligada** (`CACA_ACORDA_POR_BLOCO=1`):
+ligar sobe a frequência do ciclo de 8s para ~2s e isso custa CU, que não é
+decisão minha.
+
+### 4. Atraso ATÉ o sinal: DESCONHECIDO, e por quê
+
+A etapa `sinal` mede **do aviso chegar até a primeira leitura** — relógio
+monotônico, duração local. O atraso da **rede até o aviso** fica
+**desconhecido**: a única referência seria o timestamp do bloco, que tem
+resolução de **1 segundo** e não serve para medir dezenas de ms. Declarado no
+`resumo()`, não estimado.
+
+### 5. A cotação continua PENDENTE, com o motivo identificado
+
+`cotacao` tem zero amostras porque `olharMercado()` roda **no `finally` do
+ciclo**, fora da avaliação — e porque neste sandbox as casas de preço estão
+fora da allowlist (só `mainnet.base.org` passa). **São duas causas distintas**,
+e nenhuma delas é "o bot não cota": instrumentar aquele ponto é trabalho, e o
+dado de preço externo não existe aqui de todo jeito.
+
+### 6. Qual é o maior obstáculo, pelo que está medido
+
+    atualização dos dados   newHeads avisa o BLOCO (~2s), não a fatia (~200ms)
+    espera interna          até 8s, e o bloco NÃO a interrompe
+    leitura                 56,7ms
+    simulação               49,7ms (paralela)
+    cotação                 pendente
+
+**Os dois primeiros são de outra ordem de grandeza que os três últimos.**
+Otimizar leitura ou simulação seria afinar 106ms com 8.000ms de espera interna
+no mesmo caminho. **Não fiz.** A otimização que a medição justifica é a espera
+interna, e ela está pronta e desligada, aguardando a decisão dela sobre CU.
+
+### O que falta para fechar, e a ação exata
+
+A etapa `sinal` precisa do WebSocket, que não sobe neste sandbox
+(`avisoDeBloco: "CAIU — perguntando"`). **Ação necessária: implantar `4f61137`
+ou posterior no Railway com `CACA_ENVIAR=0` e colar um log de algumas horas.**
+O coletor está pronto: versão, período, amostras, mediana e percentis por
+etapa, desconexões, fallback, retentativas e recusas já saem na linha
+`[BLOCO] tempos:`.

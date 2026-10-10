@@ -145,3 +145,12 @@ test('a frase NÃO chama a parede do ciclo de latência', () => {
         'a parede do ciclo tem de DIZER que inclui o sono: 8000ms publicados como '
         + 'latência seriam um número que não descreve o que o nome diz');
 });
+
+test('o resumo declara os TRÊS limites: inclusão, atraso até o sinal, e newHeads', () => {
+    const r = new LivroDeTempos().resumo('real');
+    assert.match(r.oQueIssoNaoMede, /INCLUSÃO/);
+    assert.match(r.oQueIssoNaoMede, /DESCONHECIDO/, 'o atraso até o aviso não tem referência');
+    assert.match(r.oQueIssoNaoMede, /newHeads/);
+    assert.match(r.oQueIssoNaoMede, /não Flashblock/,
+        'confundir aviso de bloco com fatia de 200ms seria supor a primeira disponibilidade');
+});

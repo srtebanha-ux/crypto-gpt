@@ -276,8 +276,13 @@ export class LivroDeTempos {
             somaSequencialP50: percentil(somas, 0.5),
             etapas: porEtapa,
             paredeDosGrupos,
-            oQueIssoNaoMede: 'INCLUSÃO. Rapidez de montagem ou simulação não prova captura: '
-                + 'a fatia em que a transação cai depende da chegada, e isso só o recibo diz',
+            oQueIssoNaoMede: 'INCLUSÃO, e o ATRASO ATÉ O SINAL. (1) Rapidez de montagem ou '
+                + 'simulação não prova captura: a fatia em que a transação cai depende da chegada, '
+                + 'e isso só o recibo diz. (2) A etapa `sinal` mede do AVISO chegar até a leitura; '
+                + 'o atraso da rede ATÉ o aviso fica DESCONHECIDO, porque o timestamp do bloco tem '
+                + 'resolução de 1 segundo e não serve de referência para dezenas de ms. '
+                + '(3) O aviso é `newHeads`: BLOCO COMPLETO (~2s), não Flashblock (~200ms) — '
+                + 'a mudança de estado pode ter ficado visível numa fatia anterior.',
         };
     }
 

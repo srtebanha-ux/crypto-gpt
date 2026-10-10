@@ -2561,6 +2561,8 @@ async function principal(): Promise<'parar' | void> {
     /** O instante monotônico do último aviso de bloco, e se foi aviso ou timeout. */
     let sinalEm: bigint | null = null;
     let sinalFoiBloco = false;
+    /** Quantos avisos de bloco chegaram DURANTE um sono e esperaram por ele. */
+    let blocosQueEsperaramOSono = 0;
     /** Ao lado do cache, no volume: o livro tem de sobreviver ao deploy. */
     const CAMINHO_DO_LIVRO = process.env.CACA_EPISODIOS
         ?? CAMINHO_DO_CACHE.replace(/[^/]+$/, 'episodios.json');
@@ -2646,6 +2648,12 @@ async function principal(): Promise<'parar' | void> {
     const JANELA_DE_BLOCOS = numeroDoAmbiente(
         'CACA_JANELA_DE_BLOCOS', process.env.CACA_JANELA_DE_BLOCOS, 2);
     const QUANTOS_ARMAR = Number(process.env.CACA_QUANTOS_ARMAR ?? '8');
+    /**
+     * CANDIDATA, desligada por padrao: acordar o ciclo por bloco em TODA
+     * postura, nao so no gatilho. Medido que hoje o sono ignora o bloco.
+     * Ligar sobe a frequencia do ciclo (8s -> ~2s) e custa CU: e decisao dela.
+     */
+    const ACORDA_POR_BLOCO = process.env.CACA_ACORDA_POR_BLOCO === '1';
     const VALIDADE_ARMADO_MS = Number(process.env.CACA_VALIDADE_ARMADO_MS ?? '5000');
 
     async function armar(): Promise<void> {
@@ -4539,6 +4547,15 @@ async function principal(): Promise<'parar' | void> {
                     ultimoSinalDeVida = Date.now();
                     log.info(`[BLOCO ${blocoAtual}] Só a brasa — ninguém mais pode ter caído.`, {
                         tempos: comoLerOsTempos(tempos.resumo('real')),
+                        oSinalEsperouOSono: blocosQueEsperaramOSono === 0
+                            ? (ouvinte?.vivo ? 'nenhum bloco chegou durante um sono ainda'
+                                : 'NÃO SEI: o aviso de bloco está caído, então não há sinal para esperar')
+                            : `${blocosQueEsperaramOSono} aviso(s) de bloco chegaram DURANTE o sono e `
+                              + `esperaram por ele. Acordar por bloco é CANDIDATA `
+                              + `(CACA_ACORDA_POR_BLOCO=1, hoje ${ACORDA_POR_BLOCO ? 'LIGADA' : 'desligada'})`,
+                        oQueOSinalMede: 'do aviso de bloco chegar até a primeira leitura. NÃO mede o '
+                            + 'atraso da rede até o aviso: para isso falta referência confiável '
+                            + '(o timestamp do bloco tem resolução de 1s), e isso fica DESCONHECIDO',
                         gargalo: (() => {
                             const g = tempos.gargalo('real');
                             return g === null ? 'sem amostra' : `${g.etapa} (p50 ${g.p50.toFixed(1)}ms)`;
@@ -6122,7 +6139,54 @@ async function principal(): Promise<'parar' | void> {
                     await dormir(ritmo);
                 }
             } else if (resta > 0) {
-                await dormirDeOlho(resta, OLHAR_MERCADO_MS, olharMercado, async (ms) => { await dormir(ms); });
+                // O SONO IGNORA O BLOCO — medido lendo o codigo em 2026-10-10,
+                // e e a resposta a pergunta dela: *"verifique também se os oito
+                // segundos de espera podem adiar o processamento de um sinal
+                // novo ou se são interrompidos por ele"*.
+                //
+                // `dormirDeOlho` acorda por MERCADO (preco fora da corrente),
+                // nunca por bloco. Entao um bloco que nasce no meio do sono
+                // espera o sono terminar: ate ~8s em 'dormindo', ~1s em
+                // 'atento'. Os 106ms de caminho critico nao sao a latencia do
+                // bot nesses estados — o sono e.
+                //
+                // Aqui isso passa a ser MEDIDO: o ouvinte registra a chegada
+                // mesmo durante o sono, e o atraso vai para a etapa 'sinal' do
+                // ciclo seguinte. A INTERRUPCAO de verdade e candidata e fica
+                // atras de `CACA_ACORDA_POR_BLOCO=1`, desligada por padrao:
+                // acordar por bloco sobe a frequencia do ciclo de 8s para ~2s
+                // e isso custa CU, que nao e decisao minha.
+                let chegouNoSono: bigint | null = null;
+                let quantosNoSono = 0;
+                const desassinar = ouvinte?.vivo
+                    ? ouvinte.assinar(() => {
+                        quantosNoSono += 1;
+                        if (chegouNoSono === null) chegouNoSono = process.hrtime.bigint();
+                    })
+                    : null;
+                try {
+                    if (ACORDA_POR_BLOCO && ouvinte?.vivo) {
+                        await esperarBlocoOuTempo(
+                            (aoBloco) => ouvinte.assinar(aoBloco),
+                            resta,
+                            (fn, ms) => setTimeout(fn, ms),
+                            (id) => clearTimeout(id as NodeJS.Timeout),
+                        );
+                    } else {
+                        await dormirDeOlho(resta, OLHAR_MERCADO_MS, olharMercado,
+                            async (ms) => { await dormir(ms); });
+                    }
+                } finally {
+                    desassinar?.();
+                }
+                if (chegouNoSono !== null) {
+                    // O atraso REAL do sono: do bloco chegar ate o ciclo
+                    // comecar. Isto NAO e "tempo de processamento": e espera
+                    // interna, e a etapa 'sinal' do proximo ciclo a recebe.
+                    sinalEm = chegouNoSono;
+                    sinalFoiBloco = true;
+                    blocosQueEsperaramOSono += quantosNoSono;
+                }
             }
         }
     }
