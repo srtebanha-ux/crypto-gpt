@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
     ControleDeCapacidade, Inventario, sanitizar, oQuePausar, SECUNDARIAS,
     ENTRE_SONDAGENS_MS, SONDAGENS_POR_JANELA, JANELA_DE_SONDAGEM_MS, CU_ESTIMADO_POR_METODO,
-    decidirSobreRecusa,
+    decidirSobreRecusa, OrcamentoDaTarefa, veredictoDaVarredura,
 } from './capacidade';
 import { classificarRecusa } from './cobertura';
 import { EscadaDeRpc, ehFalhaDeTransporte } from './escadaDeRpc';
@@ -634,4 +634,131 @@ test('nada lido e sem cache anterior: NÃO grava fronteira', () => {
     assert.match(antes, /varrido\.faixasLidas\.length === 0 && !estadoDoCache\.usavel/,
         'o portão tem de estar ANTES da gravação');
     assert.match(antes, /return;/, 'e tem de sair sem gravar');
+});
+
+test('"um quarto falhou" era 40 de 40: a fração sai do TOTAL, não dos sucessos', () => {
+    // O caso real de 21:14:45: janelasLidas 0, janelasQueFalharam 40. A conta
+    // antiga era `falharam > lidas / 4` -> `40 > 0` -> verdadeiro, e a frase
+    // dizia "um quarto das janelas falhou".
+    const antiga = (lidas: number, falharam: number) => falharam > lidas / 4;
+    assert.equal(antiga(0, 40), true, 'a condição antiga disparava a frase do "um quarto"');
+
+    const v = veredictoDaVarredura({ lidas: 0, falharam: 40, achados: 0 });
+    assert.equal(v.disponivel, false);
+    assert.equal(v.fracaoQueFalhou, 1, '40 de 40 é 100%, não 25%');
+    assert.match(v.frase, /HISTÓRICO INDISPONÍVEL: 40 de 40 janelas falharam \(100\.0%\)/);
+    assert.match(v.frase, /não é\s+"nenhuma liquidação"/);
+    assert.ok(!/um quarto/.test(v.frase));
+});
+
+test('zero janelas lidas nunca é "nenhuma liquidação"', () => {
+    for (const falharam of [1, 7, 40]) {
+        const v = veredictoDaVarredura({ lidas: 0, falharam, achados: 0 });
+        assert.equal(v.disponivel, false, `${falharam} falhas`);
+        assert.match(v.frase, /ausência de leitura/);
+    }
+    // Com pelo menos uma lida, o resultado existe — e diz que é PISO.
+    const parcial = veredictoDaVarredura({ lidas: 3, falharam: 37, achados: 2 });
+    assert.equal(parcial.disponivel, true);
+    assert.match(parcial.frase, /INCOMPLETA: 3 janelas lidas e 37 falharam \(92\.5% das tentativas\)/);
+    assert.match(parcial.frase, /é PISO, não total/);
+    // Completa é completa.
+    assert.match(veredictoDaVarredura({ lidas: 40, falharam: 0, achados: 5 }).frase, /COMPLETA/);
+});
+
+test('o orçamento cobre a tarefa INTEIRA: janelas e retentativas no mesmo bolso', () => {
+    const r = relogio();
+    const o = new OrcamentoDaTarefa('historico', 5, 60_000, r.agora);
+    for (let i = 0; i < 5; i += 1) assert.equal(o.pedir(), true, `tentativa ${i + 1}`);
+    assert.equal(o.pedir(), false, 'a sexta não sai');
+    assert.equal(o.esgotado(), true);
+    assert.match(o.porqueAcabou()!, /teto de 5 tentativas/);
+    assert.match(o.comoLer(), /5 de 5 tentativas/);
+});
+
+test('o orçamento também acaba por TEMPO, não só por contagem', () => {
+    const r = relogio();
+    const o = new OrcamentoDaTarefa('historico', 100, 10_000, r.agora);
+    assert.equal(o.pedir(), true);
+    r.andar(10_000);
+    assert.equal(o.pedir(), false);
+    assert.match(o.porqueAcabou()!, /10s de parede/);
+});
+
+test('uma recusa de cota ENCERRA o orçamento: não insiste nas 39 restantes', () => {
+    const o = new OrcamentoDaTarefa('historico', 50, 60_000, relogio().agora);
+    assert.equal(o.pedir(), true);
+    o.encerrar(`o provedor recusou por capacidade: ${RECUSA_REAL.slice(0, 30)}`);
+    assert.equal(o.pedir(), false);
+    assert.match(o.porqueAcabou()!, /capacidade/);
+    assert.equal(o.gastas(), 1, 'uma tentativa gasta, não quarenta');
+});
+
+test('o censo passa `tentativas: 1` e consome o orçamento — não 4 por janela', () => {
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const i = fonte.indexOf('async function quandoFoiAUltimaLiquidacao');
+    const corpo = fonte.slice(i, i + 5000).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    assert.match(corpo, /new OrcamentoDaTarefa\('historico'/, 'a tarefa tem orçamento');
+    assert.match(corpo, /if \(!orcamento\.pedir\(\)\) break;/, 'cada janela sai do orçamento');
+    assert.match(corpo, /\}\], 1, 'demorada', 'historico'\)/,
+        '`tentativas: 1`: as retentativas internas multiplicavam o orçamento por quatro');
+    assert.match(corpo, /orcamento\.encerrar\(/, 'cota encerra a tarefa');
+    assert.match(corpo, /veredictoDaVarredura\(/, 'e o resultado sai dos contadores');
+    // A frase do "um quarto" não voltou.
+    assert.ok(!/janelasLidas \/ 4/.test(corpo));
+});
+
+test('sondagem que FALHA não promove nem restaura disponibilidade', () => {
+    const r = relogio();
+    const k = new ControleDeCapacidade(r.agora);
+    k.esgotou('alchemy', RECUSA_REAL);
+    r.andar(ENTRE_SONDAGENS_MS);
+    assert.equal(k.podeSondar('alchemy'), true);
+    k.sondou('alchemy');
+    // A sondagem falhou: ninguém chama `confirmou`. O estado NÃO muda.
+    assert.equal(k.estaEsgotado('alchemy'), true);
+    assert.equal(k.condicao('alchemy'), 'esgotado');
+    assert.equal(k.condicao('alchemy', 'eth_blockNumber'), 'esgotado',
+        'uma sondagem gasta não é uma sondagem bem-sucedida');
+    assert.deepEqual(k.metodosConfirmados('alchemy'), [],
+        'nenhum método foi confirmado por uma falha');
+});
+
+test('o relatório por método diz provedor, última verificação e resultado', () => {
+    const r = relogio();
+    const k = new ControleDeCapacidade(r.agora);
+    k.confirmou('mainnet.base.org', 'eth_call');
+    r.andar(90_000);
+    const m = k.metodosConfirmados('mainnet.base.org');
+    assert.deepEqual(m, [{ metodo: 'eth_call', haQuantoMs: 90_000 }]);
+    const linha = k.porProvedorConfigurado(['mainnet.base.org'])[0]!;
+    assert.equal(linha.provedor, 'mainnet.base.org');
+    assert.equal(linha.condicao, 'disponivel');
+    assert.match(linha.detalhe, /uma leitura passou há 1\.5 min/);
+    // E eth_getLogs, que nunca passou, continua desconhecido.
+    assert.equal(k.condicao('mainnet.base.org', 'eth_getLogs'), 'desconhecido');
+});
+
+test('TODO `eth_getLogs` declara a tarefa: nenhum cai no padrão `monitoramento`', () => {
+    // Ela avisou: *"Não suponha que corrigir um chamador corrige os demais."*
+    // E o log de 23:31 mostrou um `eth_getLogs` ainda rotulado `monitoramento`
+    // com a correção no ar: era a sondagem de tamanho, outro chamador.
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    // Cada `chamar<...>(` cuja lista de argumentos comeca com 'eth_getLogs'.
+    const inicios: number[] = [];
+    for (let i = codigo.indexOf('chamar<'); i >= 0; i = codigo.indexOf('chamar<', i + 1)) {
+        const cabeca = codigo.slice(i, i + 200);
+        const abre = cabeca.indexOf('(');
+        if (abre > 0 && cabeca.slice(abre, abre + 30).includes("'eth_getLogs'")) inicios.push(i);
+    }
+    assert.ok(inicios.length >= 3, `achei ${inicios.length} chamadas de eth_getLogs`);
+    for (const i of inicios) {
+        // A tarefa e o ultimo argumento: ela aparece antes do `;` que fecha.
+        const trecho = codigo.slice(i, i + 900);
+        const fim = trecho.indexOf(');');
+        assert.ok(fim > 0, 'chamada sem fim legível');
+        assert.match(trecho.slice(0, fim + 2), /'historico'\)/,
+            `esta chamada de eth_getLogs não declara a tarefa: ${trecho.slice(0, 70)}`);
+    }
 });

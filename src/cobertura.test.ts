@@ -5,6 +5,7 @@ import { join } from 'path';
 import {
     exigirResultado, RespostaSemResultado, coberturaVazia, coberturaCompleta,
     fracaoQueFalhou, comoLerACobertura, idDoLote, classificarRecusa,
+    diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs,
 } from './cobertura';
 import { codificarAggregate3, decodificarAggregate3Rapido } from './multicall';
 
@@ -186,4 +187,47 @@ test('dado de CACHE nunca conta como leitura nova', () => {
     assert.match(f, /750 de 1000 lidas \(75\.0%\)/, 'a fração lida exclui as reusadas');
     assert.match(f, /250 respondidas com estado GUARDADO/);
     assert.ok(!/1000 de 1000/.test(f));
+});
+
+test('`request limit reached` comprova FREQUÊNCIA e nada além — nem tamanho, nem método', () => {
+    const d = diagnosticarRecusaDeLogs('request limit reached');
+    assert.equal(d.restricao, 'frequencia');
+    assert.match(d.comprova, /FREQUÊNCIA/);
+    assert.match(d.comprova, /Não comprova restrição de tamanho, de método nem de capacidade/);
+    assert.ok(d.desconhecido.some((x) => /teto de TAMANHO/.test(x)));
+    assert.match(d.comoDescobrir, /UMA consulta pequena, com filtro conhecido/);
+});
+
+test('restrição de TAMANHO só quando a resposta fala de faixa ou resultados', () => {
+    for (const m of ['eth_getLogs is limited to a 500 range', 'query exceeds max results',
+        'block range is too large']) {
+        const d = diagnosticarRecusaDeLogs(m);
+        assert.equal(d.restricao, 'tamanho', m);
+        assert.match(d.comoDescobrir, /tamanho não medido fica DESCONHECIDO, não 250/);
+    }
+    // E o teto exato continua desconhecido: a mensagem diz que é grande, não qual é.
+    assert.ok(diagnosticarRecusaDeLogs('query exceeds max results')
+        .desconhecido.some((x) => /teto exato/.test(x)));
+});
+
+test('capacidade e método são classificações próprias, e cada uma diz o que falta', () => {
+    const cap = diagnosticarRecusaDeLogs('Monthly capacity limit exceeded');
+    assert.equal(cap.restricao, 'capacidade');
+    assert.match(cap.comprova, /vale para todo método/);
+    assert.ok(cap.desconhecido.some((x) => /tamanho/.test(x)), 'cota não diz nada sobre tamanho');
+    const met = diagnosticarRecusaDeLogs('the method eth_getLogs is not available');
+    assert.equal(met.restricao, 'metodo');
+    assert.match(met.comprova, /MÉTODO/);
+});
+
+test('mensagem sem padrão observado fica DESCONHECIDA nos quatro', () => {
+    const d = diagnosticarRecusaDeLogs('weird upstream failure 7');
+    assert.equal(d.restricao, 'desconhecida');
+    assert.ok(d.desconhecido.some((x) => /todos os quatro/.test(x)));
+    assert.match(d.comoDescobrir, /escolher um dos quatro seria invenção/);
+});
+
+test('o diagnóstico não publica credencial', () => {
+    const d = diagnosticarRecusaDeLogs('request limit reached at https://h/v2/CHAVE_MUITO_SECRETA_123');
+    assert.ok(!comoLerODiagnosticoDeLogs(d).includes('CHAVE_MUITO_SECRETA_123'));
 });

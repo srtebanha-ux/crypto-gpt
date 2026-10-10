@@ -36,6 +36,8 @@
  * PRESENCA da chave, nao a verdade do valor.
  */
 
+import { sanitizar } from './capacidade';
+
 /** A falha de leitura que antes virava `undefined` e estourava longe. */
 export class RespostaSemResultado extends Error {
     constructor(public readonly metodo: string, public readonly chaves: string[]) {
@@ -204,4 +206,94 @@ export function classificarRecusa(mensagem: string): {
         oQueFazer: 'não identificada: não trato como limite, porque tratar erro desconhecido como '
             + '"pediu calma" esconde defeito nosso atrás de paciência',
     };
+}
+
+// ---------------------------------------------------------------------------
+// DIAGNOSTICO LIMITADO DE `eth_getLogs`: o que a RESPOSTA comprova.
+//
+// Ela proibiu a inferencia que eu ia fazer: *"não deduza restrição de tamanho
+// ou método apenas de `request limit reached`."* Esta funcao devolve o que a
+// mensagem COMPROVA e deixa o resto DESCONHECIDO, em vez de escolher um dos
+// quatro no escuro.
+//
+// Os textos sao os que este projeto OBSERVOU, com a data:
+//   `request limit reached`                 mainnet.base.org, 2026-10-10
+//   `Monthly capacity limit exceeded`       alchemy, 2026-10-10
+//   `eth_getLogs is limited to a 500 range` mainnet.base.org, 2026-10-06
+//   `query exceeds max results`             usado no proxy de verificacao
+// ---------------------------------------------------------------------------
+
+export type RestricaoDeLogs = 'frequencia' | 'tamanho' | 'metodo' | 'capacidade' | 'desconhecida';
+
+export interface DiagnosticoDeLogs {
+    restricao: RestricaoDeLogs;
+    /** O que a resposta COMPROVA, com as palavras dela. */
+    comprova: string;
+    /** O que continua DESCONHECIDO depois desta resposta. */
+    desconhecido: string[];
+    /** A proxima medicao que resolveria o desconhecido — barata e especifica. */
+    comoDescobrir: string;
+}
+
+export function diagnosticarRecusaDeLogs(mensagem: string): DiagnosticoDeLogs {
+    const m = mensagem.toLowerCase();
+    const s = sanitizar(mensagem);
+    // TAMANHO: so quando a mensagem FALA de faixa, intervalo ou resultados.
+    if (/limited to a \d+ range|block range|exceeds max results|too many (logs|results)|range is too large/.test(m)) {
+        return {
+            restricao: 'tamanho',
+            comprova: `a resposta fala de FAIXA/RESULTADOS ("${s}"): a recusa é do TAMANHO da `
+                + 'consulta, e uma janela menor pode passar',
+            desconhecido: ['se o metodo esta liberado em qualquer tamanho',
+                'qual o teto exato (so a sondagem por tamanhos responde)'],
+            comoDescobrir: 'sondar tamanhos decrescentes com o MESMO filtro (é o que '
+                + '`descobrirPedaco` faz) — e tamanho não medido fica DESCONHECIDO, não 250',
+        };
+    }
+    if (/method\b[^.]{0,40}\bnot (found|supported|available)|unsupported method|-32601/.test(m)) {
+        return {
+            restricao: 'metodo',
+            comprova: `a resposta diz que o MÉTODO não existe ou não é servido ("${s}")`,
+            desconhecido: ['nada sobre frequência ou tamanho: o método nem chegou a ser executado'],
+            comoDescobrir: 'outro provedor, ou o endpoint correto deste — repetir não muda',
+        };
+    }
+    if (classificarRecusa(mensagem).tipo === 'cota') {
+        return {
+            restricao: 'capacidade',
+            comprova: `a resposta fala de CAPACIDADE/COTA da conta ("${s}"): vale para todo método `
+                + 'deste provedor, e esperar não a devolve',
+            desconhecido: ['se o tamanho da consulta seria aceito com cota disponível',
+                'se o método é servido por este plano'],
+            comoDescobrir: 'nada a medir neste provedor até a cota voltar; medir no secundário '
+                + 'responde sobre o secundário, não sobre este',
+        };
+    }
+    if (classificarRecusa(mensagem).tipo === 'taxa') {
+        return {
+            restricao: 'frequencia',
+            // ESTA E A LINHA QUE ELA PEDIU. `request limit reached` diz
+            // FREQUENCIA e mais nada: nao diz que a janela e grande, nem que o
+            // metodo e proibido, nem que a cota acabou.
+            comprova: `a resposta fala de LIMITE DE REQUISIÇÕES ("${s}"): é FREQUÊNCIA — pedidos `
+                + 'por segundo. Não comprova restrição de tamanho, de método nem de capacidade',
+            desconhecido: ['o teto de TAMANHO deste provedor (esta recusa não diz nada sobre ele)',
+                'se o método seria servido numa janela sem rajada',
+                'quanto de cota resta'],
+            comoDescobrir: 'UMA consulta pequena, com filtro conhecido, depois do recuo: se ela '
+                + 'passar, a restrição era frequência; se falhar com mensagem de faixa, é tamanho',
+        };
+    }
+    return {
+        restricao: 'desconhecida',
+        comprova: `a resposta não se encaixa em nenhum padrão observado ("${s}")`,
+        desconhecido: ['frequência, tamanho, método e capacidade — todos os quatro'],
+        comoDescobrir: 'guardar a mensagem e uma consulta pequena de controle; sem padrão '
+            + 'reconhecido, escolher um dos quatro seria invenção',
+    };
+}
+
+export function comoLerODiagnosticoDeLogs(d: DiagnosticoDeLogs): string {
+    return `restrição ${d.restricao.toUpperCase()} | COMPROVA: ${d.comprova} | `
+        + `DESCONHECIDO: ${d.desconhecido.join('; ')} | PRÓXIMA MEDIÇÃO: ${d.comoDescobrir}`;
 }

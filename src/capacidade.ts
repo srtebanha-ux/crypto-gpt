@@ -461,3 +461,100 @@ export function decidirSobreRecusa(e: {
         porque: `recusa ${c.tipo}: não trato como limite e devolvo o erro a quem chamou`,
     };
 }
+
+// ---------------------------------------------------------------------------
+// ORCAMENTO DE UMA TAREFA INTEIRA — janelas E retentativas no mesmo bolso.
+//
+// MEDIDO no log de 2026-10-10 21:14:45, com `336bd0f` no ar: o censo de
+// liquidacoes terminou com `janelasLidas: 0` e `janelasQueFalharam: 40`. O laco
+// rodava as 40 janelas sempre, e cada `chamar` ainda repetia ate 4 vezes com a
+// sua propria escada: ate 160 `eth_getLogs` contra um provedor que recusava
+// tudo. O conserto de `336bd0f` era na DESCOBERTA DE DEVEDORES — outro
+// chamador. Corrigir um nao corrige os demais.
+//
+// Este orcamento e por TAREFA: as janelas e as retentativas saem do mesmo
+// numero, e quando ele acaba a tarefa ADIA em vez de insistir.
+// ---------------------------------------------------------------------------
+
+export class OrcamentoDaTarefa {
+    private tentativasGastas = 0;
+    private readonly comecouEm: number;
+    private motivoDoFim: string | null = null;
+
+    constructor(
+        public readonly tarefa: Tarefa,
+        private readonly tetoDeTentativas: number,
+        private readonly tetoDeMs: number,
+        private readonly agora: () => number = () => Date.now(),
+    ) { this.comecouEm = this.agora(); }
+
+    /** Pede uma tentativa. `false` quando o orcamento acabou. */
+    pedir(): boolean {
+        if (this.motivoDoFim !== null) return false;
+        if (this.tentativasGastas >= this.tetoDeTentativas) {
+            this.motivoDoFim = `teto de ${this.tetoDeTentativas} tentativas`;
+            return false;
+        }
+        const decorrido = this.agora() - this.comecouEm;
+        if (decorrido >= this.tetoDeMs) {
+            this.motivoDoFim = `teto de ${(this.tetoDeMs / 1000).toFixed(0)}s de parede`;
+            return false;
+        }
+        this.tentativasGastas += 1;
+        return true;
+    }
+
+    /** Encerra o orcamento por um motivo de fora (recusa de cota, por exemplo). */
+    encerrar(motivo: string): void { this.motivoDoFim ??= motivo; }
+
+    esgotado(): boolean { return this.motivoDoFim !== null; }
+    porqueAcabou(): string | null { return this.motivoDoFim; }
+    gastas(): number { return this.tentativasGastas; }
+    decorridoMs(): number { return this.agora() - this.comecouEm; }
+
+    comoLer(): string {
+        return `${this.tarefa}: ${this.tentativasGastas} de ${this.tetoDeTentativas} tentativas, `
+            + `${(this.decorridoMs() / 1000).toFixed(1)}s de ${(this.tetoDeMs / 1000).toFixed(0)}s`
+            + (this.motivoDoFim === null ? '' : ` — ESGOTADO: ${this.motivoDoFim}`);
+    }
+}
+
+/**
+ * O veredicto de uma varredura por janelas, calculado dos CONTADORES.
+ *
+ * MEDIDO no mesmo log: `janelasQueFalharam > janelasLidas / 4` com
+ * `janelasLidas = 0` da `40 > 0` — verdadeiro —, e a frase publicada foi
+ * *"um quarto das janelas falhou"* sobre 40 de 40. O denominador era o numero
+ * de SUCESSOS, nao o total.
+ *
+ * E zero janelas lidas nao e "nenhuma liquidacao": e historico INDISPONIVEL.
+ */
+export function veredictoDaVarredura(e: { lidas: number; falharam: number; achados: number }): {
+    disponivel: boolean; fracaoQueFalhou: number | null; frase: string;
+} {
+    const tentadas = e.lidas + e.falharam;
+    const fracao = tentadas === 0 ? null : e.falharam / tentadas;
+    if (e.lidas === 0) {
+        return {
+            disponivel: false, fracaoQueFalhou: fracao,
+            frase: tentadas === 0
+                ? 'NENHUMA janela foi tentada: não há o que concluir'
+                : `HISTÓRICO INDISPONÍVEL: ${e.falharam} de ${tentadas} janelas falharam `
+                  + `(${((fracao ?? 0) * 100).toFixed(1)}%) e NENHUMA foi lida. Isto não é `
+                  + '"nenhuma liquidação" — é ausência de leitura, e nada pode ser concluído '
+                  + 'sobre o mercado daqui',
+        };
+    }
+    if (e.falharam > 0) {
+        return {
+            disponivel: true, fracaoQueFalhou: fracao,
+            frase: `cobertura INCOMPLETA: ${e.lidas} janelas lidas e ${e.falharam} falharam `
+                + `(${((fracao ?? 0) * 100).toFixed(1)}% das tentativas). ${e.achados} achado(s) `
+                + 'é PISO, não total',
+        };
+    }
+    return {
+        disponivel: true, fracaoQueFalhou: 0,
+        frase: `cobertura COMPLETA: ${e.lidas} de ${e.lidas} janelas lidas, ${e.achados} achado(s)`,
+    };
+}

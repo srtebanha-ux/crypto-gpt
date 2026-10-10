@@ -8,7 +8,8 @@ import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } fr
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
 import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
-import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, sanitizar, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
+import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, sanitizar, OrcamentoDaTarefa, veredictoDaVarredura, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
+import { diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs } from './cobertura';
 import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd, gorjetaQueMaximizaOValor, premioQueSePagaComAFatia, chanceDeSerOTopoDaFatia } from './prontidao';
@@ -1823,6 +1824,11 @@ async function descobrirPedaco(topo: number): Promise<{ pedaco: number | null; t
         tentativas += 1;
         const a = Math.max(0, topo - tamanho + 1);
         try {
+            // A TAREFA e 'historico': a sondagem de tamanho existe para a coleta
+            // de `Borrow`, e sair rotulada `monitoramento` foi o que o log de
+            // 23:31 mostrou — o mesmo defeito de atribuicao, em OUTRO chamador.
+            // E `tentativas: 1`, porque a escada interna multiplicaria a
+            // sondagem por quatro.
             await chamar<Array<{ topics: string[] }>>('eth_getLogs', [
                 {
                     address: REDE.pool,
@@ -1830,7 +1836,7 @@ async function descobrirPedaco(topo: number): Promise<{ pedaco: number | null; t
                     toBlock: `0x${topo.toString(16)}`,
                     topics: [TOPIC_BORROW],
                 },
-            ]);
+            ], 1, 'demorada', 'historico');
             pedacoMedido = tamanho;
             anunciarPedaco(tamanho, tentativas);
             return { pedaco: tamanho, tentativas };
@@ -4135,18 +4141,29 @@ async function principal(): Promise<'parar' | void> {
         let janelasLidas = 0;
         let janelasQueFalharam = 0;
         let blocoMaisAntigoOlhado = topo;
+        /** A ultima recusa, para o diagnostico dizer o que ela comprova. */
+        let ultimaRecusa: string | null = null;
 
+        // O ORCAMENTO DA TAREFA INTEIRA: janelas E retentativas no mesmo bolso.
+        //
+        // Antes o laco rodava as 40 janelas sempre, e cada `chamar` repetia ate
+        // 4 vezes por conta — ate 160 `eth_getLogs` contra um provedor que
+        // recusava tudo, que e o que o log de 21:14:45 mostrou. Agora cada
+        // tentativa sai do orcamento, e `chamar` recebe `tentativas: 1` para
+        // nao multiplicar por fora dele.
+        const orcamento = new OrcamentoDaTarefa('historico', ATE_ONDE_OLHAR + 10, 60_000);
         for (let i = 0; i < ATE_ONDE_OLHAR; i += 1) {
             const ate = topo - i * PASSO;
             const de = Math.max(0, ate - PASSO + 1);
             if (ate <= 0) break;
+            if (!orcamento.pedir()) break;
             try {
                 const logs = await chamar<Array<{ address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string }>>('eth_getLogs', [{
                     address: REDE.pool,
                     fromBlock: `0x${de.toString(16)}`,
                     toBlock: `0x${ate.toString(16)}`,
                     topics: [TOPIC_LIQUIDATION_CALL],
-                }]);
+                }], 1, 'demorada', 'historico');
                 janelasLidas += 1;
                 blocoMaisAntigoOlhado = de;
                 for (const cru of logs) {
@@ -4155,25 +4172,56 @@ async function principal(): Promise<'parar' | void> {
                         achadas.push({ bloco: l.bloco, ativo: l.ativoDaDivida, cru: l.dividaCrua, hash: cru.transactionHash, liquidante: l.liquidante });
                     } catch { /* um log estranho nao invalida o censo */ }
                 }
-            } catch {
+            } catch (e) {
                 // Uma janela que falha nao invalida a busca, mas ENTRA NA CONTA:
                 // um censo com buracos que se apresenta como completo seria
                 // ausencia com cara de resposta.
                 janelasQueFalharam += 1;
+                const msg = e instanceof Error ? e.message : String(e);
+                const d = decidirSobreRecusa({ mensagem: msg, ehTransporte: ehFalhaDeTransporte(msg) });
+                // COTA ENCERRA A TAREFA NA HORA: insistir nas 39 janelas
+                // restantes gasta o que sobrou para receber a mesma resposta.
+                if (d.marcarEsgotado) {
+                    orcamento.encerrar(`o provedor recusou por capacidade: ${sanitizar(msg)}`);
+                    break;
+                }
+                ultimaRecusa = msg;
             }
             await dormir(200);
         }
 
         const diasOlhados = ((topo - blocoMaisAntigoOlhado) * 2) / 86400;
 
+        const veredicto = veredictoDaVarredura({
+            lidas: janelasLidas, falharam: janelasQueFalharam, achados: achadas.length,
+        });
+        if (!veredicto.disponivel) {
+            // ZERO JANELAS LIDAS -> HISTORICO INDISPONIVEL, e nao "nenhuma
+            // liquidacao". A frase antiga publicava "a Aave da Base sem liquidar
+            // ninguem ha mais de uma semana" sobre 40 janelas que falharam, e a
+            // ressalva usava `janelasLidas / 4` como denominador: com zero
+            // lidas, `40 > 0` dava "um quarto das janelas falhou".
+            log.error('[MERCADO] HISTÓRICO INDISPONÍVEL — não concluo nada sobre o mercado.', {
+                veredicto: veredicto.frase,
+                orcamento: orcamento.comoLer(),
+                diagnostico: ultimaRecusa === null
+                    ? 'nenhuma recusa registrada'
+                    : comoLerODiagnosticoDeLogs(diagnosticarRecusaDeLogs(ultimaRecusa)),
+                oQueFicaValendo: 'o censo anterior, se houver, com a idade dele. Esta volta não '
+                    + 'mede nada e não sobrescreve nada',
+                oQueIssoNaoE: 'não é "não houve liquidação": é "não consegui ler"',
+            });
+            return;
+        }
         if (achadas.length === 0) {
             log.warn('[MERCADO] NENHUMA liquidação encontrada para trás.', {
                 olheiPara: `${diasOlhados.toFixed(1)} dias`,
-                janelasLidas,
-                janelasQueFalharam,
-                oQueIssoQuerDizer: janelasQueFalharam > janelasLidas / 4
-                    ? 'MAS um quarto das janelas falhou: pode ser o RPC, não o mercado. Não conclua nada daqui'
-                    : 'não é o bot dormindo: é a Aave da Base sem liquidar ninguém há mais de uma semana. A estratégia das migalhas precisa ser revista.',
+                veredicto: veredicto.frase,
+                orcamento: orcamento.comoLer(),
+                oQueIssoQuerDizer: janelasQueFalharam > 0
+                    ? 'com janelas falhando, a ausência é PARCIAL: pode ser o RPC, não o mercado'
+                    : 'não é o bot dormindo: é a Aave da Base sem liquidar ninguém há mais de uma '
+                      + 'semana. A estratégia das migalhas precisa ser revista.',
             });
             return;
         }
