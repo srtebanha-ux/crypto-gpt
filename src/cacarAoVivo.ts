@@ -8,7 +8,7 @@ import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } fr
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
 import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
-import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, type Tarefa } from './capacidade';
+import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
 import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd, gorjetaQueMaximizaOValor, premioQueSePagaComAFatia, chanceDeSerOTopoDaFatia } from './prontidao';
@@ -1106,6 +1106,39 @@ function comTarefa<T>(t: Tarefa, f: () => T): T {
     try { return f(); } finally { tarefaAtual = antes; }
 }
 
+/**
+ * A recusa, decidida e REGISTRADA — num lugar so.
+ *
+ * Existe porque o conserto de `chamar` deixou a gemea solta: a medicao do tiro
+ * passa por `chamarCruComPaciencia`, cujo `catch` chamava `aEscadaAbsorve`
+ * direto, SEM classificar. Uma cota chegando por ali trocaria de provedor e
+ * nunca marcaria a capacidade — o mesmo defeito do boot, no caminho quente.
+ *
+ * E a REGRA 3 deste arquivo: uma regra em dois lugares e a mesma regra.
+ */
+function registrarRecusa(msg: string, metodo: string): DecisaoSobreRecusa {
+    const d = decidirSobreRecusa({ mensagem: msg, ehTransporte: ehFalhaDeTransporte(msg) });
+    if (d.marcarEsgotado) {
+        const host = hostDoRpc(rpc);
+        const novoEsgotamento = !CAPACIDADE.estaEsgotado(host);
+        CAPACIDADE.esgotou(host, msg);
+        if (novoEsgotamento) {
+            const pausa = oQuePausar({
+                algumEsgotado: true, noFallback: !ESCADA.ehOPrimario(),
+            });
+            log.error('[CAPACIDADE] Provedor com CAPACIDADE ESGOTADA.', {
+                metodo,
+                estado: CAPACIDADE.comoLer(host),
+                decisao: d.porque,
+                pausando: pausa.pausar,
+                porquePausar: pausa.porque,
+                consumoAteAqui: INVENTARIO.chamadasObservadas().slice(0, 6),
+            });
+        }
+    }
+    return d;
+}
+
 async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
     prioridadePedida?: 'essencial' | 'normal' | 'demorada'): Promise<T> {
     // A PRIORIDADE POR METODO, quando quem chama nao diz: `eth_getLogs` e a
@@ -1162,25 +1195,7 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
             // copia. Entao a decisao saiu daqui e o teste exercita a MESMA
             // funcao que producao obedece.
             const recusa = classificarRecusa(msg);
-            const decisao = decidirSobreRecusa({ mensagem: msg, ehTransporte: ehFalhaDeTransporte(msg) });
-            if (decisao.marcarEsgotado) {
-                const host = hostDoRpc(rpc);
-                const novoEsgotamento = !CAPACIDADE.estaEsgotado(host);
-                CAPACIDADE.esgotou(host, msg);
-                if (novoEsgotamento) {
-                    const pausa = oQuePausar({
-                        algumEsgotado: true, noFallback: !ESCADA.ehOPrimario(),
-                    });
-                    log.error('[CAPACIDADE] Provedor com CAPACIDADE ESGOTADA.', {
-                        metodo,
-                        estado: CAPACIDADE.comoLer(host),
-                        decisao: decisao.porque,
-                        pausando: pausa.pausar,
-                        porquePausar: pausa.porque,
-                        consumoAteAqui: INVENTARIO.chamadasObservadas().slice(0, 6),
-                    });
-                }
-            }
+            const decisao = registrarRecusa(msg, metodo);
             if (decisao.trocarDeProvedor && aEscadaAbsorve(msg)) continue;
             if (decisao.lancar || !decisao.esperarERepetir) throw e;
             // O RECUO E COMPARTILHADO: quem nem viu a recusa tambem recua, e a
@@ -1291,7 +1306,11 @@ async function chamarCruComPaciencia(
             // inteiro: a medição do tiro morria por timeout de um provedor
             // enquanto outro, vivo, estava a uma linha de distância.
             const msg = (e as Error).message;
-            if (i < tentativas - 1 && aEscadaAbsorve(msg)) continue;
+            // PELO MESMO PORTAO. Era `aEscadaAbsorve(msg)` direto: uma cota
+            // chegando pela medicao do tiro trocava de provedor e nao marcava
+            // a capacidade.
+            const d = registrarRecusa(msg, 'eth_call (medição)');
+            if (i < tentativas - 1 && d.trocarDeProvedor && aEscadaAbsorve(msg)) continue;
             throw e;
         }
         if (r.ok || r.dados || i >= tentativas - 1 || !ehLimiteDoProvedor(r.mensagem)) return r;

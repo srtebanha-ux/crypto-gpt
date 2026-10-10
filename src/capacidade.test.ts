@@ -271,16 +271,26 @@ test('a mensagem de cota casa com `ehFalhaDeTransporte`, e era isso que a engoli
     assert.equal(classificarRecusa(msg).tipo, 'cota');
 });
 
-test('a classificação vem ANTES da escada no código, senão o ramo da cota é inalcançável', () => {
+test('a classificação vem ANTES da escada, senão o ramo da cota é inalcançável', () => {
+    // A regra, não o lugar: a decisão (que marca a capacidade) tem de acontecer
+    // antes de `aEscadaAbsorve` poder dar `continue`. Ela mora em
+    // `registrarRecusa`, e cada caminho a chama antes de absorver.
     const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
-    const i = fonte.indexOf('async function chamar<T>');
-    const corpo = fonte.slice(i, fonte.indexOf('\nasync function chamarCru', i));
-    const posClassifica = corpo.indexOf('const recusa = classificarRecusa(msg)');
-    const posEscada = corpo.indexOf('aEscadaAbsorve(msg)');
-    assert.ok(posClassifica > 0 && posEscada > 0);
-    assert.ok(posClassifica < posEscada,
-        'classificar depois de a escada absorver é não classificar');
-    assert.ok(/CAPACIDADE\.esgotou\(/.test(corpo), 'e a cota tem de marcar a capacidade');
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    for (const nome of ['async function chamar<T>', 'async function chamarCruComPaciencia']) {
+        const i = codigo.indexOf(nome);
+        assert.ok(i > 0, nome);
+        const corpo = codigo.slice(i, i + 3000);
+        const posRegistra = corpo.indexOf('registrarRecusa(');
+        const posEscada = corpo.indexOf('aEscadaAbsorve(msg)');
+        assert.ok(posRegistra > 0, `${nome} tem de registrar a recusa`);
+        assert.ok(posEscada > 0 && posRegistra < posEscada,
+            `${nome}: absorver antes de registrar é não registrar`);
+    }
+    // E a marcação de capacidade existe no portão.
+    const g = codigo.indexOf('function registrarRecusa');
+    assert.ok(/CAPACIDADE\.esgotou\(/.test(codigo.slice(g, g + 1200)),
+        'o portão é quem marca a capacidade');
 });
 
 test('DESCONHECIDO não é DISPONÍVEL: os três estados por provedor', () => {
@@ -443,12 +453,33 @@ test('limitação temporária espera; transporte troca; desconhecida lança', ()
 
 test('produção OBEDECE `decidirSobreRecusa` em vez de decidir por conta', () => {
     const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
-    const i = fonte.indexOf('async function chamar<T>');
-    const corpo = fonte.slice(i, fonte.indexOf('\nasync function chamarCru', i));
-    assert.ok(/decidirSobreRecusa\(\{ mensagem: msg, ehTransporte: ehFalhaDeTransporte\(msg\) \}\)/.test(corpo),
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const g = codigo.indexOf('function registrarRecusa');
+    const portao = codigo.slice(g, g + 1200);
+    assert.ok(/decidirSobreRecusa\(\{ mensagem: msg, ehTransporte: ehFalhaDeTransporte\(msg\) \}\)/.test(portao),
         'senão o teste de integração acima prova uma cópia');
     // A marcação vem ANTES da troca de degrau: trocar primeiro e marcar depois
-    // perderia o nome do provedor que de fato recusou.
-    assert.ok(corpo.indexOf('CAPACIDADE.esgotou(') < corpo.indexOf('aEscadaAbsorve(msg)'),
-        'marcar depois de trocar marcaria o provedor errado');
+    // perderia o nome do provedor que de fato recusou — `rpc` já seria o outro.
+    assert.ok(portao.indexOf('CAPACIDADE.esgotou(') < portao.indexOf('return d;'),
+        'o portão marca antes de devolver a decisão que autoriza a troca');
+    assert.ok(!/aEscadaAbsorve/.test(portao), 'o portão não troca de degrau: quem chama troca');
+});
+
+test('TODO caminho que trata recusa passa pelo mesmo portão (REGRA 3)', () => {
+    // O conserto de `chamar` deixou a gêmea solta: `chamarCruComPaciencia` —
+    // a medição do tiro — chamava `aEscadaAbsorve` direto, sem classificar.
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    // Toda chamada de `aEscadaAbsorve` tem de estar guardada por uma decisão.
+    const linhas = codigo.split('\n').filter((l) => l.includes('aEscadaAbsorve(msg)'));
+    assert.ok(linhas.length >= 2, 'há dois caminhos de recusa; se virar um, reveja este teste');
+    for (const l of linhas) {
+        assert.match(l, /(decisao|d)\.trocarDeProvedor && aEscadaAbsorve\(msg\)/,
+            `absorver sem decidir é o defeito: ${l.trim()}`);
+    }
+    // E a marcação mora em UMA função, não copiada nos dois lugares.
+    assert.equal((codigo.match(/CAPACIDADE\.esgotou\(/g) ?? []).length, 1,
+        'duas cópias da marcação voltariam a divergir');
+    assert.equal((codigo.match(/registrarRecusa\(/g) ?? []).length, 3,
+        'a definição e os dois caminhos que a chamam');
 });
