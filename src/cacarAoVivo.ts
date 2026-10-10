@@ -25,6 +25,7 @@ import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './e
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho } from './residuo';
+import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type AvaliacaoEmCurso } from './cronometro';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
     lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
@@ -2547,6 +2548,19 @@ async function principal(): Promise<'parar' | void> {
      * Ele NAO decide nada: so observa. Nenhum portao le o livro.
      */
     const livro = new LivroDeEpisodios();
+    /**
+     * O LIVRO DOS TEMPOS — onde o tempo do caminho quente e gasto.
+     *
+     * So observa: nenhum portao le daqui. E separa `real` (candidato que
+     * apareceu) de `controlado` (o ensaio em seco), porque misturar os dois
+     * daria um numero que nao descreve nenhum.
+     */
+    const tempos = new LivroDeTempos();
+    /** A avaliacao do ciclo em curso, para as etapas se penduraram nela. */
+    let agora: AvaliacaoEmCurso | null = null;
+    /** O instante monotônico do último aviso de bloco, e se foi aviso ou timeout. */
+    let sinalEm: bigint | null = null;
+    let sinalFoiBloco = false;
     /** Ao lado do cache, no volume: o livro tem de sobreviver ao deploy. */
     const CAMINHO_DO_LIVRO = process.env.CACA_EPISODIOS
         ?? CAMINHO_DO_CACHE.replace(/[^/]+$/, 'episodios.json');
@@ -3224,7 +3238,22 @@ async function principal(): Promise<'parar' | void> {
                     quantoCobrir: cobrir(alvo), poolDeVenda: poolParaVender(alvo, poolDeVendaV1), lucroMinimo: PISO_IMPOSSIVEL })
                 : codificarCacaV2({ garantia: alvo.garantia, divida: alvo.divida, devedor: alvo.devedor,
                     quantoCobrir: cobrir(alvo), isStablePool: false, lucroMinimo: PISO_IMPOSSIVEL });
+            // CENARIO CONTROLADO, pelo MESMO caminho de producao.
+            //
+            // Ela mandou: *"Se nenhuma oportunidade aparecer, execute um
+            // cenário controlado pelo mesmo caminho, com transmissão
+            // interceptada. Declare o que ele testa e o que depende de
+            // observação real."* O ensaio em seco e esse cenario: ele roda
+            // simulacao, decisao, gorjeta e montagem com as funcoes de
+            // producao, e entrega ao interceptador.
+            //
+            // O QUE ELE TESTA: o custo de CPU e de rede de cada etapa.
+            // O QUE ELE NAO TESTA: a chegada. O ensaio nao disputa fatia de
+            // bloco nenhuma, entao nada aqui prova captura.
+            const cronoEnsaio = cronometrar(idDeAvaliacao(), 'controlado', alvo.devedor, null);
+            const fimSimEnsaio = cronoEnsaio.etapa('simulacao', 'contratos');
             const r = await chamarCruComPaciencia([{ from: donoCarteira ?? undefined, to: contrato.endereco, data: dados }, 'latest']);
+            fimSimEnsaio({ comoCorreu: r.ok ? 'ok' : 'recusada' });
             const leitura = lerRespostaDaCaca({ ok: r.ok, dados: r.dados ?? '0x', mensagem: 'mensagem' in r ? r.mensagem : undefined });
             passos.medicao = `${leitura.desfecho}${leitura.erro ? ` (${leitura.erro})` : ''}`;
 
@@ -3467,6 +3496,13 @@ async function principal(): Promise<'parar' | void> {
                         : `a decisão recusou antes da montagem: ${d88.porque}`;
                 passos.oQueIssoPROVA = 'saldo lido, decisão tomada, gorjeta calculada e transação MONTADA '
                     + 'com CACA_ENVIAR desligado — o caminho inteiro exercitado sem gastar gás';
+                const fimMontEnsaio = cronoEnsaio.etapa('montagem');
+                fimMontEnsaio({ detalhe: `${(envioDeEnsaio.length - 2) / 2} bytes` });
+                cronoEnsaio.etapa('transmissao')({ comoCorreu: 'recusada', detalhe: 'interceptada' });
+                tempos.guardar(cronoEnsaio.fechar('ok', 'cenário controlado: transmissão interceptada'));
+                passos.tempos = comoLerOsTempos(tempos.resumo('controlado'));
+                passos.oQueOsTemposNAOProvam = 'a CHEGADA. O ensaio não disputa fatia de bloco: '
+                    + 'rapidez de montagem ou simulação não comprova captura';
             }
 
             // A fronteira da faixa das migalhas: o maior premio pelo qual este
@@ -4208,7 +4244,31 @@ async function principal(): Promise<'parar' | void> {
                     dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
                 })),
             ];
+            // A avaliacao do CICLO: o sinal (o bloco novo) ja chegou, e o que
+            // se mede daqui e o caminho urgente — nao a varredura historica.
+            // A avaliacao do ciclo ANTERIOR fecha aqui, ao abrir a nova.
+            //
+            // Fechar no fim do ciclo pareceria mais natural e nao e: o caminho
+            // quente (simulacao, decisao, montagem) roda DEPOIS deste ponto no
+            // arquivo, e fechar antes dele perderia exatamente as etapas que
+            // importam. Fechar na abertura da proxima nao perde nenhuma.
+            if (agora !== null) tempos.guardar(agora.fechar('ok'));
+            agora = cronometrar(idDeAvaliacao(), 'real', null, ultimoBlocoLido);
+            // A etapa 'sinal': do aviso de bloco ate aqui. Se o ciclo acordou
+            // por TIMEOUT e nao por aviso, isso e declarado — um timeout nao e
+            // sinal, e contar como se fosse mediria o relogio, nao a rede.
+            if (sinalEm !== null) {
+                agora.marcarDuracao('sinal',
+                    Number(process.hrtime.bigint() - sinalEm) / 1e6, {
+                        comoCorreu: sinalFoiBloco ? 'ok' : 'timeout',
+                        detalhe: sinalFoiBloco ? 'aviso de bloco por WebSocket'
+                            : 'acordou por tempo, sem aviso — timeout não é sinal',
+                    });
+            }
+            const fimLeitura = agora.etapa('leitura');
             const resp = await lerEmLote(chamadasDoCiclo);
+            fimLeitura({ comoCorreu: resp.length === 0 ? 'vazia' : 'ok',
+                detalhe: `${chamadasDoCiclo.length} chamadas em lote` });
 
             let blocoAtual = ultimoBlocoLido;
             try { if (resp[0]) blocoAtual = Number(BigInt(resp[0]!)); } catch {}
@@ -4478,6 +4538,11 @@ async function principal(): Promise<'parar' | void> {
                 if (Date.now() - ultimoSinalDeVida >= MS_ENTRE_SINAIS_DE_VIDA) {
                     ultimoSinalDeVida = Date.now();
                     log.info(`[BLOCO ${blocoAtual}] Só a brasa — ninguém mais pode ter caído.`, {
+                        tempos: comoLerOsTempos(tempos.resumo('real')),
+                        gargalo: (() => {
+                            const g = tempos.gargalo('real');
+                            return g === null ? 'sem amostra' : `${g.etapa} (p50 ${g.p50.toFixed(1)}ms)`;
+                        })(),
                         episodios: comoLerOsEpisodios(livro.resumo(pisoDaAposta().toNumber())),
                         naBrasa: brasa.length,
                         // Sem isto, "mercado calmo" e "Binance morta" dao o
@@ -5087,7 +5152,13 @@ async function principal(): Promise<'parar' | void> {
                             lucroMinimo: pisoParaMedirV2(alvo),
                           });
 
+                    // GRUPO 'contratos': V1 e V2 sao medicoes do MESMO
+                    // candidato. Somar as duas como sequenciais dobraria o
+                    // caminho critico — ela proibiu isso por escrito.
+                    const fimSim = agora?.etapa('simulacao', 'contratos');
                     const r = await chamarCruComPaciencia([{ from: donoCarteira ?? undefined, to: contrato.endereco, data: dados }, 'latest']);
+                    fimSim?.({ comoCorreu: r.ok ? 'ok' : 'recusada',
+                        detalhe: `${contrato.tipo}${r.ok ? '' : ` ${('dados' in r ? r.dados : '')?.slice(0, 10) ?? ''}`}` });
                     // O V2 que PASSA e uma medicao: o lucro e pelo menos o piso
                     // que foi exigido dele. Lido como sucesso comum,
                     // `lerRespostaDaCaca` devolveria `lucroCru: 0n` (resposta
@@ -5512,6 +5583,7 @@ async function principal(): Promise<'parar' | void> {
                     // passou a imprimir "o tiro sai" para um premio que este
                     // caminho recusa. Uma regra, um lugar.
                     const ethUsd = precoDoEth();
+                    const fimDecisao = agora?.etapa('decisao');
                     const decisao = decidirTiro({
                         lucroUsd,
                         precoDoEthUsd: ethUsd,
@@ -5594,6 +5666,8 @@ async function principal(): Promise<'parar' | void> {
                             return BigInt(Math.round(comEscada * 1e9));
                         })(),
                     });
+                    fimDecisao?.({ comoCorreu: decisao.atira ? 'ok' : 'recusada',
+                        detalhe: decisao.atira ? undefined : decisao.porque.slice(0, 40) });
                     const fracao = decisao.fracaoDoLucro;
                     const risco = decisao.risco;
                     const amordaca = decisao.amordaca;
@@ -5723,8 +5797,12 @@ async function principal(): Promise<'parar' | void> {
                      * mandar desarma `provaAgora()` para sempre. Observando,
                      * le-se o conhecido.
                      */
+                    const fimMontagem = agora?.etapa('montagem');
                     const oQueFazer = degrau();
+                    fimMontagem?.({ detalhe: `${(envio.length - 2) / 2} bytes, limite ${limiteGas}` });
+                    const fimTransmissao = agora?.etapa('transmissao');
                     if (oQueFazer.acao === 'observar') {
+                        fimTransmissao?.({ comoCorreu: 'recusada', detalhe: 'envio desligado' });
                         log.warn('[OBSERVANDO] A transação está MONTADA e NÃO vai sair.', {
                             devedor: alvo.devedor,
                             contrato: contrato.nome,
@@ -6026,12 +6104,18 @@ async function principal(): Promise<'parar' | void> {
                     // Quem acorda o bot aqui e o BLOCO, no instante em que
                     // nasce. O tempo maximo existe so para nunca ficar preso
                     // esperando um aviso que nao vem.
-                    await esperarBlocoOuTempo(
+                    // O INSTANTE DO SINAL, para a etapa 'sinal' do ciclo
+                    // seguinte medir sinal -> primeira leitura. E essa a
+                    // latencia que decide a FATIA do bloco: o resto do caminho
+                    // acontece depois dela.
+                    const comoAcordou = await esperarBlocoOuTempo(
                         (aoBloco) => ouvinte.assinar(aoBloco),
                         2500,
                         (fn, ms) => setTimeout(fn, ms),
                         (id) => clearTimeout(id as NodeJS.Timeout),
                     );
+                    sinalEm = process.hrtime.bigint();
+                    sinalFoiBloco = comoAcordou === 'bloco';
                 } else {
                     // Sem aviso de bloco, um piso de ritmo impede o laco de
                     // girar na velocidade da rede queimando CU.

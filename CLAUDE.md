@@ -3491,3 +3491,125 @@ esperar o preço, a outra pede mudar o tamanho:
 **A política de execução real não foi alterada**: o tamanho em produção
 continua metade, e `src/residuo.ts` é a política CANDIDATA, exercitada só no
 diagnóstico. 1505 testes, 1505 passando. `CACA_ENVIAR=0`.
+
+## 2026-10-10: A LATÊNCIA, medida — e a camada da reversão, localizada
+
+### 1. As correções de alcance que ela pediu primeiro
+
+- **"1,50x"** é a razão **observada naquele cenário sintético**, com oráculo
+  forçado e posição montada por mim. **Não validada em condições
+  representativas.** E eu afirmei que a divergência oráculo-pool "incide igual
+  nos dois tamanhos" — isso **não foi verificado**: a curva do pool é
+  não-linear, então uma cobertura maior vende mais garantia e escorrega mais.
+  A razão pode encolher com liquidez real. Retirado como garantia.
+- **"envio real"** era ambíguo e passa a ser explícito: tudo o que chamei de
+  envio nos experimentos de tamanho rodou em **fork local do Hardhat**
+  (`hre.network.provider`, estado da Base copiado no bloco citado), e
+  **nenhuma transação foi transmitida à rede pública**. O endpoint de leitura é
+  `mainnet.base.org` (público, sem credencial). A carteira `0x3D31…5AE8`
+  continua em nonce 45 na Base real.
+
+### 2. A latência: `src/cronometro.ts`, relógio monotônico e id por avaliação
+
+Sete etapas (`sinal`, `leitura`, `decisao`, `cotacao`, `simulacao`, `montagem`,
+`transmissao`), `process.hrtime.bigint()`, um id por avaliação, e **paralelo
+separado de sequencial**: V1 e V2 entram no grupo `contratos` e contam pela
+PAREDE do grupo, não somados. Um teste prova isso: duas marcas de ~60ms
+simultâneas somam 120ms cruas e o caminho crítico sai em ~60ms.
+
+**MEDIDO no artefato** (`dist/cacarAoVivo.js`, `CACA_ENVIAR=0`, sem chave,
+cache semeado, `mainnet.base.org`):
+
+    CENÁRIO REAL (1 avaliação, janela 8s)
+      LATÊNCIA (caminho crítico, só o trabalho)   p50  56,7ms
+      parede do ciclo — INCLUI o sono da postura  p50 8055,2ms
+      leitura  56,7ms   (1 multicall, 236 chamadas em lote)
+      gargalo observado: leitura (p50 56,7ms)
+
+    CENÁRIO CONTROLADO (o ensaio em seco, mesmo caminho, transmissão interceptada)
+      caminho crítico p50 49,7ms
+      simulacao  49,7ms [paralela, 1x recusada]   <- grupo `contratos`, parede 49,7ms
+      montagem    0,0ms
+      transmissao 0,0ms [recusada: interceptada]
+
+**A parede do ciclo NÃO é latência**, e a frase do log passou a dizer isso:
+8.055ms é o sono da postura 'dormindo'. Publicar aquilo como latência seria
+exatamente o defeito que este arquivo persegue.
+
+### 3. Onde o tempo é gasto, e o que limita
+
+    etapa        p50      natureza
+    leitura    56,7ms     REDE (um multicall)
+    simulacao  49,7ms     REDE (eth_call, V1 e V2 em paralelo)
+    montagem    0,0ms     CPU — grátis
+    transmissao 0,0ms     interceptada
+
+**O caminho crítico é REDE: ~106ms** entre ler a brasa e ter o envio montado.
+A CPU não aparece. Então afinar código não compra nada; o que compra é menos
+ida-e-volta ou um provedor mais perto.
+
+### 4. O que NÃO foi medido, e é a parte que decide
+
+**A etapa `sinal` não tem uma única amostra.** O log do artefato diz
+`avisoDeBloco: "CAIU — perguntando"`: o WebSocket não sobe neste sandbox, então
+o ciclo acorda por `dormir(ritmo)` e não por aviso de bloco. **A latência
+sinal→leitura — a que decide em qual FATIA do bloco a transação cai — só pode
+ser medida onde o WebSocket funciona, isto é, no Railway dela.** O código já
+registra, e um `timeout` é marcado como `timeout`, nunca como sinal: contar um
+despertar por tempo como aviso mediria o relógio, não a rede.
+
+E o `resumo()` repete, porque é a frase dela: **rapidez de montagem ou
+simulação não comprova captura.** A inclusão não está medida por nada daqui.
+
+### 5. A CAMADA da reversão: LOCALIZADA (`forkTests/ondeReverteu.js`)
+
+O `callTracer` não existe aqui, mas o **tracer padrão** existe — e o que faltava
+era o hash: o Hardhat não o devolve quando a transação reverte no envio. Com
+`evm_setAutomine(false)`, ele devolve antes de executar.
+
+17.813 passos de `structLogs`, 8 REVERTs em cascata, e a cadeia:
+
+    depth 8  pc 2741  <- DELEGATECALL para 0x96d5686812e33ab509eccdb38c89d15607b2a413  <<< ORIGEM
+    depth 7  pc 3847  <- DELEGATECALL para 0xa4abc5fcba6d0d7e3d144d6dbf6cb6128599dfdb  (propagação)
+    depth 6  pc  963  <- CALL para 0xa238dd80… (o Pool)
+    depth 5  pc  949  <- CALL para 0x9066b0ba… (o NOSSO contrato)
+    …
+    depth 1  pc 2540  (o que chega na ponta)
+
+**A origem é a biblioteca `0x96d5686812e33ab509eccdb38c89d15607b2a413`**
+(12.101 bytes), alcançada por `DELEGATECALL` da implementação do Pool. **Não é
+o nosso contrato** — ele aparece em depth 5, propagando.
+
+**E o nome continua sem confirmação, porque o meu método era inadequado:** o
+seletor `0xb629b0e4` não aparece como literal nem nessa biblioteca nem na outra
+(`0x6d414cd0…`, 8.227 bytes). Procurar o seletor como substring do bytecode
+**não prova nem refuta** — ele pode ser calculado em tempo de execução. Então:
+
+    MEDIDO     a camada que reverteu (depth 8, 0x96d5686…), e o dado 0xb629b0e4
+    HIPÓTESE   o nome `MustNotLeaveDust()`
+    INADEQUADO procurar o seletor como literal no bytecode
+
+### 6. A conclusão operacional
+
+**Onde o tempo é gasto:** rede, ~106ms de caminho crítico (leitura 56,7 +
+simulação 49,7 em paralelo). CPU ≈ 0.
+
+**Qual etapa limita o desempenho observado:** a `leitura` (56,7ms), seguida da
+`simulacao` (49,7ms). Mas as duas juntas são menos de um bloco da Base (2s), e
+**a etapa que de fato decide a fatia — `sinal` — não tem amostra.**
+
+**A menor melhoria com justificativa para testar primeiro:** nenhuma das duas
+etapas medidas. A justificativa está do outro lado: enquanto `sinal` não for
+medido no Railway, otimizar 106ms de um orçamento de 2.000ms é otimizar o que
+não aparece. **Não vou mexer por intuição** — ela proibiu, e os dados não
+pedem.
+
+**Verificações que passaram:** o cronômetro separa paralelo de sequencial
+(testado); a parede do ciclo não é publicada como latência (testado); o
+controlado não contamina o real (testado); amostra zero não vira "o bot é
+rápido" (testado); 1.517 testes, 0 falhas, build exit 0; as duas medições
+acima OBSERVADAS no artefato.
+
+**Pendentes:** `sinal` (precisa do WebSocket — Railway); `cotacao` (sem amostra:
+o mercado não foi lido nestes ciclos); inclusão (não medida por nada daqui); o
+NOME da reversão; e a política candidata de tamanho, que **não foi promovida**.
