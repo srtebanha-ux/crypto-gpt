@@ -155,3 +155,94 @@ export function comoLerAComparacao(c: Comparacao): string {
         + `custo: +${c.ciclosAMais} ciclos = `
         + `${Object.entries(c.chamadasAMais).map(([m, n]) => `+${n} ${m}`).join(', ')}`;
 }
+
+// ---------------------------------------------------------------------------
+// O PASSO DE ESPERA DE PRODUCAO, extraido para ser testavel.
+//
+// Ela recusou a minha prova anterior: *"Resolver e remover um ouvinte uma
+// única vez não comprova, sozinho, ausência de ciclos concorrentes ou
+// consultas duplicadas. Use dependências controladas para contar avaliações,
+// chamadas RPC e reservas de nonce."*
+//
+// Esta funcao e o passo que o laco de producao executa no `finally`. Producao
+// chama ela; o teste chama ELA com dependencias falsas e CONTA. Nao ha copia.
+// ---------------------------------------------------------------------------
+
+export interface DependenciasDaEspera {
+    /** `vivo` e `assinar` do ouvinte de blocos. `null` quando nao ha. */
+    ouvinte: { vivo: boolean; assinar: (f: (n: number) => void) => () => void } | null;
+    acordaPorBloco: boolean;
+    /** O sono simples. */
+    dormir: (ms: number) => Promise<void>;
+    /** O sono que olha o mercado entre fatias. */
+    dormirDeOlho: (totalMs: number, fatiaMs: number) => Promise<boolean>;
+    /** Espera por bloco com teto de tempo. */
+    esperarBloco: (
+        assinar: (f: (n: number) => void) => () => void, tetoMs: number,
+    ) => Promise<'bloco' | 'tempo'>;
+    /** Relogio monotonico, injetavel para o teste nao depender do tempo real. */
+    agoraNs: () => bigint;
+}
+
+export interface ResultadoDaEspera {
+    /** O que encerrou a espera. */
+    porque: 'bloco' | 'sono' | 'mercado' | 'semEspera';
+    /** Instante monotonico do PRIMEIRO aviso que chegou durante a espera. */
+    primeiroAvisoNs: bigint | null;
+    /** Quantos avisos chegaram durante a espera — a rajada e contada. */
+    avisos: number;
+    /** `true` se o ouvinte foi desassinado. Pendurado e vazamento. */
+    desassinou: boolean;
+}
+
+/**
+ * Espera o proximo ciclo.
+ *
+ * REGRA que os testes guardam: esta funcao retorna UMA vez por chamada, e
+ * desassina SEMPRE. Uma rajada de avisos durante a espera e CONTADA e produz
+ * UM retorno — nunca um ciclo por aviso.
+ */
+export async function esperarOProximoCiclo(
+    postura: 'dormindo' | 'atento' | 'dedo no gatilho',
+    ritmoMs: number,
+    restaMs: number,
+    olharMercadoMs: number,
+    d: DependenciasDaEspera,
+): Promise<ResultadoDaEspera> {
+    let avisos = 0;
+    let primeiro: bigint | null = null;
+    let desassinou = false;
+    const contar = (): (() => void) | null => {
+        if (d.ouvinte === null || !d.ouvinte.vivo) return null;
+        const parar = d.ouvinte.assinar(() => {
+            avisos += 1;
+            if (primeiro === null) primeiro = d.agoraNs();
+        });
+        return () => { if (!desassinou) { desassinou = true; parar(); } };
+    };
+
+    if (postura === 'dedo no gatilho') {
+        if (d.ouvinte !== null && d.ouvinte.vivo) {
+            const parar = contar();
+            try {
+                const como = await d.esperarBloco((f) => d.ouvinte!.assinar(f), 2500);
+                return { porque: como === 'bloco' ? 'bloco' : 'sono', primeiroAvisoNs: primeiro, avisos, desassinou: true };
+            } finally { parar?.(); }
+        }
+        await d.dormir(ritmoMs);
+        return { porque: 'sono', primeiroAvisoNs: null, avisos: 0, desassinou: false };
+    }
+    if (restaMs <= 0) return { porque: 'semEspera', primeiroAvisoNs: null, avisos: 0, desassinou: false };
+    const parar = contar();
+    try {
+        if (d.acordaPorBloco && d.ouvinte !== null && d.ouvinte.vivo) {
+            const como = await d.esperarBloco((f) => d.ouvinte!.assinar(f), restaMs);
+            return { porque: como === 'bloco' ? 'bloco' : 'sono', primeiroAvisoNs: primeiro, avisos, desassinou: true };
+        }
+        const porMercado = await d.dormirDeOlho(restaMs, olharMercadoMs);
+        return {
+            porque: porMercado ? 'mercado' : 'sono',
+            primeiroAvisoNs: primeiro, avisos, desassinou: parar !== null,
+        };
+    } finally { parar?.(); }
+}

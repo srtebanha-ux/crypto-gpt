@@ -25,6 +25,7 @@
 // posição abrir, o pedido vai estar escrito na língua certa — e não vai
 // falhar por um motivo bobo que dava para ter descoberto hoje, de graça.
 import { AbiCoder, id } from 'ethers';
+import { classificarRecusa } from './cobertura';
 
 /** `liquidationCall(address,address,address,uint256,bool)` — conferido com keccak. */
 export const SELETOR_LIQUIDATION_CALL = '0x00a718a9';
@@ -152,14 +153,14 @@ export interface LeituraDaResposta {
 
 /** Recusas do PROVEDOR, que não dizem nada sobre a chamada em si. */
 export function ehLimiteDoProvedor(mensagem: string): boolean {
-    const m = mensagem.toLowerCase();
-    return (
-        m.includes('rate limit') ||
-        m.includes('429') ||
-        m.includes('too many requests') ||
-        m.includes('timeout') ||
-        m.includes('capacity')
-    );
+    // A LISTA DE PALAVRAS mora em `classificarRecusa`, num lugar so.
+    //
+    // Ela era aqui, com cinco `includes`, e `request limit reached` — a recusa
+    // que apareceu em 28 de 28 janelas no log de 2026-10-10 — nao casava com
+    // nenhum deles. A chamada subia como erro duro e a escada de espera, que
+    // existe exatamente para isso, nunca era chamada. Duas listas de palavras
+    // em dois lugares seria a REGRA 3 outra vez.
+    return classificarRecusa(mensagem).absorveEsperando;
 }
 
 /**

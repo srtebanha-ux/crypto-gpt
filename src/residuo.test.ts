@@ -5,7 +5,10 @@
 // verdade — e o teste reprova quem contrariar a medição.
 import test from 'node:test';
 import assert from 'node:assert';
-import { coberturaQuePassa, comoLerOTamanho, RESTO_EXIGIDO_USD, FOLGA_DO_RESTO } from './residuo';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import Decimal from 'decimal.js';
+import { coberturaQuePassa, comoLerOTamanho, RESTO_EXIGIDO_USD, FOLGA_DO_RESTO, comoEstaASaudeDoAlvo } from './residuo';
 
 /** Dívida em USDC cru (6 casas) a partir do dólar. */
 const cru = (usd: number) => BigInt(Math.round(usd * 1e6));
@@ -94,4 +97,48 @@ test('o resto exigido é MEDIDO, e o comentário diz de onde veio', () => {
     assert.match(fonte, /CINCO casos independentes/, 'a origem do número fica no arquivo');
     assert.match(fonte, /O QUE ISTO NAO PROVA/, 'e os buracos também');
     assert.match(fonte, /nao foi lida no TRACE/, 'e o limite do método');
+});
+
+/**
+ * As tres frases, e o caso real que o defeito produziu.
+ *
+ * Com o codigo de antes (`naoCruzou ? ... : 'elegível por saúde (já cruzou)'`)
+ * o primeiro caso deste teste FALHA: ele publicava "já cruzou" para uma queda
+ * que nao foi lida.
+ */
+test('queda NÃO LIDA não é "já cruzou": são três estados, não dois', () => {
+    for (const ausente of [undefined, null]) {
+        const f = comoEstaASaudeDoAlvo(ausente);
+        assert.match(f, /SAÚDE INDETERMINADA/);
+        assert.ok(!/já cruzou/.test(f), 'não ter lido não é ter cruzado');
+        assert.ok(!/elegível/.test(f));
+        // E a forma do defeito, explicitada: o ramo de ausencia nao pode cair
+        // no mesmo ramo do zero.
+        assert.notEqual(f, comoEstaASaudeDoAlvo(new Decimal(0)));
+    }
+});
+
+test('o caso real do log: 1.4071% é INELEGÍVEL, não elegível', () => {
+    const f = comoEstaASaudeDoAlvo(new Decimal('1.4071'));
+    assert.match(f, /INELEGÍVEL POR SAÚDE/);
+    assert.match(f, /falta cair 1\.4071%/);
+    assert.ok(!/já cruzou/.test(f), 'era esta contradição no log de produção');
+});
+
+test('queda zero ou negativa diz a queda LIDA ao lado da conclusão', () => {
+    for (const q of ['0', '-0.5']) {
+        const f = comoEstaASaudeDoAlvo(new Decimal(q));
+        assert.match(f, /elegível por saúde/);
+        assert.match(f, /queda lida =/, 'a conclusão vem com o número que a sustenta');
+    }
+});
+
+test('o `[EM SECO]` usa a função testada, não uma cópia da frase', () => {
+    // Senao este teste provaria a copia. O defeito original estava inline.
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    assert.ok(/comoEstaASaudeDoAlvo\(alvo\.quedaPct\)/.test(fonte),
+        'o diagnóstico tem de chamar a função');
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    assert.ok(!/elegível por saúde \(já cruzou\)/.test(codigo),
+        'a frase antiga, que publicava ausência como conclusão, não voltou');
 });

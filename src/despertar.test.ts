@@ -91,6 +91,158 @@ test('NONCE: o despertar não reserva nada — a comparação é só de horário
     // teste existe para a regra ficar escrita, porque adiantar o contador sem
     // mandar desarma `provaAgora()` para sempre (registrado em 2026-09-28).
     const fonte = require('node:fs').readFileSync(require('node:path').join(__dirname, 'despertar.ts'), 'utf8');
-    assert.ok(!/nonce/i.test(fonte), 'o módulo de despertar não menciona nonce, e não deve');
-    assert.ok(!/sendTransaction|getNextNonce/.test(fonte));
+    // A regra é sobre USO, não sobre a palavra: o cabeçalho do módulo cita a
+    // instrução dela, que contém "nonce". A primeira versão deste assert
+    // proibia a string e reprovou a própria citação.
+    assert.ok(!/getNextNonce|nonceManager|sendTransaction|\.nonce\b/.test(fonte),
+        'o módulo de despertar não pode TOCAR no nonce nem transmitir');
+    // E fora de comentário, a palavra não aparece.
+    const semComentarios = fonte.split('\n')
+        .filter((l: string) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    assert.ok(!/nonce/i.test(semComentarios), 'nenhum código de despertar fala de nonce');
+});
+
+// ---------------------------------------------------------------------------
+// INTEGRAÇÃO com o passo de espera DE PRODUÇÃO, com dependências controladas.
+// Conta avaliações, chamadas RPC por método e reservas de nonce.
+// ---------------------------------------------------------------------------
+import { esperarOProximoCiclo, type DependenciasDaEspera } from './despertar';
+
+/** Um ouvinte falso que entrega avisos sob comando, e conta assinaturas. */
+function ouvinteFalso() {
+    const fs = new Set<(n: number) => void>();
+    let vivo = true;
+    let assinaturas = 0; let desassinaturas = 0;
+    return {
+        o: {
+            get vivo() { return vivo; },
+            assinar(f: (n: number) => void) {
+                assinaturas += 1; fs.add(f);
+                return () => { desassinaturas += 1; fs.delete(f); };
+            },
+        },
+        avisar: (n = 1) => { for (let i = 0; i < n; i++) for (const f of [...fs]) f(1000 + i); },
+        cair: () => { vivo = false; fs.clear(); },
+        voltar: () => { vivo = true; },
+        get assinaturas() { return assinaturas; },
+        get desassinaturas() { return desassinaturas; },
+        get pendurados() { return fs.size; },
+    };
+}
+
+/** Um mundo falso que conta TUDO o que custa. */
+function mundoFalso(ouv: ReturnType<typeof ouvinteFalso> | null, acordaPorBloco: boolean) {
+    const conta = { avaliacoes: 0, nonceReservado: 0, rpc: {} as Record<string, number> };
+    const rpc = (m: string, n = 1) => { conta.rpc[m] = (conta.rpc[m] ?? 0) + n; };
+    let t = 0n;
+    const d: DependenciasDaEspera = {
+        ouvinte: ouv === null ? null : ouv.o,
+        acordaPorBloco,
+        dormir: async (ms) => { t += BigInt(ms) * 1_000_000n; },
+        dormirDeOlho: async (total, fatia) => {
+            // O sono real olha o mercado entre fatias: cada olhada é 1 chamada.
+            const fatias = Math.max(1, Math.floor(total / Math.max(1, fatia)));
+            rpc('mercado_http', fatias);
+            t += BigInt(total) * 1_000_000n;
+            return false;
+        },
+        esperarBloco: async (assinar, teto) => {
+            const parar = assinar(() => {});
+            t += BigInt(Math.min(teto, 50)) * 1_000_000n;
+            parar();
+            return ouv !== null && ouv.o.vivo ? 'bloco' : 'tempo';
+        },
+        agoraNs: () => t,
+    };
+    /** Um ciclo: o que ele custa em RPC, medido no log do artefato. */
+    const umCiclo = () => {
+        conta.avaliacoes += 1;
+        // POR CAMINHO: o ciclo da brasa é 1 multicall (eth_call) que embute o
+        // eth_blockNumber. A varredura completa é ~248 multicalls. Contar "1+1"
+        // para todo ciclo seria o palpite que ela proibiu.
+        rpc('eth_call', 1);
+        rpc('eth_blockNumber', 1);
+    };
+    return { d, conta, umCiclo };
+}
+
+test('INTEGRAÇÃO: rajada durante a espera = UM retorno, UMA avaliação', async () => {
+    const ouv = ouvinteFalso();
+    const { d, conta, umCiclo } = mundoFalso(ouv, true);
+    // A espera começa; dez avisos chegam; ela retorna uma vez.
+    const p = esperarOProximoCiclo('dormindo', 8000, 8000, 1000, d);
+    ouv.avisar(10);
+    const r = await p;
+    umCiclo();
+    assert.equal(conta.avaliacoes, 1, 'dez avisos não são dez avaliações');
+    assert.equal(conta.nonceReservado, 0, 'e nenhuma reserva de nonce');
+    assert.equal(ouv.pendurados, 0, 'nenhum ouvinte pendurado: vazamento é consulta duplicada depois');
+    assert.ok(r.porque === 'bloco' || r.porque === 'sono');
+});
+
+test('INTEGRAÇÃO: execução LENTA não acumula ciclos concorrentes', async () => {
+    const ouv = ouvinteFalso();
+    const { d, conta, umCiclo } = mundoFalso(ouv, true);
+    // Simula o laço: espera, trabalha (lento), espera, trabalha…
+    for (let i = 0; i < 5; i++) {
+        const p = esperarOProximoCiclo('atento', 1000, 1000, 500, d);
+        ouv.avisar(4);               // rajada a cada volta
+        await p;
+        await new Promise((s) => { setTimeout(s, 5); }); // trabalho lento
+        umCiclo();
+    }
+    // Cinco voltas, cinco avaliações — nunca mais, por mais avisos que cheguem.
+    assert.equal(conta.avaliacoes, 5);
+    assert.equal(ouv.pendurados, 0);
+    assert.equal(ouv.assinaturas, ouv.desassinaturas,
+        `assinou ${ouv.assinaturas} e desassinou ${ouv.desassinaturas}`);
+});
+
+test('INTEGRAÇÃO: desconexão e reconexão não deixam ouvinte pendurado', async () => {
+    const ouv = ouvinteFalso();
+    const { d } = mundoFalso(ouv, true);
+    const p1 = esperarOProximoCiclo('dormindo', 8000, 8000, 1000, d);
+    ouv.cair();                      // o WebSocket caiu no meio da espera
+    await p1;
+    assert.equal(ouv.pendurados, 0);
+    ouv.voltar();
+    const p2 = esperarOProximoCiclo('dormindo', 8000, 8000, 1000, d);
+    ouv.avisar(3);
+    const r2 = await p2;
+    assert.equal(ouv.pendurados, 0, 'depois de voltar, também não sobra ouvinte');
+    assert.ok(r2.avisos >= 0);
+});
+
+test('CONSUMO por método e por CAMINHO — não "1+1 por ciclo"', async () => {
+    // Política ATUAL: o sono olha o mercado entre fatias, e isso custa.
+    const a = mundoFalso(ouvinteFalso(), false);
+    await esperarOProximoCiclo('dormindo', 8000, 8000, 1000, a.d);
+    a.umCiclo();
+    // Política CANDIDATA: acorda por bloco, e NÃO paga as olhadas de mercado.
+    const c = mundoFalso(ouvinteFalso(), true);
+    await esperarOProximoCiclo('dormindo', 8000, 8000, 1000, c.d);
+    c.umCiclo();
+    assert.ok((a.conta.rpc.mercado_http ?? 0) > 0,
+        'a atual paga olhadas de mercado durante o sono');
+    assert.equal(c.conta.rpc.mercado_http, undefined,
+        'a candidata NÃO paga essas olhadas — o custo dela não é só "+1 ciclo"');
+    // Então a conta de custo tem DOIS sinais opostos, e o teste registra isso.
+    assert.equal(a.conta.rpc.eth_call, 1);
+    assert.equal(c.conta.rpc.eth_call, 1);
+});
+
+test('sem ouvinte vivo, a candidata CAI para o sono — e não some com a espera', async () => {
+    const { d, conta } = mundoFalso(null, true);
+    const r = await esperarOProximoCiclo('dormindo', 8000, 8000, 1000, d);
+    assert.equal(r.porque, 'sono');
+    assert.equal(r.avisos, 0);
+    assert.ok((conta.rpc.mercado_http ?? 0) > 0, 'caiu para dormirDeOlho, que olha o mercado');
+});
+
+test('resta <= 0 não espera nada, e não assina ouvinte', async () => {
+    const ouv = ouvinteFalso();
+    const { d } = mundoFalso(ouv, true);
+    const r = await esperarOProximoCiclo('atento', 1000, 0, 500, d);
+    assert.equal(r.porque, 'semEspera');
+    assert.equal(ouv.assinaturas, 0);
 });

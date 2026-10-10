@@ -6,6 +6,9 @@ import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
+import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
+import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
+import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd, gorjetaQueMaximizaOValor, premioQueSePagaComAFatia, chanceDeSerOTopoDaFatia } from './prontidao';
 import {
@@ -24,8 +27,9 @@ import { POOLS } from './contratos';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
-import { coberturaQuePassa, comoLerOTamanho } from './residuo';
+import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
 import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type AvaliacaoEmCurso } from './cronometro';
+import { esperarOProximoCiclo } from './despertar';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
     lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
@@ -150,6 +154,17 @@ export interface Medida {
      * custo de deixar um sensivel de fora e o tiro.
      */
     via?: Via;
+    /**
+     * Quando esta medicao foi LIDA da corrente, em ms do relogio de parede.
+     *
+     * `undefined` quer dizer "lida agora, neste ciclo". Um valor preenchido
+     * quer dizer ESTADO GUARDADO: a leitura deste devedor falhou e o que esta
+     * aqui e o ultimo fato conhecido, com idade. Existe porque um pedaco
+     * perdido tirava 250 devedores das listas quentes como se eles tivessem
+     * ficado seguros — e porque numero velho decidindo o ritmo e o defeito do
+     * `maisFragilA` de 15 minutos que este projeto ja pagou.
+     */
+    lidoEm?: number;
 }
 
 /**
@@ -1013,15 +1028,45 @@ async function umaChamada<T>(metodo: string, params: unknown[]): Promise<T> {
     });
     const corpo = (await res.json()) as { result?: T; error?: { message?: string } };
     if (corpo.error) throw new Error(corpo.error.message ?? 'erro sem mensagem');
-    return corpo.result as T;
+    // O PORTAO. Era `return corpo.result as T`, e um corpo sem `result` nem
+    // `error` — que o provedor da Base manda sob carga — devolvia `undefined`
+    // prometido como `string`. Ele viajava ate
+    // `decodificarAggregate3Rapido(dataHex)` e estourava
+    // `Cannot read properties of undefined (reading 'replace')` no PEDACO todo,
+    // 270 linhas longe da causa. Ver `src/cobertura.ts`.
+    return exigirResultado<T>(corpo, metodo);
 }
 
-async function chamar<T>(metodo: string, params: unknown[], tentativas = 4): Promise<T> {
+/**
+ * A VAZAO, compartilhada por todas as leituras deste processo.
+ *
+ * MEDIDO em 2026-10-10 rodando o artefato contra `mainnet.base.org`: 214 linhas
+ * de `request limit reached` em 90 segundos, cada perna paralela esperando a sua
+ * propria escada. O provedor nao tem uma cota por perna, entao a escada nao pode
+ * ser por perna. Ver `src/vazaoDoProvedor.ts`.
+ */
+const VAZAO = new GovernadorDeVazao(
+    numeroDoAmbiente('CACA_MAX_EM_VOO', process.env.CACA_MAX_EM_VOO, 6),
+);
+/** Os avisos repetidos, agrupados: o primeiro inteiro, o resto contado. */
+const AVISOS = new AgrupadorDeAvisos(10_000);
+
+async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
+    prioridadePedida?: 'essencial' | 'normal' | 'demorada'): Promise<T> {
+    // A PRIORIDADE POR METODO, quando quem chama nao diz: `eth_getLogs` e a
+    // coleta de 3 anos e o censo — leitura que pode esperar. `eth_call` e a
+    // brasa e a decisao do tiro. Derivar do metodo, e nao escolher por
+    // chamada, evita a REGRA 3: trinta pontos de chamada escolhendo a mao
+    // seriam trinta lugares para esquecer.
+    const prioridade = prioridadePedida
+        ?? (metodo === 'eth_getLogs' ? 'demorada' : 'normal');
     let espera = 1000;
     for (let i = 0; ; i += 1) {
+        const soltar = await VAZAO.vez(metodo, prioridade);
         try {
             const r = await umaChamada<T>(metodo, params);
             ESCADA.deuCerto();
+            VAZAO.deuCerto();
             return r;
         } catch (e) {
             const msg = (e as Error).message;
@@ -1032,10 +1077,30 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4): Pro
             // alcançar o failover escrito no boot. Trocar de provedor e repetir
             // na hora é mais rápido que a escada de espera, e não espera nada.
             if (aEscadaAbsorve(msg)) continue;
-            if (!ehLimiteDoProvedor(msg)) throw e;
-            log.warn('O provedor pediu calma; esperando.', { erro: msg, esperandoMs: espera });
+            const recusa = classificarRecusa(msg);
+            if (!recusa.absorveEsperando) throw e;
+            // O RECUO E COMPARTILHADO: quem nem viu a recusa tambem recua, e a
+            // proxima chamada ja nasce esperando. Era isto que faltava.
+            const recuo = VAZAO.recuar(espera);
+            const aviso = AVISOS.registrar(`recusa:${recusa.tipo}:${msg.slice(0, 60)}`, {
+                metodo, erro: msg.slice(0, 160), tipoDaRecusa: recusa.tipo,
+                oQueFazer: recusa.oQueFazer, tentativa: i + 1, de: tentativas,
+            });
+            if (aviso !== null) {
+                log.warn(
+                    aviso.primeira
+                        ? 'O provedor recusou; recuando. (primeiro exemplo, inteiro)'
+                        : `O provedor recusou ${aviso.quantos}x nos últimos 10s; recuando.`,
+                    { ...(aviso.exemplo as object), recuandoMs: recuo, vazao: VAZAO.estado() },
+                );
+            }
             await dormir(espera);
             espera *= 2;
+        } finally {
+            // SEM ISTO A VAZAO TRAVA PARA SEMPRE: o `return` do caminho feliz
+            // sai da funcao sem passar pelo `catch`. O `finally` cobre os tres
+            // caminhos — volta, estoura e repete.
+            soltar();
         }
     }
 }
@@ -1053,7 +1118,13 @@ async function chamarCru(
     if (corpo.error) {
         return { ok: false, mensagem: corpo.error.message ?? 'erro sem mensagem', dados: corpo.error.data };
     }
-    return { ok: true, dados: corpo.result ?? '0x' };
+    // `corpo.result ?? '0x'` era a mesma forma do defeito do `.replace`, com
+    // outra cara: `'0x'` e "o contrato nao devolveu nada", que e RESPOSTA, e
+    // falta de `result` e FALHA DE LEITURA. Trocar uma pela outra faria a
+    // medicao de lucro ler zero onde nao houve medicao nenhuma — e `0n` sendo
+    // lido como "nao mediu" ja custou um capitulo a este projeto.
+    // `chamarCru` LANCA no transporte, e `chamarCruComPaciencia` trata.
+    return { ok: true, dados: exigirResultado<string>(corpo, 'eth_call') };
 }
 
 /**
@@ -1287,7 +1358,31 @@ const MARGEM_QUENTE = Number(process.env.CACA_MARGEM_QUENTE ?? '25');
 /** O ultimo relogio da varredura, para o log do bloco dizer onde o tempo foi. */
 export let ultimaMedicao = { total: 0, msRede: 0, msDecode: 0, pedacos: 0 };
 
-async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Promise<Array<string | null>> {
+/**
+ * A cobertura da ULTIMA leitura em lote, para quem chama poder declara-la.
+ *
+ * Mora aqui, ao lado de `ultimaMedicao`, porque e o mesmo tipo de informacao:
+ * o que a leitura custou e o que ela de fato trouxe. Sem isto, um pedaco
+ * perdido era indistinguivel de uma posicao que respondeu nada — e era por isso
+ * que 2.500 devedores saiam das listas quentes sem uma linha de log.
+ */
+export let ultimaCobertura: Cobertura = coberturaVazia();
+
+/**
+ * O ULTIMO FATO CONHECIDO de cada devedor, com a hora em que foi lido.
+ *
+ * Nao e cache de conveniencia: e o que impede uma falha de leitura de virar
+ * esquecimento. Quem nao foi lido num ciclo volta as camadas com este estado,
+ * marcado por `Medida.lidoEm`, e e relido no ciclo seguinte.
+ */
+const ultimoFatoConhecido = new Map<string, Medida & { lidoEm: number }>();
+
+async function lerEmLote(
+    chamadas: Array<{ alvo: string; dados: string }>,
+    nomeDaLeitura = 'lote',
+): Promise<Array<string | null>> {
+    const cobertura = coberturaVazia(chamadas.length);
+    ultimaCobertura = cobertura;
     const pedacos = partirEmPedacos(chamadas, CHAMADAS_POR_MULTICALL);
     const porPedaco: Array<Array<string | null>> = new Array(pedacos.length);
     // Dois relogios separados. O pool de conexoes nao mudou nada (3.440ms ->
@@ -1303,16 +1398,24 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
         await Promise.all(
             onda.map(async (pedaco, j) => {
                 const posicao = i + j;
+                const de = posicao * CHAMADAS_POR_MULTICALL;
+                const lote = idDoLote(nomeDaLeitura, posicao, de, de + pedaco.length - 1);
                 const t0 = Date.now();
                 try {
                     const bruto = await chamar<string>('eth_call', [
                         { to: MULTICALL3, data: codificarAggregate3(pedaco) },
                         'latest',
-                    ]);
+                    // A BRASA E ESSENCIAL: o alvo cruza dentro de um bloco de
+                    // 2s, e esperar o recuo inteiro para proteger uma cota e
+                    // perder o alvo. A varredura completa pode esperar.
+                    ], 4, nomeDaLeitura === 'brasa' ? 'essencial' : 'demorada');
                     msRede += Date.now() - t0;
                     const t1 = Date.now();
                     const rs = decodificarAggregate3Rapido(bruto);
                     porPedaco[posicao] = pedaco.map((_, k) => (rs[k]?.ok ? rs[k].dados : null));
+                    // LIDA e a posicao que CHEGOU, com resposta ok ou com
+                    // reversao: as duas sao a corrente falando. Buraco e sumico.
+                    cobertura.lidas += pedaco.length;
                     msDecode += Date.now() - t1;
                 } catch (e) {
                     // Um pedaco que falha vira buracos, nao uma lista curta:
@@ -1322,12 +1425,28 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
                     // vez, e sumir em silencio significa nao ver quem caiu
                     // enquanto o log mostra uma varredura completa.
                     porPedaco[posicao] = pedaco.map(() => null);
-                    log.warn('Um pedaço da varredura não foi lido.', {
-                        posicoesPerdidas: pedaco.length,
-                        de: chamadas.length,
-                        erro: (e as Error).message.slice(0, 120),
-                        consequencia: 'quem estiver nessas posições não é visto neste bloco',
+                    cobertura.falharam += pedaco.length;
+                    for (let k = 0; k < pedaco.length; k += 1) cobertura.posicoesFalhas.add(de + k);
+                    cobertura.lotesQueFalharam.push({
+                        lote, posicoes: pedaco.length, erro: (e as Error).message.slice(0, 160),
                     });
+                    // UMA linha por pedaco enterrava o evento de verdade: dez
+                    // pedacos deram dez linhas iguais. O log agrupado sai no fim
+                    // da leitura, com contagem e id de lote; aqui fica so o
+                    // PRIMEIRO exemplo, inteiro, porque ela pediu os dois.
+                    if (cobertura.lotesQueFalharam.length === 1) {
+                        log.warn('Um pedaço da leitura não foi lido. (primeiro exemplo, inteiro)', {
+                            lote,
+                            metodo: 'eth_call -> Multicall3.aggregate3',
+                            formatoDaEntrada: `${pedaco.length} tuplas (address,bool,bytes)`,
+                            posicoesPerdidas: pedaco.length,
+                            de: chamadas.length,
+                            erro: (e as Error).message.slice(0, 200),
+                            tipoDoErro: (e as Error).name,
+                            consequencia: 'quem estiver nessas posições NÃO FOI LIDO neste bloco — '
+                                + 'e não ter sido lido não é estar seguro',
+                        });
+                    }
                 }
             }),
         );
@@ -1338,6 +1457,36 @@ async function lerEmLote(chamadas: Array<{ alvo: string; dados: string }>): Prom
     // mesmo e a resposta: se `msRede` somar muito acima do total, a rede esta
     // paralela e o gargalo e outro.
     ultimaMedicao = { total, msRede, msDecode, pedacos: pedacos.length };
+    // O AGRUPADO: uma linha para a leitura inteira, com a conta vinda dos
+    // CONTADORES. O log de 2026-10-10 publicou "um quarto das janelas falhou"
+    // com 40 falhas e 4 sucessos — frase literal, 91% de verdade. Aqui a fracao
+    // nao e escrevivel a mao.
+    if (cobertura.falharam > 0) {
+        const porErro = new Map<string, { quantos: number; posicoes: number; lotes: string[] }>();
+        for (const f of cobertura.lotesQueFalharam) {
+            const chave = f.erro;
+            const v = porErro.get(chave) ?? { quantos: 0, posicoes: 0, lotes: [] };
+            v.quantos += 1; v.posicoes += f.posicoes;
+            if (v.lotes.length < 5) v.lotes.push(f.lote);
+            porErro.set(chave, v);
+        }
+        log.warn('[COBERTURA] A leitura não foi completa, e aqui está o que faltou.', {
+            leitura: nomeDaLeitura,
+            cobertura: comoLerACobertura(cobertura),
+            pedidas: cobertura.pedidas,
+            lidas: cobertura.lidas,
+            naoLidas: cobertura.falharam,
+            lotesQueFalharam: cobertura.lotesQueFalharam.length,
+            de: pedacos.length,
+            porErro: [...porErro.entries()].map(([erro, v]) => ({
+                erro,
+                lotes: v.quantos,
+                posicoes: v.posicoes,
+                exemplos: v.lotes,
+                eDoProvedor: ehLimiteDoProvedor(erro),
+            })),
+        });
+    }
     return porPedaco.flat();
 }
 
@@ -2599,9 +2748,10 @@ async function principal(): Promise<'parar' | void> {
     /** A maior faixa que a coleta guarda. Acima dela nao se pergunta nada. */
     const FAIXA_MAIS_LARGA = FAIXAS_DE_DISTANCIA[FAIXAS_DE_DISTANCIA.length - 1]!;
     function anotarEpisodios(medidos: Medida[], bloco: number, idadeDoDadoMs: number | null,
-        fecharAusentes = true): void {
+        fecharAusentes = true, universoConsultado?: Iterable<string>,
+        coberturaFoiCompleta = true): void {
         const agora = Date.now();
-        livro.bateuPonto(agora);
+        livro.bateuPonto(agora, coberturaFoiCompleta);
         const vistos: string[] = [];
         for (const m of medidos) {
             const falta = m.queda.toNumber();
@@ -2634,7 +2784,7 @@ async function principal(): Promise<'parar' | void> {
         // cada 15 min: se ela fechasse, todo alvo que ela ve e a brasa nao
         // viraria um episodio novo a cada volta — tentativa virando
         // oportunidade pela porta dos fundos.
-        if (fecharAusentes) livro.fecharOsAusentes(vistos, agora);
+        if (fecharAusentes) livro.fecharOsAusentes(vistos, agora, 'perdiDeVista', universoConsultado);
     }
     let armadoEm = 0;
     /** Quando a ULTIMA tentativa aconteceu, deu certo ou nao. Freia repeticao. */
@@ -3478,12 +3628,18 @@ async function principal(): Promise<'parar' | void> {
                     // NENHUM tamanho; uma liquidavel pode ser recusada pelo
                     // tamanho pedido. Os consertos sao opostos: a primeira
                     // pede esperar o preco, a segunda pede mudar o tamanho.
-                    const naoCruzou = alvo.quedaPct !== undefined && alvo.quedaPct !== null
-                        && alvo.quedaPct.greaterThan(0);
-                    const porSaude = naoCruzou
-                        ? `INELEGÍVEL POR SAÚDE agora: falta cair ${alvo.quedaPct!.toFixed(4)}% `
-                          + '(nenhum tamanho liquida uma posição sadia). '
-                        : 'elegível por saúde (já cruzou). ';
+                    // TRES ESTADOS, e eu tinha escrito dois. No log de
+                    // 2026-10-10 este alvo saiu como "elegível por saúde (já
+                    // cruzou)" ao lado de "precisa cair 1,4071%" e de uma
+                    // simulacao revertida — tres linhas discordando sobre a
+                    // mesma posicao. A causa: `quedaPct` ausente caia no ramo
+                    // do `else`, e AUSENCIA era publicada como a conclusao mais
+                    // forte que existe. E a assinatura deste projeto, no log que
+                    // existe para conferir o caminho do tiro.
+                    // A FRASE MORA EM `residuo.ts` para poder ser exercitada:
+                    // `cacarAoVivo.ts` sobe o bot ao ser importado, e era por
+                    // isso que este ramo nunca teve teste — e saiu invertido.
+                    const porSaude = comoEstaASaudeDoAlvo(alvo.quedaPct);
                     const q = coberturaQuePassa({
                         dividaCrua: alvo.dividaCrua ?? 0n, dividaUsd: d,
                         // Sem a saude exata aqui, o regime conservador: supor
@@ -4274,7 +4430,7 @@ async function principal(): Promise<'parar' | void> {
                     });
             }
             const fimLeitura = agora.etapa('leitura');
-            const resp = await lerEmLote(chamadasDoCiclo);
+            const resp = await lerEmLote(chamadasDoCiclo, 'brasa');
             fimLeitura({ comoCorreu: resp.length === 0 ? 'vazia' : 'ok',
                 detalhe: `${chamadasDoCiclo.length} chamadas em lote` });
 
@@ -4517,7 +4673,12 @@ async function principal(): Promise<'parar' | void> {
             // O LIVRO, a cada ciclo: e aqui que o tempo efetivo se acumula.
             // Fora do `if` do log de proposito — a disponibilidade nao pode
             // depender de quando a linha de sinal de vida sai.
-            anotarEpisodios(medidosDaBrasa, blocoAtual, Date.now() - menorMargemLidaEm);
+            // O UNIVERSO DESTE CICLO e a brasa, e so ele pode ser fechado. Era
+            // esta a causa do 533 -> 0 em 239ms: o ciclo da brasa fechava os
+            // episodios que a varredura completa, de 62 mil posicoes, tinha
+            // aberto 239ms antes. Ver `LivroDeEpisodios.fecharOsAusentes`.
+            anotarEpisodios(medidosDaBrasa, blocoAtual, Date.now() - menorMargemLidaEm, true, brasa,
+                coberturaCompleta(ultimaCobertura));
 
             // A POSTURA PASSA A LER O NUMERO DE 8 SEGUNDOS, NAO O DE 15 MINUTOS.
             //
@@ -4546,6 +4707,28 @@ async function principal(): Promise<'parar' | void> {
                 if (Date.now() - ultimoSinalDeVida >= MS_ENTRE_SINAIS_DE_VIDA) {
                     ultimoSinalDeVida = Date.now();
                     log.info(`[BLOCO ${blocoAtual}] Só a brasa — ninguém mais pode ter caído.`, {
+                        // A LINHA CURTA, PRIMEIRO. Ela pediu um resumo de onze
+                        // coisas conferivel de relance: *"versão · estado do
+                        // serviço · envio · cobertura · idade dos dados ·
+                        // falhas · RPC ativo · WebSocket · decisões · duração ·
+                        // amostras"*. Nenhum campo ausente vira valor: ver
+                        // `src/resumoDoCiclo.ts`.
+                        resumo: resumoDoCiclo({
+                            versao: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7)
+                                ?? process.env.GIT_COMMIT_SHA?.slice(0, 7) ?? null,
+                            servico: `brasa/${posturaAgora()}`,
+                            envioAutorizado: ENVIAR,
+                            lidas: ultimaCobertura.lidas,
+                            pedidas: ultimaCobertura.pedidas === 0 ? null : ultimaCobertura.pedidas,
+                            idadeDoDadoMs: Date.now() - menorMargemLidaEm,
+                            falhas: ultimaCobertura.falharam,
+                            rpcAtivo: soOHost(rpc),
+                            webSocket: ouvinte === null ? null : ouvinte.vivo,
+                            decisoes: medidosDaBrasa.length,
+                            decisoesQueAtirariam: caidos.length,
+                            duracaoMs: Date.now() - inicioDoCiclo,
+                            amostras: tempos.quantas('real'),
+                        }),
                         tempos: comoLerOsTempos(tempos.resumo('real')),
                         oSinalEsperouOSono: blocosQueEsperaramOSono === 0
                             ? (ouvinte?.vivo ? 'nenhum bloco chegou durante um sono ainda'
@@ -4671,7 +4854,16 @@ async function principal(): Promise<'parar' | void> {
                     const loteGigante = await lerEmLote(aLer.map((d) => ({
                         alvo: REDE.pool,
                         dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
-                    })));
+                    })), varredura);
+                    // A cobertura DESTA leitura, capturada antes de qualquer
+                    // outra chamada sobrescrever `ultimaCobertura`.
+                    const coberturaDaLeitura = ultimaCobertura;
+                    /** Quem NAO foi lido: nao e seguro, nao e ausencia, e buraco. */
+                    const naoLidos: string[] = [];
+                    for (const pos of coberturaDaLeitura.posicoesFalhas) {
+                        const d = aLer[pos];
+                        if (d !== undefined) naoLidos.push(d);
+                    }
 
                     const medidos: Medida[] = [];
                     /**
@@ -4727,6 +4919,46 @@ async function principal(): Promise<'parar' | void> {
                                 via: oQueSeSabeDaVia(aLer[i]),
                             });
                         } catch {}
+                    }
+
+                    // O ESTADO GUARDADO, e por que ele volta para a lista.
+                    //
+                    // `repartirPorFragilidade` monta as camadas a partir de
+                    // `medidos`. Quem nao foi lido nao esta em `medidos`, entao
+                    // SAIA das camadas — e sair das camadas e exatamente o que
+                    // o log de 2026-10-10 mostrou: 533 episodios abertos virando
+                    // 0, e 2.500 devedores deixando de ser vigiados por uma
+                    // falha de rede. Ausencia de leitura virando ausencia de
+                    // alvo, que e o defeito que da nome a este projeto.
+                    //
+                    // Entao o ultimo fato conhecido volta, MARCADO com a idade.
+                    // O custo de reconduzir um devedor cuja posicao mudou e uma
+                    // vaga de vigilia e uma releitura no ciclo seguinte; o custo
+                    // de esqueve-lo e perder o alvo sem nunca saber.
+                    const agoraMs = Date.now();
+                    for (const m of medidos) ultimoFatoConhecido.set(m.devedor.toLowerCase(), { ...m, lidoEm: agoraMs });
+                    let reusados = 0;
+                    let maisVelhoMs: number | null = null;
+                    for (const d of naoLidos) {
+                        const guardado = ultimoFatoConhecido.get(d.toLowerCase());
+                        if (guardado === undefined) continue;
+                        medidos.push({ ...guardado });
+                        reusados += 1;
+                        const idade = agoraMs - guardado.lidoEm!;
+                        if (maisVelhoMs === null || idade > maisVelhoMs) maisVelhoMs = idade;
+                    }
+                    coberturaDaLeitura.reusadas = reusados;
+                    coberturaDaLeitura.idadeMaisVelhaMs = maisVelhoMs;
+                    if (naoLidos.length > 0) {
+                        log.warn('[NÃO LI] Posições que a leitura perdeu, e o que eu fiz com elas.', {
+                            naoLidos: naoLidos.length,
+                            estadoGuardadoReconduzido: reusados,
+                            semEstadoAnterior: naoLidos.length - reusados,
+                            idadeDoMaisVelho: maisVelhoMs === null ? 'nenhum' : `${(maisVelhoMs / 1000).toFixed(0)}s`,
+                            oQueIssoNaoE: 'não é dívida zero, não é posição saudável e não é ausência de '
+                                + 'oportunidade: é falta de leitura. Nenhum deles é esquecido por isto',
+                            cobertura: comoLerACobertura(coberturaDaLeitura),
+                        });
                     }
 
                     // A base dos precos anda junto com a leitura: a fragilidade
@@ -4942,7 +5174,7 @@ async function principal(): Promise<'parar' | void> {
                             void tiroEmSeco(paraEnsaiar);
                         }
                         ultimoCompleto = Date.now();
-                        anotarEpisodios(medidos, blocoAtual, 0, false);
+                        anotarEpisodios(medidos, blocoAtual, 0, false, undefined, coberturaCompleta(coberturaDaLeitura));
                         if (primeiraVoltaPosBoot) {
                             // A PRIMEIRA volta completa e onde se sabe quem
                             // continua na lista. Antes dela, fechar seria
@@ -6111,83 +6343,38 @@ async function principal(): Promise<'parar' | void> {
             // exatamente no unico estado para o qual foi construido, e o laco
             // voltava sem espera nenhuma: ~3 ciclos/s, centenas de milhares de
             // CU numa tarde de mercado ruim.
-            if (posturaAgora() === 'dedo no gatilho') {
-                if (ouvinte?.vivo) {
-                    // Com o dedo no gatilho, quem acorda o bot e o BLOCO, nao o
-                    // relogio: o aviso chega no instante em que ele nasce. O
-                    // tempo maximo existe para nunca ficar preso esperando um
-                    // aviso que nao vem — WebSocket mudo e indistinguivel de
-                    // rede parada, e ficar pendurado seria pior que perguntar.
-                    // Quem acorda o bot aqui e o BLOCO, no instante em que
-                    // nasce. O tempo maximo existe so para nunca ficar preso
-                    // esperando um aviso que nao vem.
-                    // O INSTANTE DO SINAL, para a etapa 'sinal' do ciclo
-                    // seguinte medir sinal -> primeira leitura. E essa a
-                    // latencia que decide a FATIA do bloco: o resto do caminho
-                    // acontece depois dela.
-                    const comoAcordou = await esperarBlocoOuTempo(
-                        (aoBloco) => ouvinte.assinar(aoBloco),
-                        2500,
-                        (fn, ms) => setTimeout(fn, ms),
+            // O PASSO DE ESPERA mora em `despertar.ts`, e producao chama a
+            // MESMA funcao que o teste de integracao exercita com dependencias
+            // falsas contando avaliacoes, RPC por metodo e reservas de nonce.
+            // Era inline aqui, e ela recusou a prova: *"Resolver e remover um
+            // ouvinte uma única vez não comprova, sozinho, ausência de ciclos
+            // concorrentes ou consultas duplicadas."*
+            const espera = await esperarOProximoCiclo(
+                posturaAgora(), ritmo, resta, OLHAR_MERCADO_MS,
+                {
+                    ouvinte: ouvinte === null ? null
+                        : { vivo: ouvinte.vivo, assinar: (f) => ouvinte.assinar(f) },
+                    acordaPorBloco: ACORDA_POR_BLOCO,
+                    dormir: async (ms) => { await dormir(ms); },
+                    dormirDeOlho: (total, fatia) => dormirDeOlho(total, fatia, olharMercado,
+                        async (ms) => { await dormir(ms); }),
+                    esperarBloco: (assinar, teto) => esperarBlocoOuTempo(
+                        assinar, teto, (fn, ms) => setTimeout(fn, ms),
                         (id) => clearTimeout(id as NodeJS.Timeout),
-                    );
-                    sinalEm = process.hrtime.bigint();
-                    sinalFoiBloco = comoAcordou === 'bloco';
-                } else {
-                    // Sem aviso de bloco, um piso de ritmo impede o laco de
-                    // girar na velocidade da rede queimando CU.
-                    await dormir(ritmo);
-                }
-            } else if (resta > 0) {
-                // O SONO IGNORA O BLOCO — medido lendo o codigo em 2026-10-10,
-                // e e a resposta a pergunta dela: *"verifique também se os oito
-                // segundos de espera podem adiar o processamento de um sinal
-                // novo ou se são interrompidos por ele"*.
-                //
-                // `dormirDeOlho` acorda por MERCADO (preco fora da corrente),
-                // nunca por bloco. Entao um bloco que nasce no meio do sono
-                // espera o sono terminar: ate ~8s em 'dormindo', ~1s em
-                // 'atento'. Os 106ms de caminho critico nao sao a latencia do
-                // bot nesses estados — o sono e.
-                //
-                // Aqui isso passa a ser MEDIDO: o ouvinte registra a chegada
-                // mesmo durante o sono, e o atraso vai para a etapa 'sinal' do
-                // ciclo seguinte. A INTERRUPCAO de verdade e candidata e fica
-                // atras de `CACA_ACORDA_POR_BLOCO=1`, desligada por padrao:
-                // acordar por bloco sobe a frequencia do ciclo de 8s para ~2s
-                // e isso custa CU, que nao e decisao minha.
-                let chegouNoSono: bigint | null = null;
-                let quantosNoSono = 0;
-                const desassinar = ouvinte?.vivo
-                    ? ouvinte.assinar(() => {
-                        quantosNoSono += 1;
-                        if (chegouNoSono === null) chegouNoSono = process.hrtime.bigint();
-                    })
-                    : null;
-                try {
-                    if (ACORDA_POR_BLOCO && ouvinte?.vivo) {
-                        await esperarBlocoOuTempo(
-                            (aoBloco) => ouvinte.assinar(aoBloco),
-                            resta,
-                            (fn, ms) => setTimeout(fn, ms),
-                            (id) => clearTimeout(id as NodeJS.Timeout),
-                        );
-                    } else {
-                        await dormirDeOlho(resta, OLHAR_MERCADO_MS, olharMercado,
-                            async (ms) => { await dormir(ms); });
-                    }
-                } finally {
-                    desassinar?.();
-                }
-                if (chegouNoSono !== null) {
-                    // O atraso REAL do sono: do bloco chegar ate o ciclo
-                    // comecar. Isto NAO e "tempo de processamento": e espera
-                    // interna, e a etapa 'sinal' do proximo ciclo a recebe.
-                    sinalEm = chegouNoSono;
-                    sinalFoiBloco = true;
-                    blocosQueEsperaramOSono += quantosNoSono;
-                }
+                    ),
+                    agoraNs: () => process.hrtime.bigint(),
+                },
+            );
+            if (espera.primeiroAvisoNs !== null) {
+                // O atraso do sono: do aviso chegar ate o ciclo comecar.
+                sinalEm = espera.primeiroAvisoNs;
+                sinalFoiBloco = true;
+                if (espera.porque !== 'bloco') blocosQueEsperaramOSono += espera.avisos;
+            } else if (espera.porque === 'bloco') {
+                sinalEm = process.hrtime.bigint();
+                sinalFoiBloco = true;
             }
+
         }
     }
 }

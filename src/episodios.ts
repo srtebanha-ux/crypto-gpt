@@ -156,6 +156,10 @@ export class LivroDeEpisodios {
 
     private observadoTotalMs = 0;
 
+    /** Quanto do tempo observado foi olhado com cobertura INCOMPLETA. */
+
+    private msComCoberturaIncompletaTotal = 0;
+
     private lacunasPerdidas = 0;
 
     private lacunaPerdidaMs = 0;
@@ -178,10 +182,24 @@ export class LivroDeEpisodios {
     constructor(private readonly tetoDeLacunaMs = LACUNA_QUE_AINDA_CONTA_MS) {}
 
     /** Marca que o livro estava vivo neste instante, com alvo ou sem. */
-    bateuPonto(agoraMs: number): void {
+    /**
+     * `coberturaCompleta = false` marca o periodo como IMPROPRIO para inferencia
+     * economica.
+     *
+     * Ela pediu: *"Marque períodos afetados como impróprios para inferência
+     * econômica."* O tempo continua contando como observado — o bot estava
+     * vivo e olhando —, mas `msComCoberturaIncompleta` diz quanto dele foi
+     * olhado com buraco. Sem esta separacao, "nenhuma oportunidade apareceu"
+     * nao se distingue de "2.500 posicoes nao foram lidas", que e o defeito
+     * deste incidente.
+     */
+    bateuPonto(agoraMs: number, coberturaCompleta = true): void {
         if (this.comecouEm === null) this.comecouEm = agoraMs;
         if (this.vistoPorUltimoEm !== null) {
             const d = agoraMs - this.vistoPorUltimoEm;
+            if (d > 0 && d <= this.tetoDeLacunaMs && !coberturaCompleta) {
+                this.msComCoberturaIncompletaTotal += d;
+            }
             if (d > 0 && d <= this.tetoDeLacunaMs) this.observadoTotalMs += d;
             else if (d > this.tetoDeLacunaMs) {
                 // Lacuna de coleta: NAO entra como observacao, e e declarada.
@@ -284,13 +302,34 @@ export class LivroDeEpisodios {
      * recuperou, foi paga ou liquidada. Confundir isso com 'recuperou' seria
      * inventar desfecho — o defeito que este projeto persegue.
      */
+    /**
+     * Fecha os episodios abertos que a leitura de agora NAO viu.
+     *
+     * `universoConsultado` existe porque o log de 2026-10-10 mostrou 533
+     * episodios abertos virando ZERO em 239ms, e 2.702 reaberturas: o ciclo da
+     * brasa — que consulta 233 posicoes — fechava os episodios que a varredura
+     * completa, de 62 mil posicoes, tinha acabado de abrir. "Nao estava nas
+     * minhas 233" nao e "saiu do universo vigiado", e tratar os dois como a
+     * mesma coisa fabricava episodios de duracao zero aos milhares.
+     *
+     * Quando `universoConsultado` e dado, so quem estava NELE pode ser fechado.
+     * Quem nao foi consultado fica aberto, porque sobre ele a leitura de agora
+     * nao disse nada.
+     */
     fecharOsAusentes(vistosAgora: Iterable<string>, agoraMs: number,
-        desfecho: DesfechoDoEpisodio = 'perdiDeVista'): number {
+        desfecho: DesfechoDoEpisodio = 'perdiDeVista',
+        universoConsultado?: Iterable<string>): number {
         const vistos = new Set<string>();
         for (const v of vistosAgora) vistos.add(v.toLowerCase());
+        let universo: Set<string> | null = null;
+        if (universoConsultado !== undefined) {
+            universo = new Set<string>();
+            for (const v of universoConsultado) universo.add(v.toLowerCase());
+        }
         let quantos = 0;
         for (const [chave, e] of [...this.abertos]) {
             if (vistos.has(e.devedor)) continue;
+            if (universo !== null && !universo.has(e.devedor)) continue;
             e.fechouEm = agoraMs;
             e.desfecho = desfecho;
             this.abertos.delete(chave);
@@ -392,6 +431,8 @@ export class LivroDeEpisodios {
         msEntreLeituras: number;
         msSemDados: number;
         msOffline: number;
+        /** Tempo observado com buraco de leitura: improprio para inferencia economica. */
+        msComCoberturaIncompleta: number;
         pendentesDeReconciliacao: number;
         alvosDistintos: number;
         reaberturas: number;
@@ -440,6 +481,9 @@ export class LivroDeEpisodios {
             msEntreLeituras: this.observadoTotalMs,
             msSemDados: this.lacunaPerdidaMs,
             msOffline: this.msOfflineTotal,
+            // IMPROPRIO PARA INFERENCIA ECONOMICA: tempo observado com buraco
+            // de leitura. "Nenhuma oportunidade" aqui nao e medicao.
+            msComCoberturaIncompleta: this.msComCoberturaIncompletaTotal,
             pendentesDeReconciliacao: this.pendentes.size,
             alvosDistintos: distintos.size,
             reaberturas: todos.filter((e) => e.reaberturaDe > 0).length,
@@ -498,10 +542,19 @@ export const COBERTURA_DO_REGISTRO = {
  */
 export function comoLerOsEpisodios(r: ReturnType<LivroDeEpisodios['resumo']>): string {
     if (r.episodios === 0) {
-        return r.observadoMs === 0
-            ? 'NADA observado ainda — e isto não é "não houve alvo"'
-            : `nenhum episódio em ${(r.observadoMs / 60000).toFixed(1)} min observados. `
-              + 'Isto é ausência MEDIDA, não falta de medição';
+        if (r.observadoMs === 0) return 'NADA observado ainda — e isto não é "não houve alvo"';
+        // AQUI ESTAVA O PIOR CASO DESTA FRASE, e o teste o pegou: "ausência
+        // MEDIDA" publicado sobre um periodo em que a leitura teve buraco. Zero
+        // episodios com cobertura incompleta nao e medicao de ausencia: e
+        // ausencia de medicao, que e o defeito que da nome a este projeto.
+        if (r.msComCoberturaIncompleta > 0) {
+            return `nenhum episódio em ${(r.observadoMs / 60000).toFixed(1)} min observados, MAS `
+                + `${(r.msComCoberturaIncompleta / 60000).toFixed(1)} min deles tiveram COBERTURA `
+                + 'INCOMPLETA: esse período é IMPRÓPRIO para inferência econômica. Isto NÃO é '
+                + 'ausência medida — é leitura que faltou';
+        }
+        return `nenhum episódio em ${(r.observadoMs / 60000).toFixed(1)} min observados. `
+            + 'Isto é ausência MEDIDA, não falta de medição';
     }
     const faixas = r.porFaixa
         .filter((f) => f.episodios > 0)
@@ -520,6 +573,10 @@ export function comoLerOsEpisodios(r: ReturnType<LivroDeEpisodios['resumo']>): s
         + `somando ${(r.lacunas.msPerdidos / 60000).toFixed(1)} min`
         + (r.msOffline > 0 ? ` | ${(r.msOffline / 60000).toFixed(1)} min OFFLINE (desconhecido: o `
             + 'processo estava morto, não é o mesmo que lacuna de coleta)' : '')
+        + (r.msComCoberturaIncompleta > 0
+            ? ` | ${(r.msComCoberturaIncompleta / 60000).toFixed(1)} min observados com COBERTURA `
+              + 'INCOMPLETA: esse período é IMPRÓPRIO para inferência econômica, porque "nenhuma '
+              + 'oportunidade" ali pode ser leitura que faltou' : '')
         + (r.pendentesDeReconciliacao > 0
             ? ` | ${r.pendentesDeReconciliacao} episódio(s) a reconciliar do reinício` : '')
         + (faixas === '' ? '' : ` || ${faixas}`);

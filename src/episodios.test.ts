@@ -338,3 +338,80 @@ test('GRAVAÇÃO: temporário ÚNICO por gravação, e rename depois', async () 
     assert.equal(await lerLivro('x', { ler: async () => 'nada disso' }), null);
     assert.equal(await lerLivro('x', { ler: async () => '{"versao":99}' }), null);
 });
+
+/**
+ * O 533 -> 0 EM 239ms, reproduzido.
+ *
+ * Do log de producao de 2026-10-10: a varredura completa abriu 533 episodios e
+ * 239ms depois o ciclo da brasa — que consulta 233 posicoes — fechou TODOS,
+ * inclusive os 300 que ele nao tinha consultado. A varredura seguinte reabriu, e
+ * foram 2.702 reaberturas e milhares de episodios de duracao ZERO.
+ *
+ * Este teste FALHA sem o `universoConsultado`.
+ */
+test('o ciclo da brasa NÃO fecha o que ele não consultou', () => {
+    const l = new LivroDeEpisodios();
+    const completa: string[] = [];
+    for (let i = 0; i < 533; i += 1) completa.push(`0x${i.toString(16).padStart(40, '0')}`);
+    for (const d of completa) ler(l, d, 1000, 0.3);
+    assert.equal(l.resumo().abertos, 533);
+
+    // O ciclo da brasa, 239ms depois: ele le 233 e ve 230 na faixa.
+    const brasa = completa.slice(0, 233);
+    const vistos = brasa.slice(0, 230);
+    for (const d of vistos) ler(l, d, 1239, 0.28);
+    const fechados = l.fecharOsAusentes(vistos, 1239, 'perdiDeVista', brasa);
+
+    assert.equal(fechados, 3, 'só os 3 que ESTAVAM nas 233 e não apareceram');
+    assert.equal(l.resumo().abertos, 530, 'os 300 fora da brasa continuam abertos');
+
+    // E a reabertura em cadeia nao acontece: a varredura seguinte reve os 533 e
+    // nenhum episodio novo nasce para quem nunca foi fechado.
+    for (const d of completa) ler(l, d, 16_000, 0.3);
+    assert.equal(l.resumo().reaberturas, 3, 'só os 3 de verdade fechados reabrem');
+});
+
+test('sem o universo, o defeito antigo ainda é visível — e é o que ele era', () => {
+    // Guarda a DIFERENCA entre as duas chamadas, para ninguem "simplificar" de
+    // volta: sem universo, fechar os ausentes fecha 303 de uma vez.
+    const l = new LivroDeEpisodios();
+    const todos = ['0xa', '0xb', '0xc'];
+    for (const d of todos) ler(l, d, 0, 0.3);
+    assert.equal(l.fecharOsAusentes(['0xa'], 100), 2, 'sem universo: fecha quem não foi visto');
+    const l2 = new LivroDeEpisodios();
+    for (const d of todos) ler(l2, d, 0, 0.3);
+    assert.equal(l2.fecharOsAusentes(['0xa'], 100, 'perdiDeVista', ['0xa', '0xb']), 1,
+        'com universo: só 0xb, porque 0xc não foi consultado');
+});
+
+test('episódio de duração ZERO é contado e nomeado, não escondido', () => {
+    // Milhares deles apareceram no log, e a causa era o fechamento indevido.
+    // A duracao zero em si nao e defeito — pode ser uma posicao vista uma vez
+    // so — mas ela tem de ser CONTAVEL para a proxima sessao poder perguntar.
+    const l = new LivroDeEpisodios();
+    ler(l, '0xa', 0, 0.3);
+    l.fecharOsAusentes([], 0);
+    const r = l.resumo();
+    assert.equal(r.episodios, 1);
+    const zerados = l.todos().filter((e) => e.fechouEm !== null && e.fechouEm === e.abriuEm);
+    assert.equal(zerados.length, 1, 'o livro guarda o que precisa para contá-los');
+});
+
+test('período com cobertura incompleta é marcado impróprio para inferência econômica', () => {
+    const l = new LivroDeEpisodios();
+    l.bateuPonto(0, true);
+    l.bateuPonto(1000, true);          // 1s com cobertura completa
+    l.bateuPonto(3000, false);         // 2s com buraco de leitura
+    const r = l.resumo();
+    assert.equal(r.msEntreLeituras, 3000, 'o bot estava vivo e olhando os 3s');
+    assert.equal(r.msComCoberturaIncompleta, 2000, 'mas 2s deles foram olhados com buraco');
+    const frase = comoLerOsEpisodios(r);
+    assert.match(frase, /IMPRÓPRIO para inferência econômica/);
+});
+
+test('cobertura completa não marca nada: o padrão não contamina a medição', () => {
+    const l = new LivroDeEpisodios();
+    l.bateuPonto(0); l.bateuPonto(5000);
+    assert.equal(l.resumo().msComCoberturaIncompleta, 0);
+    assert.ok(!/IMPRÓPRIO/.test(comoLerOsEpisodios(l.resumo())));
+});

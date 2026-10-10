@@ -206,3 +206,33 @@ export function comoLerOTamanho(hoje: bigint, possivel: CoberturaPossivel): stri
         + `${possivel.cobrir} (${razao.toFixed(2)}x) — ${possivel.porque}. `
         + 'MEDIDO em fork com posição sintética; o tamanho em produção NÃO foi alterado';
 }
+
+/**
+ * A ELEGIBILIDADE POR SAUDE, em tres estados — e nao dois.
+ *
+ * DEFEITO REPRODUZIDO (log de producao de 2026-10-10): o `[EM SECO]` publicou
+ * `elegível por saúde (já cruzou)` para um alvo que a MESMA linha dizia
+ * `precisa cair 1.4071%`, e cuja simulacao reverteu. Tres afirmacoes
+ * discordando sobre a mesma posicao.
+ *
+ * A causa era `const naoCruzou = quedaPct !== undefined && quedaPct !== null &&
+ * quedaPct.greaterThan(0)` seguido de um `? :`: quando a queda NAO FOI LIDA, a
+ * expressao dava `false` e o `else` publicava a conclusao mais forte que
+ * existe. Ausencia com cara de resposta, no diagnostico que existe para
+ * conferir o caminho do tiro.
+ *
+ * Esta funcao existe fora do laco para poder ser EXERCITADA — o `[EM SECO]`
+ * mora dentro de `cacarAoVivo.ts`, que sobe o bot ao ser importado.
+ */
+export function comoEstaASaudeDoAlvo(quedaPct: { greaterThan(n: number): boolean;
+    toFixed(n: number): string } | null | undefined): string {
+    if (quedaPct === undefined || quedaPct === null) {
+        return 'SAÚDE INDETERMINADA: não li a queda deste alvo neste ciclo, e não ter lido '
+            + 'não é ter cruzado. ';
+    }
+    if (quedaPct.greaterThan(0)) {
+        return `INELEGÍVEL POR SAÚDE agora: falta cair ${quedaPct.toFixed(4)}% `
+            + '(nenhum tamanho liquida uma posição sadia). ';
+    }
+    return `elegível por saúde: queda lida = ${quedaPct.toFixed(4)}%, já cruzou. `;
+}
