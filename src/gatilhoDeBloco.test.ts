@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { wsDoHttp, pedidoDeAssinatura, blocoDaMensagem, esperarBlocoOuTempo,
     pedidoDePing, SILENCIO_QUE_MATA_MS, OuvinteDeBlocos,
-    lerFalhaDeWs, comoLerAFalhaDeWs } from './gatilhoDeBloco';
+    lerFalhaDeWs, comoLerAFalhaDeWs, enderecoDeBlocos, classificarNegociacao,
+    comoLerANegociacao } from './gatilhoDeBloco';
 
 test('deriva o WebSocket do mesmo provedor', () => {
     assert.equal(wsDoHttp('https://base-mainnet.g.alchemy.com/v2/abc'), 'wss://base-mainnet.g.alchemy.com/v2/abc');
@@ -234,4 +235,66 @@ test('o diagnóstico do ouvinte diz ausência de falha sem inventar uma', () => 
     assert.equal(d.falhasPersistentes, 0);
     assert.match(d.ultimaFalha, /nenhuma falha registrada/);
     o.fechar();
+});
+
+// ---------------------------------------------------------------------------
+// O ENDERECO NAO SE DERIVA POR SUPOSICAO, e a NEGOCIACAO diz qual e o problema.
+//
+// MEDIDO em 2026-10-10 com `negociarWs`: `wss://mainnet.base.org` responde
+// HTTP 405 Method Not Allowed. Era contra esse host que o bot reconectava a
+// cada 30 segundos, e a biblioteca so dizia "Received network error or
+// non-101 status code.".
+// ---------------------------------------------------------------------------
+
+test('sem CACA_WS_URL o bot NÃO deriva o endereço: não conecta e diz por quê', () => {
+    const r = enderecoDeBlocos('https://mainnet.base.org', {});
+    assert.equal(r.url, null);
+    assert.equal(r.origem, 'ausente');
+    assert.match(r.porque, /derivar do HTTP seria supor que o provedor oferece o serviço/);
+});
+
+test('CACA_WS_URL declarada manda, com caminho e credencial de quem definiu', () => {
+    const r = enderecoDeBlocos('https://mainnet.base.org', { CACA_WS_URL: 'wss://x.exemplo/v2/K' });
+    assert.equal(r.url, 'wss://x.exemplo/v2/K');
+    assert.equal(r.origem, 'declarada');
+});
+
+test('CACA_WS_URL inválida é CONFIGURAÇÃO, não bloqueio nem rede', () => {
+    const r = enderecoDeBlocos('https://mainnet.base.org', { CACA_WS_URL: 'https://x.exemplo' });
+    assert.equal(r.url, null);
+    assert.match(r.porque, /configuração INVÁLIDA/);
+    assert.match(r.porque, /não é bloqueio nem falha de rede/);
+});
+
+test('derivar só com permissão explícita, e a frase diz que é SUPOSIÇÃO', () => {
+    const r = enderecoDeBlocos('https://mainnet.base.org', { CACA_WS_DERIVAR: '1' });
+    assert.equal(r.url, 'wss://mainnet.base.org');
+    assert.equal(r.origem, 'derivada');
+    assert.match(r.porque, /SUPOSIÇÃO/);
+    assert.match(r.porque, /mainnet\.base\.org em 2026-10-10/);
+});
+
+test('o status da negociação separa serviço ausente de bloqueio e de rede', () => {
+    // 405 e o que `mainnet.base.org` devolveu, MEDIDO.
+    assert.equal(classificarNegociacao(405).classe, 'servicoAusente');
+    assert.equal(classificarNegociacao(200).classe, 'servicoAusente');
+    assert.equal(classificarNegociacao(426).classe, 'servicoAusente');
+    assert.equal(classificarNegociacao(101).classe, 'aceita');
+    assert.equal(classificarNegociacao(401).classe, 'autenticacao');
+    assert.equal(classificarNegociacao(403).classe, 'autenticacao');
+    assert.equal(classificarNegociacao(404).classe, 'caminho');
+    assert.equal(classificarNegociacao(429).classe, 'limitacao');
+    assert.equal(classificarNegociacao(503).classe, 'transitoria');
+    // SEM resposta e transitoria: nao houve negociacao para julgar.
+    assert.equal(classificarNegociacao(null, 'ECONNRESET').classe, 'transitoria');
+    assert.match(classificarNegociacao(405).mensagem, /não oferece WebSocket aqui/);
+    assert.match(classificarNegociacao(401).mensagem, /CONFIGURAÇÃO, não rede/);
+});
+
+test('a mensagem da negociação é sanitizada e a frase traz só o host', () => {
+    const n = classificarNegociacao(401, 'denied for wss://h.exemplo/v2/CHAVE_SECRETA_LONGA_123456');
+    const f = comoLerANegociacao(n, 'wss://h.exemplo/v2/CHAVE_SECRETA_LONGA_123456');
+    assert.ok(!f.includes('CHAVE_SECRETA_LONGA_123456'));
+    assert.match(f, /h\.exemplo/);
+    assert.match(f, /HTTP 401/);
 });

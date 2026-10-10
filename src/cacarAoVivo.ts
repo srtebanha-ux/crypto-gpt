@@ -15,7 +15,7 @@ import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tet
 import {
     lerRecibo, placarVazio, contarTiro, comoEstaIndo, placarParaCache, placarDoCache,
 } from './tiros';
-import { wsDoHttp, esperarBlocoOuTempo, OuvinteDeBlocos } from './gatilhoDeBloco';
+import { esperarBlocoOuTempo, OuvinteDeBlocos, enderecoDeBlocos, negociarWs, comoLerANegociacao } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, blocosAteCruzar, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDeQualquerFonte, quedaDoMercado } from './precoDeMercado';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
@@ -922,6 +922,10 @@ function aEscadaAbsorve(mensagem: string): boolean {
     if (!ehFalhaDeTransporte(mensagem)) return false;
     const r = ESCADA.falhou();
     rpc = r.url;
+    // O GOVERNADOR tem de saber de quem e o recuo. Sem isto, o recuo por
+    // provedor existiria no codigo e seria global na pratica: tudo cairia na
+    // mesma chave.
+    VAZAO.usando(hostDoRpc(rpc));
     if (r.trocou) {
         log.warn('[RPC] TROQUEI DE PROVEDOR — o anterior não respondeu.', {
             de: hostDoRpc(r.de),
@@ -960,6 +964,7 @@ function talvezVoltarAoPrimario(): void {
     const de = ESCADA.url();
     ESCADA.voltarAoPrimario();
     rpc = ESCADA.url();
+    VAZAO.usando(hostDoRpc(rpc));
     log.info('[RPC] Voltando ao provedor primário.', {
         de: hostDoRpc(de), para: hostDoRpc(rpc),
         porque: 'ficar no secundário para sempre é degradar em silêncio — ele é mais '
@@ -1070,6 +1075,9 @@ const VAZAO = new GovernadorDeVazao(
 );
 /** Os avisos repetidos, agrupados: o primeiro inteiro, o resto contado. */
 const AVISOS = new AgrupadorDeAvisos(10_000);
+// O provedor em uso no boot. Sem isto o recuo por provedor cairia todo numa
+// chave só, e o conserto seria enfeite.
+VAZAO.usando(hostDoRpc(rpc));
 
 /**
  * O ESGOTAMENTO DE CAPACIDADE, por provedor. Ver `src/capacidade.ts`.
@@ -1085,6 +1093,13 @@ const INVENTARIO = new Inventario();
 const BOOT_EM = Date.now();
 /** Qual tarefa esta pedindo RPC agora. A chamada sozinha nao sabe. */
 let tarefaAtual: Tarefa = 'monitoramento';
+/**
+ * Quantas vezes cada tarefa secundaria foi ADIADA por orcamento.
+ *
+ * Contado, nao silencioso: uma coleta que nao rodou tem de aparecer, senao
+ * "nenhum devedor novo" fica indistinguivel de "nao fui buscar".
+ */
+const ADIADAS = { historico: 0, morpho: 0, varreduraCompleta: 0 };
 function comTarefa<T>(t: Tarefa, f: () => T): T {
     const antes = tarefaAtual;
     tarefaAtual = t;
@@ -1126,7 +1141,18 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
             // morria na primeira tentativa e o bot ficava cego sem nunca
             // alcançar o failover escrito no boot. Trocar de provedor e repetir
             // na hora é mais rápido que a escada de espera, e não espera nada.
-            if (aEscadaAbsorve(msg)) continue;
+            // A CLASSIFICACAO VEM ANTES DA ESCADA, e isto e um conserto.
+            //
+            // MEDIDO no log de producao de 2026-10-10 20:02:15: a escada
+            // imprimiu `Monthly capacity limit exceeded` e trocou de provedor,
+            // e o ciclo seguinte continuou publicando
+            // `capacidade: "nenhum provedor esgotado"`. A causa:
+            // `ehFalhaDeTransporte` casa com `capacity` E com `exceeded`, entao
+            // `aEscadaAbsorve` absorvia a mensagem e dava `continue` — e o ramo
+            // da cota, logo abaixo, era CODIGO MORTO para a unica mensagem que
+            // ele existe para tratar.
+            //
+            // Trocar de degrau esta certo; esquecer POR QUE e que nao esta.
             const recusa = classificarRecusa(msg);
             if (recusa.tipo === 'cota') {
                 // ESGOTAMENTO, nao falha transitoria. Registrar ANTES de lancar,
@@ -1148,13 +1174,23 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
                             + 'que sobrou. Não volto automaticamente a este provedor por tempo',
                     });
                 }
+                // Trocar de degrau continua certo — o que estava errado era
+                // trocar e esquecer o motivo. A escada decide o PARA ONDE; a
+                // capacidade decide o NAO VOLTE.
+                if (aEscadaAbsorve(msg)) continue;
                 throw e;
             }
+            if (aEscadaAbsorve(msg)) continue;
             if (!recusa.absorveEsperando) throw e;
             // O RECUO E COMPARTILHADO: quem nem viu a recusa tambem recua, e a
             // proxima chamada ja nasce esperando. Era isto que faltava.
             const recuo = VAZAO.recuar(espera);
-            const aviso = AVISOS.registrar(`recusa:${recusa.tipo}:${msg.slice(0, 60)}`, {
+            const aviso = AVISOS.registrar(`recusa:${recusa.tipo}:${hostDoRpc(rpc)}:${msg.slice(0, 60)}`, {
+                // QUAL TAREFA gerou a recusa. Ela pediu: *"identifique quais
+                // tarefas estão gerando os eth_getLogs recusados."* Sem isto a
+                // linha dizia o metodo e nao dizia quem o chamou.
+                tarefa: tarefaAtual,
+                provedor: hostDoRpc(rpc),
                 metodo, erro: msg.slice(0, 160), tipoDaRecusa: recusa.tipo,
                 oQueFazer: recusa.oQueFazer, tentativa: i + 1, de: tentativas,
             });
@@ -1734,7 +1770,22 @@ async function lerFaixaPartindoSePreciso(
     b: number,
     vistos: Set<string>,
 ): Promise<{ lidas: Array<[number, number]>; falhas: number }> {
+    // A TAREFA, nomeada no lugar que gasta.
+    //
+    // MEDIDO no log de 2026-10-10: o inventario atribuia os 19 `eth_getLogs`
+    // recusados a `monitoramento`, porque `tarefaAtual` tem esse valor por
+    // padrao e esta funcao nunca o trocava. Quem os gera e a COLETA de
+    // `Borrow` — historico de 3 anos —, que e secundaria e pode esperar.
+    tarefaAtual = 'historico';
     try {
+        // SOB LIMITACAO, O HISTORICO ADIA. Ela pediu: *"Durante limitação,
+        // adie histórico e descoberta secundária para preservar o monitoramento
+        // essencial."* A faixa nao lida volta como FALHA — e falha declarada
+        // abre lacuna no cursor em vez de avancar por cima dela.
+        if (VAZAO.estaEmRecuo() || CAPACIDADE.esgotados().length > 0) {
+            ADIADAS.historico += 1;
+            return { lidas: [], falhas: 1 };
+        }
         const logs = await chamar<Array<{ topics: string[] }>>('eth_getLogs', [
             {
                 address: REDE.pool,
@@ -1756,6 +1807,10 @@ async function lerFaixaPartindoSePreciso(
             lidas: [...esquerda.lidas, ...direita.lidas],
             falhas: esquerda.falhas + direita.falhas,
         };
+    } finally {
+        // A etiqueta volta ao que era: as chamadas DEPOIS desta funcao nao sao
+        // historico, e herdar o rotulo seria o mesmo defeito ao contrario.
+        tarefaAtual = 'monitoramento';
     }
 }
 
@@ -2942,16 +2997,46 @@ async function principal(): Promise<'parar' | void> {
     // significa que um bloco nascido logo depois da pergunta so e visto na
     // seguinte — e nessa corrida isso e a diferenca entre entrar no bloco N+1
     // e no N+2. Se a conexao nao abrir ou cair, o bot volta a perguntar.
-    const urlDeBlocos = wsDoHttp(rpc);
-    const ouvinte = urlDeBlocos
-        ? new OuvinteDeBlocos(urlDeBlocos, (aviso) => log.warn(`[BLOCOS] ${aviso}`))
-        : null;
+    // O ENDERECO NAO E DERIVADO POR SUPOSICAO, e a NEGOCIACAO e conferida.
+    //
+    // Ver `enderecoDeBlocos` e `negociarWs`. O log de 2026-10-10 reconectava a
+    // cada 30s contra `wss://mainnet.base.org`, derivado do HTTP — e aquele
+    // host responde HTTP 405 ao upgrade: nao oferece o servico. A biblioteca
+    // dizia so "Received network error or non-101 status code."
+    const alvoDeBlocos = enderecoDeBlocos(rpc);
+    let ouvinte: OuvinteDeBlocos | null = null;
+    if (alvoDeBlocos.url === null) {
+        log.info('[BLOCOS] NÃO vou abrir WebSocket, e o motivo é este.', {
+            origem: alvoDeBlocos.origem,
+            porque: alvoDeBlocos.porque,
+            consequencia: 'sigo perguntando por HTTP — que é o que o bot já fazia com a conexão '
+                + 'caída, menos as tentativas inúteis a cada 30s',
+            comoLigar: 'defina CACA_WS_URL com o endereço wss do provedor (com caminho e chave), '
+                + 'ou CACA_WS_DERIVAR=1 para derivar do HTTP assumindo o risco',
+        });
+    } else {
+        // UMA negociacao, antes de abrir: ela diz QUAL dos cinco problemas e.
+        const neg = await negociarWs(alvoDeBlocos.url);
+        const vaiTentar = neg.classe === 'aceita' || neg.classe === 'limitacao'
+            || neg.classe === 'transitoria';
+        log.info('[BLOCOS] Negociação HTTP do WebSocket, conferida antes de abrir.', {
+            origem: alvoDeBlocos.origem,
+            resultado: comoLerANegociacao(neg, alvoDeBlocos.url),
+            vouAbrir: vaiTentar,
+            porque: vaiTentar
+                ? 'a negociação não descarta o serviço: abro e o cão de guarda cuida do resto'
+                : 'é CONFIGURAÇÃO, não rede: reconectar não muda o resultado, e cada tentativa '
+                  + 'gasta chamada para receber a mesma resposta',
+            declarado: alvoDeBlocos.origem === 'derivada'
+                ? 'o endereço foi SUPOSTO a partir do HTTP'
+                : 'o endereço foi declarado',
+        });
+        if (vaiTentar) {
+            ouvinte = new OuvinteDeBlocos(alvoDeBlocos.url, (aviso) => log.warn(`[BLOCOS] ${aviso}`));
+        }
+    }
     ouvinte?.abrir();
     processoEncerrando.push(() => ouvinte?.fechar());
-    log.info('Aviso de bloco novo por WebSocket.', {
-        ligado: ouvinte !== null,
-        porQue: ouvinte === null ? 'não consegui derivar o endereço wss do RPC; sigo perguntando' : 'reajo quando o bloco nasce, não quando eu pergunto',
-    });
     let posturaAnterior: Postura = 'dormindo';
     // Ver o comentario longo no `[POSTURA]`: a oscilacao em volta do limiar do
     // 'atento' e esperada, o comportamento esta certo, e o que se cala e a
@@ -4854,9 +4939,15 @@ async function principal(): Promise<'parar' | void> {
                                       + 'uma varredura completa entra ou não entra na amostra e '
                                       + 'muda a projeção por um fator grande)'
                                     : `${dia.chamadas} chamadas/dia, ${dia.cuEstimado} CU/dia ESTIMADO`,
-                                capacidade: CAPACIDADE.esgotados().length === 0
-                                    ? 'nenhum provedor esgotado'
-                                    : CAPACIDADE.esgotados().map((p) => CAPACIDADE.comoLer(p)),
+                                // POR PROVEDOR, com os TRES estados. A frase
+                                // antiga era `nenhum provedor esgotado`, que
+                                // saia igual para quem nunca foi consultado e
+                                // para quem acabou de responder.
+                                capacidade: CAPACIDADE.porProvedorConfigurado(
+                                    ESCADA_LIDA.degraus.map((u) => hostDoRpc(u)),
+                                ),
+                                vazao: VAZAO.estado(),
+                                secundariasAdiadas: ADIADAS,
                             };
                         })(),
                         avisoDeBloco: ouvinte === null

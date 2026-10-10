@@ -250,3 +250,67 @@ test('a cobertura NÃO mora numa variável de módulo que chamada auxiliar sobre
     assert.ok(/Promise<\{ dados: Array<string \| null>; cobertura: Cobertura \}>/.test(codigo),
         '`lerEmLote` devolve a cobertura junto com os dados, sem estado compartilhado');
 });
+
+// ---------------------------------------------------------------------------
+// O LOG DE 2026-10-10 20:02:15: a escada trocou de provedor imprimindo
+// `Monthly capacity limit exceeded` e o ciclo seguinte continuou dizendo
+// `capacidade: "nenhum provedor esgotado"`.
+// ---------------------------------------------------------------------------
+
+test('a mensagem de cota casa com `ehFalhaDeTransporte`, e era isso que a engolia', () => {
+    const { ehFalhaDeTransporte } = require('./escadaDeRpc');
+    const msg = 'Monthly capacity limit exceeded. Visit https://dashboard.alchemy.com/settings/'
+        + 'billing to upgrade your scaling policy for';
+    assert.equal(ehFalhaDeTransporte(msg), true,
+        'ela casa com `capacity` E com `exceeded` — então `aEscadaAbsorve` dava `continue` e o '
+        + 'ramo da cota, logo abaixo, era CÓDIGO MORTO para a única mensagem que ele trata');
+    // E continua casando, de propósito: trocar de degrau ESTÁ certo. O que
+    // estava errado era trocar e esquecer o motivo.
+    assert.equal(classificarRecusa(msg).tipo, 'cota');
+});
+
+test('a classificação vem ANTES da escada no código, senão o ramo da cota é inalcançável', () => {
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const i = fonte.indexOf('async function chamar<T>');
+    const corpo = fonte.slice(i, fonte.indexOf('\nasync function chamarCru', i));
+    const posClassifica = corpo.indexOf('const recusa = classificarRecusa(msg)');
+    const posEscada = corpo.indexOf('aEscadaAbsorve(msg)');
+    assert.ok(posClassifica > 0 && posEscada > 0);
+    assert.ok(posClassifica < posEscada,
+        'classificar depois de a escada absorver é não classificar');
+    assert.ok(/CAPACIDADE\.esgotou\(/.test(corpo), 'e a cota tem de marcar a capacidade');
+});
+
+test('DESCONHECIDO não é DISPONÍVEL: os três estados por provedor', () => {
+    const r = relogio();
+    const k = new ControleDeCapacidade(r.agora);
+    const configurados = ['base-mainnet.g.alchemy.com', 'mainnet.base.org', 'terceiro.exemplo'];
+
+    // Nada consultado ainda: TODOS desconhecidos. A frase antiga diria
+    // "nenhum provedor esgotado", que lê como "está tudo bem".
+    let linhas = k.porProvedorConfigurado(configurados);
+    assert.deepEqual(linhas.map((l) => l.condicao), ['desconhecido', 'desconhecido', 'desconhecido']);
+    assert.match(linhas[0]!.detalhe, /DESCONHECIDO, e desconhecido NÃO é disponível/);
+
+    // O primário esgota, o secundário responde, o terceiro nunca foi chamado.
+    k.esgotou('base-mainnet.g.alchemy.com', 'Monthly capacity limit exceeded');
+    k.confirmou('mainnet.base.org');
+    r.andar(90_000);
+    linhas = k.porProvedorConfigurado(configurados);
+    assert.deepEqual(linhas.map((l) => l.condicao), ['esgotado', 'disponivel', 'desconhecido']);
+    assert.match(linhas[1]!.detalhe, /uma leitura passou há 1\.5 min: disponibilidade CONFIRMADA/);
+    assert.match(linhas[2]!.detalhe, /DESCONHECIDO/);
+    // E o provedor que nunca foi chamado NÃO desaparece da lista: faltar leria
+    // como "está tudo bem com ele".
+    assert.equal(linhas.length, 3);
+});
+
+test('confirmar disponibilidade NÃO devolve o provedor a desconhecido', () => {
+    const k = new ControleDeCapacidade(relogio().agora);
+    k.esgotou('alchemy', 'Monthly capacity limit exceeded');
+    assert.equal(k.confirmou('alchemy'), true, 'foi recuperação');
+    assert.equal(k.condicao('alchemy'), 'disponivel',
+        'apagar o estado diria "nunca perguntei", que é outra coisa');
+    assert.equal(k.confirmou('alchemy'), false, 'a segunda leitura não é recuperação');
+    assert.equal(k.condicao('alchemy'), 'disponivel');
+});

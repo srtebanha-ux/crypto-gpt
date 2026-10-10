@@ -457,3 +457,54 @@ test('cobertura completa não marca nada: o padrão não contamina a medição',
     assert.equal(l.resumo().msComCoberturaIncompleta, 0);
     assert.ok(!/IMPRÓPRIO/.test(comoLerOsEpisodios(l.resumo())));
 });
+
+test('a cobertura incompleta ATRAVESSA o reinício — era isso que desaparecia', () => {
+    // MEDIDO no log de 2026-10-10: a varredura publicou minutos de cobertura
+    // INCOMPLETA e, depois do reinicio, a linha nao os trazia mais. A causa:
+    // `msComCoberturaIncompleta` NAO estava em `paraDisco`.
+    // Os pontos vao de 20s: acima do teto de lacuna (30s) o intervalo e
+    // LACUNA e nao conta como observado — nem com cobertura, nem sem. Entao
+    // somar 4,5 min de buraco exige 14 leituras, e e assim que producao faz.
+    const a = new LivroDeEpisodios();
+    a.bateuPonto(0, true);
+    for (let i = 1; i <= 14; i += 1) a.bateuPonto(i * 20_000, false);
+    const esperado = 14 * 20_000;        // 4,7 min com buraco de leitura
+    assert.equal(a.resumo().msComCoberturaIncompleta, esperado);
+
+    const noDisco = a.paraDisco(esperado);
+    assert.equal(noDisco.msComCoberturaIncompleta, esperado, 'o campo vai ao disco');
+
+    const b = new LivroDeEpisodios();
+    b.doDisco(noDisco, esperado);
+    assert.equal(b.resumo().msComCoberturaIncompleta, esperado,
+        'e volta: o período não é reclassificado como válido');
+    assert.equal(b.resumo().incompletaAntesDesconhecida, false);
+});
+
+test('livro gravado ANTES do campo lê como DESCONHECIDO, não como zero', () => {
+    const a = new LivroDeEpisodios();
+    a.bateuPonto(0, true);
+    a.bateuPonto(20_000, true);
+    const antigo = a.paraDisco(20_000);
+    delete (antigo as { msComCoberturaIncompleta?: number }).msComCoberturaIncompleta;
+
+    const b = new LivroDeEpisodios();
+    b.doDisco(antigo, 20_000);
+    const r = b.resumo();
+    assert.equal(r.incompletaAntesDesconhecida, true,
+        'zero afirmaria "não houve cobertura incompleta antes", que não se sabe');
+    assert.match(comoLerOsEpisodios(r), /NÃO pode ser classificado/);
+    assert.match(comoLerOsEpisodios(r), /é desconhecido/);
+});
+
+test('campo torto no disco também é desconhecido, não valor', () => {
+    for (const ruim of [-5, NaN, 'muito' as unknown as number]) {
+        const a = new LivroDeEpisodios();
+        const d = a.paraDisco(0);
+        (d as { msComCoberturaIncompleta?: number }).msComCoberturaIncompleta = ruim;
+        const b = new LivroDeEpisodios();
+        b.doDisco(d, 0);
+        assert.equal(b.resumo().incompletaAntesDesconhecida, true, String(ruim));
+        assert.equal(b.resumo().msComCoberturaIncompleta, 0);
+    }
+});

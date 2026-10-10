@@ -50,8 +50,18 @@ export interface ContagemDeChamadas {
 export class GovernadorDeVazao {
     private emVoo = 0;
     private fila: Array<() => void> = [];
-    private recuoAteMs = 0;
-    private esperaAtualMs = 0;
+    /**
+     * O recuo e POR PROVEDOR, e nao um so para todos.
+     *
+     * Ela pediu: *"Demonstre que compartilham o mesmo orçamento de chamadas e
+     * período de espera por provedor."* Um recuo global faria a recusa do
+     * primario castigar o secundario — que e justamente para onde o trafego
+     * acabou de ir. Compartilhado DENTRO do provedor, separado ENTRE eles.
+     */
+    private readonly recuoAteMs = new Map<string, number>();
+    private readonly esperaAtualMs = new Map<string, number>();
+    /** O provedor em uso. Quem troca de degrau avisa aqui. */
+    private provedor = 'primario';
     readonly contagem: ContagemDeChamadas = {
         porMetodo: {},
         porPrioridade: { essencial: 0, normal: 0, demorada: 0 },
@@ -72,21 +82,30 @@ export class GovernadorDeVazao {
      * passa (`deuCerto`). Era isto que faltava: 214 recusas em 90s eram cinco
      * escadas independentes subindo e descendo sozinhas.
      */
-    recuar(baseMs = 1000, tetoMs = 8000): number {
-        this.esperaAtualMs = this.esperaAtualMs === 0
-            ? baseMs
-            : Math.min(this.esperaAtualMs * 2, tetoMs);
-        const ate = this.agora() + this.esperaAtualMs;
-        if (ate > this.recuoAteMs) this.recuoAteMs = ate;
+    /** Diz qual provedor esta em uso. O recuo de um nao castiga o outro. */
+    usando(provedor: string): void { this.provedor = provedor; }
+    qualProvedor(): string { return this.provedor; }
+
+    recuar(baseMs = 1000, tetoMs = 8000, provedor = this.provedor): number {
+        const atual = this.esperaAtualMs.get(provedor) ?? 0;
+        const nova = atual === 0 ? baseMs : Math.min(atual * 2, tetoMs);
+        this.esperaAtualMs.set(provedor, nova);
+        const ate = this.agora() + nova;
+        if (ate > (this.recuoAteMs.get(provedor) ?? 0)) this.recuoAteMs.set(provedor, ate);
         this.contagem.recuos += 1;
         this.contagem.recusasAbsorvidas += 1;
-        return this.esperaAtualMs;
+        return nova;
     }
 
-    deuCerto(): void { this.esperaAtualMs = 0; this.recuoAteMs = 0; }
+    deuCerto(provedor = this.provedor): void {
+        this.esperaAtualMs.set(provedor, 0);
+        this.recuoAteMs.set(provedor, 0);
+    }
 
-    /** Quanto falta do recuo, em ms. Zero quando nao ha recuo. */
-    recuoRestanteMs(): number { return Math.max(0, this.recuoAteMs - this.agora()); }
+    /** Quanto falta do recuo DESTE provedor. Zero quando nao ha recuo. */
+    recuoRestanteMs(provedor = this.provedor): number {
+        return Math.max(0, (this.recuoAteMs.get(provedor) ?? 0) - this.agora());
+    }
 
     /**
      * A vez de uma chamada. Devolve a funcao que libera a vaga.
@@ -98,6 +117,9 @@ export class GovernadorDeVazao {
         this.contagem.porMetodo[metodo] = (this.contagem.porMetodo[metodo] ?? 0) + 1;
         this.contagem.porPrioridade[prioridade] += 1;
         const espera = Math.min(this.recuoRestanteMs(), TETO_DE_ESPERA_MS[prioridade]);
+        // A CONCORRENCIA continua GLOBAL, de proposito: ela protege o processo
+        // (sockets, memoria, CPU), nao o provedor. O que e por provedor e o
+        // RECUO. Misturar os dois faria a troca de degrau herdar o castigo.
         if (espera > 0) {
             this.contagem.msEmRecuo += espera;
             await this.dormir(espera);
@@ -117,9 +139,21 @@ export class GovernadorDeVazao {
     }
 
     /** Para o log: quantas estao em voo e quantas esperando. */
-    estado(): { emVoo: number; naFila: number; recuoRestanteMs: number } {
-        return { emVoo: this.emVoo, naFila: this.fila.length, recuoRestanteMs: this.recuoRestanteMs() };
+    estado(): {
+        emVoo: number; naFila: number; provedor: string; recuoRestanteMs: number;
+        recuoPorProvedor: Array<{ provedor: string; restaMs: number }>;
+    } {
+        return {
+            emVoo: this.emVoo, naFila: this.fila.length, provedor: this.provedor,
+            recuoRestanteMs: this.recuoRestanteMs(),
+            recuoPorProvedor: [...this.recuoAteMs.keys()]
+                .map((p) => ({ provedor: p, restaMs: this.recuoRestanteMs(p) }))
+                .filter((l) => l.restaMs > 0),
+        };
     }
+
+    /** `true` quando este provedor esta em recuo agora. Decide adiar secundaria. */
+    estaEmRecuo(provedor = this.provedor): boolean { return this.recuoRestanteMs(provedor) > 0; }
 }
 
 /**

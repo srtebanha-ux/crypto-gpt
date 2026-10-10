@@ -124,3 +124,54 @@ test('chaves diferentes não se misturam', () => {
     assert.equal(a.registrar('taxa', {})?.primeira, true);
     assert.equal(a.registrar('cota', {})?.primeira, true, 'cota pede ação oposta: linha própria');
 });
+
+test('o recuo é POR PROVEDOR: a recusa do primário não castiga o secundário', () => {
+    // Era um recuo global. Com a escada trocando de degrau logo depois da
+    // recusa — foi o que o log de 2026-10-10 mostrou —, o castigo do primário
+    // ia junto para o provedor que acabou de receber o tráfego.
+    const f = falso();
+    const g = new GovernadorDeVazao(6, f.agora, f.dormir);
+    g.usando('alchemy');
+    g.recuar(2000, 8000);
+    assert.equal(g.recuoRestanteMs('alchemy'), 2000);
+    assert.equal(g.recuoRestanteMs('base.org'), 0, 'quem não recusou não espera');
+    assert.equal(g.estaEmRecuo('alchemy'), true);
+    assert.equal(g.estaEmRecuo('base.org'), false);
+
+    // E a escalada é separada: cada provedor tem a sua.
+    g.recuar(2000, 8000, 'base.org');
+    assert.equal(g.recuoRestanteMs('base.org'), 2000, 'começa do chão, não herda a escada do outro');
+    assert.equal(g.recuoRestanteMs('alchemy'), 2000);
+});
+
+test('o sucesso zera o recuo DO provedor que respondeu, só dele', () => {
+    const f = falso();
+    const g = new GovernadorDeVazao(6, f.agora, f.dormir);
+    g.recuar(1000, 8000, 'a');
+    g.recuar(1000, 8000, 'b');
+    g.deuCerto('a');
+    assert.equal(g.recuoRestanteMs('a'), 0);
+    assert.equal(g.recuoRestanteMs('b'), 1000);
+});
+
+test('a CONCORRÊNCIA continua global: ela protege o processo, não o provedor', async () => {
+    const f = falso();
+    const g = new GovernadorDeVazao(2, f.agora, f.dormir);
+    const s1 = await g.vez('eth_call');
+    const s2 = await g.vez('eth_call');
+    assert.equal(g.estado().emVoo, 2);
+    // Trocar de provedor NÃO devolve vaga: sockets e CPU são do processo.
+    g.usando('outro');
+    assert.equal(g.estado().emVoo, 2);
+    s1(); s2();
+});
+
+test('o estado do log diz o provedor em uso e os recuos abertos', () => {
+    const f = falso();
+    const g = new GovernadorDeVazao(6, f.agora, f.dormir);
+    g.usando('alchemy');
+    g.recuar(3000, 8000);
+    const e = g.estado();
+    assert.equal(e.provedor, 'alchemy');
+    assert.deepEqual(e.recuoPorProvedor, [{ provedor: 'alchemy', restaMs: 3000 }]);
+});

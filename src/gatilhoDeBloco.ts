@@ -31,6 +31,67 @@ export function wsDoHttp(url: string): string | null {
 }
 
 /**
+ * De onde o endereco de WebSocket DEVE vir — e a derivacao nao e resposta.
+ *
+ * Ela mandou: *"Não derive um endpoint WebSocket do HTTP por suposição.
+ * Confirme endpoint, caminho, autenticação e suporte ao serviço."*
+ *
+ * E o log de 2026-10-10 mostra por que: o bot estava no SEGUNDARIO
+ * (`mainnet.base.org`), `wsDoHttp` derivou `wss://mainnet.base.org`, e aquele
+ * endpoint publico **nao oferece WebSocket** — medido aqui em 2026-10-10, o
+ * proxy devolve 405 e a biblioteca diz *"Received network error or non-101
+ * status code."*. Ou seja: a reconexao a cada 30s era contra um servico que nao
+ * existe naquele host, e o log culpava a rede.
+ *
+ * Entao a derivacao deixa de ser automatica:
+ *
+ *   `CACA_WS_URL` definida  -> e ela, declarada pela dona, com caminho e
+ *                              credencial que ela escolheu
+ *   `CACA_WS_DERIVAR=1`     -> deriva do HTTP, e a frase DIZ que e suposicao
+ *   nenhuma das duas        -> NAO conecta, e diz que nao conecta
+ *
+ * Nao conectar nao cega o bot: ele volta a perguntar por HTTP, que e o que ele
+ * ja estava fazendo com a conexao caida — menos as tentativas inuteis.
+ */
+export function enderecoDeBlocos(
+    rpcHttp: string,
+    env: { CACA_WS_URL?: string; CACA_WS_DERIVAR?: string } = process.env,
+): { url: string | null; origem: 'declarada' | 'derivada' | 'ausente'; porque: string } {
+    const declarada = env.CACA_WS_URL?.trim();
+    if (declarada !== undefined && declarada !== '') {
+        if (!declarada.startsWith('wss://') && !declarada.startsWith('ws://')) {
+            return {
+                url: null, origem: 'ausente',
+                porque: 'CACA_WS_URL está definida e NÃO começa com wss:// nem ws:// — '
+                    + 'configuração INVÁLIDA, e isto não é bloqueio nem falha de rede. '
+                    + 'Não tento conectar; sigo perguntando por HTTP',
+            };
+        }
+        return {
+            url: declarada, origem: 'declarada',
+            porque: 'endereço DECLARADO em CACA_WS_URL: caminho e credencial são os que você pôs',
+        };
+    }
+    if (env.CACA_WS_DERIVAR === '1') {
+        const d = wsDoHttp(rpcHttp);
+        return d === null
+            ? { url: null, origem: 'ausente', porque: `não sei derivar WebSocket de "${rpcHttp}"` }
+            : {
+                url: d, origem: 'derivada',
+                porque: 'DERIVADO do endereço HTTP por CACA_WS_DERIVAR=1 — é SUPOSIÇÃO: o provedor '
+                    + 'pode não oferecer WebSocket neste host, e foi exatamente isso que aconteceu '
+                    + 'com mainnet.base.org em 2026-10-10',
+            };
+    }
+    return {
+        url: null, origem: 'ausente',
+        porque: 'nenhum endereço de WebSocket configurado (CACA_WS_URL vazia e CACA_WS_DERIVAR != 1). '
+            + 'NÃO tento conectar — derivar do HTTP seria supor que o provedor oferece o serviço. '
+            + 'Sigo perguntando por HTTP, que é o que o bot já fazia com a conexão caída',
+    };
+}
+
+/**
  * O ping. `net_version` em vez de um frame de ping do protocolo porque o
  * `WebSocket` global do Node nao expoe `ping()` — e uma chamada JSON-RPC barata
  * serve ao mesmo proposito: obriga o provedor a responder, e a resposta e o que
@@ -410,4 +471,119 @@ export class OuvinteDeBlocos {
         this.pararBatimento();
         try { this.ws?.close(); } catch { /* ja estava fechado */ }
     }
+}
+
+/**
+ * O RESULTADO DA NEGOCIACAO HTTP, que a biblioteca de WebSocket nao conta.
+ *
+ * Ela pediu: *"capture o resultado da negociação HTTP quando a biblioteca
+ * permitir, com status e mensagem sanitizada."* A biblioteca nao permite: o
+ * `WebSocket` do Node entrega `"Received network error or non-101 status code."`
+ * e o `code` do evento vem vazio — foi isso que o log de producao mostrou.
+ *
+ * O handshake, porem, e um GET comum com cabecalhos de upgrade. Entao a
+ * negociacao da para fazer a mao com `https.request`, que ENTREGA o status:
+ *
+ *   101  o servico existe e aceitou: o problema e outro
+ *   200  responde HTTP e IGNORA o upgrade: nao oferece WebSocket neste caminho
+ *   401/403  autenticacao ou politica: configuracao, nao rede
+ *   404  caminho errado
+ *   405  nao permite o metodo nesse caminho (o que este sandbox devolve)
+ *   429  limitacao temporaria
+ *   erro de socket  nao chegou a haver negociacao: transitoria
+ *
+ * Isto NAO abre conexao de verdade e NAO assina nada: e uma chamada, para o
+ * log poder dizer QUAL dos cinco e, em vez de "erro de rede".
+ */
+export interface NegociacaoDeWs {
+    /** O status HTTP da negociacao. `null` = nem chegou a haver resposta. */
+    status: number | null;
+    /** A classe do problema, decidida pelo STATUS e nao pela prosa. */
+    classe: 'aceita' | 'servicoAusente' | 'autenticacao' | 'caminho' | 'limitacao'
+        | 'persistente' | 'transitoria';
+    /** A mensagem, SANITIZADA. */
+    mensagem: string;
+}
+
+/** Traduz o status da negociacao na classe, e a classe decide o que fazer. */
+export function classificarNegociacao(status: number | null, erro?: string): NegociacaoDeWs {
+    if (status === null) {
+        return {
+            status: null, classe: 'transitoria',
+            mensagem: sanitizar(erro ?? 'não houve resposta HTTP: a negociação não aconteceu'),
+        };
+    }
+    const classe: NegociacaoDeWs['classe'] = status === 101 ? 'aceita'
+        : status === 401 || status === 403 ? 'autenticacao'
+            : status === 404 ? 'caminho'
+                : status === 405 || status === 200 || status === 426 ? 'servicoAusente'
+                    : status === 429 ? 'limitacao'
+                        : status >= 500 ? 'transitoria' : 'persistente';
+    const porClasse: Record<NegociacaoDeWs['classe'], string> = {
+        aceita: 'o serviço existe e aceitou o upgrade (101): se a conexão ainda cai, a causa é outra',
+        servicoAusente: 'o host responde HTTP e NÃO faz upgrade neste caminho: este provedor não '
+            + 'oferece WebSocket aqui. Reconectar não resolve — é configuração de endpoint',
+        autenticacao: 'autenticação ou política recusou: é CONFIGURAÇÃO, não rede. A credencial do '
+            + 'WebSocket pode ser outra que a do HTTP',
+        caminho: 'caminho não encontrado: o endpoint existe mas a rota do WebSocket é outra',
+        limitacao: 'limitação temporária na própria negociação: esperar faz sentido aqui',
+        persistente: 'recusa que não melhora repetindo logo',
+        transitoria: 'falha de transporte ou erro do servidor: pode ter sido a rede',
+    };
+    return { status, classe, mensagem: sanitizar(erro ?? porClasse[classe]) };
+}
+
+/**
+ * Faz a negociacao de upgrade e devolve o status. UMA chamada, sem reconectar.
+ *
+ * `https.request` deixa mandar `Connection: Upgrade`, e emite `upgrade` quando o
+ * servidor responde 101 e `response` quando ele responde qualquer outra coisa —
+ * que e exatamente a informacao que faltava.
+ */
+export async function negociarWs(
+    urlWs: string,
+    tempoMaximoMs = 8_000,
+): Promise<NegociacaoDeWs> {
+    const alvo = urlWs.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://');
+    const { request } = await import(alvo.startsWith('https://') ? 'https' : 'http');
+    return await new Promise<NegociacaoDeWs>((resolve) => {
+        let pronto = false;
+        const fim = (n: NegociacaoDeWs) => { if (!pronto) { pronto = true; resolve(n); } };
+        try {
+            const req = request(alvo, {
+                method: 'GET',
+                headers: {
+                    Connection: 'Upgrade',
+                    Upgrade: 'websocket',
+                    // Chave de 16 bytes em base64, como o protocolo pede. O
+                    // valor nao importa para nos: so o status da resposta.
+                    'Sec-WebSocket-Key': Buffer.from('coleta-de-blocos').toString('base64'),
+                    'Sec-WebSocket-Version': '13',
+                },
+                timeout: tempoMaximoMs,
+            });
+            req.on('upgrade', (res: { statusCode?: number }, socket: { destroy(): void }) => {
+                socket.destroy();
+                fim(classificarNegociacao(res.statusCode ?? 101));
+            });
+            req.on('response', (res: { statusCode?: number; statusMessage?: string; destroy(): void }) => {
+                res.destroy();
+                fim(classificarNegociacao(res.statusCode ?? null,
+                    `HTTP ${res.statusCode ?? '?'} ${res.statusMessage ?? ''}`.trim()));
+            });
+            req.on('timeout', () => { req.destroy(); fim(classificarNegociacao(null, 'a negociação não respondeu no tempo')); });
+            req.on('error', (e: Error) => fim(classificarNegociacao(null, e.message)));
+            req.end();
+        } catch (e) {
+            fim(classificarNegociacao(null, e instanceof Error ? e.message : String(e)));
+        }
+    });
+}
+
+/** A frase do log da negociacao. */
+export function comoLerANegociacao(n: NegociacaoDeWs, url: string): string {
+    let host = '…';
+    try { host = new URL(url.replace(/^wss?:\/\//, 'https://')).host; } catch { /* host fica … */ }
+    return `negociação de WebSocket com ${host}: `
+        + `${n.status === null ? 'SEM resposta HTTP' : `HTTP ${n.status}`} — ${n.classe}. ${n.mensagem}`;
 }

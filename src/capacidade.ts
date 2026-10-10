@@ -43,9 +43,25 @@ export const SONDAGENS_POR_JANELA = 6;
 // minutos, custam 6 chamadas e descobrem a virada em meio dia.
 export const JANELA_DE_SONDAGEM_MS = 24 * 60 * 60_000;
 
+/**
+ * O que se sabe sobre um provedor. TRES estados, nao dois.
+ *
+ * Ela recusou a frase `capacidade: "nenhum provedor esgotado"`: *"'Nenhum
+ * esgotado' deve distinguir estado desconhecido de disponibilidade
+ * confirmada."* Estava certa — aquela frase saia para um provedor que nunca foi
+ * consultado e para um que acabou de responder, e sao conclusoes diferentes.
+ *
+ *   'desconhecido' nenhuma leitura ainda. NAO e disponibilidade.
+ *   'disponivel'   uma leitura PASSOU, e quando.
+ *   'esgotado'     respondeu esgotamento de capacidade.
+ */
+export type CondicaoDoProvedor = 'desconhecido' | 'disponivel' | 'esgotado';
+
 export interface EstadoDeProvedor {
     /** `null` enquanto nunca foi declarado esgotado. */
     esgotadoEm: number | null;
+    /** Quando uma leitura PASSOU por este provedor. `null` = nunca. */
+    confirmadoEm: number | null;
     /** A mensagem SANITIZADA que declarou o esgotamento. */
     motivo: string | null;
     sondagens: number;
@@ -77,7 +93,8 @@ export class ControleDeCapacidade {
 
     private estado(chave: string): EstadoDeProvedor {
         const e = this.porProvedor.get(chave)
-            ?? { esgotadoEm: null, motivo: null, sondagens: 0, ultimaSondagemEm: null, janelaComecouEm: null };
+            ?? { esgotadoEm: null, confirmadoEm: null, motivo: null, sondagens: 0,
+                ultimaSondagemEm: null, janelaComecouEm: null };
         this.porProvedor.set(chave, e);
         return e;
     }
@@ -93,12 +110,58 @@ export class ControleDeCapacidade {
         }
     }
 
-    /** RECUPERACAO 1: uma leitura que PASSOU prova disponibilidade. */
+    /**
+     * RECUPERACAO 1: uma leitura que PASSOU prova disponibilidade.
+     *
+     * Devolve `true` so quando isto FOI uma recuperacao — o provedor estava
+     * esgotado e deixou de estar. Uma leitura normal apenas registra a
+     * disponibilidade, e e ela que tira o provedor de 'desconhecido'.
+     *
+     * O estado NAO e apagado: apagar devolveria o provedor a 'desconhecido', e
+     * "nunca perguntei" nao e o mesmo que "respondeu agora".
+     */
     confirmou(chave: string): boolean {
+        const e = this.estado(chave);
+        const recuperou = e.esgotadoEm !== null;
+        e.esgotadoEm = null;
+        e.motivo = null;
+        e.confirmadoEm = this.agora();
+        return recuperou;
+    }
+
+    /** A condicao de um provedor. 'desconhecido' nao e disponibilidade. */
+    condicao(chave: string): CondicaoDoProvedor {
         const e = this.porProvedor.get(chave);
-        if (e === undefined || e.esgotadoEm === null) return false;
-        this.porProvedor.delete(chave);
-        return true;
+        if (e === undefined) return 'desconhecido';
+        if (e.esgotadoEm !== null) return 'esgotado';
+        return e.confirmadoEm === null ? 'desconhecido' : 'disponivel';
+    }
+
+    /**
+     * A linha de capacidade do log, POR PROVEDOR e com os tres estados.
+     *
+     * `provedores` e a lista configurada: um provedor que nunca foi chamado tem
+     * de aparecer como DESCONHECIDO, e nao faltar da lista — faltar leria como
+     * "esta tudo bem com ele".
+     */
+    porProvedorConfigurado(provedores: string[]): Array<{ provedor: string; condicao: CondicaoDoProvedor; detalhe: string }> {
+        return provedores.map((p) => {
+            const c = this.condicao(p);
+            const e = this.porProvedor.get(p);
+            if (c === 'esgotado') return { provedor: p, condicao: c, detalhe: this.comoLer(p) };
+            if (c === 'disponivel') {
+                const min = (this.agora() - (e!.confirmadoEm ?? 0)) / 60_000;
+                return {
+                    provedor: p, condicao: c,
+                    detalhe: `uma leitura passou há ${min.toFixed(1)} min: disponibilidade CONFIRMADA`,
+                };
+            }
+            return {
+                provedor: p, condicao: c,
+                detalhe: 'nenhuma leitura por este provedor nesta execução: estado DESCONHECIDO, '
+                    + 'e desconhecido NÃO é disponível',
+            };
+        });
     }
 
     /** RECUPERACAO 2: mudanca de configuracao apaga o que se sabia. */

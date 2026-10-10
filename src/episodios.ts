@@ -170,6 +170,8 @@ export class LivroDeEpisodios {
     /** Quanto do tempo observado foi olhado com cobertura INCOMPLETA. */
 
     private msComCoberturaIncompletaTotal = 0;
+    /** `true` quando o livro do disco nao trazia o campo: desconhecido, nao zero. */
+    private incompletaAntesDesconhecida = false;
 
     private lacunasPerdidas = 0;
 
@@ -361,6 +363,18 @@ export class LivroDeEpisodios {
             msEntreLeituras: this.observadoTotalMs,
             msSemDados: this.lacunaPerdidaMs,
             msOffline: this.msOfflineTotal,
+            // O CAMPO QUE NAO IA AO DISCO, e o defeito que ele causava.
+            //
+            // MEDIDO no log de 2026-10-10: a varredura publicou minutos de
+            // cobertura INCOMPLETA e, depois do reinicio, a linha nao os trazia
+            // mais. A causa nao era contador zerado por engano: este campo
+            // simplesmente NAO ESTAVA em `paraDisco`. O boot seguinte comecava
+            // em zero e o periodo passava a ler como valido — reclassificacao
+            // silenciosa, que e exatamente o que ela proibiu.
+            //
+            // E o teste de `cacheDeDevedores` nao pegava: ele le os campos da
+            // interface do CACHE, e este mora no LIVRO.
+            msComCoberturaIncompleta: this.msComCoberturaIncompletaTotal,
             lacunasPerdidas: this.lacunasPerdidas,
             comecouEm: this.comecouEm,
             episodios: this.todos().map((e) => ({ ...e, estados: [...e.estados] })),
@@ -380,6 +394,16 @@ export class LivroDeEpisodios {
     doDisco(d: LivroNoDisco, agoraMs: number): void {
         this.observadoTotalMs = d.msEntreLeituras;
         this.lacunaPerdidaMs = d.msSemDados;
+        // AUSENTE NAO E ZERO. Um livro gravado antes deste campo existir nao
+        // diz que nao houve cobertura incompleta: diz que nao se sabe. Zero
+        // afirmaria o contrario, e e a forma de defeito que este projeto
+        // registra mais vezes.
+        if (d.msComCoberturaIncompleta === undefined || !Number.isFinite(d.msComCoberturaIncompleta)
+            || d.msComCoberturaIncompleta < 0) {
+            this.incompletaAntesDesconhecida = true;
+        } else {
+            this.msComCoberturaIncompletaTotal = d.msComCoberturaIncompleta;
+        }
         this.lacunasPerdidas = d.lacunasPerdidas;
         this.comecouEm = d.comecouEm;
         this.msOfflineTotal = d.msOffline + Math.max(0, agoraMs - d.gravadoEm);
@@ -447,6 +471,13 @@ export class LivroDeEpisodios {
         /** Tempo observado com buraco de leitura: improprio para inferencia economica. */
         msComCoberturaIncompleta: number;
         /**
+         * `true` quando o periodo ANTERIOR a este boot nao pode ser classificado.
+         *
+         * O livro no disco nao trazia o campo, entao nao se sabe se houve
+         * cobertura incompleta antes. Isto NAO e "nao houve".
+         */
+        incompletaAntesDesconhecida: boolean;
+        /**
          * Episodios FECHADOS com duracao zero, e de onde eles vem.
          *
          * `umaLeituraSo` e legitimo: a varredura DECLAROU o universo consultado,
@@ -508,6 +539,7 @@ export class LivroDeEpisodios {
             // IMPROPRIO PARA INFERENCIA ECONOMICA: tempo observado com buraco
             // de leitura. "Nenhuma oportunidade" aqui nao e medicao.
             msComCoberturaIncompleta: this.msComCoberturaIncompletaTotal,
+            incompletaAntesDesconhecida: this.incompletaAntesDesconhecida,
             duracaoZero: (() => {
                 const zerados = todos.filter((e) => e.fechouEm !== null && e.fechouEm === e.abriuEm);
                 return {
@@ -585,6 +617,14 @@ export function comoLerOsEpisodios(r: ReturnType<LivroDeEpisodios['resumo']>): s
                 + 'INCOMPLETA: esse período é IMPRÓPRIO para inferência econômica. Isto NÃO é '
                 + 'ausência medida — é leitura que faltou';
         }
+        // E O MESMO DEFEITO DE RETORNO ANTECIPADO, pela segunda vez nesta
+        // funcao: a ressalva nao pode ficar depois de um `return`. Zero
+        // episodios com o periodo anterior DESCONHECIDO nao e ausencia medida.
+        if (r.incompletaAntesDesconhecida) {
+            return `nenhum episódio em ${(r.observadoMs / 60000).toFixed(1)} min observados neste `
+                + 'boot — e o período ANTERIOR a ele NÃO pode ser classificado: o livro no disco '
+                + 'não trazia a conta de cobertura incompleta. Isto NÃO é "não houve": é desconhecido';
+        }
         return `nenhum episódio em ${(r.observadoMs / 60000).toFixed(1)} min observados. `
             + 'Isto é ausência MEDIDA, não falta de medição';
     }
@@ -609,6 +649,10 @@ export function comoLerOsEpisodios(r: ReturnType<LivroDeEpisodios['resumo']>): s
             ? ` | ${(r.msComCoberturaIncompleta / 60000).toFixed(1)} min observados com COBERTURA `
               + 'INCOMPLETA: esse período é IMPRÓPRIO para inferência econômica, porque "nenhuma '
               + 'oportunidade" ali pode ser leitura que faltou' : '')
+        + (r.incompletaAntesDesconhecida
+            ? ' | o período ANTERIOR a este boot NÃO pode ser classificado: o livro no disco não '
+              + 'trazia a conta de cobertura incompleta. Isto NÃO é "não houve" — é desconhecido'
+            : '')
         + (r.duracaoZero.total > 0
             ? ` | ${r.duracaoZero.total} episódio(s) de DURAÇÃO ZERO `
               + `(${r.duracaoZero.umaLeituraSo} fechados por varredura que DECLAROU o universo `
@@ -652,6 +696,8 @@ export interface LivroNoDisco {
     msEntreLeituras: number;
     msSemDados: number;
     msOffline: number;
+    /** Opcional: livro gravado antes deste campo lê como DESCONHECIDO, não zero. */
+    msComCoberturaIncompleta?: number;
     lacunasPerdidas: number;
     comecouEm: number | null;
     /** Os episodios, com o `Set` de estados virado lista. */
