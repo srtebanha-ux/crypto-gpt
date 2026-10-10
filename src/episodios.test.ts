@@ -147,3 +147,83 @@ test('a maior lacuna de um episódio viaja com ele — a duração fica conferí
     assert.equal(e.observadoMs, 20_000, '20s está dentro do teto, então conta');
     assert.equal(e.leituras, 2);
 });
+
+test('COBERTURA: sair e voltar à lista não é oportunidade nova', () => {
+    // Ela mandou: "Teste cruzamentos entre amostras, saída e retorno à lista e
+    // reinício do processo, evitando contar o mesmo episódio como uma
+    // oportunidade nova."
+    const l = new LivroDeEpisodios();
+    ler(l, '0xaa', 0, 0.1, { premioEstimadoUsd: 200 });
+    l.fecharOsAusentes([], 5000);          // saiu da brasa
+    ler(l, '0xaa', 60_000, 0.1, { premioEstimadoUsd: 200 });  // voltou
+    l.fecharOsAusentes([], 65_000);
+    ler(l, '0xaa', 120_000, 0.1, { premioEstimadoUsd: 200 }); // voltou de novo
+    const r = l.resumo();
+    assert.equal(r.episodios, 3, 'três episódios, porque a observação foi interrompida');
+    assert.equal(r.alvosDistintos, 1, 'mas UM alvo — e um prêmio, não três');
+    assert.equal(r.reaberturas, 2, 'as duas voltas são reaberturas');
+    assert.match(comoLerOsEpisodios(r), /1 alvo\(s\) distinto\(s\)/);
+    assert.match(comoLerOsEpisodios(r), /não é oportunidade nova/);
+    // E o contador viaja no episódio, para a análise poder agrupar.
+    assert.deepEqual(l.todos().map((e) => e.reaberturaDe), [0, 1, 2]);
+});
+
+test('COBERTURA: a mesma posição vista por duas amostras é UM episódio', () => {
+    // Cruzamento entre amostras: a varredura completa e o ciclo da brasa veem
+    // o mesmo devedor. Se cada um abrisse episódio, a contagem dobraria.
+    const l = new LivroDeEpisodios();
+    l.ver({ devedor: '0xAA', mercado: 'aave-v3/long', agoraMs: 0, bloco: 1, faltaPct: 0.2 });
+    l.ver({ devedor: '0xaa', mercado: 'aave-v3/long', agoraMs: 1000, bloco: 2, faltaPct: 0.18 });
+    assert.equal(l.resumo().episodios, 1, 'maiúscula/minúscula não cria episódio novo');
+    // Mercado DIFERENTE é episódio diferente, de propósito: a via de quebra faz
+    // parte da identidade do que está sendo medido.
+    l.ver({ devedor: '0xaa', mercado: 'morpho/cbBTC-USDC', agoraMs: 2000, bloco: 3, faltaPct: 0.3 });
+    const r = l.resumo();
+    assert.equal(r.episodios, 2);
+    assert.equal(r.alvosDistintos, 2, 'alvo+mercado é a identidade');
+});
+
+test('COBERTURA: reinício do processo zera o livro, e a janela diz isso', () => {
+    const antes = new LivroDeEpisodios();
+    for (let t = 0; t <= 300_000; t += 5000) ler(antes, '0xaa', t, 0.1);
+    assert.ok(antes.resumo().msEntreLeituras > 290_000);
+    // O deploy: livro novo. Nada atravessa — e a janela de parede começa agora.
+    const depois = new LivroDeEpisodios();
+    const r = depois.resumo();
+    assert.equal(r.episodios, 0);
+    assert.equal(r.msEntreLeituras, 0);
+    assert.equal(r.janelaDeParedeMs, 0, 'a janela não herda nada do boot anterior');
+    assert.match(comoLerOsEpisodios(r), /NADA observado ainda/);
+});
+
+test('COBERTURA: tempo ESTIMADO e tempo SEM DADOS são campos separados', () => {
+    const l = new LivroDeEpisodios();
+    ler(l, '0xaa', 0, 0.1);
+    ler(l, '0xaa', 8000, 0.1);        // 8s: estimado, conta
+    ler(l, '0xaa', 8000 + 600_000, 0.1); // 10 min: sem dados, descartado
+    const r = l.resumo();
+    assert.equal(r.msEntreLeituras, 8000, 'só o intervalo abaixo do teto é observação');
+    assert.ok(r.msSemDados >= 599_000, 'e a lacuna aparece como SEM DADOS, não como zero');
+    // Somar os dois é a parede; confundir um com o outro infla a disponibilidade.
+    assert.ok(r.janelaDeParedeMs >= r.msEntreLeituras + r.msSemDados - 1);
+});
+
+test('COBERTURA: imune e poeira são MARCADOS, não excluídos da coleta', () => {
+    const l = new LivroDeEpisodios();
+    ler(l, '0xaa', 0, 0.05, { imune: true });
+    ler(l, '0xbb', 0, 0, { poeira: true });
+    ler(l, '0xcc', 0, 0.05);
+    const r = l.resumo();
+    assert.equal(r.episodios, 3, 'os três entram: excluir seria a coleta escolhendo o resultado');
+    assert.equal(r.imunes, 1);
+    assert.equal(r.poeiras, 1);
+});
+
+test('a cobertura está DECLARADA no módulo, com os quatro pontos dela', () => {
+    const { COBERTURA_DO_REGISTRO } = require('./episodios');
+    assert.ok(COBERTURA_DO_REGISTRO.entram.includes('BRASA'));
+    assert.ok(COBERTURA_DO_REGISTRO.ficamFora.length >= 3);
+    assert.match(COBERTURA_DO_REGISTRO.mudancaDeLista, /perdiDeVista/);
+    assert.match(COBERTURA_DO_REGISTRO.reinicioDoProcesso, /MEMORIA/);
+    assert.match(COBERTURA_DO_REGISTRO.tempoEstimado, /msSemDados/);
+});

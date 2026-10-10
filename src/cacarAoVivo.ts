@@ -24,6 +24,7 @@ import { POOLS } from './contratos';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
+import { coberturaQuePassa, comoLerOTamanho } from './residuo';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
     lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
@@ -2564,11 +2565,17 @@ async function principal(): Promise<'parar' | void> {
             const estados: EstadoDoEpisodio[] = ['alvoProximo'];
             if (falta <= 0) estados.push('posicaoLiquidavel');
             vistos.push(m.devedor);
+            // IMUNE e POEIRA sao MARCADOS, nao excluidos: um imune pode cair
+            // pela acao do dono, e excluir seria a coleta escolhendo o
+            // resultado. Quem analisa filtra depois.
+            const imune = m.via === 'imune';
+            const poeira = m.dividaUsd !== null && ehPoeira(m.dividaUsd);
             livro.ver({
                 devedor: m.devedor,
                 mercado: `aave-v3/${m.via ?? 'via desconhecida'}`,
                 agoraMs: agora, bloco, faltaPct: falta,
                 dividaUsd: divida, premioEstimadoUsd: premio, estados, idadeDoDadoMs,
+                imune, poeira,
             });
         }
         // Quem saiu da faixa NAO "recuperou": eu perdi de vista. O desfecho de
@@ -3385,6 +3392,25 @@ async function principal(): Promise<'parar' | void> {
                         to: contrato.endereco, data: envioDeEnsaio,
                     });
                 }
+                // O TAMANHO que a regra de residuo deixaria passar — DIAGNOSTICO.
+                //
+                // MEDIDO em fork em 2026-10-10: divida entre ~US$ 1.000 e
+                // ~US$ 2.000 RECUSA metade com `MustNotLeaveDust()`, e com
+                // saude abaixo de 0,95 a cobertura aceita chega a 80% da
+                // divida (1,6x a metade). O tamanho em producao NAO foi
+                // alterado: a evidencia e de posicao sintetica e a decisao de
+                // mudar e dela.
+                passos.oTamanhoQuePassaria = (() => {
+                    const d = alvo.dividaUsd === undefined ? null : alvo.dividaUsd.toNumber();
+                    const q = coberturaQuePassa({
+                        dividaCrua: alvo.dividaCrua ?? 0n, dividaUsd: d,
+                        // Sem a saude exata aqui, o regime conservador: supor
+                        // "abaixo de 0,95" liberaria cobertura maior que a Aave
+                        // pode recusar, e errar para esse lado custa gas.
+                        saudeAbaixoDeNoventaECinco: false,
+                    });
+                    return comoLerOTamanho(cobrir(alvo), q);
+                })();
                 passos.montagem = `${(envioDeEnsaio.length - 2) / 2} bytes de calldata, piso no contrato `
                     + `${pisoDeEnsaio} (${(Number(pisoDeEnsaio) / 1e6).toFixed(2)} na moeda da dívida se for 6 casas)`
                     + `, limite de gás ${gasDeEnsaio.limite ?? 'NÃO definido'}`;

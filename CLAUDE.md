@@ -3234,3 +3234,136 @@ As cinco probabilidades que ela mandou separar continuam **desconhecidas, e
 separadas**: surgimento, cruzamento, execução viável, inclusão e captura. O
 livro dos episódios mede a primeira. As outras quatro não têm número, e não vou
 preencher com divisão igual entre concorrentes nem com posição na fatia.
+
+## 2026-10-10, continuação: a REGRA DE RESÍDUO, e eu generalizei de novo
+
+Ela recusou a minha conclusão do experimento anterior: *"O experimento não
+validou metade como regra universal. Registre 'nenhum ganho demonstrado nos
+casos testados'... Complete a matriz com posições pequenas... e valores
+próximos dos limites de resíduos. Localize MustNotLeaveDust no trace; não
+conclua sua causa apenas pelo seletor."*
+
+Estava certa, e a matriz ampliada derrubou a MINHA conclusão nas duas direções.
+
+### A FRONTEIRA, medida por bisseção (`forkTests/aFronteiraDoResiduo.js`)
+
+Posições montadas no fork (UMA dívida em USDC, UMA garantia em WETH), e para
+cada uma a maior cobertura aceita achada por bisseção com `eth_call` — de
+graça, sem enviar nada:
+
+    dívida   saúde   maior cobertura aceita      resto de dívida   metade passa?
+    US$  300  0,999  NENHUMA                           —            não
+    US$  300  0,93   NENHUMA                           —            não
+    US$  500  0,999  NENHUMA                           —            não
+    US$  500  0,93   NENHUMA                           —            não
+    US$ 1000  0,999  NENHUMA                           —            não
+    US$ 1000  0,93   NENHUMA                           —            não
+    US$ 1500  0,999  499,84 USDC (33,3%)          US$ 1000,16       não
+    US$ 1500  0,93   499,84 USDC (33,3%)          US$ 1000,16       não
+    US$ 2100  0,999  100% da dívida               US$     0,00      SIM
+    US$ 2100  0,93   1.099,84 (52,4%)             US$ 1000,16       SIM
+    US$ 3000  0,999  100% da dívida               US$     0,00      SIM
+    US$ 3000  0,93   1.999,84 (66,7%)             US$ 1000,16       SIM
+    US$ 5000  0,999  100% da dívida               US$     0,00      SIM
+    US$ 5000  0,93   3.999,84 (80,0%)             US$ 1000,16       SIM
+
+**CINCO casos independentes deixaram EXATAMENTE US$ 1000,16 de resto.** Não é
+formula minha nem memória: é a fronteira, lida nos números.
+
+### As duas afirmações minhas que caíram, em direções opostas
+
+1. **"O teto de metade continua certo" é FALSO** para dívida entre ~US$ 1.000 e
+   ~US$ 2.000: ali metade deixa resto abaixo do piso e a Aave **RECUSA**. E
+   existe cobertura MENOR que passa (33,3% no caso de US$ 1.500). O bot, que
+   pede sempre metade, **não consegue liquidar essas posições** — gastaria gás
+   numa reversão garantida.
+
+2. **"Nenhum ganho demonstrado" vale só para saúde ~0,997.** Com saúde 0,93 a
+   cobertura aceita chega a **80% da dívida** num alvo de US$ 5.000 — **1,6x**
+   mais dívida coberta que metade, logo ~1,6x o prêmio. O ganho EXISTE, e só
+   nesse regime.
+
+A frase que a matriz sustenta, e nada além dela: **"nenhum ganho demonstrado
+nos casos de saúde entre 0,95 e 1; ganho de até 1,6x demonstrado com saúde
+abaixo de 0,95; e recusa de metade demonstrada entre US$ 1.000 e US$ 2.000 de
+dívida."**
+
+### O que NÃO foi provado, e o método que falhou
+
+- **A causa não saiu do trace.** `debug_traceCall` com `callTracer` não existe
+  neste ambiente: *"Hardhat currently only supports the default tracer"*. O que
+  há é a FRONTEIRA medida e o seletor. Dizer "a causa é o MIN_LEFTOVER da
+  Aave" seria conclusão por seletor — o que ela proibiu.
+- **As posições são sintéticas e de ativo único.** Posição multi-ativo pode se
+  comportar diferente, e a regra olha também o resto de GARANTIA. Não medido.
+- **"Dívida ≤ US$ 1.000 é inliquidável" vale para as posições TESTADAS.** O
+  censo acha 165 liquidações abaixo do piso de gás na Base real — então ou são
+  multi-ativo, ou garantia esgotada, ou algo que estas sintéticas não
+  reproduzem. Buraco declarado.
+
+### E o diagnóstico apareceu num alvo REAL, em produção local
+
+O `[EM SECO]` do artefato, no alvo `0x6b950f30` (o de US$ 49,33 de 07/10, hoje
+com US$ 1.082 de dívida):
+
+    oTamanhoQuePassaria: "o bot pede 541262490 e a cobertura que a regra de
+    resíduo deixa passar é 62200885 (0.11x) — metade seria RECUSADA (deixaria
+    US$ 541.18, abaixo do exigido US$ 1020.16)"
+
+**Este alvo está hoje inliquidável no tamanho que o bot pede.** O tamanho em
+produção **NÃO foi alterado** — ela mandou preservar o comportamento enquanto a
+alternativa não estiver demonstrada, e a demonstração é de fork com posição
+sintética. O que mudou é que o log agora DIZ.
+
+## 2026-10-10: a RECONCILIAÇÃO L1+L2, e o meu "0,1%" era inventado
+
+Em 2026-10-09 eu escrevi aqui *"a taxa L1 é 0,1% disto"*. Era percentual meu, e
+ela proibiu: *"Não use percentuais arbitrários para substituir componentes não
+medidos."*
+
+### Medido pelo PRÓPRIO oráculo de gás da Base
+
+O predeploy `0x420000000000000000000000000000000000000F` responde
+`getL1Fee(bytes)` — alimentado com o **calldata real** do `cacar()` (196 bytes,
+a mesma `codificarCacaV1` que monta a transação):
+
+    l1BaseFee 54.381.202 | blobBaseFee 3.710.994
+    baseFeeScalar 2.269  | blobBaseFeeScalar 1.055.762
+    isFjord true | isEcotone true
+    l1GasUsed 1.754  ->  l1Fee 0,000000001 ETH = US$ 0,000002
+
+### A conta completa, para a MESMA transação, sucesso e reversão separados
+
+    cenário                               gás      gorjeta    L2         L1          TOTAL      L1 %
+    REVERSÃO (39 recibos reais)          372.202  0,02 gwei  US$0,023137 US$0,000002 US$0,023139 0,01%
+    REVERSÃO com gorjeta de alvo grande  372.202  0,65 gwei  US$0,606190 US$0,000002 US$0,606191 0,00%
+    SUCESSO (gás medido no fork)         679.930  0,05 gwei  US$0,092986 US$0,000002 US$0,092987 0,00%
+
+**O L1 é 0,01% do total, não 0,1%.** Eu errei por 10x — para o lado
+conservador, mas era palpite. E ele é **fixo por transação**: não depende de a
+transação ter sucesso ou reverter.
+
+### O contraste com RECIBOS REAIS, e a diferença explicada
+
+Seis transações de um bloco real da Base (52418787), cada uma com 196–199 bytes
+de calldata, comparando o `l1Fee` do recibo com o `getL1Fee` do oráculo no
+MESMO bloco:
+
+    bytes  l1Gas(recibo)  l1Fee(recibo)    l1Fee(oráculo)   diferença   L1 % do total
+      196      1.901      0,000000000731   0,000000000615    -15,87%       0,015%
+      196      1.600      0,000000000615   0,000000000615      0,00%       0,006%
+      196      2.557      0,000000000984   0,000000000752    -23,55%       0,105%
+      196      2.343      0,000000000901   0,000000000618    -31,41%       0,002%
+      196      1.955      0,000000000752   0,000000000615    -18,17%       0,014%
+      199      2.263      0,000000000870   0,000000000615    -29,30%       0,096%
+
+**A diferença de 0 a 31% tem explicação medida:** o `l1GasUsed` do recibo varia
+de 1.600 a 2.557 com o MESMO tamanho de calldata, porque o custo L1 conta
+bytes ZERO e NÃO-ZERO com pesos diferentes — e as outras transações têm
+endereços e valores diferentes nos mesmos 196 bytes. O oráculo chamado com o
+NOSSO calldata devolve 1.754, dentro dessa faixa.
+
+**Então o componente L1 do nosso tiro é MEDIDO (1.754 de gás L1), e a variação
+entre transações é propriedade do conteúdo do calldata, não erro do método.**
+Em todos os casos o L1 fica abaixo de 0,11% do total: para esta estratégia ele
+não decide nada — mas agora isso é medição, e não um percentual meu.

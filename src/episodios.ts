@@ -92,6 +92,25 @@ export interface Episodio {
     simulacao: string | null;
     /** Idade do dado de preco/posicao quando a leitura foi feita. */
     idadeDoDadoMs: number | null;
+    /**
+     * O par e imune a preco? NAO exclui da coleta — marca.
+     *
+     * Excluir seria a coleta escolhendo o resultado: um imune pode cair pela
+     * acao do dono (medido em 2026-09-28, `0x43ec917e` andou 2,41 pontos de
+     * saude em 70 minutos porque o dono sacou garantia). Quem analisa filtra;
+     * a coleta guarda.
+     */
+    imune: boolean;
+    /** Divida tao pequena que nao paga o proprio gas. Tambem marca, nao exclui. */
+    poeira: boolean;
+    /**
+     * Quantos episodios DESTE alvo e mercado ja fecharam antes deste.
+     *
+     * Uma posicao que sai da lista e volta abre episodio NOVO — mas e a MESMA
+     * posicao e o MESMO premio. Sem este contador, sair e voltar dez vezes
+     * leria como dez oportunidades, que e exatamente o que ela proibiu.
+     */
+    reaberturaDe: number;
 }
 
 export interface LeituraDeEpisodio {
@@ -107,6 +126,8 @@ export interface LeituraDeEpisodio {
     porqueNaoAtirei?: string | null;
     simulacao?: string | null;
     idadeDoDadoMs?: number | null;
+    imune?: boolean;
+    poeira?: boolean;
 }
 
 /**
@@ -130,6 +151,9 @@ export class LivroDeEpisodios {
     private lacunasPerdidas = 0;
 
     private lacunaPerdidaMs = 0;
+
+    /** Quantos episodios ja fecharam, por alvo+mercado. */
+    private jaFechados = new Map<string, number>();
 
     constructor(private readonly tetoDeLacunaMs = LACUNA_QUE_AINDA_CONTA_MS) {}
 
@@ -176,6 +200,9 @@ export class LivroDeEpisodios {
                 porqueNaoAtirei: l.porqueNaoAtirei ?? null,
                 simulacao: l.simulacao ?? null,
                 idadeDoDadoMs: l.idadeDoDadoMs ?? null,
+                imune: l.imune ?? false,
+                poeira: l.poeira ?? false,
+                reaberturaDe: this.jaFechados.get(chave) ?? 0,
             };
             this.abertos.set(chave, novo);
             return novo;
@@ -199,6 +226,8 @@ export class LivroDeEpisodios {
         if (l.porqueNaoAtirei !== undefined) existente.porqueNaoAtirei = l.porqueNaoAtirei;
         if (l.simulacao !== undefined) existente.simulacao = l.simulacao;
         if (l.idadeDoDadoMs !== undefined) existente.idadeDoDadoMs = l.idadeDoDadoMs;
+        if (l.imune !== undefined) existente.imune = l.imune;
+        if (l.poeira !== undefined) existente.poeira = l.poeira;
         return existente;
     }
 
@@ -217,6 +246,7 @@ export class LivroDeEpisodios {
         e.desfecho = desfecho;
         this.abertos.delete(chave);
         this.fechados.push(e);
+        this.jaFechados.set(chave, (this.jaFechados.get(chave) ?? 0) + 1);
     }
 
     /**
@@ -237,6 +267,7 @@ export class LivroDeEpisodios {
             e.desfecho = desfecho;
             this.abertos.delete(chave);
             this.fechados.push(e);
+            this.jaFechados.set(chave, (this.jaFechados.get(chave) ?? 0) + 1);
             quantos += 1;
         }
         return quantos;
@@ -255,6 +286,12 @@ export class LivroDeEpisodios {
      * qual corte usou. Embutir um padrao aqui seria escolher o resultado.
      */
     resumo(premioMinimoUsd: number | null = null): {
+        msEntreLeituras: number;
+        msSemDados: number;
+        alvosDistintos: number;
+        reaberturas: number;
+        imunes: number;
+        poeiras: number;
         observadoMs: number;
         janelaDeParedeMs: number;
         lacunas: { quantas: number; msPerdidos: number };
@@ -291,7 +328,16 @@ export class LivroDeEpisodios {
             alvoProximo: 0, posicaoLiquidavel: 0, simulacaoComSucesso: 0, potencialmenteCapturavel: 0,
         };
         for (const e of todos) for (const s of e.estados) estados[s] += 1;
+        const distintos = new Set(todos.map((e) => `${e.devedor}|${e.mercado}`));
         return {
+            // `msEntreLeituras` e ESTIMADO (o intervalo conta inteiro);
+            // `msSemDados` e lacuna descartada. Ela mandou separar os dois.
+            msEntreLeituras: this.observadoTotalMs,
+            msSemDados: this.lacunaPerdidaMs,
+            alvosDistintos: distintos.size,
+            reaberturas: todos.filter((e) => e.reaberturaDe > 0).length,
+            imunes: todos.filter((e) => e.imune).length,
+            poeiras: todos.filter((e) => e.poeira).length,
             observadoMs: this.observadoTotalMs,
             janelaDeParedeMs: this.comecouEm === null || this.vistoPorUltimoEm === null
                 ? 0 : this.vistoPorUltimoEm - this.comecouEm,
@@ -305,6 +351,36 @@ export class LivroDeEpisodios {
         };
     }
 }
+
+/**
+ * A COBERTURA do registro, declarada — porque sem isto a disponibilidade e um
+ * numero sem denominador.
+ *
+ * Ela mandou: *"Declare a cobertura do registro de episódios. Informe quais
+ * posições entram na coleta, quais ficam fora e como mudanças na lista
+ * monitorada afetam os episódios."*
+ */
+export const COBERTURA_DO_REGISTRO = {
+    entram: 'as posicoes da BRASA (233 vagas), lidas a cada ciclo, com `queda` '
+        + 'dentro da faixa mais larga (1%)',
+    ficamFora: [
+        'quem esta acima de 1% de distancia — nao e perguntado, e nao aparece como ausencia',
+        'quem nao entrou na brasa: a lista quente (~1.400) e a lista completa (~61.800) '
+            + 'nao alimentam o livro no ciclo curto',
+        'a varredura completa ADICIONA e ATUALIZA, mas nao FECHA: senao todo alvo que ela '
+            + 've e a brasa nao viraria episodio novo a cada 15 minutos',
+    ],
+    mudancaDeLista: 'a brasa e reordenada na varredura completa. Uma posicao que sai da brasa '
+        + 'fecha como `perdiDeVista` — e isso NAO e desfecho da posicao. Se ela volta, abre '
+        + 'episodio novo com `reaberturaDe` > 0, e a soma de episodios deixa de ser a soma de '
+        + 'oportunidades: use `alvosDistintos`',
+    reinicioDoProcesso: 'o livro mora na MEMORIA. Todo deploy zera. A janela de parede comeca '
+        + 'no boot, entao a disponibilidade medida e sempre DESTE boot — e o Railway reinicia '
+        + 'varias vezes por dia',
+    tempoEstimado: '`msEntreLeituras` e tempo ESTIMADO: o intervalo entre duas leituras conta '
+        + 'inteiro como observacao. `msSemDados` e tempo SEM DADOS: lacuna acima do teto, '
+        + 'descartada. Somar os dois daria a parede; so o primeiro e observacao',
+} as const;
 
 /**
  * A frase do log.
@@ -328,7 +404,10 @@ export function comoLerOsEpisodios(r: ReturnType<LivroDeEpisodios['resumo']>): s
     const cobertura = r.janelaDeParedeMs > 0
         ? `${(100 * r.observadoMs / r.janelaDeParedeMs).toFixed(1)}% da parede`
         : 'sem janela';
-    return `${r.episodios} episódio(s), ${r.abertos} aberto(s) | observei `
+    return `${r.episodios} episódio(s) em ${r.alvosDistintos} alvo(s) distinto(s)`
+        + `${r.reaberturas > 0 ? ` (${r.reaberturas} reabertura(s): a MESMA posição voltou à lista, `
+            + 'e isso não é oportunidade nova)' : ''}`
+        + `, ${r.abertos} aberto(s) | observei `
         + `${(r.observadoMs / 60000).toFixed(1)} min de ${(r.janelaDeParedeMs / 60000).toFixed(1)} `
         + `de parede (${cobertura}), ${r.lacunas.quantas} lacuna(s) descartada(s) `
         + `somando ${(r.lacunas.msPerdidos / 60000).toFixed(1)} min`
