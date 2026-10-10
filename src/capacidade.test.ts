@@ -65,7 +65,11 @@ test('RECUPERAÇÃO 3: a sondagem é espaçada e tem TETO explícito', () => {
     const k = new ControleDeCapacidade(r.agora);
     k.esgotou('alchemy', 'Monthly capacity limit exceeded');
 
-    // Pode sondar logo (a primeira), depois espera 30 min entre sondagens.
+    // A PRIMEIRA também espera 30 min, contados do esgotamento. Esta asserção
+    // mudou por instrução dela: antes a primeira passava na hora, e com o
+    // castigo de 300s da escada a sondagem efetiva saía a 5 min, não a 30.
+    assert.equal(k.podeSondar('alchemy'), false, 'no instante do esgotamento, não');
+    r.andar(ENTRE_SONDAGENS_MS);
     assert.equal(k.podeSondar('alchemy'), true);
     k.sondou('alchemy');
     assert.equal(k.podeSondar('alchemy'), false, 'não sonda duas vezes seguidas');
@@ -88,6 +92,7 @@ test('a sondagem que FALHA também conta: senão o teto é letra morta', () => {
     const r = relogio();
     const k = new ControleDeCapacidade(r.agora);
     k.esgotou('alchemy', 'Monthly capacity limit exceeded');
+    r.andar(ENTRE_SONDAGENS_MS);
     for (let i = 0; i < SONDAGENS_POR_JANELA; i += 1) {
         k.sondou('alchemy');       // falhou, e continua esgotado
         r.andar(ENTRE_SONDAGENS_MS);
@@ -416,6 +421,9 @@ test('INTEGRAÇÃO: cota no primário, secundário responde, e as cinco provas',
 
     // (5) SÓ AS RECUPERAÇÕES PREVISTAS permitem nova tentativa.
     const antesDaSondagem = chamadasNoPrimario;
+    assert.equal(cap.podeSondar(host(PRIM)), false,
+        'aos 5 min do castigo da escada a sondagem AINDA não: ela conta 30 min do esgotamento');
+    r.andar(25 * 60_000);
     assert.equal(cap.podeSondar(host(PRIM)), true, 'a sondagem espaçada é uma delas');
     cap.sondou(host(PRIM));
     assert.equal(cap.podeSondar(host(PRIM)), false, 'e só uma por 30 min');
@@ -480,6 +488,150 @@ test('TODO caminho que trata recusa passa pelo mesmo portão (REGRA 3)', () => {
     // E a marcação mora em UMA função, não copiada nos dois lugares.
     assert.equal((codigo.match(/CAPACIDADE\.esgotou\(/g) ?? []).length, 1,
         'duas cópias da marcação voltariam a divergir');
-    assert.equal((codigo.match(/registrarRecusa\(/g) ?? []).length, 3,
-        'a definição e os dois caminhos que a chamam');
+    // A definição mais os TRÊS caminhos de recusa: `chamar`, a medição do tiro
+    // (`chamarCruComPaciencia`) e a sondagem do primário. Se aparecer um
+    // caminho novo sem passar aqui, esta conta denuncia.
+    assert.equal((codigo.match(/registrarRecusa\(/g) ?? []).length, 4,
+        'a definição e os três caminhos que a chamam');
+});
+
+test('a PRIMEIRA sondagem também espera os 30 min: 5 não liberava', () => {
+    // A contradição que ela mediu: o castigo da escada é 300s, e
+    // `ultimaSondagemEm === null` deixava a primeira passar na hora — então a
+    // sondagem efetiva acontecia a 5 MINUTOS, não aos 30 anunciados.
+    const r = relogio();
+    const k = new ControleDeCapacidade(r.agora);
+    k.esgotou('alchemy', RECUSA_REAL);
+    assert.equal(k.podeSondar('alchemy'), false, 'no instante do esgotamento, não');
+    r.andar(5 * 60_000);
+    assert.equal(k.podeSondar('alchemy'), false, '5 min: era aqui que ela passava');
+    r.andar(24 * 60_000 + 59_999);
+    assert.equal(k.podeSondar('alchemy'), false, '29min59,999s ainda não');
+    r.andar(1);
+    assert.equal(k.podeSondar('alchemy'), true, '30 min exatos: o que a frase anuncia');
+});
+
+test('uma sequência de sondagens malsucedidas NÃO libera nada nem se repete', () => {
+    const r = relogio();
+    const k = new ControleDeCapacidade(r.agora);
+    k.esgotou('alchemy', RECUSA_REAL);
+    const horarios: number[] = [];
+    // Um dia inteiro, minuto a minuto, sondando sempre que for permitido.
+    for (let min = 0; min <= 24 * 60; min += 1) {
+        if (k.podeSondar('alchemy')) { horarios.push(min); k.sondou('alchemy'); }
+        r.andar(60_000);
+    }
+    // Seis de 30 em 30 min; o teto da janela fecha o resto do dia; e em 1440
+    // min a janela de 24h vira e a cota de sondagens volta — a cota MENSAL
+    // pode ter virado, e meio dia cego seria pior que uma chamada.
+    assert.deepEqual(horarios, [30, 60, 90, 120, 150, 180, 1440],
+        'seis por janela, e a janela de 24h renova');
+    assert.equal(k.estaEsgotado('alchemy'), true, 'nenhuma passou: continua esgotado');
+    assert.equal(k.condicao('alchemy'), 'esgotado');
+});
+
+test('disponibilidade é POR MÉTODO: eth_getBalance não libera eth_getLogs', () => {
+    const r = relogio();
+    const k = new ControleDeCapacidade(r.agora);
+    k.confirmou('mainnet.base.org', 'eth_getBalance');
+    assert.equal(k.condicao('mainnet.base.org', 'eth_getBalance'), 'disponivel');
+    assert.equal(k.condicao('mainnet.base.org', 'eth_getLogs'), 'desconhecido',
+        'nunca foi perguntado por este método: desconhecido, não disponível');
+    // E o provedor, no geral, respondeu algo — as duas respostas convivem.
+    assert.equal(k.condicao('mainnet.base.org'), 'disponivel');
+    k.confirmou('mainnet.base.org', 'eth_getLogs');
+    assert.equal(k.condicao('mainnet.base.org', 'eth_getLogs'), 'disponivel');
+    assert.deepEqual(
+        k.metodosConfirmados('mainnet.base.org').map((m) => m.metodo).sort(),
+        ['eth_getBalance', 'eth_getLogs'],
+    );
+});
+
+test('provedor esgotado é esgotado para TODO método, inclusive o já confirmado', () => {
+    const k = new ControleDeCapacidade(relogio().agora);
+    k.confirmou('alchemy', 'eth_call');
+    k.esgotou('alchemy', RECUSA_REAL);
+    assert.equal(k.condicao('alchemy', 'eth_call'), 'esgotado',
+        'a cota é da conta, não do método: uma confirmação antiga não a contradiz');
+});
+
+test('a tarefa viaja na REQUISIÇÃO, não num global restaurado em `finally`', () => {
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    assert.ok(!/let tarefaAtual/.test(codigo),
+        'variável global não sobrevive a `await`: foi assim que um eth_getLogs do '
+        + 'histórico saiu rotulado monitoramento');
+    assert.ok(!/tarefaAtual\s*=/.test(codigo), 'nem atribuição a ela');
+    // A tarefa é parâmetro de `chamar`, e o inventário conta por ele.
+    assert.match(codigo, /tarefa: Tarefa = 'monitoramento'\): Promise<T>/);
+    assert.match(codigo, /INVENTARIO\.contar\(tarefa, metodo\)/);
+    // E a coleta de histórico a declara na própria chamada.
+    assert.match(codigo, /\], 4, 'demorada', 'historico'\)/);
+});
+
+test('duas tarefas concorrentes não se sobrescrevem no inventário', async () => {
+    // O defeito do global: a tarefa era lida DEPOIS de awaits. Com o valor
+    // viajando na chamada, duas leituras intercaladas contam certo.
+    const inv = new Inventario();
+    const chamar = async (tarefa: 'historico' | 'monitoramento', metodo: string, atrasoMs: number) => {
+        inv.contar(tarefa, metodo);
+        await new Promise((r) => { setTimeout(r, atrasoMs); });
+        return tarefa;
+    };
+    await Promise.all([
+        chamar('historico', 'eth_getLogs', 20),
+        chamar('monitoramento', 'eth_call', 1),
+        chamar('historico', 'eth_getLogs', 5),
+    ]);
+    const linhas = inv.chamadasObservadas();
+    assert.equal(linhas.find((l) => l.tarefa === 'historico')!.chamadas, 2);
+    assert.equal(linhas.find((l) => l.tarefa === 'monitoramento')!.chamadas, 1);
+});
+
+test('sonda primeiro, promove depois: o tráfego não se move antes do sucesso', () => {
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const i = fonte.indexOf('async function talvezVoltarAoPrimario');
+    const corpo = fonte.slice(i, fonte.indexOf('\nconst dormir', i))
+        .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const posSonda = corpo.indexOf('await sondarProvedor(');
+    const posPromove = corpo.indexOf('ESCADA.voltarAoPrimario()');
+    assert.ok(posSonda > 0 && posPromove > 0);
+    assert.ok(posSonda < posPromove, 'promover antes de sondar é descobrir depois de pagar');
+    // E a sondagem é por FORA da escada, senão ela já teria promovido o tráfego.
+    const sonda = fonte.slice(fonte.indexOf('async function sondarProvedor'),
+        fonte.indexOf('async function talvezVoltarAoPrimario'));
+    assert.ok(!/ESCADA\.|\brpc\b\s*=/.test(sonda.replace(/\/\*[\s\S]*?\*\//g, '')),
+        'a sondagem não mexe na escada nem no rpc global');
+    // Falha na sondagem -> nenhuma promoção naquele caminho.
+    const ramoFalha = corpo.slice(corpo.indexOf('if (!r.ok)'), posPromove);
+    assert.match(ramoFalha, /return;/, 'a falha volta sem promover');
+});
+
+test('o tamanho de eth_getLogs não medido é DESCONHECIDO, não o piso', () => {
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const i = codigo.indexOf('async function descobrirPedaco');
+    const corpo = codigo.slice(i, codigo.indexOf('\nasync function juntarDevedores', i));
+    assert.ok(!/pedacoMedido = PEDACO_MINIMO/.test(corpo),
+        'gravar o piso como medido publicava "aceita 250 blocos" sem nenhuma sondagem aprovada');
+    assert.match(corpo, /return \{ pedaco: null, tentativas \}/, 'desconhecido é `null`');
+    // E a varredura NÃO começa com tamanho desconhecido.
+    const v = codigo.indexOf('const medida = await descobrirPedaco(topo)');
+    const depois = codigo.slice(v, v + 700);
+    assert.match(depois, /if \(medida\.pedaco === null\)/);
+    assert.ok(depois.indexOf('medida.pedaco === null') < depois.indexOf('faixasDeBlocos('),
+        'o corte vem ANTES de montar as faixas, senão a varredura paralela já saiu');
+});
+
+test('nada lido e sem cache anterior: NÃO grava fronteira', () => {
+    // Achado na verificação desta rodada: com a varredura adiada o cache saía
+    // com `ultimoBloco: 51142298` e ZERO devedores — cobertura afirmada sobre
+    // blocos que ninguém leu.
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const i = codigo.indexOf('const gravacao = await gravarCache(CAMINHO_DO_CACHE');
+    const antes = codigo.slice(Math.max(0, i - 700), i);
+    assert.match(antes, /varrido\.faixasLidas\.length === 0 && !estadoDoCache\.usavel/,
+        'o portão tem de estar ANTES da gravação');
+    assert.match(antes, /return;/, 'e tem de sair sem gravar');
 });

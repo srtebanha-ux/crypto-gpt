@@ -8,7 +8,7 @@ import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } fr
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
 import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
-import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
+import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, sanitizar, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
 import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd, gorjetaQueMaximizaOValor, premioQueSePagaComAFatia, chanceDeSerOTopoDaFatia } from './prontidao';
@@ -940,37 +940,82 @@ function aEscadaAbsorve(mensagem: string): boolean {
 }
 
 /** Tenta voltar ao primário quando o castigo venceu. Barato: só troca a url. */
-function talvezVoltarAoPrimario(): void {
+/**
+ * Uma chamada ISOLADA a um provedor especifico, so para sondar.
+ *
+ * Nao passa pela escada nem mexe no `rpc` global: a sondagem precisa perguntar
+ * AO PRIMARIO sem promover o trafego, e era justamente isso que faltava.
+ */
+async function sondarProvedor(
+    url: string, metodo: string, params: unknown[],
+): Promise<{ ok: true } | { ok: false; erro: string }> {
+    try {
+        const res = await buscar(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: metodo, params }),
+            signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        const corpo = (await res.json()) as { result?: unknown; error?: { message?: string } };
+        if (corpo.error) return { ok: false, erro: corpo.error.message ?? 'erro sem mensagem' };
+        if (!('result' in corpo)) return { ok: false, erro: 'resposta sem `result`' };
+        return { ok: true };
+    } catch (e) {
+        return { ok: false, erro: e instanceof Error ? e.message : String(e) };
+    }
+}
+
+/**
+ * Tenta voltar ao primario quando o castigo venceu.
+ *
+ * SONDA PRIMEIRO, PROMOVE DEPOIS. A versao anterior trocava `rpc` para o
+ * primario e descobria o esgotamento na chamada seguinte — ela pediu:
+ * *"Prefira sondar o primário separadamente e só promover o tráfego após
+ * sucesso."*
+ *
+ * A sondagem e UMA chamada barata (`eth_blockNumber`) ao endereco do primario,
+ * por fora da escada, e o trafego so muda se ela passar.
+ */
+async function talvezVoltarAoPrimario(): Promise<void> {
     if (!ESCADA.deveVoltarAoPrimario()) return;
-    // O PORTAO DA CAPACIDADE, e ele vem ANTES de tudo.
-    //
-    // `deveVoltarAoPrimario` mede TEMPO de castigo, e cota nao volta com tempo.
-    // Sem este portao, o bot devolvia o trafego ao provedor que respondeu
-    // `Monthly capacity limit exceeded` assim que o castigo vencia — e
-    // descobria o esgotamento outra vez, de graca nenhuma.
-    //
-    // A unica porta que abre aqui e a SONDAGEM espacada, com teto explicito.
-    const primario = hostDoRpc(ESCADA.urlDoPrimario());
+    const urlPrimario = ESCADA.urlDoPrimario();
+    const primario = hostDoRpc(urlPrimario);
+    // O portao da capacidade: cota nao volta com tempo, e o castigo da escada
+    // mede tempo. A unica porta e a sondagem espacada, com teto.
     if (CAPACIDADE.estaEsgotado(primario)) {
         if (!CAPACIDADE.podeSondar(primario)) return;
         CAPACIDADE.sondou(primario);
-        log.warn('[CAPACIDADE] SONDANDO o primário esgotado — uma tentativa, espaçada.', {
-            provedor: primario,
-            estado: CAPACIDADE.comoLer(primario),
-            oQueAcontece: 'se esta leitura passar, o provedor volta por CONFIRMAÇÃO; se falhar, '
-                + 'conta como tentativa gasta e eu espero a próxima janela',
-        });
     }
+    const r = await sondarProvedor(urlPrimario, 'eth_blockNumber', []);
+    if (!r.ok) {
+        // A sondagem FALHOU: o trafego NAO se move. Se foi cota, o estado
+        // continua (ou passa a constar) esgotado pelo mesmo portao de sempre.
+        // PELO MESMO PORTAO, com o host do PRIMARIO: a recusa foi dele, nao do
+        // provedor em uso. Marcar `rpc` aqui marcaria o secundario.
+        const d = registrarRecusa(r.erro, 'eth_blockNumber (sondagem)', primario);
+        log.warn('[RPC] Sondei o primário e ele NÃO respondeu. Fico onde estou.', {
+            provedor: primario,
+            erro: sanitizar(r.erro),
+            tipo: d.porque,
+            oQueIssoNaoE: 'não promovi o tráfego: trocar e descobrir depois é pagar a descoberta '
+                + 'com as chamadas da caça',
+        });
+        return;
+    }
+    // PASSOU: confirma a disponibilidade DESTE metodo e promove.
+    CAPACIDADE.confirmou(primario, 'eth_blockNumber');
     const de = ESCADA.url();
     ESCADA.voltarAoPrimario();
     rpc = ESCADA.url();
     VAZAO.usando(hostDoRpc(rpc));
-    log.info('[RPC] Voltando ao provedor primário.', {
+    log.info('[RPC] Voltando ao provedor primário — DEPOIS de sondar.', {
         de: hostDoRpc(de), para: hostDoRpc(rpc),
-        porque: 'ficar no secundário para sempre é degradar em silêncio — ele é mais '
-            + 'lento e tem teto de 2.000 blocos no eth_getLogs',
+        sondagem: 'eth_blockNumber passou neste endereço',
+        atencao: 'disponibilidade confirmada para eth_blockNumber. Histórico por eth_getLogs '
+            + 'continua DESCONHECIDO até um eth_getLogs passar — são limites diferentes',
     });
 }
+
 const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Gerenciador de Nonce Atômico para evitar conflitos em alta velocidade
@@ -1091,8 +1136,19 @@ const CAPACIDADE = new ControleDeCapacidade();
 const INVENTARIO = new Inventario();
 /** Quando este processo subiu: o denominador da projecao diaria. */
 const BOOT_EM = Date.now();
-/** Qual tarefa esta pedindo RPC agora. A chamada sozinha nao sabe. */
-let tarefaAtual: Tarefa = 'monitoramento';
+/**
+ * A TAREFA NAO MORA MAIS NUM GLOBAL.
+ *
+ * A primeira versao era `let tarefaAtual`, trocada antes da chamada e restaurada
+ * num `finally`. MEDIDO em 2026-10-10: `chamar` le a tarefa DEPOIS de awaits, e
+ * o `finally` de quem chamou ja a havia restaurado enquanto repeticoes internas
+ * seguiam pendentes — um `eth_getLogs` do historico saiu rotulado
+ * `monitoramento`. Variavel global nao sobrevive a `await`.
+ *
+ * Agora a tarefa e o ULTIMO PARAMETRO de `chamar` e de `lerEmLote`: viaja com a
+ * requisicao, sobrevive as tentativas e ao fallback, e duas tarefas
+ * concorrentes nao se sobrescrevem.
+ */
 /**
  * Quantas vezes cada tarefa secundaria foi ADIADA por orcamento.
  *
@@ -1100,11 +1156,7 @@ let tarefaAtual: Tarefa = 'monitoramento';
  * "nenhum devedor novo" fica indistinguivel de "nao fui buscar".
  */
 const ADIADAS = { historico: 0, morpho: 0, varreduraCompleta: 0 };
-function comTarefa<T>(t: Tarefa, f: () => T): T {
-    const antes = tarefaAtual;
-    tarefaAtual = t;
-    try { return f(); } finally { tarefaAtual = antes; }
-}
+
 
 /**
  * A recusa, decidida e REGISTRADA — num lugar so.
@@ -1116,10 +1168,17 @@ function comTarefa<T>(t: Tarefa, f: () => T): T {
  *
  * E a REGRA 3 deste arquivo: uma regra em dois lugares e a mesma regra.
  */
-function registrarRecusa(msg: string, metodo: string): DecisaoSobreRecusa {
+function registrarRecusa(
+    msg: string, metodo: string,
+    /**
+     * De QUEM foi a recusa. O padrao e o provedor em uso, mas a sondagem
+     * pergunta ao PRIMARIO estando no secundario — e marcar o host errado seria
+     * pior que nao marcar.
+     */
+    host = hostDoRpc(rpc),
+): DecisaoSobreRecusa {
     const d = decidirSobreRecusa({ mensagem: msg, ehTransporte: ehFalhaDeTransporte(msg) });
     if (d.marcarEsgotado) {
-        const host = hostDoRpc(rpc);
         const novoEsgotamento = !CAPACIDADE.estaEsgotado(host);
         CAPACIDADE.esgotou(host, msg);
         if (novoEsgotamento) {
@@ -1140,7 +1199,21 @@ function registrarRecusa(msg: string, metodo: string): DecisaoSobreRecusa {
 }
 
 async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
-    prioridadePedida?: 'essencial' | 'normal' | 'demorada'): Promise<T> {
+    prioridadePedida?: 'essencial' | 'normal' | 'demorada',
+    /**
+     * A TAREFA viaja COM A REQUISICAO, e nao numa variavel de modulo.
+     *
+     * MEDIDO em 2026-10-10: `tarefaAtual` era lida dentro de `chamar` DEPOIS de
+     * awaits, e o `finally` de `lerFaixaPartindoSePreciso` a restaurava
+     * enquanto repeticoes internas ainda estavam pendentes — entao um
+     * `eth_getLogs` do historico saiu rotulado `monitoramento` na propria
+     * execucao em que eu disse que a atribuicao funcionava.
+     *
+     * Parametro resolve de raiz: ele sobrevive as tentativas e a troca de
+     * provedor, porque e o mesmo valor em toda a chamada, e duas tarefas
+     * concorrentes nao se sobrescrevem.
+     */
+    tarefa: Tarefa = 'monitoramento'): Promise<T> {
     // A PRIORIDADE POR METODO, quando quem chama nao diz: `eth_getLogs` e a
     // coleta de 3 anos e o censo — leitura que pode esperar. `eth_call` e a
     // brasa e a decisao do tiro. Derivar do metodo, e nao escolher por
@@ -1148,7 +1221,7 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
     // seriam trinta lugares para esquecer.
     const prioridade = prioridadePedida
         ?? (metodo === 'eth_getLogs' ? 'demorada' : 'normal');
-    INVENTARIO.contar(tarefaAtual, metodo);
+    INVENTARIO.contar(tarefa, metodo);
     let espera = 1000;
     for (let i = 0; ; i += 1) {
         const soltar = await VAZAO.vez(metodo, prioridade);
@@ -1158,7 +1231,7 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
             VAZAO.deuCerto();
             // RECUPERACAO 1: uma leitura que PASSA prova disponibilidade. E a
             // unica forma de sair do esgotamento que nao e esperar nem supor.
-            if (CAPACIDADE.confirmou(hostDoRpc(rpc))) {
+            if (CAPACIDADE.confirmou(hostDoRpc(rpc), metodo)) {
                 log.info('[CAPACIDADE] O provedor VOLTOU — uma leitura passou.', {
                     provedor: hostDoRpc(rpc),
                     porque: 'confirmação de disponibilidade, não passagem de tempo: cota não '
@@ -1205,7 +1278,7 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
                 // QUAL TAREFA gerou a recusa. Ela pediu: *"identifique quais
                 // tarefas estão gerando os eth_getLogs recusados."* Sem isto a
                 // linha dizia o metodo e nao dizia quem o chamou.
-                tarefa: tarefaAtual,
+                tarefa,
                 provedor: hostDoRpc(rpc),
                 metodo, erro: msg.slice(0, 160), tipoDaRecusa: recusa.tipo,
                 oQueFazer: recusa.oQueFazer, tentativa: i + 1, de: tentativas,
@@ -1521,6 +1594,8 @@ const ultimoFatoConhecido = new Map<string, Medida & { lidoEm: number }>();
 async function lerEmLote(
     chamadas: Array<{ alvo: string; dados: string }>,
     nomeDaLeitura = 'lote',
+    /** A tarefa que paga por esta leitura. Vai na chamada, nao num global. */
+    tarefa: Tarefa = 'monitoramento',
 ): Promise<{ dados: Array<string | null>; cobertura: Cobertura }> {
     const cobertura = coberturaVazia(chamadas.length);
     const pedacos = partirEmPedacos(chamadas, CHAMADAS_POR_MULTICALL);
@@ -1548,7 +1623,7 @@ async function lerEmLote(
                     // A BRASA E ESSENCIAL: o alvo cruza dentro de um bloco de
                     // 2s, e esperar o recuo inteiro para proteger uma cota e
                     // perder o alvo. A varredura completa pode esperar.
-                    ], 4, nomeDaLeitura === 'brasa' ? 'essencial' : 'demorada');
+                    ], 4, nomeDaLeitura === 'brasa' ? 'essencial' : 'demorada', tarefa);
                     msRede += Date.now() - t0;
                     const t1 = Date.now();
                     const rs = decodificarAggregate3Rapido(bruto);
@@ -1712,7 +1787,7 @@ let pedacoMedido: number | null = null;
  * E o numero tem de aparecer porque ele MUDA: o `mainnet.base.org` servia 2.000
  * blocos em 02/10 e 500 em 06/10, medido nos dois dias.
  */
-function anunciarPedaco(pedaco: number, tentativas: number, bateuNoPiso: boolean): void {
+function anunciarPedaco(pedaco: number, tentativas: number): void {
     log.info('[RPC] Teto de eth_getLogs deste provedor, MEDIDO agora.', {
         provedor: hostDoRpc(rpc),
         aceita: `${pedaco.toLocaleString('pt-BR')} blocos por chamada`,
@@ -1721,12 +1796,9 @@ function anunciarPedaco(pedaco: number, tentativas: number, bateuNoPiso: boolean
         oQueIssoCusta: pedaco >= PEDACO
             ? 'nenhum desconto: a varredura vai no tamanho que pedi'
             : `${(PEDACO / pedaco).toFixed(1)}x mais chamadas que o pedido para cobrir a mesma história`,
-        // Sem esta linha, "o provedor é limitado" fica igual a "o provedor
-        // recusou tudo e eu desci até o piso sem nunca ter sucesso".
-        atencao: bateuNoPiso
-            ? `NENHUMA sondagem passou, nem a de ${PEDACO_MINIMO}: estou usando o piso no escuro. `
-              + 'Se as faixas falharem, a lista de devedores volta VAZIA — confira o próximo log'
-            : 'medido com resposta boa do provedor',
+        // Esta linha so sai com sondagem BOA: o caso "recusou tudo" nao chega
+        // aqui, porque ele devolve tamanho DESCONHECIDO em vez do piso.
+        atencao: 'medido com resposta boa do provedor',
     });
 }
 
@@ -1741,7 +1813,7 @@ function anunciarPedaco(pedaco: number, tentativas: number, bateuNoPiso: boolean
  * Uma falha de rede passageira na sondagem é lida como teto menor, e o erro
  * então é para o lado seguro: mais chamadas, nunca menos cobertura.
  */
-async function descobrirPedaco(topo: number): Promise<{ pedaco: number; tentativas: number }> {
+async function descobrirPedaco(topo: number): Promise<{ pedaco: number | null; tentativas: number }> {
     if (pedacoMedido !== null) return { pedaco: pedacoMedido, tentativas: 0 };
     const escada = tamanhosASondar(PEDACO, PEDACO_MINIMO);
     let passo = 0;
@@ -1760,14 +1832,35 @@ async function descobrirPedaco(topo: number): Promise<{ pedaco: number; tentativ
                 },
             ]);
             pedacoMedido = tamanho;
-            anunciarPedaco(tamanho, tentativas, false);
+            anunciarPedaco(tamanho, tentativas);
             return { pedaco: tamanho, tentativas };
         } catch {
             passo += 1;
             if (passo >= escada.length) {
-                pedacoMedido = PEDACO_MINIMO;
-                anunciarPedaco(PEDACO_MINIMO, tentativas, true);
-                return { pedaco: PEDACO_MINIMO, tentativas };
+                // NENHUMA SONDAGEM PASSOU -> o tamanho e DESCONHECIDO, nao 250.
+                //
+                // A versao anterior gravava `pedacoMedido = PEDACO_MINIMO` e
+                // anunciava `aceita: 250 blocos por chamada`. Ela recusou:
+                // *"Nenhuma sondagem aprovada significa capacidade desconhecida
+                // ou indisponível para aquela consulta. Não publique '250
+                // blocos aceitos' nem inicie varredura paralela como se o
+                // tamanho estivesse validado."*
+                //
+                // E `pedacoMedido` fica null de proposito: a proxima volta
+                // sonda de novo, em vez de carregar um numero inventado pelo
+                // resto do processo.
+                log.warn('[RPC] NÃO SEI o teto de eth_getLogs deste provedor.', {
+                    provedor: hostDoRpc(rpc),
+                    tamanho: 'DESCONHECIDO — nenhuma sondagem passou, nem a menor '
+                        + `(${PEDACO_MINIMO} blocos)`,
+                    sondagens: tentativas,
+                    oQueIssoNaoE: 'não é "o provedor aceita 250": é "eu não consegui medir". '
+                        + 'Publicar o piso como medido seria ausência com cara de resposta',
+                    consequencia: 'a descoberta de devedores fica ADIADA. Cache e cursor são '
+                        + 'preservados, as leituras que não dependem de eth_getLogs continuam, '
+                        + 'e a cobertura sai declarada como INCOMPLETA',
+                });
+                return { pedaco: null, tentativas };
             }
             tamanho = escada[passo]!;
         }
@@ -1790,13 +1883,6 @@ async function lerFaixaPartindoSePreciso(
     b: number,
     vistos: Set<string>,
 ): Promise<{ lidas: Array<[number, number]>; falhas: number }> {
-    // A TAREFA, nomeada no lugar que gasta.
-    //
-    // MEDIDO no log de 2026-10-10: o inventario atribuia os 19 `eth_getLogs`
-    // recusados a `monitoramento`, porque `tarefaAtual` tem esse valor por
-    // padrao e esta funcao nunca o trocava. Quem os gera e a COLETA de
-    // `Borrow` — historico de 3 anos —, que e secundaria e pode esperar.
-    tarefaAtual = 'historico';
     try {
         // SOB LIMITACAO, O HISTORICO ADIA. Ela pediu: *"Durante limitação,
         // adie histórico e descoberta secundária para preservar o monitoramento
@@ -1806,6 +1892,8 @@ async function lerFaixaPartindoSePreciso(
             ADIADAS.historico += 1;
             return { lidas: [], falhas: 1 };
         }
+        // A TAREFA vai NA CHAMADA: sobrevive as tentativas e ao fallback, e
+        // duas tarefas concorrentes nao se sobrescrevem.
         const logs = await chamar<Array<{ topics: string[] }>>('eth_getLogs', [
             {
                 address: REDE.pool,
@@ -1813,7 +1901,7 @@ async function lerFaixaPartindoSePreciso(
                 toBlock: `0x${b.toString(16)}`,
                 topics: [TOPIC_BORROW],
             },
-        ]);
+        ], 4, 'demorada', 'historico');
         for (const d of devedoresDosEventos(logs)) vistos.add(d);
         return { lidas: [[a, b]], falhas: 0 };
     } catch {
@@ -1827,10 +1915,6 @@ async function lerFaixaPartindoSePreciso(
             lidas: [...esquerda.lidas, ...direita.lidas],
             falhas: esquerda.falhas + direita.falhas,
         };
-    } finally {
-        // A etiqueta volta ao que era: as chamadas DEPOIS desta funcao nao sao
-        // historico, e herdar o rotulo seria o mesmo defeito ao contrario.
-        tarefaAtual = 'monitoramento';
     }
 }
 
@@ -1850,6 +1934,21 @@ async function varrerDevedores(
     const faixasLidas: Array<[number, number]> = [];
     const inicio = blocoInicial !== undefined ? Math.max(0, blocoInicial) : Math.max(0, topo - BLOCOS + 1);
     const medida = await descobrirPedaco(topo);
+    // TAMANHO DESCONHECIDO -> NAO VARRE. Nada de varredura paralela em cima de
+    // um tamanho que nenhuma sondagem aprovou: ela seriam 5 chamadas por lote
+    // batendo num limite que eu nao sei qual e, e o resultado — lista vazia —
+    // leria como "nao ha devedores novos".
+    //
+    // O cache e o cursor ficam INTOCADOS (nada e gravado por esta volta), as
+    // leituras que nao dependem de `eth_getLogs` seguem no laco de caca, e a
+    // cobertura sai declarada.
+    if (medida.pedaco === null) {
+        ADIADAS.historico += 1;
+        return {
+            devedores: [], faixasLidas: [], faixasQueFalharam: 1,
+            de: inicio, ate: topo, cortadaPeloTempo: false,
+        };
+    }
     const todas = faixasDeBlocos(inicio, topo, medida.pedaco);
     const faixas = opcoes.ordem === 'tras' ? [...todas].reverse() : todas;
     const orcamentoMs = opcoes.orcamentoMs ?? 0;
@@ -2697,7 +2796,9 @@ async function principal(): Promise<'parar' | void> {
         void (async () => {
             try {
                 const { varrerMercadosDoMorpho } = await import('./mercadosDoMorpho');
-                await comTarefa('morpho', () => varrerMercadosDoMorpho());
+                // O censo do Morpho tem o seu proprio transporte; a tarefa dele entra
+                // quando ele passar a usar `chamar`. Nao finjo atribuicao que nao existe.
+                await varrerMercadosDoMorpho();
             } catch (e) {
                 log.error('[MORPHO] A varredura falhou, e o bot segue caçando.', {
                     erro: e instanceof Error ? e.message : String(e),
@@ -3231,6 +3332,29 @@ async function principal(): Promise<'parar' | void> {
                     ? 'CHEGUEI AO NASCIMENTO DO POOL: cobertura total, 100% da história'
                     : 'parei numa faixa que falhou; o próximo boot retoma daqui',
         });
+    }
+
+    // NADA LIDO E SEM CACHE ANTERIOR -> NAO GRAVA FRONTEIRA NENHUMA.
+    //
+    // Achado na propria verificacao desta rodada, com um provedor que recusa
+    // todo `eth_getLogs`: a varredura foi corretamente ADIADA, e o cache saiu
+    // gravado com `ultimoBloco: 51142298` e ZERO devedores. O numero vem de
+    // `comecaEm - 1` no `Math.max` acima, que e a fronteira CONHECIDA quando
+    // havia cache — e sem cache nenhum ele afirma cobertura sobre blocos que
+    // ninguem leu. O proximo boot comecaria depois dela e nao voltaria.
+    //
+    // Nao e defeito novo da logica do cursor; e um caminho que o adiamento
+    // tornou alcancavel, e deixa-lo passar seria gravar o buraco para sempre.
+    if (varrido.faixasLidas.length === 0 && !estadoDoCache.usavel) {
+        log.warn('[CACHE] NÃO gravei: não li nada e não havia fronteira anterior.', {
+            devedoresAchados: varrido.devedores.length,
+            faixasQueFalharam: varrido.faixasQueFalharam,
+            oQueIssoEvita: `gravar "coberto até ${ultimoBlocoDoCache}" sem ter lido um bloco — o `
+                + 'próximo boot começaria depois dessa fronteira e nunca voltaria',
+            oQueFicaValendo: 'nenhuma memória de devedores nesta execução; a cobertura é ZERO e '
+                + 'está declarada. As leituras que não dependem de eth_getLogs seguem',
+        });
+        return;
     }
 
     const gravacao = await gravarCache(CAMINHO_DO_CACHE, {
@@ -4542,7 +4666,7 @@ async function principal(): Promise<'parar' | void> {
         // discordando sobre a mesma linha e o defeito que este projeto persegue.
         zerarContaDaPaciencia();
         // Conferido uma vez por ciclo, fora do caminho de rede: só troca a url.
-        talvezVoltarAoPrimario();
+        await talvezVoltarAoPrimario();
         try {
             if (Date.now() - ultimaColeta > MIN_COLETA * 60_000) {
                 const novoTopo = Number.parseInt(await chamar<string>('eth_blockNumber', []), 16);
@@ -5107,15 +5231,14 @@ async function principal(): Promise<'parar' | void> {
                     );
                 const aLer = corte.lidos;
                 if (aLer.length > 0) {
-                    // A TAREFA que gasta, nomeada: o inventario separa a
-                    // varredura completa do monitoramento, e as duas tem ordens
-                    // de grandeza diferentes (248 multicalls contra 1).
-                    tarefaAtual = varredura === 'completa' ? 'varreduraCompleta' : 'monitoramento';
                     const leitura = await lerEmLote(aLer.map((d) => ({
                         alvo: REDE.pool,
                         dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
-                    })), varredura);
-                    tarefaAtual = 'monitoramento';
+                    // A TAREFA vai no parametro: 248 multicalls da varredura
+                    // completa contra 1 da brasa sao ordens de grandeza
+                    // diferentes, e precisam ser contadas separadas.
+                    })), varredura,
+                    varredura === 'completa' ? 'varreduraCompleta' : 'monitoramento');
                     const coberturaDaLeitura = leitura.cobertura;
                     const loteGigante = leitura.dados;
                     /** Quem NAO foi lido: nao e seguro, nao e ausencia, e buraco. */

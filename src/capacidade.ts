@@ -64,6 +64,14 @@ export interface EstadoDeProvedor {
     esgotadoEm: number | null;
     /** Quando uma leitura PASSOU por este provedor. `null` = nunca. */
     confirmadoEm: number | null;
+    /**
+     * Quando cada METODO passou neste provedor. `eth_getBalance` passar NAO
+     * diz nada sobre `eth_getLogs`: sao limites diferentes no mesmo provedor, e
+     * foi um `eth_getBalance` bom convivendo com `eth_getLogs` recusado que
+     * motivou isto. Ela pediu: *"Sucesso em `eth_getBalance` não libera
+     * automaticamente histórico por `eth_getLogs`."*
+     */
+    confirmadoPorMetodo: Record<string, number>;
     /** A mensagem SANITIZADA que declarou o esgotamento. */
     motivo: string | null;
     sondagens: number;
@@ -95,8 +103,8 @@ export class ControleDeCapacidade {
 
     private estado(chave: string): EstadoDeProvedor {
         const e = this.porProvedor.get(chave)
-            ?? { esgotadoEm: null, confirmadoEm: null, motivo: null, sondagens: 0,
-                ultimaSondagemEm: null, janelaComecouEm: null };
+            ?? { esgotadoEm: null, confirmadoEm: null, confirmadoPorMetodo: {}, motivo: null,
+                sondagens: 0, ultimaSondagemEm: null, janelaComecouEm: null };
         this.porProvedor.set(chave, e);
         return e;
     }
@@ -122,21 +130,36 @@ export class ControleDeCapacidade {
      * O estado NAO e apagado: apagar devolveria o provedor a 'desconhecido', e
      * "nunca perguntei" nao e o mesmo que "respondeu agora".
      */
-    confirmou(chave: string): boolean {
+    confirmou(chave: string, metodo?: string): boolean {
         const e = this.estado(chave);
         const recuperou = e.esgotadoEm !== null;
         e.esgotadoEm = null;
         e.motivo = null;
         e.confirmadoEm = this.agora();
+        if (metodo !== undefined) e.confirmadoPorMetodo[metodo] = this.agora();
         return recuperou;
     }
 
     /** A condicao de um provedor. 'desconhecido' nao e disponibilidade. */
-    condicao(chave: string): CondicaoDoProvedor {
+    condicao(chave: string, metodo?: string): CondicaoDoProvedor {
         const e = this.porProvedor.get(chave);
         if (e === undefined) return 'desconhecido';
         if (e.esgotadoEm !== null) return 'esgotado';
+        if (metodo !== undefined) {
+            // POR METODO: o provedor pode estar servindo `eth_call` e recusando
+            // `eth_getLogs`. Herdar a disponibilidade de um metodo para outro
+            // seria publicar como medido o que nao foi perguntado.
+            return e.confirmadoPorMetodo[metodo] === undefined ? 'desconhecido' : 'disponivel';
+        }
         return e.confirmadoEm === null ? 'desconhecido' : 'disponivel';
+    }
+
+    /** Os metodos que JA passaram neste provedor, com a idade da confirmacao. */
+    metodosConfirmados(chave: string): Array<{ metodo: string; haQuantoMs: number }> {
+        const e = this.porProvedor.get(chave);
+        if (e === undefined) return [];
+        return Object.entries(e.confirmadoPorMetodo)
+            .map(([metodo, em]) => ({ metodo, haQuantoMs: this.agora() - em }));
     }
 
     /**
@@ -190,7 +213,15 @@ export class ControleDeCapacidade {
             e.sondagens = 0;
         }
         if (e.sondagens >= SONDAGENS_POR_JANELA) return false;
-        if (e.ultimaSondagemEm !== null && agora - e.ultimaSondagemEm < ENTRE_SONDAGENS_MS) return false;
+        // O INTERVALO VALE PARA A PRIMEIRA TAMBEM, e isto e um conserto.
+        //
+        // Ela mediu a contradicao: o castigo da escada e de 300s, e
+        // `ultimaSondagemEm === null` deixava a primeira sondagem passar na
+        // hora — entao a sondagem efetiva acontecia a 5 MINUTOS do
+        // esgotamento, nao aos 30 que a frase anunciava. O relogio da primeira
+        // conta de `esgotadoEm`.
+        const desde = e.ultimaSondagemEm ?? e.esgotadoEm;
+        if (agora - desde < ENTRE_SONDAGENS_MS) return false;
         return true;
     }
 
