@@ -3706,3 +3706,99 @@ ou posterior no Railway com `CACA_ENVIAR=0` e colar um log de algumas horas.**
 O coletor está pronto: versão, período, amostras, mediana e percentis por
 etapa, desconexões, fallback, retentativas e recusas já saem na linha
 `[BLOCO] tempos:`.
+
+## 2026-10-10: o atraso interno MEDIDO, e o experimento pronto
+
+### 1. A retratação que ela pediu
+
+**"Zero blocos significa orçamento inexistente" está RETIRADO.** O que está
+medido é que, em 3 oportunidades valiosas, a posição não ficou liquidável e
+disponível em nenhum BLOCO inteiro. **A janela INTRABLOCO — se houve fatia em
+que o estado já estava visível — NÃO FOI DETERMINADA**, e exigiria a fonte de
+Flashblocks, que não é `newHeads`.
+
+### 2. O `newHeads` do nosso provedor: NÃO amostrado, e o impedimento é claro
+
+    wss://mainnet.base.org  ->  "Unexpected server response: 405"
+
+O proxy deste ambiente recusa WebSocket. **Zero amostras de `newHeads`** — e
+isso é impedimento de ambiente, não medição sobre o provedor.
+
+O que **deu** para medir, por HTTP, e declarado como coisa diferente:
+
+    eth_getBlockByNumber(latest) a cada ~120ms | 333 pedidos, 0 falhas, 65s
+    33 blocos vistos | intervalo p10 1.906ms  p50 1.950ms  p90 2.112ms  máx 2.130ms
+    pulos de número: [1]  — nenhum bloco perdido
+
+    ISTO MEDE     a cadência de PRODUÇÃO do bloco, por polling HTTP
+    NÃO MEDE      a entrega do `newHeads`; a cadência da FATIA (~200ms);
+                  nem quanto tempo o estado já estava visível antes
+
+### 3. A comparação das duas políticas, sobre o MESMO fluxo
+
+`src/despertar.ts` é **puro**: recebe os instantes de bloco e devolve os
+horários de despertar das duas políticas. Nenhuma consulta externa — é isso que
+permite comparar sem duplicar RPC. Rodado sobre a cadência MEDIDA (p50 1.950ms,
+33 blocos em 65s), trabalho de 106ms, custo de 1 `eth_call` + 1
+`eth_blockNumber` por ciclo:
+
+    DORMINDO (8.000ms)
+      atual:      9 ciclos | atraso p50 6.650ms  p90 7.450ms  máx 7.450ms
+      candidata: 34 ciclos | atraso p50     0ms  p90     0ms  máx     0ms
+      atraso EVITÁVEL p50 6.650ms | custo +25 ciclos = +25 eth_call, +25 eth_blockNumber
+
+    ATENTO (1.000ms)
+      atual:     66 ciclos | atraso p50   400ms  p90   800ms  máx   950ms
+      candidata: 67 ciclos | atraso p50     0ms
+      atraso EVITÁVEL p50 400ms | custo +1 ciclo
+
+**Em 'dormindo' o atraso evitável é 6,65 segundos** — 63x o caminho crítico de
+106ms. O gargalo é a espera interna, e não há dúvida entre os candidatos.
+
+**E o custo não é simétrico:** em 'atento' a candidata custa +1 ciclo por
+minuto; em 'dormindo', +25. O preço do conserto é concentrado no estado em que
+o alvo está longe — exatamente onde ele importa menos.
+
+### 4. Os riscos que ela nomeou, todos testados
+
+    rajada de 10 avisos em 50ms   -> <= 2 ciclos com bloco pendente, e nada
+                                     sobra pendente no fim: sem fila crescente
+    ciclos concorrentes           -> `esperarBlocoOuTempo` resolve UMA vez com
+                                     10 avisos, e desassina UMA vez (sem
+                                     vazamento, sem consulta duplicada depois)
+    reserva de nonce              -> o módulo não menciona nonce, e um teste lê
+                                     o código para garantir que continue assim
+    fluxo vazio                   -> atraso evitável `null`, não zero
+
+### 5. Preço externo NÃO é cotação da rota
+
+`olharMercado()` lê **preço de referência fora da corrente** — é SINAL, para
+decidir postura e antecipar a escrita do oráculo. **Não é cotação executável.**
+
+A cotação que falta é outra: **quanto a rota de venda devolveria pela garantia
+tomada**, no pool, no instante do tiro, com escorregamento — é ela que diz se o
+empréstimo é pago. Hoje isso vive no `lucroEstimado` (curva medida em
+`venda.ts`) e na simulação por `eth_call`, e **nenhuma das duas é uma cotação
+de rota medida na hora**. Confundir as duas foi um risco que ela cortou antes
+de eu cometer; fica registrado como etapa separada e **não medida**.
+
+### 6. Antes de pedir ativação no Railway — e o dado que FALTA
+
+Para comparar as duas políticas em observação:
+
+    duração proposta        2 horas em 'dormindo'/'atento' normais
+    teto de requisições     +25 ciclos/min no pior estado = +1.500 ciclos/h
+                            = +1.500 eth_call e +1.500 eth_blockNumber por hora
+    critérios de interrupção (1) qualquer erro de RPC acima de 1% dos pedidos
+                            (2) o log parar de sair por mais de 5 min
+                            (3) a própria dona mandar parar
+    custo incremental       NÃO SEI CALCULAR EM DINHEIRO
+
+**O dado que falta, exatamente:** o **plano da Alchemy e a cota de CU
+disponível no mês**. Sem ele eu não converto "+1.500 chamadas/hora" em custo
+nem sei se cabe. **Não vou contratar nada nem supor que cabe.** A variável
+`CACA_ACORDA_POR_BLOCO=1` liga a candidata quando ela decidir; desligada é o
+comportamento de hoje, byte por byte.
+
+1521 testes, 0 falhas, build exit 0. `CACA_ENVIAR=0`, política de tamanho
+inalterada, nenhum envio reativado.
