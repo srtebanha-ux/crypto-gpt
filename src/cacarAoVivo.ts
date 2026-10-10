@@ -23,7 +23,7 @@ import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PI
 import { POOLS } from './contratos';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
-import { LivroDeEpisodios, comoLerOsEpisodios, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
+import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho } from './residuo';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
@@ -2547,6 +2547,39 @@ async function principal(): Promise<'parar' | void> {
      * Ele NAO decide nada: so observa. Nenhum portao le o livro.
      */
     const livro = new LivroDeEpisodios();
+    /** Ao lado do cache, no volume: o livro tem de sobreviver ao deploy. */
+    const CAMINHO_DO_LIVRO = process.env.CACA_EPISODIOS
+        ?? CAMINHO_DO_CACHE.replace(/[^/]+$/, 'episodios.json');
+    let primeiraVoltaPosBoot = true;
+    async function regravarLivro(): Promise<void> {
+        const r = await gravarLivro(CAMINHO_DO_LIVRO, livro.paraDisco(Date.now()));
+        if (!r.gravou) log.error('[EPISÓDIOS] NÃO gravei o livro.', { porque: r.porque });
+    }
+
+    {
+        // O LIVRO volta do disco: a IDENTIDADE atravessa o reinicio, o TEMPO
+        // nao. O periodo offline vira `msOffline` — desconhecido, nem
+        // observacao nem lacuna de coleta.
+        const doDisco = await lerLivro(CAMINHO_DO_LIVRO);
+        if (doDisco !== null) {
+            livro.doDisco(doDisco, Date.now());
+            const r = livro.resumo();
+            log.info('[EPISÓDIOS] O livro que sobreviveu ao deploy.', {
+                vindoDoDisco: `${r.episodios} episódio(s) em ${r.alvosDistintos} alvo(s)`,
+                offline: `${(r.msOffline / 60000).toFixed(1)} min DESCONHECIDOS (processo morto)`,
+                aReconciliar: r.pendentesDeReconciliacao === 0 ? 'nenhum'
+                    : `${r.pendentesDeReconciliacao} — a posição precisa reaparecer para o `
+                      + 'episódio continuar; se não reaparecer na primeira volta, fecha como perdiDeVista',
+                porQue: 'sem isto cada deploy criaria oportunidade nova da MESMA posição',
+            });
+        } else {
+            log.info('[EPISÓDIOS] Nenhum livro no disco — começando do zero.', {
+                caminho: CAMINHO_DO_LIVRO,
+                oQueIssoNaoE: 'isto não é "não houve alvo": é "não há registro"',
+            });
+        }
+    }
+
     /** A maior faixa que a coleta guarda. Acima dela nao se pergunta nada. */
     const FAIXA_MAIS_LARGA = FAIXAS_DE_DISTANCIA[FAIXAS_DE_DISTANCIA.length - 1]!;
     function anotarEpisodios(medidos: Medida[], bloco: number, idadeDoDadoMs: number | null,
@@ -3402,6 +3435,18 @@ async function principal(): Promise<'parar' | void> {
                 // mudar e dela.
                 passos.oTamanhoQuePassaria = (() => {
                     const d = alvo.dividaUsd === undefined ? null : alvo.dividaUsd.toNumber();
+                    // DUAS RECUSAS DIFERENTES, e ela mandou separar: *"No alvo
+                    // real, separe inelegibilidade por saúde de rejeição por
+                    // resíduos."* Uma posicao sadia nao e liquidavel por
+                    // NENHUM tamanho; uma liquidavel pode ser recusada pelo
+                    // tamanho pedido. Os consertos sao opostos: a primeira
+                    // pede esperar o preco, a segunda pede mudar o tamanho.
+                    const naoCruzou = alvo.quedaPct !== undefined && alvo.quedaPct !== null
+                        && alvo.quedaPct.greaterThan(0);
+                    const porSaude = naoCruzou
+                        ? `INELEGÍVEL POR SAÚDE agora: falta cair ${alvo.quedaPct!.toFixed(4)}% `
+                          + '(nenhum tamanho liquida uma posição sadia). '
+                        : 'elegível por saúde (já cruzou). ';
                     const q = coberturaQuePassa({
                         dividaCrua: alvo.dividaCrua ?? 0n, dividaUsd: d,
                         // Sem a saude exata aqui, o regime conservador: supor
@@ -3409,7 +3454,7 @@ async function principal(): Promise<'parar' | void> {
                         // pode recusar, e errar para esse lado custa gas.
                         saudeAbaixoDeNoventaECinco: false,
                     });
-                    return comoLerOTamanho(cobrir(alvo), q);
+                    return porSaude + 'E, pelo TAMANHO: ' + comoLerOTamanho(cobrir(alvo), q);
                 })();
                 passos.montagem = `${(envioDeEnsaio.length - 2) / 2} bytes de calldata, piso no contrato `
                     + `${pisoDeEnsaio} (${(Number(pisoDeEnsaio) / 1e6).toFixed(2)} na moeda da dívida se for 6 casas)`
@@ -4816,6 +4861,20 @@ async function principal(): Promise<'parar' | void> {
                         }
                         ultimoCompleto = Date.now();
                         anotarEpisodios(medidos, blocoAtual, 0, false);
+                        if (primeiraVoltaPosBoot) {
+                            // A PRIMEIRA volta completa e onde se sabe quem
+                            // continua na lista. Antes dela, fechar seria
+                            // inventar desfecho.
+                            const desistidos = livro.desistirDosPendentes(Date.now());
+                            primeiraVoltaPosBoot = false;
+                            if (desistidos > 0) {
+                                log.info('[EPISÓDIOS] Reconciliação do reinício.', {
+                                    fechados: `${desistidos} episódio(s) não reapareceram`,
+                                    desfecho: 'perdiDeVista — NÃO "recuperou": não se sabe o que houve com a posição',
+                                });
+                            }
+                        }
+                        void regravarLivro();
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
                             episodios: comoLerOsEpisodios(livro.resumo(pisoDaAposta().toNumber())),
                             alvosChecados: aLer.length,

@@ -227,3 +227,114 @@ test('a cobertura está DECLARADA no módulo, com os quatro pontos dela', () => 
     assert.match(COBERTURA_DO_REGISTRO.reinicioDoProcesso, /MEMORIA/);
     assert.match(COBERTURA_DO_REGISTRO.tempoEstimado, /msSemDados/);
 });
+
+test('PERSISTÊNCIA: a identidade atravessa o reinício, o TEMPO não', () => {
+    const { pareceLivro, VERSAO_DO_LIVRO } = require('./episodios');
+    const antes = new LivroDeEpisodios();
+    ler(antes, '0xaa', 0, 0.1, { premioEstimadoUsd: 200 });
+    ler(antes, '0xaa', 10_000, 0.09, { premioEstimadoUsd: 200 });
+    const disco = antes.paraDisco(10_000);
+    assert.ok(pareceLivro(disco));
+    assert.equal(disco.versao, VERSAO_DO_LIVRO);
+    assert.deepEqual(disco.abertosAoGravar, ['0xaa|aave-v3/WETH-USDC']);
+    // O JSON tem de sobreviver ao round-trip: `Set` virou lista.
+    const relido = JSON.parse(JSON.stringify(disco));
+    const depois = new LivroDeEpisodios();
+    depois.doDisco(relido, 10_000 + 600_000); // 10 minutos de processo morto
+    const r = depois.resumo();
+    assert.equal(r.episodios, 1, 'a identidade atravessou: é o MESMO episódio');
+    assert.equal(r.alvosDistintos, 1, 'e NÃO virou oportunidade nova');
+    assert.equal(r.reaberturas, 0, 'reinício não é reabertura: o episódio nem fechou');
+    assert.equal(r.msEntreLeituras, 10_000, 'o tempo observado é o de antes, sem herdar nada');
+    assert.ok(r.msOffline >= 600_000, 'e os 10 minutos mortos são OFFLINE');
+    assert.equal(r.pendentesDeReconciliacao, 1);
+    assert.deepEqual(depois.aReconciliar(), ['0xaa|aave-v3/WETH-USDC']);
+    assert.match(comoLerOsEpisodios(r), /OFFLINE \(desconhecido/);
+    assert.match(comoLerOsEpisodios(r), /a reconciliar do reinício/);
+});
+
+test('PERSISTÊNCIA: o offline NÃO vira observação na primeira leitura', () => {
+    const antes = new LivroDeEpisodios();
+    ler(antes, '0xaa', 0, 0.1);
+    const depois = new LivroDeEpisodios();
+    depois.doDisco(JSON.parse(JSON.stringify(antes.paraDisco(1000))), 1000 + 900_000);
+    // A posição reaparece: o episódio CONTINUA, e o buraco não é observação.
+    ler(depois, '0xaa', 1000 + 900_000 + 5, 0.1);
+    const r = depois.resumo();
+    assert.equal(r.episodios, 1);
+    assert.ok(r.msEntreLeituras < 1000, `o offline entrou como observação: ${r.msEntreLeituras}ms`);
+    assert.equal(r.pendentesDeReconciliacao, 0, 'reapareceu: reconciliado');
+    assert.equal(depois.todos()[0]!.reconciliado, true);
+});
+
+test('PERSISTÊNCIA: quem não reaparece fecha como perdiDeVista, não recuperou', () => {
+    const antes = new LivroDeEpisodios();
+    ler(antes, '0xaa', 0, 0.1);
+    ler(antes, '0xbb', 0, 0.1);
+    const depois = new LivroDeEpisodios();
+    depois.doDisco(JSON.parse(JSON.stringify(antes.paraDisco(1000))), 60_000);
+    ler(depois, '0xaa', 61_000, 0.1);          // só 0xaa volta
+    const desistidos = depois.desistirDosPendentes(62_000);
+    assert.equal(desistidos, 1, '0xbb não voltou');
+    const r = depois.resumo();
+    assert.equal(r.desfechos.perdiDeVista, 1);
+    assert.equal(r.desfechos.recuperou, undefined, 'não se inventa desfecho num reinício');
+    assert.equal(depois.todos().find((e) => e.devedor === '0xbb')!.reconciliado, false);
+});
+
+test('PERSISTÊNCIA: arquivo de versão ou forma errada é RECUSADO', () => {
+    const { pareceLivro } = require('./episodios');
+    assert.equal(pareceLivro(null), false);
+    assert.equal(pareceLivro({}), false);
+    assert.equal(pareceLivro({ versao: 999, gravadoEm: 1, episodios: [], jaFechados: {}, abertosAoGravar: [] }), false,
+        'versão diferente não é lida torta');
+    assert.equal(pareceLivro({ versao: 1, gravadoEm: 1, episodios: [], jaFechados: {} }), false,
+        'campo ausente recusa: ausência não vira lista vazia');
+});
+
+test('PERSISTÊNCIA: o contador de reaberturas atravessa o disco', () => {
+    const antes = new LivroDeEpisodios();
+    ler(antes, '0xaa', 0, 0.1);
+    antes.fecharOsAusentes([], 1000);
+    ler(antes, '0xaa', 2000, 0.1);
+    const depois = new LivroDeEpisodios();
+    depois.doDisco(JSON.parse(JSON.stringify(antes.paraDisco(2000))), 3000);
+    antes.fecharOsAusentes([], 4000);
+    ler(depois, '0xaa', 5000, 0.1);
+    depois.fecharOsAusentes([], 6000);
+    ler(depois, '0xaa', 7000, 0.1);
+    // O terceiro episódio sabe que é o terceiro, mesmo com o reinício no meio.
+    assert.equal(depois.todos().at(-1)!.reaberturaDe, 2);
+    assert.equal(depois.resumo().alvosDistintos, 1, 'e continua UM alvo');
+});
+
+test('GRAVAÇÃO: temporário ÚNICO por gravação, e rename depois', async () => {
+    const { gravarLivro, lerLivro } = require('./episodios');
+    const l = new LivroDeEpisodios();
+    ler(l, '0xaa', 0, 0.1);
+    const escritos: string[] = []; const renomeados: [string, string][] = [];
+    const io = {
+        mkdir: async () => {},
+        escrever: async (p: string) => { escritos.push(p); },
+        renomear: async (a: string, b: string) => { renomeados.push([a, b]); },
+    };
+    const r1 = await gravarLivro('/app/data/episodios.json', l.paraDisco(1000), io);
+    const r2 = await gravarLivro('/app/data/episodios.json', l.paraDisco(1001), io);
+    assert.equal(r1.gravou, true);
+    assert.equal(r2.gravou, true);
+    assert.notEqual(escritos[0], escritos[1], 'duas gravações NÃO disputam o mesmo temporário');
+    for (const [de, para] of renomeados) {
+        assert.ok(de.endsWith('.tmp'), 'escreve no temporário');
+        assert.equal(para, '/app/data/episodios.json', 'e renomeia ESSE temporário');
+    }
+    // Falha de escrita NÃO estoura: devolve gravou=false com o motivo.
+    const ruim = await gravarLivro('/x/y.json', l.paraDisco(1), {
+        mkdir: async () => {}, escrever: async () => { throw new Error('disco cheio'); },
+    });
+    assert.equal(ruim.gravou, false);
+    assert.match(ruim.porque, /disco cheio/);
+    // Arquivo torto devolve null, não livro vazio.
+    assert.equal(await lerLivro('/nao/existe.json'), null);
+    assert.equal(await lerLivro('x', { ler: async () => 'nada disso' }), null);
+    assert.equal(await lerLivro('x', { ler: async () => '{"versao":99}' }), null);
+});

@@ -3367,3 +3367,127 @@ NOSSO calldata devolve 1.754, dentro dessa faixa.
 entre transações é propriedade do conteúdo do calldata, não erro do método.**
 Em todos os casos o L1 fica abaixo de 0,11% do total: para esta estratégia ele
 não decide nada — mas agora isso é medição, e não um percentual meu.
+
+## 2026-10-10, correções: o L1 com o argumento errado, e a origem que eu NÃO localizei
+
+Ela apontou cinco pontos antes de aceitar as medições. Quatro derrubaram coisa
+minha.
+
+### 1. O L1 estava medido com o ARGUMENTO ERRADO
+
+*"confirme quais bytes foram passados a getL1Fee"*. Eu passei os **196 bytes
+do calldata**. O oráculo da OP Stack cobra pelos bytes da **transação
+serializada**:
+
+    só o calldata (o que eu passei)         196 bytes   l1Gas 1.754   US$ 0,00000169
+    a transação serializada sem assinatura  242 bytes   l1Gas 2.370   US$ 0,00000229
+    getL1FeeUpperBound(310) — teto Fjord                              US$ 0,00000444
+
+**A conta certa custa 1,35x a que eu publiquei.** A ordem de grandeza
+(centésimos de centavo) é que decide se importa — e não importa — mas o número
+estava errado e a correção é minha.
+
+E a explicação que eu dei para a diferença contra os recibos ("bytes zero
+contam diferente") **não foi verificada contra a fórmula vigente**. Ela está
+retirada: o que está medido é que `l1GasUsed` varia 1.600–2.557 entre
+transações de 196 bytes, e que o nosso cai em 2.370 com a serialização certa.
+**Por que varia, não medi.**
+
+### 2. A bisseção supunha monotonicidade. Agora ela foi OBSERVADA
+
+*"não use bisseção global sem demonstrar monotonicidade"*. A grade inteira foi
+varrida (21 frações, de 1% a 100%), e o padrão aceita/recusa saiu:
+
+    US$ 1500  saúde 0,997   ######...............   1 troca -> monótono
+    US$ 1500  saúde 0,93    ######...............   1 troca -> monótono
+    US$ 5000  saúde 0,999   #####################   0 trocas -> tudo aceito
+    US$ 5000  saúde 0,928   ################.....   1 troca -> monótono
+
+O conjunto aceito é um **prefixo** nas quatro: coberturas pequenas passam,
+grandes recusam. A bisseção não mentiu — mas agora isso é observação, não
+premissa. Com dívida e garantia remanescentes registradas em cada linha.
+
+### 3. "1,6x o prêmio" virou LUCRO LÍQUIDO por tamanho
+
+Cada linha é um **envio de verdade**, com o gás do próprio recibo descontado
+(alvo US$ 5.000, saúde 0,927754):
+
+    %dívida   bruto USDC   gás US$   LÍQUIDO USD   resto dívida US$
+      30%      1.570,75     1,4454     1.569,30        3.499,45
+      50%      2.615,60     1,4454     2.614,15        2.499,61
+      66%      3.450,16     1,4454     3.448,71        1.699,73
+      75%      3.919,08     1,4454     3.917,63        1.249,80
+      80%           —           —      RECUSADO               —
+
+**75% contra 50% = 1,50x de lucro LÍQUIDO**, com o mesmo gás. O 1,6x que eu
+publiquei era razão de **dívida coberta**, não de lucro. E o valor absoluto
+está inflado pela divergência oráculo-falso/pool; a RAZÃO sobrevive porque a
+divergência incide igual nos dois tamanhos.
+
+E a fronteira ficou apertada entre dois envios reais: deixar US$ 1.249,80 de
+dívida **passa**, deixar US$ 999,21 **recusa** — o piso está entre os dois.
+
+### 4. A ORIGEM DA REVERSÃO: eu NÃO localizei, e paro de afirmar o nome
+
+*"A indisponibilidade de callTracer não encerra a investigação... Não invente
+causalidade a partir do seletor."*
+
+Procurei pelo código, não pelo nome. O seletor `0xb629b0e4`:
+
+    nosso Cacador        6.495 bytes    AUSENTE
+    Pool (proxy)         1.933 bytes    AUSENTE
+    implementação        22.442 bytes   AUSENTE   (0xa4abc5fc…, POOL_REVISION 11)
+    os 5 contratos embutidos por PUSH20 no bytecode da implementação: AUSENTE
+    cobertura da busca: 100% dos 11 endereços embutidos
+
+**Não está em nenhum deles.** Então:
+
+- o que está MEDIDO é o *dado* da reversão: `0xb629b0e4`;
+- o nome `MustNotLeaveDust()` é **hipótese minha que casa com o seletor** — e
+  passo a escrever "reversão `0xb629b0e4`" onde antes escrevi o nome;
+- a origem continua **NÃO LOCALIZADA**. O `callTracer` não existe neste
+  ambiente, e a varredura de endereços embutidos não achou. O que resta tentar:
+  o tracer padrão (structLogs) ou uma reprodução mínima que chame o Pool direto
+  com um EOA fundeado em USDC. Declarado, não encerrado.
+
+### 5. Os episódios PERSISTEM, e o offline é DESCONHECIDO
+
+*"persista o registro e os identificadores entre reinícios... Marque o período
+offline como desconhecido e reconcilie a posição ao voltar; não assuma
+continuidade nem crie automaticamente outra oportunidade econômica."*
+
+Três coisas separadas no desenho:
+
+    IDENTIDADE  atravessa o reinício — a mesma posição continua o MESMO
+                episódio, senão cada deploy criaria oportunidade nova
+    TEMPO       NÃO atravessa. O período morto vira `msOffline`: nem observação
+                nem lacuna de coleta. São causas diferentes (bot morto contra
+                bot vivo sem ler) e pedem consertos diferentes
+    DESFECHO    não se inventa. Volta PENDENTE DE RECONCILIAÇÃO: se a posição
+                reaparece o episódio continua; se não reaparece na primeira
+                volta completa, fecha como `perdiDeVista`
+
+Gravação com a mesma regra do cache: temporário de nome **único por gravação** e
+`rename` atômico. Arquivo torto devolve `null`, não livro vazio.
+
+**OBSERVADO em dois boots reais do artefato:**
+
+    boot 1: "Nenhum livro no disco — começando do zero.
+             oQueIssoNaoE: isto não é 'não houve alvo': é 'não há registro'"
+    boot 2: "O livro que sobreviveu ao deploy.
+             offline: 1.4 min DESCONHECIDOS (processo morto)
+             aReconciliar: nenhum"
+
+### 6. E as duas recusas ficaram SEPARADAS no alvo real
+
+*"No alvo real, separe inelegibilidade por saúde de rejeição por resíduos."* O
+`[EM SECO]` agora diz as duas, porque os consertos são opostos — uma pede
+esperar o preço, a outra pede mudar o tamanho:
+
+    INELEGÍVEL POR SAÚDE agora: falta cair 8.0520% (nenhum tamanho liquida uma
+    posição sadia). E, pelo TAMANHO: o bot pede 541262490 e a cobertura que a
+    regra de resíduo deixa passar é 62200885…
+
+**A política de execução real não foi alterada**: o tamanho em produção
+continua metade, e `src/residuo.ts` é a política CANDIDATA, exercitada só no
+diagnóstico. 1505 testes, 1505 passando. `CACA_ENVIAR=0`.

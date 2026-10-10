@@ -111,6 +111,14 @@ export interface Episodio {
      * leria como dez oportunidades, que e exatamente o que ela proibiu.
      */
     reaberturaDe: number;
+    /**
+     * Voltou do disco aberto e a posicao reapareceu depois do reinicio.
+     *
+     * `false` num episodio que atravessou o disco quer dizer que ele fechou por
+     * reinicio sem a posicao ter sido vista outra vez — e `perdiDeVista` e o
+     * desfecho honesto, nao `recuperou`.
+     */
+    reconciliado: boolean;
 }
 
 export interface LeituraDeEpisodio {
@@ -154,6 +162,18 @@ export class LivroDeEpisodios {
 
     /** Quantos episodios ja fecharam, por alvo+mercado. */
     private jaFechados = new Map<string, number>();
+
+    /**
+     * Tempo em que o processo estava MORTO — nem observacao nem lacuna.
+     *
+     * Lacuna de coleta e o bot vivo sem conseguir ler; offline e o bot morto.
+     * Sao causas diferentes e pedem consertos diferentes, entao sao campos
+     * diferentes.
+     */
+    private msOfflineTotal = 0;
+
+    /** Episodios que voltaram do disco ABERTOS e ainda nao foram reconciliados. */
+    private pendentes = new Set<string>();
 
     constructor(private readonly tetoDeLacunaMs = LACUNA_QUE_AINDA_CONTA_MS) {}
 
@@ -203,9 +223,17 @@ export class LivroDeEpisodios {
                 imune: l.imune ?? false,
                 poeira: l.poeira ?? false,
                 reaberturaDe: this.jaFechados.get(chave) ?? 0,
+                reconciliado: false,
             };
             this.abertos.set(chave, novo);
             return novo;
+        }
+        // RECONCILIACAO: este episodio voltou do disco aberto, e a posicao
+        // reapareceu. Ele CONTINUA (mesma identidade, nenhuma oportunidade
+        // nova) e o periodo offline nao conta como observacao.
+        if (this.pendentes.has(chave)) {
+            this.pendentes.delete(chave);
+            existente.reconciliado = true;
         }
         const lacuna = l.agoraMs - existente.ultimoVistoEm;
         if (lacuna > existente.maiorLacunaMs) existente.maiorLacunaMs = lacuna;
@@ -273,6 +301,81 @@ export class LivroDeEpisodios {
         return quantos;
     }
 
+    /** O livro como vai ao disco. `Set` vira lista; nada de `Decimal`. */
+    paraDisco(agoraMs: number): LivroNoDisco {
+        return {
+            versao: VERSAO_DO_LIVRO,
+            gravadoEm: agoraMs,
+            msEntreLeituras: this.observadoTotalMs,
+            msSemDados: this.lacunaPerdidaMs,
+            msOffline: this.msOfflineTotal,
+            lacunasPerdidas: this.lacunasPerdidas,
+            comecouEm: this.comecouEm,
+            episodios: this.todos().map((e) => ({ ...e, estados: [...e.estados] })),
+            jaFechados: Object.fromEntries(this.jaFechados),
+            abertosAoGravar: [...this.abertos.keys()],
+        };
+    }
+
+    /**
+     * Volta do disco.
+     *
+     * O tempo entre `gravadoEm` e `agoraMs` e OFFLINE: desconhecido. Os
+     * episodios que estavam abertos voltam PENDENTES — a posicao precisa
+     * reaparecer para o episodio continuar, e se nao reaparecer na primeira
+     * volta ele fecha como `perdiDeVista`.
+     */
+    doDisco(d: LivroNoDisco, agoraMs: number): void {
+        this.observadoTotalMs = d.msEntreLeituras;
+        this.lacunaPerdidaMs = d.msSemDados;
+        this.lacunasPerdidas = d.lacunasPerdidas;
+        this.comecouEm = d.comecouEm;
+        this.msOfflineTotal = d.msOffline + Math.max(0, agoraMs - d.gravadoEm);
+        this.jaFechados = new Map(Object.entries(d.jaFechados));
+        this.fechados = [];
+        this.abertos.clear();
+        this.pendentes.clear();
+        const abertos = new Set(d.abertosAoGravar);
+        for (const e of d.episodios) {
+            const ep: Episodio = { ...e, estados: new Set(e.estados) };
+            const chave = `${ep.devedor}|${ep.mercado}`;
+            if (abertos.has(chave) && ep.fechouEm === null) {
+                this.abertos.set(chave, ep);
+                this.pendentes.add(chave);
+            } else this.fechados.push(ep);
+        }
+        // O relogio de observacao NAO continua de onde parou: a proxima leitura
+        // comeca uma lacuna nova, e nao herda o instante de antes do reinicio.
+        this.vistoPorUltimoEm = null;
+    }
+
+    /** Quem voltou do disco aberto e ainda nao reapareceu. */
+    aReconciliar(): string[] {
+        return [...this.pendentes];
+    }
+
+    /**
+     * Fecha os pendentes que nao reapareceram.
+     *
+     * Chamado depois da PRIMEIRA volta completa pos-reinicio: ali ja se sabe
+     * quem continua na lista. Antes disso, fechar seria inventar desfecho.
+     */
+    desistirDosPendentes(agoraMs: number): number {
+        let n = 0;
+        for (const chave of [...this.pendentes]) {
+            const e = this.abertos.get(chave);
+            this.pendentes.delete(chave);
+            if (e === undefined) continue;
+            e.fechouEm = agoraMs;
+            e.desfecho = 'perdiDeVista';
+            this.abertos.delete(chave);
+            this.fechados.push(e);
+            this.jaFechados.set(chave, (this.jaFechados.get(chave) ?? 0) + 1);
+            n += 1;
+        }
+        return n;
+    }
+
     todos(): Episodio[] {
         return [...this.fechados, ...this.abertos.values()];
     }
@@ -288,6 +391,8 @@ export class LivroDeEpisodios {
     resumo(premioMinimoUsd: number | null = null): {
         msEntreLeituras: number;
         msSemDados: number;
+        msOffline: number;
+        pendentesDeReconciliacao: number;
         alvosDistintos: number;
         reaberturas: number;
         imunes: number;
@@ -334,6 +439,8 @@ export class LivroDeEpisodios {
             // `msSemDados` e lacuna descartada. Ela mandou separar os dois.
             msEntreLeituras: this.observadoTotalMs,
             msSemDados: this.lacunaPerdidaMs,
+            msOffline: this.msOfflineTotal,
+            pendentesDeReconciliacao: this.pendentes.size,
             alvosDistintos: distintos.size,
             reaberturas: todos.filter((e) => e.reaberturaDe > 0).length,
             imunes: todos.filter((e) => e.imune).length,
@@ -411,5 +518,111 @@ export function comoLerOsEpisodios(r: ReturnType<LivroDeEpisodios['resumo']>): s
         + `${(r.observadoMs / 60000).toFixed(1)} min de ${(r.janelaDeParedeMs / 60000).toFixed(1)} `
         + `de parede (${cobertura}), ${r.lacunas.quantas} lacuna(s) descartada(s) `
         + `somando ${(r.lacunas.msPerdidos / 60000).toFixed(1)} min`
+        + (r.msOffline > 0 ? ` | ${(r.msOffline / 60000).toFixed(1)} min OFFLINE (desconhecido: o `
+            + 'processo estava morto, não é o mesmo que lacuna de coleta)' : '')
+        + (r.pendentesDeReconciliacao > 0
+            ? ` | ${r.pendentesDeReconciliacao} episódio(s) a reconciliar do reinício` : '')
         + (faixas === '' ? '' : ` || ${faixas}`);
+}
+
+// ---------------------------------------------------------------------------
+// PERSISTENCIA — e o periodo offline marcado como DESCONHECIDO.
+//
+// Ela mandou: *"persista o registro e os identificadores entre reinícios, com
+// gravação segura. Marque o período offline como desconhecido e reconcilie a
+// posição ao voltar; não assuma continuidade nem crie automaticamente outra
+// oportunidade econômica."*
+//
+// As tres coisas sao diferentes e o desenho as separa:
+//
+//   IDENTIDADE  atravessa o reinicio. A mesma posicao continua o MESMO
+//               episodio — senao cada deploy criaria oportunidade nova, que e
+//               exatamente o que ela proibiu duas vezes.
+//   TEMPO       NAO atravessa. O periodo offline vira `msOffline`, que nao e
+//               observacao nem lacuna de coleta: e DESCONHECIDO. Sao causas
+//               diferentes (o bot morto contra o bot vivo sem ler) e misturar
+//               as duas apagaria a distincao que ela pediu.
+//   DESFECHO    nao se inventa. O episodio volta como PENDENTE DE
+//               RECONCILIACAO: se a posicao reaparece, ele continua; se nao
+//               reaparece na primeira volta completa, fecha como
+//               `perdiDeVista`.
+// ---------------------------------------------------------------------------
+
+/** Sobe quando o formato muda, para um arquivo velho nao ser lido torto. */
+export const VERSAO_DO_LIVRO = 1;
+
+export interface LivroNoDisco {
+    versao: number;
+    gravadoEm: number;
+    msEntreLeituras: number;
+    msSemDados: number;
+    msOffline: number;
+    lacunasPerdidas: number;
+    comecouEm: number | null;
+    /** Os episodios, com o `Set` de estados virado lista. */
+    episodios: (Omit<Episodio, 'estados'> & { estados: EstadoDoEpisodio[] })[];
+    /** Quantos episodios ja fecharam, por alvo+mercado. */
+    jaFechados: Record<string, number>;
+    /** Quem estava ABERTO na hora de gravar — volta pendente de reconciliacao. */
+    abertosAoGravar: string[];
+}
+
+/** `true` se o objeto tem a forma de um livro gravado por nos. */
+export function pareceLivro(x: unknown): x is LivroNoDisco {
+    if (typeof x !== 'object' || x === null) return false;
+    const o = x as Record<string, unknown>;
+    return o.versao === VERSAO_DO_LIVRO
+        && typeof o.gravadoEm === 'number'
+        && Array.isArray(o.episodios)
+        && typeof o.jaFechados === 'object' && o.jaFechados !== null
+        && Array.isArray(o.abertosAoGravar);
+}
+
+/**
+ * Grava o livro com a MESMA regra de seguranca do cache deste projeto:
+ * temporario de nome UNICO por gravacao, e `rename` atomico depois.
+ *
+ * O nome unico nao e detalhe: em 2026-10-07 duas gravacoes do cache
+ * disputaram `${caminho}.tmp` e o `rename` da segunda estourou com ENOENT.
+ * Pior que perder a gravacao: duas escritas concorrentes no mesmo arquivo
+ * podem se intercalar e publicar JSON cortado em cima do historico.
+ */
+export async function gravarLivro(
+    caminho: string,
+    d: LivroNoDisco,
+    io: {
+        mkdir?: (p: string) => Promise<void>;
+        escrever?: (p: string, c: string) => Promise<void>;
+        renomear?: (a: string, b: string) => Promise<void>;
+    } = {},
+): Promise<{ gravou: boolean; porque: string }> {
+    const fs = require('node:fs/promises') as typeof import('node:fs/promises');
+    const path = require('node:path') as typeof import('node:path');
+    const mkdir = io.mkdir ?? (async (p: string) => { await fs.mkdir(p, { recursive: true }); });
+    const escrever = io.escrever ?? ((p: string, c: string) => fs.writeFile(p, c, 'utf8'));
+    const renomear = io.renomear ?? ((a: string, b: string) => fs.rename(a, b));
+    const temp = `${caminho}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    try {
+        await mkdir(path.dirname(caminho));
+        await escrever(temp, JSON.stringify(d));
+        await renomear(temp, caminho);
+        return { gravou: true, porque: `${d.episodios.length} episódio(s) em ${caminho}` };
+    } catch (e) {
+        return { gravou: false, porque: (e as Error).message };
+    }
+}
+
+/** Le o livro. Arquivo ausente ou torto devolve `null` — nao livro vazio. */
+export async function lerLivro(
+    caminho: string,
+    io: { ler?: (p: string) => Promise<string> } = {},
+): Promise<LivroNoDisco | null> {
+    const fs = require('node:fs/promises') as typeof import('node:fs/promises');
+    const ler = io.ler ?? ((p: string) => fs.readFile(p, 'utf8'));
+    try {
+        const x = JSON.parse(await ler(caminho));
+        // Arquivo torto NAO vira livro vazio: `null` quer dizer "nao li", e
+        // livro vazio quer dizer "li e nao havia nada". Sao coisas diferentes.
+        return pareceLivro(x) ? x : null;
+    } catch { return null; }
 }

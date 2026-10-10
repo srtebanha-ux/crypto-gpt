@@ -33,10 +33,28 @@
  * E ela corrige DUAS afirmacoes minhas, em direcoes opostas:
  *
  *   1. "nenhum ganho demonstrado" vale para saude ~0,997 — ali pedir mais que
- *      metade e clampado e so custa premio de flash loan. MAS com saude 0,93
- *      a cobertura aceita chega a 80% da divida: num alvo de US$ 5.000 isso e
- *      1,6x mais divida coberta que a metade, logo ~1,6x o premio. O ganho
- *      EXISTE, e so nesse regime.
+ *      metade e clampado e so custa premio de flash loan.
+ *
+ *      Com saude 0,93 o ganho EXISTE, e agora esta em LUCRO LIQUIDO SIMULADO
+ *      por tamanho — nao em "1,6x o premio", que era razao de divida coberta.
+ *      Medido na grade de 2026-10-10 (`forkTests/aGradeDoTamanho.js`), alvo de
+ *      US$ 5.000 com saude 0,927754, cada linha um ENVIO de verdade com o gas
+ *      do proprio recibo descontado:
+ *
+ *        %divida   bruto USDC   gas US$   LIQUIDO USD   resto divida US$
+ *          30%      1.570,75     1,4454     1.569,30        3.499,45
+ *          50%      2.615,60     1,4454     2.614,15        2.499,61
+ *          66%      3.450,16     1,4454     3.448,71        1.699,73
+ *          75%      3.919,08     1,4454     3.917,63        1.249,80
+ *          80%           —           —      RECUSADO               —
+ *
+ *      75% contra 50%: **US$ 3.917,63 contra US$ 2.614,15 LIQUIDOS = 1,50x**,
+ *      com o MESMO gas (US$ 1,4454) nos dois. O 1,6x que eu publiquei era a
+ *      razao de divida coberta, nao de lucro.
+ *
+ *      DECLARADO: o valor absoluto esta inflado pela divergencia entre o
+ *      oraculo falso e o preco real do pool. A RAZAO sobrevive porque a
+ *      divergencia incide igual nos dois tamanhos.
  *   2. "o teto de metade continua certo" e FALSO para divida entre ~US$ 1.000
  *      e ~US$ 2.000: ali metade DEIXA resto abaixo do piso e a Aave RECUSA —
  *      e existe uma cobertura menor que PASSA. O bot, pedindo sempre metade,

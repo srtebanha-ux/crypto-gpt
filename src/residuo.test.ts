@@ -49,6 +49,19 @@ test('saúde abaixo de 0,95: a cobertura aceita PASSA de metade — o ganho medi
     const razao = Number(r.cobrir) / Number(cru(5000) / 2n);
     assert.ok(razao > 1.5 && razao <= 1.61, `ganho medido foi ~1,6x, deu ${razao.toFixed(2)}x`);
     assert.match(r.porque, /é aí que há ganho/);
+    // E o ganho que importa é o LÍQUIDO, medido por envio na grade de 10/10:
+    // 75% rendeu US$ 3.917,63 contra US$ 2.614,15 da metade, com o MESMO gás.
+    // Razão de LUCRO = 1,50x — e não o 1,6x de dívida coberta que eu publiquei.
+    const fonte = require('node:fs').readFileSync(require('node:path').join(__dirname, 'residuo.ts'), 'utf8');
+    assert.match(fonte, /LIQUIDO USD/, 'a tabela de lucro líquido fica no arquivo');
+    assert.match(fonte, /1,50x/, 'e a razão é de LUCRO, não de dívida coberta');
+    // O "1,6x" só pode aparecer sendo RETRATADO, nunca como afirmação.
+    // (A primeira versão deste assert proibia a string inteira e reprovou a
+    // própria retratação — a regra certa é sobre o CONTEXTO, não a palavra.)
+    for (const linha of fonte.split('\n').filter((x: string) => x.includes('1,6x'))) {
+        assert.match(linha, /nao em|era a/,
+            `"1,6x" aparece sem retratação: ${linha.trim()}`);
+    }
     // E o resto que sobra respeita o exigido COM folga.
     const resto = 5000 - Number(r.cobrir) / 1e6;
     assert.ok(resto >= RESTO_EXIGIDO_USD, `resto ${resto} abaixo do exigido`);
