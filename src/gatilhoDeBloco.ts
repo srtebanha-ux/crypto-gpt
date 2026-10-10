@@ -20,6 +20,8 @@
  * o bot segue perguntando. Chutar um endereco aqui faria o bot tentar conectar
  * num lugar que nao existe e reclamar para sempre.
  */
+import { sanitizar } from './capacidade';
+
 export function wsDoHttp(url: string): string | null {
     const limpo = url.trim();
     if (limpo.startsWith('wss://') || limpo.startsWith('ws://')) return limpo;
@@ -117,6 +119,84 @@ export function esperarBlocoOuTempo(
  */
 export const SILENCIO_QUE_MATA_MS = 15_000;
 
+/** O teto do recuo quando a falha pode ter sido a rede piscando. */
+export const TETO_TRANSITORIO_MS = 30_000;
+
+/**
+ * O teto do recuo quando a falha e PERSISTENTE.
+ *
+ * Dez minutos, nao trinta segundos. Um provedor que recusa a conexao — cota,
+ * credencial, politica — vai recusar a proxima tambem, e cada tentativa custa
+ * credito para receber a mesma porta fechada. O log dela mostrava a mesma linha
+ * a cada 30s indefinidamente.
+ */
+export const TETO_PERSISTENTE_MS = 10 * 60_000;
+
+export interface FalhaDeWs {
+    /** 'recusada' = nunca abriu; 'caiu' = abriu e caiu depois. */
+    status: 'recusada' | 'caiu';
+    /** O codigo de fechamento do WebSocket. `null` quando o evento nao traz. */
+    codigo: number | null;
+    /** A razao/mensagem, SANITIZADA — a URL do provedor carrega a chave. */
+    mensagem: string | null;
+    /**
+     * `true` quando repetir logo NAO deve ajudar.
+     *
+     * Decidido pelo CODIGO, nao pela prosa: 1008 (policy violation), 1011
+     * (internal error do servidor), 4001-4999 (faixa de aplicacao, que e onde
+     * provedor poe "nao autorizado" e "cota"), e 1002/1003 (erro de protocolo:
+     * se o nosso frame esta errado, ele vai estar errado na proxima tambem).
+     */
+    persistente: boolean;
+}
+
+/** Os codigos de fechamento que nao melhoram repetindo logo. */
+export const CODIGOS_PERSISTENTES = [1002, 1003, 1008, 1011] as const;
+
+/**
+ * Le o evento de `close`/`error` e devolve a causa.
+ *
+ * Tudo e opcional porque o evento VARIA: `error` muitas vezes nao traz codigo
+ * nenhum, e o `close` de um proxy pode vir sem razao. Campo ausente sai `null`
+ * — nunca zero, que seria um codigo de fechamento valido inventado.
+ */
+export function lerFalhaDeWs(ev: unknown, abriuAntes: boolean): FalhaDeWs {
+    const e = (typeof ev === 'object' && ev !== null ? ev as Record<string, unknown> : {});
+    const codigo = typeof e.code === 'number' && Number.isFinite(e.code) ? e.code : null;
+    const cru = typeof e.reason === 'string' && e.reason !== ''
+        ? e.reason
+        : typeof e.message === 'string' && e.message !== '' ? e.message : null;
+    const persistente = codigo !== null
+        && (CODIGOS_PERSISTENTES.includes(codigo as 1008) || (codigo >= 4000 && codigo <= 4999));
+    return {
+        status: abriuAntes ? 'caiu' : 'recusada',
+        codigo,
+        mensagem: cru === null ? null : sanitizar(cru),
+        // Uma conexao que NUNCA abriu e, por si, mais suspeita que uma que
+        // caiu — mas sem codigo nao da para afirmar bloqueio, e tratar
+        // ausencia como bloqueio deixaria o bot sem aviso de bloco por 10 min
+        // por causa de um soluco. Entao: so o codigo decide.
+        persistente,
+    };
+}
+
+/** A frase do aviso. Diz o que se sabe e o que NAO se sabe. */
+export function comoLerAFalhaDeWs(f: FalhaDeWs): string {
+    const partes = [
+        f.status === 'recusada'
+            ? 'conexão de blocos RECUSADA (nunca abriu)'
+            : 'conexão de blocos CAIU (estava aberta)',
+        f.codigo === null ? 'código de fechamento: NÃO informado pelo evento' : `código ${f.codigo}`,
+        f.mensagem === null ? 'sem mensagem' : `"${f.mensagem}"`,
+        f.persistente
+            ? `tratando como PERSISTENTE pelo código: recuo até ${TETO_PERSISTENTE_MS / 60_000} min, `
+              + 'porque repetir contra uma porta fechada gasta crédito sem mudar nada'
+            : `tratando como transitória: recuo até ${TETO_TRANSITORIO_MS / 1000}s`,
+        'enquanto isso, volto a perguntar por HTTP',
+    ];
+    return partes.join(' | ');
+}
+
 /**
  * De quanto em quanto tempo bater o ping.
  *
@@ -167,6 +247,12 @@ export class OuvinteDeBlocos {
     /** Quantas vezes o cao de guarda derrubou a conexao. Vai para o log. */
     public quedasPorSilencio = 0;
     public vivo = false;
+    /** A ultima falha, com codigo e mensagem SANITIZADA. `null` = nenhuma. */
+    public ultimaFalha: FalhaDeWs | null = null;
+    /** Se a conexao chegou a ABRIR antes de cair. Separa recusa de queda. */
+    private vivoAntes = false;
+    /** Quantas falhas PERSISTENTES seguidas. Decide o recuo longo. */
+    public falhasPersistentes = 0;
 
     constructor(
         private readonly url: string,
@@ -224,7 +310,9 @@ export class OuvinteDeBlocos {
             this.ws = ws;
             ws.addEventListener('open', () => {
                 this.vivo = true;
+                this.vivoAntes = true;
                 this.esperaMs = 1000;
+                this.falhasPersistentes = 0;
                 // O relogio do cao de guarda comeca AQUI, e nao no primeiro
                 // bloco: um socket que abre e nunca fala e justamente o caso
                 // que `close` nao pega. Sem isto `msSemAviso()` seria `null`
@@ -249,12 +337,23 @@ export class OuvinteDeBlocos {
             // trava, uma queda gerava dois avisos e tres sockets, e a
             // contagem dobrava a cada rodada — o backoff virava enfeite.
             let jaCaiu = false;
-            const cair = () => {
+            const cair = (ev?: unknown) => {
                 if (jaCaiu || this.ws !== ws) return;
                 jaCaiu = true;
                 this.vivo = false;
                 this.pararBatimento();
-                this.aoAviso?.('conexão de blocos caiu; volto a perguntar enquanto reconecto');
+                // A CAUSA, e nao so o fato. Ela mandou: *"Capture separadamente
+                // a causa da falha do WebSocket: status de conexão, código de
+                // fechamento e mensagem sanitizada."*
+                //
+                // A versao anterior recebia o evento e o DESCARTAVA: a frase era
+                // uma literal, e o `code` do `close` — a unica coisa que
+                // distingue "a rede piscou" de "este provedor nao vai me
+                // aceitar" — ia para o lixo. Sem ele, reconectar a cada 30s
+                // contra um 1008 de cota era um laco infinito contra uma porta
+                // fechada.
+                this.ultimaFalha = lerFalhaDeWs(ev, this.vivoAntes);
+                this.aoAviso?.(comoLerAFalhaDeWs(this.ultimaFalha));
                 this.reconectar();
             };
             ws.addEventListener('close', cair);
@@ -267,11 +366,36 @@ export class OuvinteDeBlocos {
 
     private reconectar(): void {
         if (this.fechado) return;
-        const espera = this.esperaMs;
-        // Dobrar ate um teto: reconectar em laco apertado contra um provedor
-        // fora do ar so gera mais falha.
-        this.esperaMs = Math.min(this.esperaMs * 2, 30_000);
+        // TRANSITORIA contra PERSISTENTE, e os tetos sao diferentes.
+        //
+        // O log dela mostrava `[BLOCOS] conexão de blocos caiu` repetido a cada
+        // 30 segundos, para sempre, com a MESMA causa. Trinta segundos e o teto
+        // certo para a rede ter piscado, e o teto errado para um provedor que
+        // recusa a conexao: ali cada tentativa gasta credito para receber a
+        // mesma porta fechada.
+        const persistente = this.ultimaFalha?.persistente === true;
+        if (persistente) this.falhasPersistentes += 1;
+        const teto = persistente ? TETO_PERSISTENTE_MS : TETO_TRANSITORIO_MS;
+        const espera = Math.min(this.esperaMs, teto);
+        this.esperaMs = Math.min(this.esperaMs * 2, teto);
         setTimeout(() => this.abrir(), espera).unref?.();
+    }
+
+    /** O que o log do ciclo publica sobre o aviso de bloco. */
+    public diagnostico(): {
+        ligado: boolean; ultimoBloco: number; msSemAviso: number | null;
+        quedasPorSilencio: number; falhasPersistentes: number; ultimaFalha: string;
+    } {
+        return {
+            ligado: this.vivo,
+            ultimoBloco: this.ultimoBloco,
+            msSemAviso: this.msSemAviso(),
+            quedasPorSilencio: this.quedasPorSilencio,
+            falhasPersistentes: this.falhasPersistentes,
+            ultimaFalha: this.ultimaFalha === null
+                ? 'nenhuma falha registrada nesta execução'
+                : comoLerAFalhaDeWs(this.ultimaFalha),
+        };
     }
 
     /** Registra um ouvinte e devolve como tirar ele. */

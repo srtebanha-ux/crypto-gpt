@@ -172,3 +172,18 @@ test('timeout pede pedaço MENOR, não repetição igual', () => {
     assert.equal(c.tipo, 'tempo');
     assert.match(c.oQueFazer, /MENOR/);
 });
+
+
+test('dado de CACHE nunca conta como leitura nova', () => {
+    // Ela pediu: *"dados de cache não contam como leituras novas."* `reusadas` e
+    // `lidas` sao campos separados, e a soma delas NAO e cobertura: somar faria
+    // 2.500 posicoes nao lidas aparecerem como lidas porque havia estado velho
+    // guardado para elas.
+    const c = coberturaVazia(1000);
+    c.lidas = 750; c.falharam = 250; c.reusadas = 250; c.idadeMaisVelhaMs = 600_000;
+    assert.equal(coberturaCompleta(c), false, 'estado reusado não completa cobertura');
+    const f = comoLerACobertura(c);
+    assert.match(f, /750 de 1000 lidas \(75\.0%\)/, 'a fração lida exclui as reusadas');
+    assert.match(f, /250 respondidas com estado GUARDADO/);
+    assert.ok(!/1000 de 1000/.test(f));
+});

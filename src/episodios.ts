@@ -119,6 +119,17 @@ export interface Episodio {
      * desfecho honesto, nao `recuperou`.
      */
     reconciliado: boolean;
+    /**
+     * `true` quando o episodio foi fechado por uma varredura que NAO declarou o
+     * universo consultado — isto e, que nao sabia se tinha olhado para ele.
+     *
+     * E FATO REGISTRADO, nao proxy. A primeira versao desta medicao classificava
+     * duracao zero por "mais de uma leitura", e o teste derrubou: os 300
+     * episodios que o ciclo da brasa fechava indevidamente tinham UMA leitura
+     * cada, entao o proxy os chamava de legitimos. Era o erro que este projeto
+     * registra tantas vezes — eu inventando o discriminador em vez de medir.
+     */
+    fechadoSemUniverso: boolean;
 }
 
 export interface LeituraDeEpisodio {
@@ -242,6 +253,7 @@ export class LivroDeEpisodios {
                 poeira: l.poeira ?? false,
                 reaberturaDe: this.jaFechados.get(chave) ?? 0,
                 reconciliado: false,
+                fechadoSemUniverso: false,
             };
             this.abertos.set(chave, novo);
             return novo;
@@ -332,6 +344,7 @@ export class LivroDeEpisodios {
             if (universo !== null && !universo.has(e.devedor)) continue;
             e.fechouEm = agoraMs;
             e.desfecho = desfecho;
+            e.fechadoSemUniverso = universo === null;
             this.abertos.delete(chave);
             this.fechados.push(e);
             this.jaFechados.set(chave, (this.jaFechados.get(chave) ?? 0) + 1);
@@ -433,6 +446,17 @@ export class LivroDeEpisodios {
         msOffline: number;
         /** Tempo observado com buraco de leitura: improprio para inferencia economica. */
         msComCoberturaIncompleta: number;
+        /**
+         * Episodios FECHADOS com duracao zero, e de onde eles vem.
+         *
+         * `umaLeituraSo` e legitimo: a varredura DECLAROU o universo consultado,
+         * olhou para esta posicao e nao a viu. `fechadoNoMesmoInstante` e
+         * SUSPEITO: foi fechado por uma varredura que nao declarou o universo,
+         * logo nao se sabe se ela olhou — e e a assinatura do defeito de
+         * 2026-10-10, em que o ciclo da brasa (233) fechava o que a varredura
+         * completa (62 mil) tinha aberto 239ms antes.
+         */
+        duracaoZero: { total: number; umaLeituraSo: number; fechadoNoMesmoInstante: number };
         pendentesDeReconciliacao: number;
         alvosDistintos: number;
         reaberturas: number;
@@ -484,6 +508,14 @@ export class LivroDeEpisodios {
             // IMPROPRIO PARA INFERENCIA ECONOMICA: tempo observado com buraco
             // de leitura. "Nenhuma oportunidade" aqui nao e medicao.
             msComCoberturaIncompleta: this.msComCoberturaIncompletaTotal,
+            duracaoZero: (() => {
+                const zerados = todos.filter((e) => e.fechouEm !== null && e.fechouEm === e.abriuEm);
+                return {
+                    total: zerados.length,
+                    umaLeituraSo: zerados.filter((e) => !e.fechadoSemUniverso).length,
+                    fechadoNoMesmoInstante: zerados.filter((e) => e.fechadoSemUniverso).length,
+                };
+            })(),
             pendentesDeReconciliacao: this.pendentes.size,
             alvosDistintos: distintos.size,
             reaberturas: todos.filter((e) => e.reaberturaDe > 0).length,
@@ -577,6 +609,12 @@ export function comoLerOsEpisodios(r: ReturnType<LivroDeEpisodios['resumo']>): s
             ? ` | ${(r.msComCoberturaIncompleta / 60000).toFixed(1)} min observados com COBERTURA `
               + 'INCOMPLETA: esse período é IMPRÓPRIO para inferência econômica, porque "nenhuma '
               + 'oportunidade" ali pode ser leitura que faltou' : '')
+        + (r.duracaoZero.total > 0
+            ? ` | ${r.duracaoZero.total} episódio(s) de DURAÇÃO ZERO `
+              + `(${r.duracaoZero.umaLeituraSo} fechados por varredura que DECLAROU o universo `
+              + `consultado, o que é legítimo; ${r.duracaoZero.fechadoNoMesmoInstante} fechados `
+              + 'sem universo declarado, o que é SUSPEITO: era a assinatura do ciclo da brasa '
+              + 'fechando o que a varredura completa abriu)' : '')
         + (r.pendentesDeReconciliacao > 0
             ? ` | ${r.pendentesDeReconciliacao} episódio(s) a reconciliar do reinício` : '')
         + (faixas === '' ? '' : ` || ${faixas}`);

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { wsDoHttp, pedidoDeAssinatura, blocoDaMensagem, esperarBlocoOuTempo,
-    pedidoDePing, SILENCIO_QUE_MATA_MS, OuvinteDeBlocos } from './gatilhoDeBloco';
+    pedidoDePing, SILENCIO_QUE_MATA_MS, OuvinteDeBlocos,
+    lerFalhaDeWs, comoLerAFalhaDeWs } from './gatilhoDeBloco';
 
 test('deriva o WebSocket do mesmo provedor', () => {
     assert.equal(wsDoHttp('https://base-mainnet.g.alchemy.com/v2/abc'), 'wss://base-mainnet.g.alchemy.com/v2/abc');
@@ -163,4 +164,74 @@ test('QUALQUER mensagem realimenta o cão, não só bloco novo', () => {
     (o as unknown as { ultimoAvisoEm: number }).ultimoAvisoEm = relogio;
     relogio += 14_000;
     assert.equal(o.baterUmaVez(), false, '14s desde o pong: a conexão está viva');
+});
+
+// ---------------------------------------------------------------------------
+// A CAUSA DA FALHA DO WEBSOCKET, que era descartada.
+//
+// O log de producao trazia `[BLOCOS] conexão de blocos caiu; volto a perguntar
+// enquanto reconecto` repetido a cada 30 segundos, sem codigo, sem razao e sem
+// distinguir "a rede piscou" de "este provedor nao vai me aceitar". A funcao
+// `cair()` RECEBIA o evento e nao olhava nada dele.
+// ---------------------------------------------------------------------------
+
+test('o código de fechamento e a razão são capturados, não descartados', () => {
+    const f = lerFalhaDeWs({ code: 1008, reason: 'policy violation' }, true);
+    assert.equal(f.status, 'caiu');
+    assert.equal(f.codigo, 1008);
+    assert.equal(f.mensagem, 'policy violation');
+    assert.equal(f.persistente, true);
+    const frase = comoLerAFalhaDeWs(f);
+    assert.match(frase, /código 1008/);
+    assert.match(frase, /PERSISTENTE/);
+    assert.match(frase, /10 min/);
+});
+
+test('conexão que NUNCA abriu é "recusada", não "caiu"', () => {
+    assert.equal(lerFalhaDeWs({ code: 1006 }, false).status, 'recusada');
+    assert.equal(lerFalhaDeWs({ code: 1006 }, true).status, 'caiu');
+    assert.match(comoLerAFalhaDeWs(lerFalhaDeWs({}, false)), /RECUSADA \(nunca abriu\)/);
+});
+
+test('código ausente sai `null` e NÃO vira persistente', () => {
+    // Zero seria um codigo de fechamento inventado, e "sem codigo" tratado como
+    // bloqueio deixaria o bot 10 min sem aviso de bloco por um soluço.
+    for (const ev of [{}, undefined, null, 'erro', { code: NaN }]) {
+        const f = lerFalhaDeWs(ev, true);
+        assert.equal(f.codigo, null, JSON.stringify(ev));
+        assert.equal(f.persistente, false);
+    }
+    assert.match(comoLerAFalhaDeWs(lerFalhaDeWs({}, true)), /NÃO informado pelo evento/);
+});
+
+test('1006 (queda anormal) é TRANSITÓRIA: é o código de rede piscando', () => {
+    const f = lerFalhaDeWs({ code: 1006 }, true);
+    assert.equal(f.persistente, false);
+    assert.match(comoLerAFalhaDeWs(f), /transitória/);
+    assert.match(comoLerAFalhaDeWs(f), /30s/);
+});
+
+test('a faixa 4000–4999 é da aplicação: é ali que o provedor diz cota/autorização', () => {
+    for (const c of [4000, 4429, 4999]) assert.equal(lerFalhaDeWs({ code: c }, false).persistente, true);
+    assert.equal(lerFalhaDeWs({ code: 3999 }, false).persistente, false);
+    assert.equal(lerFalhaDeWs({ code: 5000 }, false).persistente, false);
+});
+
+test('a mensagem do WebSocket é SANITIZADA: a chave mora na URL', () => {
+    const f = lerFalhaDeWs(
+        { code: 1008, reason: 'denied for wss://base-mainnet.g.alchemy.com/v2/CHAVE_SUPER_SECRETA_1234567' },
+        false,
+    );
+    assert.ok(!f.mensagem!.includes('CHAVE_SUPER_SECRETA_1234567'));
+    assert.ok(!comoLerAFalhaDeWs(f).includes('CHAVE_SUPER_SECRETA_1234567'));
+});
+
+test('o diagnóstico do ouvinte diz ausência de falha sem inventar uma', () => {
+    const o = new OuvinteDeBlocos('wss://exemplo.invalido');
+    const d = o.diagnostico();
+    assert.equal(d.ligado, false);
+    assert.equal(d.msSemAviso, null, 'nenhum aviso ainda não é "0ms desde o último"');
+    assert.equal(d.falhasPersistentes, 0);
+    assert.match(d.ultimaFalha, /nenhuma falha registrada/);
+    o.fechar();
 });

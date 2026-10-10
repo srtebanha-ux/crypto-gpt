@@ -384,6 +384,48 @@ test('sem o universo, o defeito antigo ainda é visível — e é o que ele era'
         'com universo: só 0xb, porque 0xc não foi consultado');
 });
 
+test('duração zero: as DUAS origens são separadas, porque pedem ações opostas', () => {
+    // Legitima: vista numa leitura so, e nao na seguinte.
+    const a = new LivroDeEpisodios();
+    ler(a, '0xa', 0, 0.3);
+    a.fecharOsAusentes([], 0, 'perdiDeVista', ['0xa']);   // declarou que olhou
+    const ra = a.resumo();
+    assert.deepEqual(ra.duracaoZero, { total: 1, umaLeituraSo: 1, fechadoNoMesmoInstante: 0 });
+    assert.match(comoLerOsEpisodios(ra), /DECLAROU o universo consultado, o que é legítimo/);
+
+    // SUSPEITA: duas leituras no mesmo instante e fechamento no mesmo instante.
+    // E a assinatura do 533 -> 0, e por isso ela sai com a palavra SUSPEITO.
+    const b = new LivroDeEpisodios();
+    ler(b, '0xb', 0, 0.3);
+    b.fecharOsAusentes([], 0);          // sem universo: nao se sabe se olhou
+    const rb = b.resumo();
+    assert.deepEqual(rb.duracaoZero, { total: 1, umaLeituraSo: 0, fechadoNoMesmoInstante: 1 });
+    assert.match(comoLerOsEpisodios(rb), /SUSPEITO/);
+});
+
+test('com o universo consultado, o 533 -> 0 produz ZERO episódios suspeitos', () => {
+    // A medicao que fecha a investigacao que ela pediu: a causa dos milhares de
+    // episodios de duracao zero era o fechamento indevido, e com o universo o
+    // numero cai a zero nesse mesmo cenario.
+    const l = new LivroDeEpisodios();
+    const completa: string[] = [];
+    for (let i = 0; i < 533; i += 1) completa.push(`0x${i.toString(16).padStart(40, '0')}`);
+    for (const d of completa) ler(l, d, 1000, 0.3);
+    const brasa = completa.slice(0, 233);
+    for (const d of brasa) ler(l, d, 1000, 0.28);     // mesmo instante, de proposito
+    l.fecharOsAusentes(brasa, 1000, 'perdiDeVista', brasa);
+    assert.equal(l.resumo().duracaoZero.total, 0, 'ninguém foi fechado: todos os 233 foram vistos');
+
+    // E sem o universo, no MESMO cenario, os 300 de fora fecham com duracao zero.
+    const semUniverso = new LivroDeEpisodios();
+    for (const d of completa) ler(semUniverso, d, 1000, 0.3);
+    for (const d of brasa) ler(semUniverso, d, 1000, 0.28);
+    semUniverso.fecharOsAusentes(brasa, 1000);
+    assert.equal(semUniverso.resumo().duracaoZero.total, 300,
+        'estes 300 eram os episódios de duração zero do log de produção');
+    assert.equal(semUniverso.resumo().duracaoZero.fechadoNoMesmoInstante, 300, 'todos SUSPEITOS');
+});
+
 test('episódio de duração ZERO é contado e nomeado, não escondido', () => {
     // Milhares deles apareceram no log, e a causa era o fechamento indevido.
     // A duracao zero em si nao e defeito — pode ser uma posicao vista uma vez

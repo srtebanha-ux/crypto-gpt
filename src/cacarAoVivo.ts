@@ -8,6 +8,7 @@ import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } fr
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
 import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
+import { ControleDeCapacidade, Inventario, oQuePausar, type Tarefa } from './capacidade';
 import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd, gorjetaQueMaximizaOValor, premioQueSePagaComAFatia, chanceDeSerOTopoDaFatia } from './prontidao';
@@ -937,6 +938,25 @@ function aEscadaAbsorve(mensagem: string): boolean {
 /** Tenta voltar ao primário quando o castigo venceu. Barato: só troca a url. */
 function talvezVoltarAoPrimario(): void {
     if (!ESCADA.deveVoltarAoPrimario()) return;
+    // O PORTAO DA CAPACIDADE, e ele vem ANTES de tudo.
+    //
+    // `deveVoltarAoPrimario` mede TEMPO de castigo, e cota nao volta com tempo.
+    // Sem este portao, o bot devolvia o trafego ao provedor que respondeu
+    // `Monthly capacity limit exceeded` assim que o castigo vencia — e
+    // descobria o esgotamento outra vez, de graca nenhuma.
+    //
+    // A unica porta que abre aqui e a SONDAGEM espacada, com teto explicito.
+    const primario = hostDoRpc(ESCADA.urlDoPrimario());
+    if (CAPACIDADE.estaEsgotado(primario)) {
+        if (!CAPACIDADE.podeSondar(primario)) return;
+        CAPACIDADE.sondou(primario);
+        log.warn('[CAPACIDADE] SONDANDO o primário esgotado — uma tentativa, espaçada.', {
+            provedor: primario,
+            estado: CAPACIDADE.comoLer(primario),
+            oQueAcontece: 'se esta leitura passar, o provedor volta por CONFIRMAÇÃO; se falhar, '
+                + 'conta como tentativa gasta e eu espero a próxima janela',
+        });
+    }
     const de = ESCADA.url();
     ESCADA.voltarAoPrimario();
     rpc = ESCADA.url();
@@ -1051,6 +1071,26 @@ const VAZAO = new GovernadorDeVazao(
 /** Os avisos repetidos, agrupados: o primeiro inteiro, o resto contado. */
 const AVISOS = new AgrupadorDeAvisos(10_000);
 
+/**
+ * O ESGOTAMENTO DE CAPACIDADE, por provedor. Ver `src/capacidade.ts`.
+ *
+ * `Monthly capacity limit exceeded` nao volta esperando, e era por isso que
+ * `talvezVoltarAoPrimario` — que mede TEMPO de castigo — devolvia o trafego ao
+ * provedor esgotado.
+ */
+const CAPACIDADE = new ControleDeCapacidade();
+/** O inventario de consumo, por tarefa e por metodo. */
+const INVENTARIO = new Inventario();
+/** Quando este processo subiu: o denominador da projecao diaria. */
+const BOOT_EM = Date.now();
+/** Qual tarefa esta pedindo RPC agora. A chamada sozinha nao sabe. */
+let tarefaAtual: Tarefa = 'monitoramento';
+function comTarefa<T>(t: Tarefa, f: () => T): T {
+    const antes = tarefaAtual;
+    tarefaAtual = t;
+    try { return f(); } finally { tarefaAtual = antes; }
+}
+
 async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
     prioridadePedida?: 'essencial' | 'normal' | 'demorada'): Promise<T> {
     // A PRIORIDADE POR METODO, quando quem chama nao diz: `eth_getLogs` e a
@@ -1060,6 +1100,7 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
     // seriam trinta lugares para esquecer.
     const prioridade = prioridadePedida
         ?? (metodo === 'eth_getLogs' ? 'demorada' : 'normal');
+    INVENTARIO.contar(tarefaAtual, metodo);
     let espera = 1000;
     for (let i = 0; ; i += 1) {
         const soltar = await VAZAO.vez(metodo, prioridade);
@@ -1067,6 +1108,15 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
             const r = await umaChamada<T>(metodo, params);
             ESCADA.deuCerto();
             VAZAO.deuCerto();
+            // RECUPERACAO 1: uma leitura que PASSA prova disponibilidade. E a
+            // unica forma de sair do esgotamento que nao e esperar nem supor.
+            if (CAPACIDADE.confirmou(hostDoRpc(rpc))) {
+                log.info('[CAPACIDADE] O provedor VOLTOU — uma leitura passou.', {
+                    provedor: hostDoRpc(rpc),
+                    porque: 'confirmação de disponibilidade, não passagem de tempo: cota não '
+                        + 'volta com o relógio',
+                });
+            }
             return r;
         } catch (e) {
             const msg = (e as Error).message;
@@ -1078,6 +1128,28 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
             // na hora é mais rápido que a escada de espera, e não espera nada.
             if (aEscadaAbsorve(msg)) continue;
             const recusa = classificarRecusa(msg);
+            if (recusa.tipo === 'cota') {
+                // ESGOTAMENTO, nao falha transitoria. Registrar ANTES de lancar,
+                // porque e isto que impede o retorno automatico ao provedor.
+                const host = hostDoRpc(rpc);
+                const novo = !CAPACIDADE.estaEsgotado(host);
+                CAPACIDADE.esgotou(host, msg);
+                if (novo) {
+                    const pausa = oQuePausar({
+                        algumEsgotado: true, noFallback: !ESCADA.ehOPrimario(),
+                    });
+                    log.error('[CAPACIDADE] Provedor com CAPACIDADE ESGOTADA.', {
+                        metodo,
+                        estado: CAPACIDADE.comoLer(host),
+                        pausando: pausa.pausar,
+                        porquePausar: pausa.porque,
+                        consumoAteAqui: INVENTARIO.chamadasObservadas().slice(0, 6),
+                        oQueIssoNaoE: 'não é limite de taxa: esperar não resolve e repetir gasta o '
+                            + 'que sobrou. Não volto automaticamente a este provedor por tempo',
+                    });
+                }
+                throw e;
+            }
             if (!recusa.absorveEsperando) throw e;
             // O RECUO E COMPARTILHADO: quem nem viu a recusa tambem recua, e a
             // proxima chamada ja nasce esperando. Era isto que faltava.
@@ -1366,7 +1438,20 @@ export let ultimaMedicao = { total: 0, msRede: 0, msDecode: 0, pedacos: 0 };
  * perdido era indistinguivel de uma posicao que respondeu nada — e era por isso
  * que 2.500 devedores saiam das listas quentes sem uma linha de log.
  */
-export let ultimaCobertura: Cobertura = coberturaVazia();
+/**
+ * A COBERTURA VIAJA COM A LEITURA, e nao numa variavel de modulo.
+ *
+ * A primeira versao disto era `export let ultimaCobertura`, e era um defeito da
+ * forma que ela nomeou: *"meça cada avaliação completa sem sobrescrever os
+ * contadores nas chamadas auxiliares."* Toda chamada de `lerEmLote` —
+ * `resolverPares`, os simbolos das moedas, as casas decimais — sobrescrevia o
+ * contador, e o log do ciclo podia publicar a cobertura de uma leitura auxiliar
+ * de 15 posicoes como se fosse a cobertura da varredura de 62 mil.
+ *
+ * Agora `lerEmLote` DEVOLVE a cobertura junto com os dados, e quem precisa dela
+ * a guarda na sua propria variavel. Nao ha estado compartilhado para
+ * sobrescrever.
+ */
 
 /**
  * O ULTIMO FATO CONHECIDO de cada devedor, com a hora em que foi lido.
@@ -1380,9 +1465,8 @@ const ultimoFatoConhecido = new Map<string, Medida & { lidoEm: number }>();
 async function lerEmLote(
     chamadas: Array<{ alvo: string; dados: string }>,
     nomeDaLeitura = 'lote',
-): Promise<Array<string | null>> {
+): Promise<{ dados: Array<string | null>; cobertura: Cobertura }> {
     const cobertura = coberturaVazia(chamadas.length);
-    ultimaCobertura = cobertura;
     const pedacos = partirEmPedacos(chamadas, CHAMADAS_POR_MULTICALL);
     const porPedaco: Array<Array<string | null>> = new Array(pedacos.length);
     // Dois relogios separados. O pool de conexoes nao mudou nada (3.440ms ->
@@ -1487,7 +1571,7 @@ async function lerEmLote(
             })),
         });
     }
-    return porPedaco.flat();
+    return { dados: porPedaco.flat(), cobertura };
 }
 
 /**
@@ -1785,7 +1869,12 @@ export async function montarAlvos(
     dataProvider: string,
     precos: Map<string, Decimal>,
     casas: Map<string, number>,
-    ler: (cs: Array<{ alvo: string; dados: string }>) => Promise<Array<string | null>> = lerEmLote,
+    // O transporte entra por parametro para a ferramenta da REGRA 0 rodar a
+    // MESMA funcao (uma copia provaria a copia). O adaptador existe porque
+    // `lerEmLote` passou a devolver a cobertura junto: `montarAlvos` nao
+    // declara cobertura de ninguem, entao ele pega so os dados.
+    ler: (cs: Array<{ alvo: string; dados: string }>) => Promise<Array<string | null>>
+        = async (cs) => (await lerEmLote(cs, 'pares')).dados,
 ): Promise<Alvo[]> {
     const chamadas = devedores.flatMap((d) =>
         moedas.map((m) => ({ alvo: dataProvider, dados: codificarUserReserveData(m, d) })),
@@ -2099,7 +2188,7 @@ async function principal(): Promise<'parar' | void> {
     // blockchain: lista de enderecos decorada envelhece em silencio.
     const parPorToken = new Map<string, string>();
     try {
-        const respSym = await lerEmLote(moedas.map((m) => ({ alvo: m, dados: SELETOR_SYMBOL })));
+        const respSym = (await lerEmLote(moedas.map((m) => ({ alvo: m, dados: SELETOR_SYMBOL })), 'símbolos')).dados;
         for (let i = 0; i < moedas.length; i++) {
             const sim = respSym[i] ? lerSymbol(respSym[i]!) : null;
             const par = sim ? simboloDaBinance(sim) : null;
@@ -2116,7 +2205,7 @@ async function principal(): Promise<'parar' | void> {
         limiarDoFeed: `${DESVIO_DE_ESCRITA.toFixed(2)}%`,
     });
 
-    const respDec = await lerEmLote(moedas.map((m) => ({ alvo: m, dados: SELETOR_DECIMALS })));
+    const respDec = (await lerEmLote(moedas.map((m) => ({ alvo: m, dados: SELETOR_DECIMALS })), 'casas')).dados;
     moedas.forEach((m, i) => {
         if (respDec[i]) {
             try { casas.set(m.toLowerCase(), Number(BigInt(respDec[i]!))); } catch {}
@@ -2511,7 +2600,21 @@ async function principal(): Promise<'parar' | void> {
      * Ele roda DESGRUDADO do laco de caca: nenhuma varredura de mercado pode
      * atrasar um tiro, e se ela falhar o bot nao morre por isso.
      */
-    if (process.env.CACA_MERCADOS_MORPHO === '1') {
+    if (process.env.CACA_MERCADOS_MORPHO === '1'
+        && oQuePausar({
+            algumEsgotado: CAPACIDADE.esgotados().length > 0,
+            noFallback: !ESCADA.ehOPrimario(),
+        }).pausar.includes('morpho')) {
+        // TAREFA SECUNDARIA PAUSADA. Ela mandou: *"Pause ou reduza tarefas
+        // secundárias antes de sobrecarregar o fallback."* O censo do Morpho
+        // responde uma pergunta que espera; o monitoramento nao.
+        log.warn('[MORPHO] NÃO vou varrer os mercados agora, e o motivo é orçamento.', {
+            provedoresEsgotados: CAPACIDADE.esgotados(),
+            noFallback: !ESCADA.ehOPrimario(),
+            porque: 'é tarefa secundária: ela espera, o monitoramento não. A variável continua '
+                + 'ligada e a varredura roda quando a capacidade voltar',
+        });
+    } else if (process.env.CACA_MERCADOS_MORPHO === '1') {
         log.warn('[MORPHO] Vou varrer os mercados UMA vez, em paralelo. Isto não atrasa a caça.', {
             porque: 'o eth_getLogs do RPC público recusou 23 de 24 janelas no sandbox; aqui ele responde',
             depois: 'apague CACA_MERCADOS_MORPHO quando a linha [MERCADOS] sair',
@@ -2519,7 +2622,7 @@ async function principal(): Promise<'parar' | void> {
         void (async () => {
             try {
                 const { varrerMercadosDoMorpho } = await import('./mercadosDoMorpho');
-                await varrerMercadosDoMorpho();
+                await comTarefa('morpho', () => varrerMercadosDoMorpho());
             } catch (e) {
                 log.error('[MORPHO] A varredura falhou, e o bot segue caçando.', {
                     erro: e instanceof Error ? e.message : String(e),
@@ -4430,7 +4533,7 @@ async function principal(): Promise<'parar' | void> {
                     });
             }
             const fimLeitura = agora.etapa('leitura');
-            const resp = await lerEmLote(chamadasDoCiclo, 'brasa');
+            const { dados: resp, cobertura: coberturaDaBrasa } = await lerEmLote(chamadasDoCiclo, 'brasa');
             fimLeitura({ comoCorreu: resp.length === 0 ? 'vazia' : 'ok',
                 detalhe: `${chamadasDoCiclo.length} chamadas em lote` });
 
@@ -4678,7 +4781,7 @@ async function principal(): Promise<'parar' | void> {
             // episodios que a varredura completa, de 62 mil posicoes, tinha
             // aberto 239ms antes. Ver `LivroDeEpisodios.fecharOsAusentes`.
             anotarEpisodios(medidosDaBrasa, blocoAtual, Date.now() - menorMargemLidaEm, true, brasa,
-                coberturaCompleta(ultimaCobertura));
+                coberturaCompleta(coberturaDaBrasa));
 
             // A POSTURA PASSA A LER O NUMERO DE 8 SEGUNDOS, NAO O DE 15 MINUTOS.
             //
@@ -4718,10 +4821,10 @@ async function principal(): Promise<'parar' | void> {
                                 ?? process.env.GIT_COMMIT_SHA?.slice(0, 7) ?? null,
                             servico: `brasa/${posturaAgora()}`,
                             envioAutorizado: ENVIAR,
-                            lidas: ultimaCobertura.lidas,
-                            pedidas: ultimaCobertura.pedidas === 0 ? null : ultimaCobertura.pedidas,
+                            lidas: coberturaDaBrasa.lidas,
+                            pedidas: coberturaDaBrasa.pedidas === 0 ? null : coberturaDaBrasa.pedidas,
                             idadeDoDadoMs: Date.now() - menorMargemLidaEm,
-                            falhas: ultimaCobertura.falharam,
+                            falhas: coberturaDaBrasa.falharam,
                             rpcAtivo: soOHost(rpc),
                             webSocket: ouvinte === null ? null : ouvinte.vivo,
                             decisoes: medidosDaBrasa.length,
@@ -4729,6 +4832,36 @@ async function principal(): Promise<'parar' | void> {
                             duracaoMs: Date.now() - inicioDoCiclo,
                             amostras: tempos.quantas('real'),
                         }),
+                        // O INVENTARIO DE CONSUMO, com observado e estimado
+                        // SEPARADOS: o provedor nao devolve CU em resposta
+                        // nenhuma, entao a coluna de CU e multiplicacao por uma
+                        // tabela e sai rotulada.
+                        consumo: (() => {
+                            const janela = Date.now() - BOOT_EM;
+                            const dia = INVENTARIO.porDia(janela);
+                            const cu = INVENTARIO.cuEstimadoTotal();
+                            return {
+                                janela: `${(janela / 60_000).toFixed(1)} min desde o boot`,
+                                chamadasObservadas: INVENTARIO.totalObservado(),
+                                porTarefaEMetodo: INVENTARIO.chamadasObservadas().slice(0, 8),
+                                cuEstimado: `${cu.cu} (ESTIMADO por tabela de pesos, NÃO medido: `
+                                    + `nenhuma resposta do provedor traz CU)`
+                                    + (cu.chamadasSemPeso > 0
+                                        ? ` — e ${cu.chamadasSemPeso} chamadas sem peso conhecido`
+                                        : ''),
+                                porDia: dia === null
+                                    ? 'janela curta demais para projetar um dia (abaixo de 10 min '
+                                      + 'uma varredura completa entra ou não entra na amostra e '
+                                      + 'muda a projeção por um fator grande)'
+                                    : `${dia.chamadas} chamadas/dia, ${dia.cuEstimado} CU/dia ESTIMADO`,
+                                capacidade: CAPACIDADE.esgotados().length === 0
+                                    ? 'nenhum provedor esgotado'
+                                    : CAPACIDADE.esgotados().map((p) => CAPACIDADE.comoLer(p)),
+                            };
+                        })(),
+                        avisoDeBloco: ouvinte === null
+                            ? 'não configurado (não é o mesmo que caído)'
+                            : ouvinte.diagnostico(),
                         tempos: comoLerOsTempos(tempos.resumo('real')),
                         oSinalEsperouOSono: blocosQueEsperaramOSono === 0
                             ? (ouvinte?.vivo ? 'nenhum bloco chegou durante um sono ainda'
@@ -4753,7 +4886,6 @@ async function principal(): Promise<'parar' | void> {
                         tiros: comoEstaIndo(tiros, nonceManager?.nonceConhecido()),
                         armados: alvosArmados.size,
                         gas: saldoLidoEm === 0 ? 'ainda não li' : `${new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6)} ETH`,
-                        avisoDeBloco: ouvinte === null ? 'desligado' : (ouvinte.vivo ? `ligado (último ${ouvinte.ultimoBloco})` : 'CAIU — perguntando'),
                         mercado: mercadoAgora() === null
                             ? 'SEM COTAÇÃO — ritmo fixo'
                             : `${mercadoAgora()!.toFixed(4)}% abaixo do oráculo (${posturaAgora()}, via ${fonteDoPreco})`,
@@ -4851,13 +4983,17 @@ async function principal(): Promise<'parar' | void> {
                     );
                 const aLer = corte.lidos;
                 if (aLer.length > 0) {
-                    const loteGigante = await lerEmLote(aLer.map((d) => ({
+                    // A TAREFA que gasta, nomeada: o inventario separa a
+                    // varredura completa do monitoramento, e as duas tem ordens
+                    // de grandeza diferentes (248 multicalls contra 1).
+                    tarefaAtual = varredura === 'completa' ? 'varreduraCompleta' : 'monitoramento';
+                    const leitura = await lerEmLote(aLer.map((d) => ({
                         alvo: REDE.pool,
                         dados: SELETOR_CONTA_DO_USUARIO + d.replace(/^0x/, '').padStart(64, '0'),
                     })), varredura);
-                    // A cobertura DESTA leitura, capturada antes de qualquer
-                    // outra chamada sobrescrever `ultimaCobertura`.
-                    const coberturaDaLeitura = ultimaCobertura;
+                    tarefaAtual = 'monitoramento';
+                    const coberturaDaLeitura = leitura.cobertura;
+                    const loteGigante = leitura.dados;
                     /** Quem NAO foi lido: nao e seguro, nao e ausencia, e buraco. */
                     const naoLidos: string[] = [];
                     for (const pos of coberturaDaLeitura.posicoesFalhas) {

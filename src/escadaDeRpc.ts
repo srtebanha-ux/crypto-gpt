@@ -164,6 +164,15 @@ export class EscadaDeRpc {
     public indice(): number { return this.atual; }
     public quantos(): number { return this.degraus.length; }
     public ehOPrimario(): boolean { return this.atual === 0; }
+    /**
+     * A url do PRIMEIRO degrau, qualquer que seja o degrau em uso.
+     *
+     * Existe porque o controle de capacidade pergunta sobre o primario estando
+     * no secundario: `url()` responderia sobre o provedor errado, e marcar o
+     * esgotamento do secundario como se fosse do primario seria pior que nao
+     * medir.
+     */
+    public urlDoPrimario(): string { return this.degraus[0]!.url; }
 
     /** Deu certo: zera a conta deste degrau. Sucesso apaga histórico de falha. */
     public deuCerto(): void {
