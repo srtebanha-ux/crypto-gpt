@@ -8,8 +8,8 @@ import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } fr
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
 import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
-import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, sanitizar, OrcamentoDaTarefa, veredictoDaVarredura, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
-import { diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs } from './cobertura';
+import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, sanitizar, OrcamentoDaTarefa, veredictoDaVarredura, FreioDeRecusas, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
+import { diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs, lerErroJsonRpc, comoLerOErroJsonRpc } from './cobertura';
 import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd, gorjetaQueMaximizaOValor, premioQueSePagaComAFatia, chanceDeSerOTopoDaFatia } from './prontidao';
@@ -1097,8 +1097,13 @@ async function umaChamada<T>(metodo: string, params: unknown[]): Promise<T> {
         body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: metodo, params }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    const corpo = (await res.json()) as { result?: T; error?: { message?: string } };
-    if (corpo.error) throw new Error(corpo.error.message ?? 'erro sem mensagem');
+    const corpo = (await res.json()) as { result?: T; error?: unknown };
+    // A FORMA DO ERRO NAO PODE COMER A MENSAGEM. `corpo.error.message` dava
+    // `undefined` quando o `error` chegava como `[code, message]` — e foi assim
+    // que 5.750 posicoes se perderam com "erro sem mensagem" no log.
+    if (corpo.error !== undefined && corpo.error !== null) {
+        throw new Error(comoLerOErroJsonRpc(lerErroJsonRpc(corpo, res.status)));
+    }
     // O PORTAO. Era `return corpo.result as T`, e um corpo sem `result` nem
     // `error` — que o provedor da Base manda sob carga — devolvia `undefined`
     // prometido como `string`. Ele viajava ate
@@ -1312,9 +1317,15 @@ async function chamarCru(
         body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'eth_call', params }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    const corpo = (await res.json()) as { result?: string; error?: { message?: string; data?: string } };
-    if (corpo.error) {
-        return { ok: false, mensagem: corpo.error.message ?? 'erro sem mensagem', dados: corpo.error.data };
+    const corpo = (await res.json()) as { result?: string; error?: { data?: string } | unknown };
+    if (corpo.error !== undefined && corpo.error !== null) {
+        const lido = lerErroJsonRpc(corpo, res.status);
+        const dados = typeof corpo.error === 'object' && corpo.error !== null
+            ? (corpo.error as { data?: string }).data
+            : undefined;
+        // `dados` (o seletor da reversao) continua viajando: e ele que
+        // distingue "ainda nao cruzou" de "meu contrato quebrou".
+        return { ok: false, mensagem: comoLerOErroJsonRpc(lido), dados };
     }
     // `corpo.result ?? '0x'` era a mesma forma do defeito do `.replace`, com
     // outra cara: `'0x'` e "o contrato nao devolveu nada", que e RESPOSTA, e
@@ -1592,6 +1603,11 @@ export let ultimaMedicao = { total: 0, msRede: 0, msDecode: 0, pedacos: 0 };
  */
 const ultimoFatoConhecido = new Map<string, Medida & { lidoEm: number }>();
 
+/** O teto de tempo da repescagem. Curto: ela nao pode atrasar o ciclo. */
+const TETO_DA_REPESCAGEM_MS = numeroDoAmbiente(
+    'CACA_REPESCAGEM_MS', process.env.CACA_REPESCAGEM_MS, 3000,
+);
+
 async function lerEmLote(
     chamadas: Array<{ alvo: string; dados: string }>,
     nomeDaLeitura = 'lote',
@@ -1599,6 +1615,8 @@ async function lerEmLote(
     tarefa: Tarefa = 'monitoramento',
 ): Promise<{ dados: Array<string | null>; cobertura: Cobertura }> {
     const cobertura = coberturaVazia(chamadas.length);
+    /** Os pedacos que falharam, para UMA repescagem com orcamento proprio. */
+    const pendentes: Array<{ posicao: number; de: number; pedaco: typeof chamadas }> = [];
     const pedacos = partirEmPedacos(chamadas, CHAMADAS_POR_MULTICALL);
     const porPedaco: Array<Array<string | null>> = new Array(pedacos.length);
     // Dois relogios separados. O pool de conexoes nao mudou nada (3.440ms ->
@@ -1646,6 +1664,10 @@ async function lerEmLote(
                     cobertura.lotesQueFalharam.push({
                         lote, posicoes: pedaco.length, erro: (e as Error).message.slice(0, 160),
                     });
+                    // GUARDA O PEDACO para a repescagem. Sem isto a unica saida
+                    // era esperar a varredura seguinte: foi assim que 5.750
+                    // posicoes ficaram sem leitura valida por um ciclo inteiro.
+                    pendentes.push({ posicao, de, pedaco });
                     // UMA linha por pedaco enterrava o evento de verdade: dez
                     // pedacos deram dez linhas iguais. O log agrupado sai no fim
                     // da leitura, com contagem e id de lote; aqui fica so o
@@ -1666,6 +1688,47 @@ async function lerEmLote(
                 }
             }),
         );
+    }
+
+    // A REPESCAGEM: uma volta, concorrencia 2, orcamento de tempo proprio.
+    //
+    // Ela pediu: *"Recupere os lotes pendentes com concorrência e orçamento
+    // controlados, preservando o monitoramento."* Concorrencia 2 e não 6, e um
+    // teto de tempo, porque a repescagem NAO pode atrasar o ciclo da brasa —
+    // ela acontece depois da leitura principal e desiste em vez de insistir.
+    if (pendentes.length > 0 && !VAZAO.estaEmRecuo()) {
+        const orcamentoDaRepescagem = new OrcamentoDaTarefa(
+            tarefa, pendentes.length, TETO_DA_REPESCAGEM_MS,
+        );
+        let recuperados = 0;
+        for (let i = 0; i < pendentes.length; i += 2) {
+            if (orcamentoDaRepescagem.esgotado()) break;
+            await Promise.all(pendentes.slice(i, i + 2).map(async (p) => {
+                if (!orcamentoDaRepescagem.pedir()) return;
+                try {
+                    const bruto = await chamar<string>('eth_call', [
+                        { to: MULTICALL3, data: codificarAggregate3(p.pedaco) },
+                        'latest',
+                    ], 1, 'demorada', tarefa);
+                    const rs = decodificarAggregate3Rapido(bruto);
+                    porPedaco[p.posicao] = p.pedaco.map((_, k) => (rs[k]?.ok ? rs[k].dados : null));
+                    cobertura.lidas += p.pedaco.length;
+                    cobertura.falharam -= p.pedaco.length;
+                    for (let k = 0; k < p.pedaco.length; k += 1) cobertura.posicoesFalhas.delete(p.de + k);
+                    recuperados += p.pedaco.length;
+                } catch { /* segue pendente, e a cobertura continua dizendo isso */ }
+            }));
+        }
+        if (recuperados > 0 || orcamentoDaRepescagem.gastas() > 0) {
+            log.info('[REPESCAGEM] Reli os lotes que falharam, com orçamento próprio.', {
+                leitura: nomeDaLeitura,
+                lotesPendentes: pendentes.length,
+                posicoesRecuperadas: recuperados,
+                aindaSemLeitura: cobertura.falharam,
+                orcamento: orcamentoDaRepescagem.comoLer(),
+                porque: 'concorrência 2 e teto de tempo: a repescagem não pode atrasar a brasa',
+            });
+        }
     }
 
     const total = Date.now() - inicioTotal;
@@ -4152,6 +4215,11 @@ async function principal(): Promise<'parar' | void> {
         // tentativa sai do orcamento, e `chamar` recebe `tentativas: 1` para
         // nao multiplicar por fora dele.
         const orcamento = new OrcamentoDaTarefa('historico', ATE_ONDE_OLHAR + 10, 60_000);
+        // O TETO GLOBAL NAO BASTA. Medido em 2026-10-11: 40 falhas em 40
+        // tentativas dentro de um orcamento de 50 — o teto limitou o total e nao
+        // impediu percorrer todas as janelas. O freio pergunta outra coisa:
+        // "ja falhei 3 vezes seguidas pela MESMA razao, vale a proxima?".
+        const freio = new FreioDeRecusas();
         for (let i = 0; i < ATE_ONDE_OLHAR; i += 1) {
             const ate = topo - i * PASSO;
             const de = Math.max(0, ate - PASSO + 1);
@@ -4166,6 +4234,9 @@ async function principal(): Promise<'parar' | void> {
                 }], 1, 'demorada', 'historico');
                 janelasLidas += 1;
                 blocoMaisAntigoOlhado = de;
+                // SUCESSO SOLTA O FREIO — inclusive sucesso PARCIAL: uma janela
+                // lida prova que o provedor nao esta recusando tudo.
+                freio.passou();
                 for (const cru of logs) {
                     try {
                         const l = decodificarLiquidacao(cru);
@@ -4186,6 +4257,27 @@ async function principal(): Promise<'parar' | void> {
                     break;
                 }
                 ultimaRecusa = msg;
+                const oQueFazer = freio.recusou(msg);
+                if (oQueFazer === 'adiar') {
+                    orcamento.encerrar(
+                        `${freio.seguidasAgora()} recusas equivalentes seguidas: adiei a tarefa `
+                        + 'em vez de percorrer as janelas restantes',
+                    );
+                    break;
+                }
+                if (oQueFazer === 'recuarESondar') {
+                    // RECUA UMA VEZ e deixa a janela seguinte servir de
+                    // sondagem: se ela passar, `freio.passou()` solta tudo.
+                    const recuo = VAZAO.recuar(2000);
+                    log.warn('[CENSO] Recuando: recusas equivalentes seguidas.', {
+                        freio: freio.comoLer(),
+                        recuandoMs: recuo,
+                        orcamento: orcamento.comoLer(),
+                        oQueVemAgora: 'a próxima janela vale como sondagem. Se ela passar, sigo; '
+                            + 'se as recusas continuarem, adio a tarefa',
+                    });
+                    await dormir(recuo);
+                }
             }
             await dormir(200);
         }
@@ -4204,6 +4296,7 @@ async function principal(): Promise<'parar' | void> {
             log.error('[MERCADO] HISTÓRICO INDISPONÍVEL — não concluo nada sobre o mercado.', {
                 veredicto: veredicto.frase,
                 orcamento: orcamento.comoLer(),
+                freio: freio.comoLer(),
                 diagnostico: ultimaRecusa === null
                     ? 'nenhuma recusa registrada'
                     : comoLerODiagnosticoDeLogs(diagnosticarRecusaDeLogs(ultimaRecusa)),
@@ -5121,6 +5214,12 @@ async function principal(): Promise<'parar' | void> {
                             decisoesQueAtirariam: caidos.length,
                             duracaoMs: Date.now() - inicioDoCiclo,
                             amostras: tempos.quantas('real'),
+                            // SEPARADOS da cobertura do ciclo, de propósito.
+                            semLeituraValida: ultimoFatoConhecido.size === 0
+                                ? null
+                                : devedores.length - ultimoFatoConhecido.size,
+                            blocosPendentes: null,
+                            descobertaAdiada: ADIADAS.historico > 0,
                         }),
                         // O INVENTARIO DE CONSUMO, com observado e estimado
                         // SEPARADOS: o provedor nao devolve CU em resposta

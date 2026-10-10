@@ -37,6 +37,20 @@ export interface EstadoDoCiclo {
     duracaoMs: number | null;
     /** Quantas amostras de latencia o livro ja tem. */
     amostras: number | null;
+    /**
+     * Posicoes CONHECIDAS que seguem sem leitura valida, fora deste ciclo.
+     *
+     * MEDIDO em 2026-10-11: o resumo publicou `cobertura 250/250` no mesmo log
+     * em que a varredura perdeu 5.750 posicoes. As duas coisas sao verdade e
+     * nao se substituem — o ciclo da brasa leu as 250 dele; os 5.750 continuam
+     * sem estado. Ela pediu: *"`250/250` não deve esconder os 5.750
+     * desconhecidos nem os 2.135 blocos pendentes."*
+     */
+    semLeituraValida: number | null;
+    /** Blocos que a descoberta deixou pendentes. `null` = não sei. */
+    blocosPendentes: number | null;
+    /** `true` quando a descoberta foi ADIADA nesta volta. */
+    descobertaAdiada: boolean | null;
 }
 
 /** O host de uma URL de RPC, sem caminho nem consulta — a chave mora neles. */
@@ -61,6 +75,15 @@ export function resumoDoCiclo(e: EstadoDoCiclo): string {
     const dec = e.decisoes === null
         ? '?'
         : `${e.decisoes}${e.decisoesQueAtirariam === null ? '' : ` (${e.decisoesQueAtirariam} atirariam)`}`;
+    const semLeitura = e.semLeituraValida === null
+        ? 'semLeitura ?'
+        : `semLeitura ${e.semLeituraValida}`;
+    const atraso = e.descobertaAdiada === null
+        ? 'descoberta ?'
+        : e.descobertaAdiada
+            ? `descoberta ADIADA (${e.blocosPendentes === null ? '?' : e.blocosPendentes} blocos pendentes)`
+            : `descoberta em dia${e.blocosPendentes === null || e.blocosPendentes === 0 ? ''
+                : ` (${e.blocosPendentes} blocos pendentes)`}`;
     return [
         `v ${e.versao ?? '?'}`,
         e.servico,
@@ -73,5 +96,10 @@ export function resumoDoCiclo(e: EstadoDoCiclo): string {
         `decisões ${dec}`,
         `ciclo ${n(e.duracaoMs)}ms`,
         `amostras ${n(e.amostras)}`,
+        // ESTES DOIS NAO SAO A COBERTURA DO CICLO, e e por isso que sao campos
+        // separados: o ciclo pode ter lido 250 de 250 e haver milhares de
+        // posicoes conhecidas sem estado nenhum.
+        semLeitura,
+        atraso,
     ].join(' · ');
 }

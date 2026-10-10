@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
     ControleDeCapacidade, Inventario, sanitizar, oQuePausar, SECUNDARIAS,
     ENTRE_SONDAGENS_MS, SONDAGENS_POR_JANELA, JANELA_DE_SONDAGEM_MS, CU_ESTIMADO_POR_METODO,
-    decidirSobreRecusa, OrcamentoDaTarefa, veredictoDaVarredura,
+    decidirSobreRecusa, OrcamentoDaTarefa, veredictoDaVarredura, FreioDeRecusas, chaveDaRecusa,
 } from './capacidade';
 import { classificarRecusa } from './cobertura';
 import { EscadaDeRpc, ehFalhaDeTransporte } from './escadaDeRpc';
@@ -697,7 +697,7 @@ test('uma recusa de cota ENCERRA o orçamento: não insiste nas 39 restantes', (
 test('o censo passa `tentativas: 1` e consome o orçamento — não 4 por janela', () => {
     const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
     const i = fonte.indexOf('async function quandoFoiAUltimaLiquidacao');
-    const corpo = fonte.slice(i, i + 5000).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const corpo = fonte.slice(i, i + 9000).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
     assert.match(corpo, /new OrcamentoDaTarefa\('historico'/, 'a tarefa tem orçamento');
     assert.match(corpo, /if \(!orcamento\.pedir\(\)\) break;/, 'cada janela sai do orçamento');
     assert.match(corpo, /\}\], 1, 'demorada', 'historico'\)/,
@@ -761,4 +761,64 @@ test('TODO `eth_getLogs` declara a tarefa: nenhum cai no padrão `monitoramento`
         assert.match(trecho.slice(0, fim + 2), /'historico'\)/,
             `esta chamada de eth_getLogs não declara a tarefa: ${trecho.slice(0, 70)}`);
     }
+});
+
+test('o freio adia antes de percorrer 40 janelas — o teto global não impedia', () => {
+    const f = new FreioDeRecusas();
+    // As três primeiras seguem; a 3ª manda recuar e sondar; a 6ª adia.
+    assert.equal(f.recusou('request limit reached'), 'seguir');
+    assert.equal(f.recusou('request limit reached'), 'seguir');
+    // Da 3ª à 5ª ele recua ANTES de cada tentativa — recuar uma vez só e
+    // continuar em velocidade cheia seria o teto global de novo, com outro nome.
+    assert.equal(f.recusou('request limit reached'), 'recuarESondar');
+    assert.equal(f.recusou('request limit reached'), 'recuarESondar');
+    assert.equal(f.recusou('request limit reached'), 'recuarESondar');
+    assert.equal(f.recusou('request limit reached'), 'adiar');
+    // SEIS tentativas, não quarenta: é essa a diferença que ela apontou.
+    assert.equal(f.seguidasAgora(), 6);
+});
+
+test('SUCESSO solta o freio, e sucesso PARCIAL também', () => {
+    const f = new FreioDeRecusas();
+    f.recusou('request limit reached');
+    f.recusou('request limit reached');
+    assert.equal(f.seguidasAgora(), 2);
+    f.passou();                                  // uma janela lida no meio
+    assert.equal(f.seguidasAgora(), 0);
+    assert.equal(f.chaveAtual(), null);
+    // E a contagem recomeça do zero: não desiste por história velha.
+    assert.equal(f.recusou('request limit reached'), 'seguir');
+    assert.equal(f.seguidasAgora(), 1);
+});
+
+test('recusas DIFERENTES não somam: a política é por razão equivalente', () => {
+    const f = new FreioDeRecusas();
+    assert.equal(f.recusou('request limit reached'), 'seguir');
+    assert.equal(f.recusou('eth_getLogs is limited to a 500 range'), 'seguir');
+    assert.equal(f.seguidasAgora(), 1, 'a razão mudou: a contagem reinicia');
+    assert.equal(f.recusou('eth_getLogs is limited to a 500 range'), 'seguir');
+    assert.equal(f.recusou('eth_getLogs is limited to a 500 range'), 'recuarESondar');
+});
+
+test('a chave da recusa ignora credencial e detalhe variável', () => {
+    assert.equal(
+        chaveDaRecusa('request limit reached at https://h/v2/CHAVE_SECRETA_LONGA_123'),
+        chaveDaRecusa('request limit reached at https://h/v2/OUTRA_CHAVE_SECRETA_99'),
+        'a mesma razão com chaves diferentes é a MESMA recusa',
+    );
+    assert.ok(!chaveDaRecusa('request limit reached at https://h/v2/CHAVE_SECRETA_LONGA_123')
+        .includes('CHAVE_SECRETA'));
+});
+
+test('o censo usa o freio DE VERDADE, com sucesso soltando', () => {
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const i = fonte.indexOf('async function quandoFoiAUltimaLiquidacao');
+    const corpo = fonte.slice(i, i + 6000).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    assert.match(corpo, /new FreioDeRecusas\(\)/);
+    assert.match(corpo, /freio\.passou\(\)/, 'sucesso solta o freio');
+    assert.match(corpo, /freio\.recusou\(msg\)/);
+    assert.match(corpo, /=== 'adiar'/, 'e o adiamento encerra a tarefa');
+    assert.match(corpo, /=== 'recuarESondar'/);
+    // `freio.passou()` vem no ramo de SUCESSO, antes do `catch`.
+    assert.ok(corpo.indexOf('freio.passou()') < corpo.indexOf('freio.recusou(msg)'));
 });

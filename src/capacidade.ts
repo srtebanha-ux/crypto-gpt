@@ -558,3 +558,76 @@ export function veredictoDaVarredura(e: { lidas: number; falharam: number; achad
         frase: `cobertura COMPLETA: ${e.lidas} de ${e.lidas} janelas lidas, ${e.achados} achado(s)`,
     };
 }
+
+// ---------------------------------------------------------------------------
+// FREIO DE RECUSAS EQUIVALENTES SEGUIDAS.
+//
+// MEDIDO no log de 2026-10-11, com `c97b94e` no ar: o censo deu 40 falhas em 40
+// tentativas dentro de um orcamento de 50. O teto GLOBAL funcionou como limite,
+// e nao impediu percorrer todas as janelas — ela apontou exatamente isso.
+//
+// Teto global responde "quanto no total". Esta politica responde outra coisa:
+// *"ja falhei N vezes seguidas pela MESMA razao, vale tentar a proxima?"*. Sao
+// perguntas diferentes e precisam das duas.
+//
+// A politica, em tres degraus:
+//   1. ate `ANTES_DE_RECUAR` recusas equivalentes seguidas: segue tentando
+//   2. depois: RECUA uma vez e tenta UMA sondagem (a janela seguinte conta como
+//      sondagem; se ela passar, o freio solta)
+//   3. ate `ANTES_DE_ADIAR`: ADIA a tarefa inteira
+//
+// SUCESSO SOLTA O FREIO, e sucesso PARCIAL tambem: uma janela lida prova que o
+// provedor nao esta recusando tudo, e manter o freio apos ela seria desistir
+// por historia velha.
+// ---------------------------------------------------------------------------
+
+export const ANTES_DE_RECUAR = 3;
+export const ANTES_DE_ADIAR = 6;
+
+/** Duas recusas sao EQUIVALENTES quando o tipo e o inicio da mensagem coincidem. */
+export function chaveDaRecusa(mensagem: string): string {
+    const c = classificarRecusa(mensagem);
+    return `${c.tipo}:${sanitizar(mensagem).slice(0, 60).toLowerCase()}`;
+}
+
+export type OQueFazerAgora = 'seguir' | 'recuarESondar' | 'adiar';
+
+export class FreioDeRecusas {
+    private chave: string | null = null;
+    private seguidas = 0;
+    /** Quantas vezes o freio mandou recuar, para o log contar. */
+    public recuos = 0;
+
+    constructor(
+        private readonly antesDeRecuar = ANTES_DE_RECUAR,
+        private readonly antesDeAdiar = ANTES_DE_ADIAR,
+    ) {}
+
+    /** Registra uma recusa e diz o que fazer em seguida. */
+    recusou(mensagem: string): OQueFazerAgora {
+        const k = chaveDaRecusa(mensagem);
+        if (k === this.chave) this.seguidas += 1;
+        else { this.chave = k; this.seguidas = 1; }
+        if (this.seguidas >= this.antesDeAdiar) return 'adiar';
+        if (this.seguidas >= this.antesDeRecuar) { this.recuos += 1; return 'recuarESondar'; }
+        return 'seguir';
+    }
+
+    /**
+     * Uma leitura PASSOU: o freio solta.
+     *
+     * Vale para sucesso parcial — uma janela lida no meio de muitas falhas
+     * prova que o provedor nao esta recusando tudo, e manter o freio ali seria
+     * desistir por historia velha.
+     */
+    passou(): void { this.chave = null; this.seguidas = 0; }
+
+    seguidasAgora(): number { return this.seguidas; }
+    chaveAtual(): string | null { return this.chave; }
+
+    comoLer(): string {
+        if (this.chave === null) return 'nenhuma recusa seguida pendente';
+        return `${this.seguidas} recusa(s) EQUIVALENTE(S) seguida(s) ("${this.chave}"), `
+            + `${this.recuos} recuo(s) — adio em ${this.antesDeAdiar}`;
+    }
+}

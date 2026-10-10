@@ -5,7 +5,7 @@ import { join } from 'path';
 import {
     exigirResultado, RespostaSemResultado, coberturaVazia, coberturaCompleta,
     fracaoQueFalhou, comoLerACobertura, idDoLote, classificarRecusa,
-    diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs,
+    diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs, lerErroJsonRpc, comoLerOErroJsonRpc,
 } from './cobertura';
 import { codificarAggregate3, decodificarAggregate3Rapido } from './multicall';
 
@@ -189,13 +189,16 @@ test('dado de CACHE nunca conta como leitura nova', () => {
     assert.ok(!/1000 de 1000/.test(f));
 });
 
-test('`request limit reached` comprova FREQUÊNCIA e nada além — nem tamanho, nem método', () => {
+test('`request limit reached` NÃO comprova frequência: a causa é INDETERMINADA', () => {
+    // RETRATAÇÃO: a versão anterior deste teste afirmava `restricao: 'frequencia'`.
+    // A mensagem diz que um limite foi alcançado e não diz qual.
     const d = diagnosticarRecusaDeLogs('request limit reached');
-    assert.equal(d.restricao, 'frequencia');
-    assert.match(d.comprova, /FREQUÊNCIA/);
-    assert.match(d.comprova, /Não comprova restrição de tamanho, de método nem de capacidade/);
-    assert.ok(d.desconhecido.some((x) => /teto de TAMANHO/.test(x)));
-    assert.match(d.comoDescobrir, /UMA consulta pequena, com filtro conhecido/);
+    assert.equal(d.restricao, 'indeterminada');
+    assert.match(d.comprova, /autoriza ESPERAR/);
+    assert.match(d.comprova, /NÃO comprova qual/);
+    assert.ok(!/é FREQUÊNCIA/.test(d.comprova), 'a conclusão antiga não voltou');
+    assert.ok(d.desconhecido.some((x) => /causa específica é INDETERMINADA/.test(x)));
+    assert.match(d.comoDescobrir, /se falhar igual, continua indeterminada/);
 });
 
 test('restrição de TAMANHO só quando a resposta fala de faixa ou resultados', () => {
@@ -230,4 +233,54 @@ test('mensagem sem padrão observado fica DESCONHECIDA nos quatro', () => {
 test('o diagnóstico não publica credencial', () => {
     const d = diagnosticarRecusaDeLogs('request limit reached at https://h/v2/CHAVE_MUITO_SECRETA_123');
     assert.ok(!comoLerODiagnosticoDeLogs(d).includes('CHAVE_MUITO_SECRETA_123'));
+});
+
+test('o erro `[code, message]` era o que comia a mensagem das 5.750 posições', () => {
+    // A FORMA ANTIGA, copiada: `corpo.error.message` num array é `undefined`.
+    const corpo = { jsonrpc: '2.0', id: 1, error: [-32005, 'request limit reached'] };
+    const comoEraAntes = (corpo as unknown as { error: { message?: string } }).error.message
+        ?? 'erro sem mensagem';
+    assert.equal(comoEraAntes, 'erro sem mensagem', 'era esta a prosa que chegava ao log');
+
+    // AGORA: código, mensagem e forma, cada um no seu campo.
+    const e = lerErroJsonRpc(corpo, 200);
+    assert.equal(e.codigo, -32005);
+    assert.equal(e.mensagem, 'request limit reached');
+    assert.equal(e.status, 200);
+    assert.equal(e.formato, 'par');
+    const frase = comoLerOErroJsonRpc(e);
+    assert.match(frase, /request limit reached/);
+    assert.match(frase, /code -32005/);
+    assert.match(frase, /HTTP 200/);
+    assert.match(frase, /forma do erro: par/);
+});
+
+test('as outras formas do `error`, e nenhuma vira "sem mensagem" calada', () => {
+    assert.equal(lerErroJsonRpc({ error: { code: -1, message: 'x' } }).formato, 'objeto');
+    assert.equal(lerErroJsonRpc({ error: 'texto solto' }).mensagem, 'texto solto');
+    assert.equal(lerErroJsonRpc({ error: 'texto solto' }).formato, 'texto');
+    assert.equal(lerErroJsonRpc({ result: '0x' }).formato, 'ausente');
+    assert.equal(lerErroJsonRpc('não é objeto').formato, 'estranho');
+    // Sem mensagem, a frase DIZ que não há — e diz que a forma não explica a causa.
+    const semMsg = lerErroJsonRpc({ error: [-32000] });
+    assert.equal(semMsg.mensagem, null);
+    assert.match(comoLerOErroJsonRpc(semMsg), /SEM mensagem legível/);
+    assert.match(comoLerOErroJsonRpc(semMsg), /não por que o provedor recusou/);
+});
+
+test('a forma não é a causa, e a frase não deixa confundir', () => {
+    // Ela avisou: *"Não atribua a causa apenas ao formato."*
+    const e = lerErroJsonRpc({ error: [-32005, 'request limit reached'] }, 200);
+    const frase = comoLerOErroJsonRpc(e);
+    // A forma aparece como diagnóstico de LEITURA, ao lado da mensagem real.
+    assert.match(frase, /forma do erro: par/);
+    assert.ok(frase.indexOf('request limit reached') < frase.indexOf('forma do erro'),
+        'a mensagem do provedor vem primeiro: ela é a evidência, a forma é contexto');
+    // E a causa específica continua indeterminada.
+    assert.equal(diagnosticarRecusaDeLogs(e.mensagem!).restricao, 'indeterminada');
+});
+
+test('a credencial não passa pelo leitor de erro', () => {
+    const e = lerErroJsonRpc({ error: [-1, 'denied at https://h/v2/CHAVE_SECRETA_LONGA_1234'] });
+    assert.ok(!comoLerOErroJsonRpc(e).includes('CHAVE_SECRETA_LONGA_1234'));
 });

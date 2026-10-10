@@ -223,7 +223,11 @@ export function classificarRecusa(mensagem: string): {
 //   `query exceeds max results`             usado no proxy de verificacao
 // ---------------------------------------------------------------------------
 
-export type RestricaoDeLogs = 'frequencia' | 'tamanho' | 'metodo' | 'capacidade' | 'desconhecida';
+export type RestricaoDeLogs = 'frequencia' | 'tamanho' | 'metodo' | 'capacidade'
+    /** Um limite foi alcancado e a mensagem NAO diz qual. Ver a retratacao abaixo. */
+    | 'indeterminada'
+    /** Nenhum padrao observado reconhece a mensagem. */
+    | 'desconhecida';
 
 export interface DiagnosticoDeLogs {
     restricao: RestricaoDeLogs;
@@ -271,17 +275,27 @@ export function diagnosticarRecusaDeLogs(mensagem: string): DiagnosticoDeLogs {
     }
     if (classificarRecusa(mensagem).tipo === 'taxa') {
         return {
-            restricao: 'frequencia',
-            // ESTA E A LINHA QUE ELA PEDIU. `request limit reached` diz
-            // FREQUENCIA e mais nada: nao diz que a janela e grande, nem que o
-            // metodo e proibido, nem que a cota acabou.
-            comprova: `a resposta fala de LIMITE DE REQUISIÇÕES ("${s}"): é FREQUÊNCIA — pedidos `
-                + 'por segundo. Não comprova restrição de tamanho, de método nem de capacidade',
-            desconhecido: ['o teto de TAMANHO deste provedor (esta recusa não diz nada sobre ele)',
+            // RETRATACAO, 2026-10-11. Eu publiquei que `request limit reached`
+            // COMPROVA frequencia. Nao comprova. Ela recusou: *"Retire a
+            // conclusão de que `request limit reached` comprova frequência.
+            // Registre a causa específica como indeterminada até haver
+            // evidência."*
+            //
+            // A mensagem diz que um LIMITE foi alcancado e nao diz QUAL: pode
+            // ser pedidos por segundo, pedidos por janela maior, peso da
+            // consulta, ou limite do plano com outro texto. O que ela autoriza
+            // e ESPERAR — e esperar e compativel com os quatro.
+            restricao: 'indeterminada',
+            comprova: `a resposta diz que um LIMITE foi alcançado ("${s}") e autoriza ESPERAR. `
+                + 'NÃO comprova qual: frequência, tamanho, método e capacidade seguem todos '
+                + 'possíveis',
+            desconhecido: ['QUAL limite foi alcançado — a causa específica é INDETERMINADA',
+                'o teto de TAMANHO deste provedor',
                 'se o método seria servido numa janela sem rajada',
                 'quanto de cota resta'],
-            comoDescobrir: 'UMA consulta pequena, com filtro conhecido, depois do recuo: se ela '
-                + 'passar, a restrição era frequência; se falhar com mensagem de faixa, é tamanho',
+            comoDescobrir: 'UMA consulta pequena, com filtro conhecido, depois do recuo. Se ela '
+                + 'passar, a evidência aponta frequência ou peso; se falhar com mensagem de '
+                + 'faixa, tamanho; se falhar igual, continua indeterminada',
         };
     }
     return {
@@ -296,4 +310,73 @@ export function diagnosticarRecusaDeLogs(mensagem: string): DiagnosticoDeLogs {
 export function comoLerODiagnosticoDeLogs(d: DiagnosticoDeLogs): string {
     return `restrição ${d.restricao.toUpperCase()} | COMPROVA: ${d.comprova} | `
         + `DESCONHECIDO: ${d.desconhecido.join('; ')} | PRÓXIMA MEDIÇÃO: ${d.comoDescobrir}`;
+}
+
+/**
+ * O ERRO JSON-RPC, qualquer que seja a FORMA em que ele chegou.
+ *
+ * MEDIDO no log de 2026-10-11: a varredura perdeu 5.750 posicoes e a mensagem
+ * saiu vazia, porque o `error` chegou como **array** `[code, message]` e o
+ * codigo fazia `corpo.error.message` — `undefined` num array, entao a prosa
+ * virava "erro sem mensagem".
+ *
+ * E a ressalva dela importa: *"Não atribua a causa apenas ao formato."* A forma
+ * explica por que a MENSAGEM se perdeu; ela nao diz por que o provedor recusou.
+ * Entao esta funcao devolve as duas coisas separadas: o que veio (`codigo`,
+ * `mensagem`, `status` HTTP) e em que FORMA veio, sem concluir causa de forma.
+ */
+export interface ErroJsonRpc {
+    codigo: number | null;
+    mensagem: string | null;
+    /** O status HTTP, quando quem chamou souber. */
+    status: number | null;
+    /** A forma em que o `error` chegou. Diagnostico de LEITURA, nao de causa. */
+    formato: 'objeto' | 'par' | 'texto' | 'ausente' | 'estranho';
+}
+
+export function lerErroJsonRpc(corpo: unknown, status: number | null = null): ErroJsonRpc {
+    const vazio: ErroJsonRpc = { codigo: null, mensagem: null, status, formato: 'ausente' };
+    if (typeof corpo !== 'object' || corpo === null) return { ...vazio, formato: 'estranho' };
+    const e = (corpo as Record<string, unknown>).error;
+    if (e === undefined || e === null) return vazio;
+    // A FORMA QUE SE PERDIA: `[code, message]`.
+    if (Array.isArray(e)) {
+        const codigo = typeof e[0] === 'number' ? e[0] : null;
+        const texto = e.find((x) => typeof x === 'string');
+        return {
+            codigo,
+            mensagem: typeof texto === 'string' ? sanitizar(texto) : null,
+            status, formato: 'par',
+        };
+    }
+    if (typeof e === 'string') return { codigo: null, mensagem: sanitizar(e), status, formato: 'texto' };
+    if (typeof e === 'object') {
+        const o = e as Record<string, unknown>;
+        return {
+            codigo: typeof o.code === 'number' ? o.code : null,
+            mensagem: typeof o.message === 'string' ? sanitizar(o.message) : null,
+            status, formato: 'objeto',
+        };
+    }
+    return { ...vazio, formato: 'estranho' };
+}
+
+/**
+ * A prosa do erro, para subir como `Error`. Nunca vazia.
+ *
+ * Quando nao ha mensagem, ela DIZ que nao ha — e diz o codigo e a forma, que e
+ * o que sobrou para diagnosticar. "erro sem mensagem" sozinho nao deixava nem
+ * saber que havia um codigo.
+ */
+export function comoLerOErroJsonRpc(e: ErroJsonRpc): string {
+    const partes: string[] = [];
+    if (e.mensagem !== null) partes.push(e.mensagem);
+    if (e.codigo !== null) partes.push(`code ${e.codigo}`);
+    if (e.status !== null) partes.push(`HTTP ${e.status}`);
+    partes.push(`forma do erro: ${e.formato}`);
+    if (e.mensagem === null) {
+        partes.push('SEM mensagem legível — e a forma explica por que ela faltou, '
+            + 'não por que o provedor recusou: a causa continua indeterminada');
+    }
+    return partes.join(' | ');
 }
