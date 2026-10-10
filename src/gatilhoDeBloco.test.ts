@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { wsDoHttp, pedidoDeAssinatura, blocoDaMensagem, esperarBlocoOuTempo,
     pedidoDePing, SILENCIO_QUE_MATA_MS, OuvinteDeBlocos,
     lerFalhaDeWs, comoLerAFalhaDeWs, enderecoDeBlocos, classificarNegociacao,
-    comoLerANegociacao } from './gatilhoDeBloco';
+    comoLerANegociacao, idDoEndpoint } from './gatilhoDeBloco';
 
 test('deriva o WebSocket do mesmo provedor', () => {
     assert.equal(wsDoHttp('https://base-mainnet.g.alchemy.com/v2/abc'), 'wss://base-mainnet.g.alchemy.com/v2/abc');
@@ -230,7 +230,7 @@ test('a mensagem do WebSocket é SANITIZADA: a chave mora na URL', () => {
 test('o diagnóstico do ouvinte diz ausência de falha sem inventar uma', () => {
     const o = new OuvinteDeBlocos('wss://exemplo.invalido');
     const d = o.diagnostico();
-    assert.equal(d.ligado, false);
+    assert.equal(d.estado, 'configurado', 'há endereço e nada foi tentado ainda');
     assert.equal(d.msSemAviso, null, 'nenhum aviso ainda não é "0ms desde o último"');
     assert.equal(d.falhasPersistentes, 0);
     assert.match(d.ultimaFalha, /nenhuma falha registrada/);
@@ -297,4 +297,37 @@ test('a mensagem da negociação é sanitizada e a frase traz só o host', () =>
     assert.ok(!f.includes('CHAVE_SECRETA_LONGA_123456'));
     assert.match(f, /h\.exemplo/);
     assert.match(f, /HTTP 401/);
+});
+
+
+test('NUNCA "conectado" antes do evento `open`: os quatro estados', () => {
+    // O log de 19:57:13.608 publicou `ligado: true` e 22ms depois a conexão foi
+    // recusada: a linha saía logo após `abrir()`, que só AGENDA.
+    const o = new OuvinteDeBlocos('wss://exemplo.invalido/v2/CHAVE_SECRETA_LONGA_123');
+    assert.equal(o.diagnostico().estado, 'configurado');
+    o.abrir();
+    assert.notEqual(o.diagnostico().estado, 'conectado',
+        '`abrir()` não conecta: ele agenda');
+    assert.ok(['conectando', 'recusado'].includes(o.diagnostico().estado));
+    o.fechar();
+});
+
+test('o endpoint entra no log pelo HOST e pela FORMA do caminho, sem a chave', () => {
+    assert.equal(idDoEndpoint('wss://base-mainnet.g.alchemy.com/v2/CHAVE_SECRETA_LONGA_123'),
+        'base-mainnet.g.alchemy.com/v2/<23 chars>');
+    assert.equal(idDoEndpoint('wss://mainnet.base.org'), 'mainnet.base.org/(raiz)');
+    assert.equal(idDoEndpoint('wss://x.exemplo/ws'), 'x.exemplo/ws');
+    assert.equal(idDoEndpoint('não é url'), '(endereço ilegível)');
+    // A FORMA distingue `/v2/<chave>` de `/ws` sem publicar nada.
+    assert.notEqual(idDoEndpoint('wss://h/v2/AAAAAAAAAAAAAAAAAAAAAAA'),
+        idDoEndpoint('wss://h/ws'));
+    assert.ok(!idDoEndpoint('wss://h/v2/CHAVE_SECRETA_LONGA_123').includes('CHAVE'));
+});
+
+test('o diagnóstico traz o endpoint sanitizado, não a URL', () => {
+    const o = new OuvinteDeBlocos('wss://h.exemplo/v2/CHAVE_SECRETA_LONGA_123');
+    const d = o.diagnostico();
+    assert.equal(d.endpoint, 'h.exemplo/v2/<23 chars>');
+    assert.ok(!JSON.stringify(d).includes('CHAVE_SECRETA_LONGA_123'));
+    o.fechar();
 });

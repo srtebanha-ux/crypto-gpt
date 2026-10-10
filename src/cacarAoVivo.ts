@@ -8,7 +8,7 @@ import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } fr
 import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, coberturaOtima, lucroMaximo, PROFUNDIDADE_DA_VENDA, ondeEuEstava, montarPlacar, oQueIssoQuerDizer, type Perdida } from './perdidas';
 import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
 import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
-import { ControleDeCapacidade, Inventario, oQuePausar, type Tarefa } from './capacidade';
+import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, type Tarefa } from './capacidade';
 import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd, gorjetaQueMaximizaOValor, premioQueSePagaComAFatia, chanceDeSerOTopoDaFatia } from './prontidao';
@@ -1153,35 +1153,36 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
             // ele existe para tratar.
             //
             // Trocar de degrau esta certo; esquecer POR QUE e que nao esta.
+            // A DECISAO mora em `decidirSobreRecusa`, e nao aqui.
+            //
+            // Ela pediu um teste de integracao com o primario devolvendo
+            // exatamente `Monthly capacity limit exceeded` e o secundario
+            // respondendo. `chamar` nao e importavel (este arquivo sobe o bot
+            // ao ser importado), e replicar a decisao no teste provaria a
+            // copia. Entao a decisao saiu daqui e o teste exercita a MESMA
+            // funcao que producao obedece.
             const recusa = classificarRecusa(msg);
-            if (recusa.tipo === 'cota') {
-                // ESGOTAMENTO, nao falha transitoria. Registrar ANTES de lancar,
-                // porque e isto que impede o retorno automatico ao provedor.
+            const decisao = decidirSobreRecusa({ mensagem: msg, ehTransporte: ehFalhaDeTransporte(msg) });
+            if (decisao.marcarEsgotado) {
                 const host = hostDoRpc(rpc);
-                const novo = !CAPACIDADE.estaEsgotado(host);
+                const novoEsgotamento = !CAPACIDADE.estaEsgotado(host);
                 CAPACIDADE.esgotou(host, msg);
-                if (novo) {
+                if (novoEsgotamento) {
                     const pausa = oQuePausar({
                         algumEsgotado: true, noFallback: !ESCADA.ehOPrimario(),
                     });
                     log.error('[CAPACIDADE] Provedor com CAPACIDADE ESGOTADA.', {
                         metodo,
                         estado: CAPACIDADE.comoLer(host),
+                        decisao: decisao.porque,
                         pausando: pausa.pausar,
                         porquePausar: pausa.porque,
                         consumoAteAqui: INVENTARIO.chamadasObservadas().slice(0, 6),
-                        oQueIssoNaoE: 'não é limite de taxa: esperar não resolve e repetir gasta o '
-                            + 'que sobrou. Não volto automaticamente a este provedor por tempo',
                     });
                 }
-                // Trocar de degrau continua certo — o que estava errado era
-                // trocar e esquecer o motivo. A escada decide o PARA ONDE; a
-                // capacidade decide o NAO VOLTE.
-                if (aEscadaAbsorve(msg)) continue;
-                throw e;
             }
-            if (aEscadaAbsorve(msg)) continue;
-            if (!recusa.absorveEsperando) throw e;
+            if (decisao.trocarDeProvedor && aEscadaAbsorve(msg)) continue;
+            if (decisao.lancar || !decisao.esperarERepetir) throw e;
             // O RECUO E COMPARTILHADO: quem nem viu a recusa tambem recua, e a
             // proxima chamada ja nasce esperando. Era isto que faltava.
             const recuo = VAZAO.recuar(espera);
@@ -3036,6 +3037,19 @@ async function principal(): Promise<'parar' | void> {
         }
     }
     ouvinte?.abrir();
+    if (ouvinte !== null) {
+        // ESTADO, nao `ligado`. A linha antiga saia logo apos `abrir()` dizendo
+        // `ligado: true`, e 22ms depois a conexao era recusada — ela afirmava o
+        // resultado antes de haver resultado. `abrir()` so AGENDA.
+        log.info('[BLOCOS] Conexão de blocos: o estado, não a promessa.', {
+            provedor: hostDoRpc(rpc),
+            endpoint: ouvinte.diagnostico().endpoint,
+            estado: ouvinte.diagnostico().estado,
+            oQueIssoQuerDizer: 'CONECTANDO não é conectado: `abrir()` agenda a conexão. O estado '
+                + 'conectado só aparece depois do evento `open`, e o ciclo publica o estado atual '
+                + 'em toda linha [BLOCO]',
+        });
+    }
     processoEncerrando.push(() => ouvinte?.fechar());
     let posturaAnterior: Postura = 'dormindo';
     // Ver o comentario longo no `[POSTURA]`: a oscilacao em volta do limiar do

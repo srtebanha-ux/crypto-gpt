@@ -31,6 +31,8 @@
  * e `inventarioComCU` a marca como tal em todas as linhas.
  */
 
+import { classificarRecusa, type TipoDeRecusa } from './cobertura';
+
 /** Quanto esperar entre duas sondagens de um provedor esgotado. */
 export const ENTRE_SONDAGENS_MS = 30 * 60_000;
 
@@ -356,4 +358,75 @@ export function oQuePausar(e: { algumEsgotado: boolean; noFallback: boolean }): 
         };
     }
     return { pausar: [], porque: 'nenhum provedor esgotado e estou no primário: nada a pausar' };
+}
+
+// ---------------------------------------------------------------------------
+// A DECISAO SOBRE UMA RECUSA, fora do laco quente para poder ser exercitada.
+//
+// Ela pediu um teste de integracao com *"primário retornando exatamente essa
+// recusa e secundário respondendo normalmente"*. `chamar` mora em
+// `cacarAoVivo.ts`, que sobe o bot ao ser importado — entao um teste nao pode
+// invoca-la. Replicar a decisao no teste provaria a COPIA, que e o defeito que
+// este projeto registra mais vezes.
+//
+// A saida e esta funcao: ela decide, `chamar` a obedece, e um teste de codigo
+// exige que `chamar` a chame em vez de decidir por conta.
+// ---------------------------------------------------------------------------
+
+export interface DecisaoSobreRecusa {
+    /** Marcar o provedor como de capacidade esgotada. */
+    marcarEsgotado: boolean;
+    /** Deixar a escada trocar de degrau. */
+    trocarDeProvedor: boolean;
+    /** Esperar e repetir (so limitacao temporaria). */
+    esperarERepetir: boolean;
+    /** Lancar para quem chamou. */
+    lancar: boolean;
+    porque: string;
+}
+
+/**
+ * O que fazer com uma recusa, dado o tipo e se a escada a reconhece.
+ *
+ * A ORDEM aqui e o conserto do log de 2026-10-10 19:57:12: a mensagem
+ * `Monthly capacity limit exceeded` casa com `ehFalhaDeTransporte` (ela contem
+ * `capacity` e `exceeded`), entao a escada a absorvia e o ramo da cota nunca
+ * rodava. A classificacao vem PRIMEIRO; a troca de degrau continua
+ * acontecendo, porque trocar esta certo — esquecer o motivo nao estava.
+ */
+export function decidirSobreRecusa(e: {
+    mensagem: string;
+    ehTransporte: boolean;
+    classificar?: (m: string) => { tipo: TipoDeRecusa; absorveEsperando: boolean };
+}): DecisaoSobreRecusa {
+    const classificar = e.classificar ?? classificarRecusa;
+    const c = classificar(e.mensagem);
+    if (c.tipo === 'cota') {
+        return {
+            marcarEsgotado: true,
+            // Trocar de degrau SIM: o secundario e justamente para isto.
+            trocarDeProvedor: e.ehTransporte,
+            esperarERepetir: false,
+            lancar: !e.ehTransporte,
+            porque: 'ESGOTAMENTO DE CAPACIDADE: marco o provedor, troco de degrau se a escada '
+                + 'reconhece a falha, e NÃO espero — esperar não devolve cota e repetir gasta o '
+                + 'que sobrou dela',
+        };
+    }
+    if (e.ehTransporte) {
+        return {
+            marcarEsgotado: false, trocarDeProvedor: true, esperarERepetir: false, lancar: false,
+            porque: 'falha de transporte: a escada troca de degrau e repete na hora, sem esperar',
+        };
+    }
+    if (c.absorveEsperando) {
+        return {
+            marcarEsgotado: false, trocarDeProvedor: false, esperarERepetir: true, lancar: false,
+            porque: `limitação ${c.tipo}: espera progressiva compartilhada por provedor`,
+        };
+    }
+    return {
+        marcarEsgotado: false, trocarDeProvedor: false, esperarERepetir: false, lancar: true,
+        porque: `recusa ${c.tipo}: não trato como limite e devolvo o erro a quem chamou`,
+    };
 }

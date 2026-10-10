@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
     ControleDeCapacidade, Inventario, sanitizar, oQuePausar, SECUNDARIAS,
     ENTRE_SONDAGENS_MS, SONDAGENS_POR_JANELA, JANELA_DE_SONDAGEM_MS, CU_ESTIMADO_POR_METODO,
+    decidirSobreRecusa,
 } from './capacidade';
 import { classificarRecusa } from './cobertura';
+import { EscadaDeRpc, ehFalhaDeTransporte } from './escadaDeRpc';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
@@ -313,4 +315,140 @@ test('confirmar disponibilidade NÃO devolve o provedor a desconhecido', () => {
         'apagar o estado diria "nunca perguntei", que é outra coisa');
     assert.equal(k.confirmou('alchemy'), false, 'a segunda leitura não é recuperação');
     assert.equal(k.condicao('alchemy'), 'disponivel');
+});
+
+// ---------------------------------------------------------------------------
+// INTEGRACAO: primario devolve EXATAMENTE a recusa do log, secundario responde.
+//
+// Usa a ESCADA de verdade, o ControleDeCapacidade de verdade e a MESMA
+// `decidirSobreRecusa` que `chamar` obedece. O unico fingimento e o transporte.
+// ---------------------------------------------------------------------------
+
+const RECUSA_REAL = 'Monthly capacity limit exceeded. Visit '
+    + 'https://dashboard.alchemy.com/settings/billing to upgrade your scaling policy for';
+
+/**
+ * Um `chamar` reduzido ao que esta sob teste: a decisao, a escada e a
+ * capacidade. A ordem das tres linhas e a MESMA de producao, e um teste de
+ * codigo (abaixo) exige que continue sendo.
+ */
+function chamarComEscada(
+    metodo: string,
+    transporte: (url: string) => string,
+    esc: InstanceType<typeof EscadaDeRpc>,
+    cap: ControleDeCapacidade,
+    hostDe: (u: string) => string,
+    tentativas = 4,
+): { resultado: string; provedorQueRespondeu: string; trocas: number } {
+    let trocas = 0;
+    for (let i = 0; ; i += 1) {
+        const url = esc.url();
+        try {
+            const r = transporte(url);
+            esc.deuCerto();
+            cap.confirmou(hostDe(url));
+            return { resultado: r, provedorQueRespondeu: hostDe(url), trocas };
+        } catch (e) {
+            const msg = (e as Error).message;
+            if (i >= tentativas - 1) throw e;
+            const d = decidirSobreRecusa({ mensagem: msg, ehTransporte: ehFalhaDeTransporte(msg) });
+            if (d.marcarEsgotado) cap.esgotou(hostDe(url), msg);
+            if (d.trocarDeProvedor) {
+                const antes = esc.url();
+                esc.falhou();
+                if (esc.url() !== antes) trocas += 1;
+                continue;
+            }
+            if (d.lancar || !d.esperarERepetir) throw e;
+        }
+    }
+}
+
+test('INTEGRAÇÃO: cota no primário, secundário responde, e as cinco provas', () => {
+    const { EscadaDeRpc: E, ehFalhaDeTransporte: eft } = require('./escadaDeRpc');
+    void eft;
+    const r = relogio();
+    const PRIM = 'https://base-mainnet.g.alchemy.com/v2/CHAVE';
+    const SEC = 'https://mainnet.base.org';
+    const host = (u: string) => new URL(u).host;
+    const esc = new E([PRIM, SEC], { trocarApos: 1, castigoMs: 300_000, agora: r.agora });
+    const cap = new ControleDeCapacidade(r.agora);
+    let chamadasNoPrimario = 0;
+
+    const transporte = (url: string) => {
+        if (url === PRIM) { chamadasNoPrimario += 1; throw new Error(RECUSA_REAL); }
+        return '0xdeadbeef';
+    };
+
+    // (1) A CHAMADA PROSSEGUE PELO SECUNDÁRIO.
+    const saida = chamarComEscada('eth_call', transporte, esc, cap, host);
+    assert.equal(saida.resultado, '0xdeadbeef');
+    assert.equal(saida.provedorQueRespondeu, 'mainnet.base.org');
+    assert.equal(saida.trocas, 1);
+
+    // (2) O PRIMÁRIO PERMANECE MARCADO COMO ESGOTADO.
+    assert.equal(cap.estaEsgotado('base-mainnet.g.alchemy.com'), true);
+    assert.equal(cap.condicao('base-mainnet.g.alchemy.com'), 'esgotado');
+    // E o sucesso no SECUNDÁRIO não limpa o primário — era este o risco de
+    // chamar `confirmou` sem olhar de quem foi a leitura.
+    assert.equal(cap.condicao('mainnet.base.org'), 'disponivel');
+
+    // (3) O RELATÓRIO MOSTRA ESSA CONDIÇÃO, e por provedor.
+    const linhas = cap.porProvedorConfigurado([host(PRIM), host(SEC)]);
+    assert.deepEqual(linhas.map((l) => l.condicao), ['esgotado', 'disponivel']);
+    assert.match(linhas[0]!.detalhe, /CAPACIDADE ESGOTADA/);
+    assert.ok(!linhas[0]!.detalhe.includes('CHAVE'), 'sem credencial no relatório');
+
+    // (4) O TRÁFEGO NÃO VOLTA PELO TEMPORIZADOR COMUM.
+    r.andar(300_001);                       // o castigo de 300s venceu
+    assert.equal(esc.deveVoltarAoPrimario(), true, 'a escada, por tempo, já liberaria');
+    assert.equal(cap.estaEsgotado(host(PRIM)), true, 'mas a capacidade NÃO liberou');
+
+    // (5) SÓ AS RECUPERAÇÕES PREVISTAS permitem nova tentativa.
+    const antesDaSondagem = chamadasNoPrimario;
+    assert.equal(cap.podeSondar(host(PRIM)), true, 'a sondagem espaçada é uma delas');
+    cap.sondou(host(PRIM));
+    assert.equal(cap.podeSondar(host(PRIM)), false, 'e só uma por 30 min');
+    r.andar(29 * 60_000);
+    assert.equal(cap.podeSondar(host(PRIM)), false, 'tempo menor que o intervalo não libera');
+    assert.equal(chamadasNoPrimario, antesDaSondagem,
+        'nenhuma chamada nova ao primário sem a sondagem autorizar');
+
+    // Recuperação por CONFIRMAÇÃO: uma leitura que passa.
+    cap.confirmou(host(PRIM));
+    assert.equal(cap.condicao(host(PRIM)), 'disponivel');
+});
+
+test('a cota NÃO entra na espera progressiva: esperar não devolve cota', () => {
+    const d = decidirSobreRecusa({ mensagem: RECUSA_REAL, ehTransporte: true });
+    assert.equal(d.marcarEsgotado, true);
+    assert.equal(d.trocarDeProvedor, true, 'trocar de degrau está certo');
+    assert.equal(d.esperarERepetir, false, 'esperar e repetir gasta o que sobrou');
+    assert.match(d.porque, /ESGOTAMENTO DE CAPACIDADE/);
+});
+
+test('limitação temporária espera; transporte troca; desconhecida lança', () => {
+    const taxa = decidirSobreRecusa({ mensagem: 'request limit reached', ehTransporte: false });
+    assert.deepEqual(
+        [taxa.marcarEsgotado, taxa.esperarERepetir, taxa.trocarDeProvedor, taxa.lancar],
+        [false, true, false, false],
+    );
+    const transp = decidirSobreRecusa({ mensagem: 'socket hang up', ehTransporte: true });
+    assert.equal(transp.trocarDeProvedor, true);
+    assert.equal(transp.marcarEsgotado, false);
+    const ruim = decidirSobreRecusa({ mensagem: 'execution reverted', ehTransporte: false });
+    assert.equal(ruim.lancar, true);
+    assert.equal(ruim.marcarEsgotado, false);
+});
+
+test('produção OBEDECE `decidirSobreRecusa` em vez de decidir por conta', () => {
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const i = fonte.indexOf('async function chamar<T>');
+    const corpo = fonte.slice(i, fonte.indexOf('\nasync function chamarCru', i));
+    assert.ok(/decidirSobreRecusa\(\{ mensagem: msg, ehTransporte: ehFalhaDeTransporte\(msg\) \}\)/.test(corpo),
+        'senão o teste de integração acima prova uma cópia');
+    // A marcação vem ANTES da troca de degrau: trocar primeiro e marcar depois
+    // perderia o nome do provedor que de fato recusou.
+    assert.ok(corpo.indexOf('CAPACIDADE.esgotou(') < corpo.indexOf('aEscadaAbsorve(msg)'),
+        'marcar depois de trocar marcaria o provedor errado');
 });

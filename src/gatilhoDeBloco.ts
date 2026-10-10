@@ -308,6 +308,8 @@ export class OuvinteDeBlocos {
     /** Quantas vezes o cao de guarda derrubou a conexao. Vai para o log. */
     public quedasPorSilencio = 0;
     public vivo = false;
+    /** O estado da conexao, em quatro. Nunca 'conectado' antes do `open`. */
+    public estado: EstadoDaConexao = 'configurado';
     /** A ultima falha, com codigo e mensagem SANITIZADA. `null` = nenhuma. */
     public ultimaFalha: FalhaDeWs | null = null;
     /** Se a conexao chegou a ABRIR antes de cair. Separa recusa de queda. */
@@ -366,11 +368,15 @@ export class OuvinteDeBlocos {
 
     public abrir(): void {
         if (this.fechado) return;
+        // CONECTANDO, nao conectado: `abrir()` so agenda. Publicar
+        // `ligado: true` aqui era afirmar o resultado 22ms antes de ele existir.
+        this.estado = 'conectando';
         try {
             const ws = new WebSocket(this.url);
             this.ws = ws;
             ws.addEventListener('open', () => {
                 this.vivo = true;
+                this.estado = 'conectado';
                 this.vivoAntes = true;
                 this.esperaMs = 1000;
                 this.falhasPersistentes = 0;
@@ -402,6 +408,7 @@ export class OuvinteDeBlocos {
                 if (jaCaiu || this.ws !== ws) return;
                 jaCaiu = true;
                 this.vivo = false;
+                this.estado = 'recusado';
                 this.pararBatimento();
                 // A CAUSA, e nao so o fato. Ela mandou: *"Capture separadamente
                 // a causa da falha do WebSocket: status de conexão, código de
@@ -421,6 +428,7 @@ export class OuvinteDeBlocos {
             ws.addEventListener('error', cair);
         } catch {
             this.vivo = false;
+            this.estado = 'recusado';
             this.reconectar();
         }
     }
@@ -444,11 +452,13 @@ export class OuvinteDeBlocos {
 
     /** O que o log do ciclo publica sobre o aviso de bloco. */
     public diagnostico(): {
-        ligado: boolean; ultimoBloco: number; msSemAviso: number | null;
-        quedasPorSilencio: number; falhasPersistentes: number; ultimaFalha: string;
+        estado: EstadoDaConexao; endpoint: string; ultimoBloco: number;
+        msSemAviso: number | null; quedasPorSilencio: number;
+        falhasPersistentes: number; ultimaFalha: string;
     } {
         return {
-            ligado: this.vivo,
+            estado: this.estado,
+            endpoint: idDoEndpoint(this.url),
             ultimoBloco: this.ultimoBloco,
             msSemAviso: this.msSemAviso(),
             quedasPorSilencio: this.quedasPorSilencio,
@@ -586,4 +596,40 @@ export function comoLerANegociacao(n: NegociacaoDeWs, url: string): string {
     try { host = new URL(url.replace(/^wss?:\/\//, 'https://')).host; } catch { /* host fica … */ }
     return `negociação de WebSocket com ${host}: `
         + `${n.status === null ? 'SEM resposta HTTP' : `HTTP ${n.status}`} — ${n.classe}. ${n.mensagem}`;
+}
+
+/**
+ * QUATRO ESTADOS, e `ligado: true` nao era nenhum deles no momento certo.
+ *
+ * O log de 2026-10-10 19:57:13.608 publicou
+ * `Aviso de bloco novo por WebSocket {ligado: true}` e 22ms DEPOIS a conexao
+ * foi recusada. A linha saia logo apos `abrir()`, que so AGENDA a conexao — ela
+ * afirmava o resultado antes de haver resultado.
+ *
+ *   'configurado' ha endereco e nada foi tentado
+ *   'conectando'  `abrir()` chamado, sem `open` ainda
+ *   'conectado'   o evento `open` chegou
+ *   'recusado'    fechou ou errou, com a causa em `ultimaFalha`
+ */
+export type EstadoDaConexao = 'configurado' | 'conectando' | 'conectado' | 'recusado';
+
+/**
+ * A identificacao do endpoint SEM credencial.
+ *
+ * O host serve ao diagnostico e nao e segredo. O CAMINHO carrega a chave na
+ * maioria dos provedores (`/v2/<chave>`), entao dele sai so a FORMA: quantos
+ * segmentos e o tamanho de cada um, que distingue `/v2/chave` de `/ws` sem
+ * publicar nada.
+ */
+export function idDoEndpoint(url: string): string {
+    try {
+        const u = new URL(url.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://'));
+        const segmentos = u.pathname.split('/').filter((x) => x !== '');
+        const forma = segmentos.length === 0
+            ? '(raiz)'
+            : segmentos.map((x) => (x.length <= 4 ? x : `<${x.length} chars>`)).join('/');
+        return `${u.host}/${forma}`;
+    } catch {
+        return '(endereço ilegível)';
+    }
 }
