@@ -3126,3 +3126,111 @@ Não muda o veredicto com este saldo (0,000450 cabe em 0,011142, e `atira`
 continua SIM) — e foi exatamente por isso que passou sem ser visto.
 
 1475 testes, 1475 passando, 0 falhas, 0 cancelados, exit 0. Build exit 0.
+
+## 2026-10-10: ela autorizou ampliar o escopo. Dois experimentos, três previsões minhas derrubadas
+
+Ela escreveu: *"Não concordo com 'tudo o mais está medido'"*, autorizou
+instrumentação e melhorias reversíveis com `CACA_ENVIAR=0`, e mandou executar
+em vez de explicar. Dois experimentos rodados, e o primeiro derrubou **três
+previsões que eu registrei antes de rodar**.
+
+### EXPERIMENTO 1 — quanto a Aave deixa cobrir (`forkTests/oTamanhoCerto.js`)
+
+**Evidência inicial:** `quantoPedirEmprestado` sempre pede METADE, com o
+comentário *"Acima da metade a Aave recusa"* — uma afirmação sobre o protocolo
+que nunca foi exercitada contra a Aave implantada na Base.
+
+**Experimento:** fork no bloco 52418045, contrato publicado real, alvo real
+`0x66bb6c29` (dívida US$ 133.948), oráculo do WETH substituído em dois regimes
+de saúde. Previsões registradas no arquivo ANTES de rodar.
+
+**Resultado:**
+
+    regime                 cobertura                     ok    lucro USDC   motivo
+    saúde 0,997329         METADE (o que o bot pede)     SIM     4.636,27
+    saúde 0,997329         60%                           SIM     4.637,01
+    saúde 0,997329         100% da dívida                SIM     4.610,27
+    saúde 0,997329         deixando ~US$ 500 de resíduo  SIM     4.610,52
+    saúde 0,937538         METADE                        SIM     9.128,39
+    saúde 0,937538         100% da dívida                não        0,00   MustNotLeaveDust()
+
+    P1 (>metade reverte)             previ reverte | ACEITOU  -> FALHOU
+    P2 (100% aceito com saúde <0,95) previ aceito  | REVERTEU -> FALHOU
+    P3 (resíduo pequeno reverte)     previ reverte | ACEITOU  -> FALHOU
+
+**O que isto ensina, e nenhuma das três era o que eu esperava:**
+
+1. **A Aave CLAMPA, não recusa.** `debtToCover` acima do fator de fechamento é
+   aceito e cortado internamente. O comentário do código estava errado.
+2. **Mas pedir mais CUSTA**: 4.610 contra 4.636 — **26 USDC, 0,56%** — porque o
+   `flashLoanSimple` cobra prêmio sobre o excedente que volta sem ser usado.
+3. **`MustNotLeaveDust()` (`0xb629b0e4`) é real** e reverte 100% quando a saúde
+   está abaixo de 0,95. É uma reversão que chega ao bot como `execution
+   reverted` genérico.
+4. **P3 não foi testada de verdade:** com saúde 0,997 qualquer pedido ≥ 50% é
+   clampado, então o resíduo nunca chegou a existir. Buraco declarado.
+
+**Impacto econômico:** o teto de metade continua certo — **por um motivo
+diferente do que estava escrito**. Não há 2x de prêmio escondido aqui, e o
+comentário foi corrigido com os números medidos. Economia direta: zero. Erro
+removido: um.
+
+**E o portão estava CERTO onde eu suspeitei:** `naoCruzouAinda` só autoriza com
+`0x930bb771`; qualquer outro seletor — `MustNotLeaveDust` incluído — devolve
+`false`. Nenhum tiro especulativo seria liberado por essa reversão. Conferido no
+código, não suposto.
+
+### EXPERIMENTO 2 — a instrumentação de disponibilidade (`src/episodios.ts`)
+
+**Evidência inicial:** eu disse que falta medir quanto TEMPO existe alvo ao
+alcance. Ela corrigiu três coisas do meu desenho, e as três estão no código:
+
+    "tempo efetivo, não quantidade de ciclos"   o ciclo varia de 200ms a 8000ms
+                                                pela postura: contar ciclos mede
+                                                a POSTURA, não a disponibilidade
+    "não transforme cada tentativa em uma        a unidade é o EPISÓDIO; as
+     nova oportunidade"                          tentativas são contadas dentro
+    "não use 0,20% como limite universal"        a distância vai em FAIXAS, e o
+                                                corte não está na coleta
+
+**Os quatro estados, separados e nunca sinônimos:** `alvoProximo`,
+`posicaoLiquidavel`, `simulacaoComSucesso`, `potencialmenteCapturavel`. Só o
+último responde "isto daria dinheiro", e os três primeiros acontecem sem ele.
+
+**Desfecho honesto:** quem sai da faixa fecha como `perdiDeVista` — não como
+`recuperou`. Saber o desfecho de verdade exige ler a corrente; inventá-lo é o
+defeito que este arquivo persegue.
+
+**Dez testes afirmam as REGRAS**, e o primeiro é o que ela corrigiu: a mesma
+meia hora lida a cada 200ms e a cada 8000ms dá **1 episódio e o mesmo tempo
+observado** nos dois (razão entre 0,99 e 1,01). Contar ciclos daria 40x de
+diferença.
+
+**Observado no artefato** (`dist/cacarAoVivo.js`, sem chave, `CACA_ENVIAR=0`):
+
+    episodios: "nenhum episódio em 0.1 min observados.
+                Isto é ausência MEDIDA, não falta de medição"
+
+Com o cache semeado o único devedor está a 8%, fora da faixa mais larga (1%) —
+então zero episódios é a resposta certa, e ela sai DIZENDO que é medição.
+
+### E A CONTA DA META QUE EU PUBLIQUEI ESTÁ RETIRADA
+
+Eu escrevi *"EV/dia se UM alvo estivesse ao alcance 24h: US$ 332,62"* e
+*"0x66bb6c29 bastariam 17% do tempo"*. Ela apontou: **isso multiplica 96
+tentativas pelo mesmo prêmio como se fossem oportunidades independentes.** Está
+errado, e por três razões:
+
+1. Um episódio tem DURAÇÃO e FIM. Quatro tentativas no mesmo alvo disputam o
+   MESMO prêmio uma vez, não quatro.
+2. O episódio pode fechar pela ação do concorrente — e aí não há prêmio nenhum
+   para as tentativas seguintes.
+3. O limite superior de 7,69% (regra de três sobre 0 de 39) **não é taxa de
+   acerto**: é o teto de confiança. Extrapolá-lo para receita diária (eu
+   publiquei "US$ 14.270/dia no teto") é usar um limite de confiança como
+   previsão. **Retirado.**
+
+As cinco probabilidades que ela mandou separar continuam **desconhecidas, e
+separadas**: surgimento, cruzamento, execução viável, inclusão e captura. O
+livro dos episódios mede a primeira. As outras quatro não têm número, e não vou
+preencher com divisão igual entre concorrentes nem com posição na fatia.

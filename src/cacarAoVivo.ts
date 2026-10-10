@@ -23,6 +23,7 @@ import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PI
 import { POOLS } from './contratos';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
+import { LivroDeEpisodios, comoLerOsEpisodios, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
     lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
@@ -75,8 +76,28 @@ export function quantoPedirEmprestado(
     const cru = new Decimal(dividaCrua.toString()).mul(coberturaMaximaUsd.dividedBy(dividaUsd));
     try {
         const v = BigInt(cru.toFixed(0));
-        // Zero significaria mandar uma cacada que nao cobre nada. Acima da
-        // metade a Aave recusa. Fora da faixa, metade.
+        // Zero significaria mandar uma cacada que nao cobre nada.
+        //
+        // "Acima da metade a Aave recusa" — era o que este comentario dizia, e
+        // e FALSO. MEDIDO em fork da Base em 2026-10-10 (bloco 52418045,
+        // forkTests/oTamanhoCerto.js), no alvo real 0x66bb6c29 com saude
+        // 0,997329:
+        //
+        //     cobrir 50%  -> SUCESSO, 4.636,27 USDC ao cofre
+        //     cobrir 60%  -> SUCESSO, 4.637,01
+        //     cobrir 100% -> SUCESSO, 4.610,27   <- NAO recusa; CLAMPA
+        //
+        // A Aave aceita o parametro e liquida ate o fator de fechamento. Pedir
+        // mais nao reverte e nao ganha — e CUSTA o premio do flash loan sobre o
+        // excedente devolvido: 26 USDC de 4.636, ou 0,56%.
+        //
+        // E na direcao oposta, com saude 0,937538 (abaixo de 0,95, onde o fator
+        // sobe a 100%), cobrir 100% REVERTEU com `MustNotLeaveDust()`
+        // (0xb629b0e4): a Aave exige nao deixar residuo. Cobrir metade passou.
+        //
+        // Entao o teto de METADE continua certo — por um motivo diferente do
+        // que estava escrito aqui: ele e o maximo que rende, pedir mais custa
+        // premio, e ele nao tropeca na regra de residuo.
         return v > 0n && v < metade ? v : metade;
     } catch {
         return metade;
@@ -2513,6 +2534,52 @@ async function principal(): Promise<'parar' | void> {
      * mercado ainda esta caindo. Quando o bloco chega, so resta mandar.
      */
     const alvosArmados = new Map<string, Alvo>();
+
+    /**
+     * O LIVRO DOS EPISODIOS — a medicao que decide se US$ 50/dia existe.
+     *
+     * Em 2026-10-10 eu disse a ela que falta UMA medicao: quanto TEMPO existe
+     * alvo ao alcance. Ela autorizou a instrumentacao e corrigiu o desenho:
+     * tempo efetivo em vez de ciclos, episodio em vez de tentativa, e faixas
+     * de distancia em vez do 0,20% de uma amostra.
+     *
+     * Ele NAO decide nada: so observa. Nenhum portao le o livro.
+     */
+    const livro = new LivroDeEpisodios();
+    /** A maior faixa que a coleta guarda. Acima dela nao se pergunta nada. */
+    const FAIXA_MAIS_LARGA = FAIXAS_DE_DISTANCIA[FAIXAS_DE_DISTANCIA.length - 1]!;
+    function anotarEpisodios(medidos: Medida[], bloco: number, idadeDoDadoMs: number | null,
+        fecharAusentes = true): void {
+        const agora = Date.now();
+        livro.bateuPonto(agora);
+        const vistos: string[] = [];
+        for (const m of medidos) {
+            const falta = m.queda.toNumber();
+            if (!Number.isFinite(falta) || falta > FAIXA_MAIS_LARGA) continue;
+            const divida = m.dividaUsd === null ? null : m.dividaUsd.toNumber();
+            const premio = m.dividaUsd === null ? null : lucroEstimado(m.dividaUsd).toNumber();
+            // OS QUATRO ESTADOS, e nenhum implica o seguinte. Aqui so os dois
+            // primeiros podem ser afirmados: a simulacao e a economia moram no
+            // caminho do tiro, e quem as alcanca registra la.
+            const estados: EstadoDoEpisodio[] = ['alvoProximo'];
+            if (falta <= 0) estados.push('posicaoLiquidavel');
+            vistos.push(m.devedor);
+            livro.ver({
+                devedor: m.devedor,
+                mercado: `aave-v3/${m.via ?? 'via desconhecida'}`,
+                agoraMs: agora, bloco, faltaPct: falta,
+                dividaUsd: divida, premioEstimadoUsd: premio, estados, idadeDoDadoMs,
+            });
+        }
+        // Quem saiu da faixa NAO "recuperou": eu perdi de vista. O desfecho de
+        // verdade exige ler a corrente, e inventa-lo seria o defeito que este
+        // arquivo persegue desde a primeira pagina.
+        // So o conjunto RECORRENTE fecha ausentes. A varredura completa roda a
+        // cada 15 min: se ela fechasse, todo alvo que ela ve e a brasa nao
+        // viraria um episodio novo a cada volta — tentativa virando
+        // oportunidade pela porta dos fundos.
+        if (fecharAusentes) livro.fecharOsAusentes(vistos, agora);
+    }
     let armadoEm = 0;
     /** Quando a ULTIMA tentativa aconteceu, deu certo ou nao. Freia repeticao. */
     let tentouArmarEm = 0;
@@ -4151,6 +4218,8 @@ async function principal(): Promise<'parar' | void> {
             // o minimo global esta dentro dela entre varreduras — e um numero
             // de 8 segundos e melhor que um de 15 minutos em qualquer direcao.
             let menorAoVivo: Decimal | null = null;
+            /** O que a brasa mediu NESTE ciclo, para o livro dos episodios. */
+            const medidosDaBrasa: Medida[] = [];
             const inicioDaBrasa = moedas.length + 2;
             for (let i = 0; i < brasa.length; i++) {
                 const dadoConta = resp[inicioDaBrasa + i];
@@ -4160,6 +4229,13 @@ async function principal(): Promise<'parar' | void> {
                     const saude = conta.saude;
                     registrarDeriva(historicoDeSaude, brasa[i]!, saude, Date.now());
                     const queda = quedaAteLiquidar(saude);
+                    if (queda !== null) {
+                        medidosDaBrasa.push({
+                            devedor: brasa[i]!, queda,
+                            dividaUsd: conta.dividaBase.dividedBy(1e8),
+                            via: oQueSeSabeDaVia(brasa[i]!),
+                        });
+                    }
                     // O minimo AO VIVO, para a postura. Ver o comentario longo
                     // em `menorAoVivo`, acima do laco.
                     //
@@ -4299,6 +4375,11 @@ async function principal(): Promise<'parar' | void> {
                 } catch {}
             }
 
+            // O LIVRO, a cada ciclo: e aqui que o tempo efetivo se acumula.
+            // Fora do `if` do log de proposito — a disponibilidade nao pode
+            // depender de quando a linha de sinal de vida sai.
+            anotarEpisodios(medidosDaBrasa, blocoAtual, Date.now() - menorMargemLidaEm);
+
             // A POSTURA PASSA A LER O NUMERO DE 8 SEGUNDOS, NAO O DE 15 MINUTOS.
             //
             // Fica DEPOIS do laco e ANTES de `qualVarredura` de propósito: a
@@ -4326,6 +4407,7 @@ async function principal(): Promise<'parar' | void> {
                 if (Date.now() - ultimoSinalDeVida >= MS_ENTRE_SINAIS_DE_VIDA) {
                     ultimoSinalDeVida = Date.now();
                     log.info(`[BLOCO ${blocoAtual}] Só a brasa — ninguém mais pode ter caído.`, {
+                        episodios: comoLerOsEpisodios(livro.resumo(pisoDaAposta().toNumber())),
                         naBrasa: brasa.length,
                         // Sem isto, "mercado calmo" e "Binance morta" dao o
                         // mesmo log — e sao coisas opostas.
@@ -4707,7 +4789,9 @@ async function principal(): Promise<'parar' | void> {
                             void tiroEmSeco(paraEnsaiar);
                         }
                         ultimoCompleto = Date.now();
+                        anotarEpisodios(medidos, blocoAtual, 0, false);
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
+                            episodios: comoLerOsEpisodios(livro.resumo(pisoDaAposta().toNumber())),
                             alvosChecados: aLer.length,
                             naBrasa: brasa.length,
                             // A ETIQUETA DESCREVE ESTE CICLO, com o corte que
