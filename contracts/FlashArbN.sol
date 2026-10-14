@@ -61,6 +61,16 @@ contract FlashArbN {
     /** O pool que esta emprestando AGORA. Fora da caca, zero. */
     address private poolPendente;
 
+    /**
+     * A LINHA DE BASE por token, tirada no inicio da operacao.
+     *
+     * Sem ela o contrato nao distingue o que a rota trouxe do que ja estava
+     * aqui — e apuraria como lucro um saldo preexistente. Limpa no fim da
+     * operacao: deixar valor gravado faria a proxima rota medir contra uma
+     * base velha, que e o mesmo defeito com outro rosto.
+     */
+    mapping(address => uint256) private baseDoCiclo;
+
     error NaoEDono();
     error ChamadaInesperada();
     error LucroInsuficiente(uint256 obtido, uint256 exigido);
@@ -168,10 +178,25 @@ contract FlashArbN {
             ? (quantidade, uint256(0))
             : (uint256(0), quantidade);
 
+        // A LINHA DE BASE de TODOS os tokens da rota, ANTES de qualquer
+        // movimento. E isto que isola a operacao do saldo preexistente.
+        for (uint256 i = 0; i < pernas.length; i++) {
+            address t = pernas[i].tokenEntra;
+            baseDoCiclo[t] = IERC20(t).balanceOf(address(this));
+        }
+        baseDoCiclo[tokenSolto] = IERC20(tokenSolto).balanceOf(address(this));
+
         poolPendente = pernas[0].pool;
         // `data` nao vazio e o que transforma o swap em flash swap.
         emprestimo.swap(out0, out1, address(this), abi.encode(pernas, quantidade, lucroMinimo));
         poolPendente = address(0);
+
+        // LIMPA a base: deixar gravado faria a proxima rota medir contra uma
+        // base velha. Um mapping que sobrevive a operacao e estado que mente.
+        for (uint256 i = 0; i < pernas.length; i++) {
+            baseDoCiclo[pernas[i].tokenEntra] = 0;
+        }
+        baseDoCiclo[tokenSolto] = 0;
     }
 
     /**
@@ -200,9 +225,12 @@ contract FlashArbN {
         uint256 devido = _quantoPagar(pernas[0], quantidade);
         IERC20(tokenPaga).transfer(msg.sender, devido);
 
-        // A GARANTIA, conferida NA CADEIA. A estimativa de fora pode estar
-        // errada; o pior caso continua sendo o gas.
-        uint256 sobra = IERC20(tokenPaga).balanceOf(address(this));
+        // A GARANTIA, conferida NA CADEIA e SOBRE O QUE ESTA ROTA GEROU.
+        //
+        // `balanceOf` cru incluiria saldo preexistente, e aí o piso passaria
+        // por dinheiro que nao e desta operacao — aprovando no fim o que a rota
+        // nao produziu. A sobra e a diferenca contra a linha de base.
+        uint256 sobra = _desteCiclo(tokenPaga);
         if (sobra < lucroMinimo) revert LucroInsuficiente(sobra, lucroMinimo);
     }
 
@@ -225,24 +253,51 @@ contract FlashArbN {
         // Ler o saldo custa uma chamada e remove a classe inteira: o que entra
         // na perna e o que o contrato TEM, e a saida e recalculada sobre esse
         // numero. Assim a conta da perna n nao herda a mentira da perna n-1.
-        uint256 emMaos = IERC20(p.tokenEntra).balanceOf(address(this));
-        uint256 vai = entrada < emMaos ? entrada : emMaos;
+        // ISOLAMENTO: a operacao so toca o que ELA trouxe.
+        //
+        // DEFEITO MEU, e a dona do bot apontou: a versao anterior lia
+        // `balanceOf` cru. Isso resolveu o saque a descoberto (token taxado
+        // entrega menos) mas criou outro — o saldo PREEXISTENTE do contrato
+        // entrava na conta. Um token parado aqui de uma operacao anterior, ou
+        // enviado por engano, seria vendido junto, e o lucro apurado no fim
+        // incluiria dinheiro que nao e desta rota.
+        //
+        // A correcao e medir CONTRA A LINHA DE BASE tirada na entrada: o que
+        // conta e a DIFERENCA, nao o saldo. `vai` fica limitado ao que esta
+        // disponivel desta operacao, e nunca excede `entrada`.
+        uint256 disponivel = _desteCiclo(p.tokenEntra);
+        uint256 vai = entrada < disponivel ? entrada : disponivel;
         if (vai == 0) revert HopSemSaida();
         uint256 saida = saidaDaPerna(p, vai);
         if (saida == 0) revert HopSemSaida();
         IPar par = IPar(p.pool);
         address t0 = par.token0();
+        address tokenSai = p.tokenEntra == t0 ? par.token1() : t0;
+        uint256 antesDaSaida = IERC20(tokenSai).balanceOf(address(this));
         // O token entra no pool por transferencia; o `swap` so retira a saida.
         IERC20(p.tokenEntra).transfer(p.pool, vai);
         (uint256 a0, uint256 a1) = p.tokenEntra == t0
             ? (uint256(0), saida)
             : (saida, uint256(0));
         par.swap(a0, a1, address(this), new bytes(0));
-        // O QUE DE FATO CHEGOU, e nao o que o `swap` prometeu: um token taxado
-        // tira a sua parte tambem na saida, e devolver `saida` aqui faria a
-        // perna seguinte repetir o mesmo saque a descoberto.
-        address tokenSai = p.tokenEntra == t0 ? par.token1() : t0;
-        return IERC20(tokenSai).balanceOf(address(this));
+        // O QUE DE FATO CHEGOU NESTA PERNA, e nao o que o `swap` prometeu nem o
+        // saldo total: um token taxado tira a sua parte tambem na saida, e o
+        // saldo total carregaria o preexistente.
+        return IERC20(tokenSai).balanceOf(address(this)) - antesDaSaida;
+    }
+
+    /**
+     * Quanto deste token pertence AO CICLO DE AGORA.
+     *
+     * Saldo total menos a linha de base registrada na entrada. Nunca negativo:
+     * se o saldo caiu abaixo da base — o que so acontece com token que mexe no
+     * saldo de terceiros — a resposta e zero, e a perna reverte por
+     * `HopSemSaida` em vez de calcular sobre um numero impossivel.
+     */
+    function _desteCiclo(address token) internal view returns (uint256) {
+        uint256 agora = IERC20(token).balanceOf(address(this));
+        uint256 base = baseDoCiclo[token];
+        return agora > base ? agora - base : 0;
     }
 
     /** Quanto o pool de emprestimo exige de volta. Arredonda PARA CIMA. */

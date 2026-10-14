@@ -48,7 +48,8 @@
     "arb:fork": "hardhat test forkTests/aArbitragemDePontaAPonta.js",
     "arb:live": "node dist/cacarArbitragem.js",
     "arb:tres": "ARB_BLOCO=52608948 hardhat test forkTests/osTresCandidatos.js",
-    "arb:rotas": "hardhat test forkTests/rotasDeDoisATres.js"
+    "arb:rotas": "hardhat test forkTests/rotasDeDoisATres.js",
+    "arb:causa": "hardhat test forkTests/aCausaIsolada.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",
