@@ -44,7 +44,8 @@
     "achar-pool": "ts-node src/acharPool.ts",
     "achar-pool:prod": "node dist/acharPool.js",
     "caca": "ts-node src/cacarAoVivo.ts",
-    "caca:prod": "node dist/cacarAoVivo.js"
+    "caca:prod": "node dist/cacarAoVivo.js",
+    "arb:fork": "hardhat test forkTests/aArbitragemDePontaAPonta.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",
