@@ -20,7 +20,14 @@ module.exports = {
     paths: { sources: './contracts', tests: './forkTests', cache: './.tmp/hhcache', artifacts: './.tmp/artifacts' },
     networks: {
         hardhat: {
-            forking: { url: 'https://mainnet.base.org' },
+            forking: {
+                url: 'https://mainnet.base.org',
+                // BLOCO FIXO quando pedido: reproduzir um candidato exige o
+                // MESMO estado que o produziu. Sem isto o fork pega o topo, as
+                // reservas ja mudaram, e "reverteu" nao distingue defeito de
+                // oportunidade que passou.
+                ...(process.env.ARB_BLOCO ? { blockNumber: Number(process.env.ARB_BLOCO) } : {}),
+            },
             chainId: 8453,
             // O Hardhat nao conhece a historia de hardforks da Base e recusa
             // qualquer chamada em bloco "historico" (o do proprio fork, inclusive).

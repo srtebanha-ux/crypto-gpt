@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    montarCandidatos, decidir, melhorTamanho, quantosMudaram, comoLerARecusa,
+    montarCandidatos, decidir, melhorTamanho, quantosMudaram, comoLerARecusa, comoLerOPlacar,
     FABRICAS_COM_FLASH_SWAP, WETH_DA_BASE, GAS_DE_UMA_ARBITRAGEM, RESERVA_VENCE_EM_MS,
     type PoolDaFabrica,
 } from './cacarArbitragem';
@@ -213,4 +213,16 @@ test('as quatro fábricas são as MEDIDAS, e o laço não inventa uma quinta', (
         assert.match(f, /^0x[0-9a-f]{40}$/, 'endereço fora do formato ou não minúsculo');
     }
     assert.equal(new Set(FABRICAS_COM_FLASH_SWAP).size, 4, 'fábrica repetida');
+});
+
+test('o placar NÃO usa a palavra APROVADO para o que não executou', () => {
+    // A classificação é dela: CANDIDATO / ESTIMADO POSITIVO / SIMULADO COM
+    // SUCESSO / ECONOMICAMENTE VALIDADO / LUCRO REALIZADO. O caçador só alcança
+    // o segundo — e os 3 "aprovados" do bloco 52608948, reproduzidos no fork
+    // daquele bloco, reverteram TODOS (token com 48% de taxa de transferência).
+    // Chamar aquilo de aprovado era afirmar execução que nunca houve.
+    const f = comoLerOPlacar();
+    assert.match(f, /ESTIMADO\(S\) POSITIVO\(S\)/);
+    assert.match(f, /execução NÃO comprovada/);
+    assert.ok(!/APROVADA|APROVADO/.test(f), 'o placar voltou a dizer APROVADO');
 });

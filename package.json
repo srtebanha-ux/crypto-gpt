@@ -46,7 +46,8 @@
     "caca": "ts-node src/cacarAoVivo.ts",
     "caca:prod": "node dist/cacarAoVivo.js",
     "arb:fork": "hardhat test forkTests/aArbitragemDePontaAPonta.js",
-    "arb:live": "node dist/cacarArbitragem.js"
+    "arb:live": "node dist/cacarArbitragem.js",
+    "arb:tres": "ARB_BLOCO=52608948 hardhat test forkTests/osTresCandidatos.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",

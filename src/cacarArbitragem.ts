@@ -71,6 +71,43 @@ export const WETH_DA_BASE = '0x4200000000000000000000000000000000000006';
  */
 export const GAS_DE_UMA_ARBITRAGEM = 260_000n;
 
+/**
+ * A GORJETA que esta decisao supoe, em wei por unidade de gas.
+ *
+ * ESCOLHA declarada, e pequena de proposito: a Base monta o bloco em fatias e
+ * este projeto ja mediu que 95% das transacoes de um bloco pagam menos de 0,02
+ * gwei e entram. 0,002 gwei e um decimo disso — suficiente para nao ser
+ * rejeitada por lance zero, e barata o bastante para nao distorcer o piso.
+ */
+export const GORJETA_SUPOSTA_WEI = BigInt(process.env.ARB_GORJETA_WEI ?? 2_000_000);
+
+/**
+ * O PRECO DO GAS, do baseFee do bloco mais a gorjeta suposta.
+ *
+ * NAO de `eth_gasPrice`, e isto foi MEDIDO: no fork do bloco 52608948 o
+ * `eth_gasPrice` devolveu 1,004432434 gwei contra um `baseFeePerGas` real de
+ * **0,005 gwei** — **200,9x**. O Hardhat inventa uma gorjeta, e usar aquele
+ * numero fazia a economia sair 201 vezes pessimista: o cacador ao vivo achou 3
+ * candidatos e o fork do MESMO bloco achou ZERO. A divergencia era o
+ * termometro, nao o mercado.
+ *
+ * E a correcao nao vale so para o fork: `eth_gasPrice` de um RPC publico
+ * tambem embute uma gorjeta escolhida pelo provedor, que nao e a nossa.
+ */
+export async function precoDoGasWei(chamar: Transporte): Promise<bigint | null> {
+    try {
+        const b = await chamar('eth_getBlockByNumber', ['latest', false]) as
+            { baseFeePerGas?: string } | null;
+        const base = b?.baseFeePerGas;
+        if (typeof base !== 'string' || base === '0x') return null;
+        return BigInt(base) + GORJETA_SUPOSTA_WEI;
+    } catch {
+        // `null`, nao um padrao: sem o baseFee eu nao sei o custo, e decidir
+        // com um numero inventado e fabricar o piso economico.
+        return null;
+    }
+}
+
 const SELETORES = {
     allPairsLength: sel('allPairsLength()'),
     allPairs: sel('allPairs(uint256)'),
@@ -452,7 +489,7 @@ export async function descobrirUniverso(
  */
 export async function lerPools(
     chamar: Transporte, enderecos: string[], porFabrica: Map<string, string>, bloco: number,
-): Promise<{ pools: PoolDaFabrica[]; falhas: number }> {
+): Promise<{ pools: PoolDaFabrica[]; falhas: number; vazios: number }> {
     const chamadas: ChamadaMulti[] = [];
     for (const a of enderecos) {
         chamadas.push({ alvo: a, dados: SELETORES.token0 });
@@ -462,6 +499,13 @@ export async function lerPools(
     const respostas = await lerEmLote(chamar, chamadas);
 
     let falhas = 0;
+    // POOL COM RESERVA ZERO E UMA TERCEIRA CATEGORIA, e nao um dos dois lados.
+    //
+    // O log publicava `cobertura 661/668 (99,0%)` ao lado de `0 leituras que
+    // falharam`, e os dois numeros juntos nao fechavam: os 7 que faltavam eram
+    // pools VAZIOS, pulados em silencio. "Nao lido" e "lido e vazio" sao coisas
+    // diferentes — o primeiro e buraco de cobertura, o segundo e resposta.
+    let vazios = 0;
     const pools: PoolDaFabrica[] = [];
     for (let i = 0; i < enderecos.length; i += 1) {
         const [t0, t1, r] = [respostas[i * 3], respostas[i * 3 + 1], respostas[i * 3 + 2]];
@@ -471,7 +515,7 @@ export async function lerPools(
         if (token0 === null || token1 === null) { falhas += 1; continue; }
         try {
             const [r0, r1] = coder.decode(['uint112', 'uint112', 'uint32'], r.dados);
-            if (r0 === 0n || r1 === 0n) continue;
+            if (r0 === 0n || r1 === 0n) { vazios += 1; continue; }
             pools.push({
                 endereco: enderecos[i]!, fabrica: porFabrica.get(enderecos[i]!) ?? '?',
                 token0, token1, reserva0: r0 as bigint, reserva1: r1 as bigint,
@@ -479,7 +523,7 @@ export async function lerPools(
             });
         } catch { falhas += 1; }
     }
-    return { pools, falhas };
+    return { pools, falhas, vazios };
 }
 
 /** Quantos pools tiveram reserva DIFERENTE da volta anterior. */
@@ -506,9 +550,11 @@ export const PLACAR = {
     blocos: 0,
     ciclos: 0,
     avaliados: 0,
-    aprovados: 0,
+    estimadosPositivos: 0,
     recusas: { semSobra: 0, gasDesconhecido: 0, naoPagaOGas: 0, reservaVelha: 0 },
     leiturasQueFalharam: 0,
+    /** Pools lidos com reserva ZERO: resposta, nao buraco de cobertura. */
+    poolsVazios: 0,
     /** A melhor sobra vista, em wei de WETH, e quanto o gás custava então. */
     melhorSobraEmWeth: 0n,
     gasQuandoFoi: 0n,
@@ -528,7 +574,8 @@ export function comoLerOPlacar(): string {
                 : 'o gás não foi medido'}`
         : 'nenhuma sobra positiva';
     return `${PLACAR.blocos} bloco(s), ${PLACAR.ciclos} ciclo(s), ${PLACAR.avaliados} rota(s) `
-        + `avaliada(s), ${PLACAR.aprovados} APROVADA(S) | recusas: semSobra ${r.semSobra}, `
+        + `avaliada(s), ${PLACAR.estimadosPositivos} ESTIMADO(S) POSITIVO(S) — execução NÃO `
+        + `comprovada | recusas: semSobra ${r.semSobra}, `
         + `naoPagaOGas ${r.naoPagaOGas}, gasDesconhecido ${r.gasDesconhecido}, `
         + `reservaVelha ${r.reservaVelha} | ${melhor} | ${PLACAR.leiturasQueFalharam} leitura(s) `
         + 'que falharam';
@@ -620,10 +667,11 @@ async function principal(): Promise<void> {
         blocoAnterior = blocoAgora;
 
         const fimLeitura = av.etapa('leitura');
-        const { pools, falhas } = await lerPools(
+        const { pools, falhas, vazios } = await lerPools(
             chamar, universo.pools, universo.porFabrica, blocoAgora,
         );
         PLACAR.leiturasQueFalharam += falhas;
+        PLACAR.poolsVazios = vazios;
         fimLeitura(pools.length > 0 ? undefined : { comoCorreu: 'vazia' });
 
         // O NUMERO QUE DECIDE SE EXISTE BUSCA: pares presentes em DUAS
@@ -642,14 +690,23 @@ async function principal(): Promise<void> {
 
         const fimDecisao = av.etapa('decisao');
         const candidatos = montarCandidatos(pools).slice(0, tetoDeRotas);
-        const gasWei = numDe(await chamar('eth_gasPrice', [])) ?? 0n;
+        // DO BASEFEE DO BLOCO, nao de `eth_gasPrice`: ver `precoDoGasWei`.
+        const gasWei = await precoDoGasWei(chamar);
         const agora = Date.now();
+        if (gasWei === null) {
+            log.warn('[ARB] NÃO decido neste ciclo: o baseFee do bloco não veio.', {
+                oQueIssoNaoE: 'não é "nenhuma oportunidade": é "não sei o custo". Decidir sem o '
+                    + 'preço do gás seria aprovar sem saber o piso',
+            });
+            fimDecisao({ comoCorreu: 'falhou' });
+            continue;
+        }
         const decisoes = candidatos.map((c) => decidir(c, gasWei, agora));
         fimDecisao();
 
         PLACAR.avaliados += decisoes.length;
         for (const d of decisoes) {
-            if (d.aprovado) PLACAR.aprovados += 1;
+            if (d.aprovado) PLACAR.estimadosPositivos += 1;
             else if (d.motivo !== null) PLACAR.recusas[d.motivo] += 1;
             if (d.candidato.U === WETH_DA_BASE && d.candidato.sobra > PLACAR.melhorSobraEmWeth) {
                 PLACAR.melhorSobraEmWeth = d.candidato.sobra;
@@ -679,7 +736,7 @@ async function principal(): Promise<void> {
                 )
                 : undefined;
             fimSim(refeito === undefined ? { comoCorreu: 'vazia' } : undefined);
-            log.warn('[ARB] CANDIDATO APROVADO pela decisão econômica.', {
+            log.warn('[ARB] ESTIMADO POSITIVO — execução NÃO comprovada.', {
                 bloco: blocoAgora,
                 emprestimo: `${d.candidato.emprestimo.endereco} (${d.candidato.emprestimo.fabrica})`,
                 venda: `${d.candidato.venda.endereco} (${d.candidato.venda.fabrica})`,
@@ -695,10 +752,16 @@ async function principal(): Promise<void> {
                         + (refeito.sobra > (d.custoEmU ?? 0n)
                             ? ' — ainda paga o gás'
                             : ' — JÁ NÃO paga o gás: a reserva mudou'),
-                oQueIssoNaoE: 'não é ordem: não existe envio neste caminho. E simulação não é '
-                    + 'lucro realizado',
-                oQueFaltaProvar: 'eth_call do executarArbitragem exige o contrato implantado; '
-                    + 'sem isso a prova de execução é a do fork (npm run arb:fork)',
+                oQueIssoNaoE: 'não é APROVADO e não é ordem. É ESTIMADO POSITIVO: cálculo '
+                    + 'econômico favorável, execução NÃO comprovada',
+                porqueNaoEAprovado: 'MEDIDO em 2026-10-14: os 3 "aprovados" do bloco 52608948 '
+                    + 'foram reproduzidos no fork daquele bloco e os TRÊS reverteram — o token da '
+                    + 'rota tem 48% de TAXA DE TRANSFERÊNCIA, então o pagamento do flash swap '
+                    + 'chega curto e o pool recusa com UniswapV2: K. Ver '
+                    + 'forkTests/osTresCandidatos.js',
+                oQueFaltaProvar: 'o único portão confiável é simular a rota INTEIRA por eth_call, '
+                    + 'e isso exige o FlashArb implantado. O sinal barato (reserva declarada '
+                    + 'contra balanceOf) foi medido e NÃO discrimina: 0,09% no token taxado',
             });
         }
 
@@ -706,13 +769,16 @@ async function principal(): Promise<void> {
 
         log.info(`[ARB ${blocoAgora}] ciclo ${ciclo}.`, {
             cobertura: (() => {
-                const f = pools.length / Math.max(1, universo.pools.length);
-                return `${pools.length} de ${universo.pools.length} pools lidos`
-                    + ` (${(f * 100).toFixed(1)}%)`
-                    + (f < 0.9
-                        ? ' — COBERTURA INCOMPLETA: "nenhuma rota" aqui pode ser leitura que faltou,'
-                            + ' e não ausência de oportunidade'
-                        : '');
+                const total = Math.max(1, universo.pools.length);
+                // TRES categorias, e a soma fecha: usáveis + vazios + falhas.
+                const naoLidos = total - pools.length - vazios;
+                const f = (pools.length + vazios) / total;
+                return `${pools.length} usável(eis) + ${vazios} com reserva ZERO`
+                    + ` + ${naoLidos} NÃO lido(s) = ${total}`
+                    + ` | leitura cobriu ${(f * 100).toFixed(1)}%`
+                    + (naoLidos > 0
+                        ? ' — COBERTURA INCOMPLETA: "nenhuma rota" pode ser leitura que faltou'
+                        : ' (pool vazio é RESPOSTA, não buraco)');
             })(),
             reservasQueMudaram: ciclo === 1 ? 'primeira volta (tudo é novo)' : mudaram,
             espacoDeBusca: `${porPar.size} par(es) distinto(s), ${paresCruzados} em DUAS ou mais `
