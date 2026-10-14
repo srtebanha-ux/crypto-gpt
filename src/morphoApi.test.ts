@@ -28,8 +28,17 @@ function fingir(respostas: Array<{ status: number; corpo: string }>) {
     return { buscar, urls, corpos, chamadas: () => i };
 }
 
-const pagina = (ids: number[], extra: Record<string, unknown> = {}) => JSON.stringify({
+/**
+ * Uma pagina da API.
+ *
+ * `cursor` entra porque a paginacao passou a ser por CURSOR OPACO, e nao por
+ * `offset` — a dona do bot corrigiu isto apontando o contrato documentado do
+ * `GET /v1/blue/markets`. Sem cursor a paginacao ENCERRA, e e por isso que os
+ * testes de varias paginas abaixo precisam dele.
+ */
+const pagina = (ids: number[], extra: Record<string, unknown> = {}, cursor?: string) => JSON.stringify({
     ...extra,
+    ...(cursor === undefined ? {} : { next_cursor: cursor }),
     items: ids.map((n) => ({
         id: `0x${n.toString(16).padStart(64, '0')}`,
         loanAsset: { address: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' },
@@ -40,9 +49,13 @@ const pagina = (ids: number[], extra: Record<string, unknown> = {}) => JSON.stri
     })),
 });
 
-test('enumera com paginação e para quando a página vem curta', async () => {
+test('enumera por CURSOR e encerra quando a API não oferece o próximo', async () => {
+    // ERA POR `offset`, e ela corrigiu: o contrato REST documentado pagina por
+    // cursor opaco. O teste mudou de forma porque a REGRA mudou — a antiga
+    // afirmava `offset=0` e `offset=100` na URL, que agora seriam pedir o que o
+    // serviço não oferece.
     const f = fingir([
-        { status: 200, corpo: pagina([...Array(POR_PAGINA).keys()].map((n) => n + 1)) },
+        { status: 200, corpo: pagina([...Array(POR_PAGINA).keys()].map((n) => n + 1), {}, 'cur-1') },
         { status: 200, corpo: pagina([1000, 1001]) },
     ]);
     const r = await enumerarMercados(f.buscar, { dormir: semSono });
@@ -50,26 +63,35 @@ test('enumera com paginação e para quando a página vem curta', async () => {
     assert.equal(r.paginas, 2);
     assert.equal(r.requisicoes, 2);
     assert.equal(r.mercados.length, POR_PAGINA + 2);
-    // A URL leva a rede e o offset: sem offset a paginação seria enfeite.
+    assert.equal(r.paginouPorCursor, true);
+    // A rede vai em TODA página; o cursor só a partir da segunda.
     assert.match(f.urls[0]!, new RegExp(`chain_id=${CHAIN_ID_DA_BASE}`));
-    assert.match(f.urls[0]!, /offset=0/);
-    assert.match(f.urls[1]!, new RegExp(`offset=${POR_PAGINA}`));
+    assert.ok(!f.urls[0]!.includes('cursor='), 'mandou cursor que a API não tinha dado');
+    assert.match(f.urls[1]!, /cursor=cur-1/);
+    // E `offset` NÃO aparece: não faz parte do contrato.
+    for (const u of f.urls) assert.ok(!u.includes('offset='), `offset na URL: ${u}`);
 });
 
-test('API que IGNORA o offset não vira laço infinito', async () => {
-    // Sempre a MESMA página cheia. Sem o critério `novos === 0` isto paginaria
-    // até o teto, gastando 20 requisições para 100 mercados repetidos.
-    const f = fingir([{ status: 200, corpo: pagina([...Array(POR_PAGINA).keys()].map((n) => n + 1)) }]);
+test('API que devolve SEMPRE a mesma página não vira laço infinito', async () => {
+    // A mesma página cheia com o MESMO cursor. Com `offset` o laço vinha de a
+    // API ignorar o parâmetro; com cursor ele vem de a API repetir o cursor — e
+    // nos dois casos o custo é gastar o teto de requisições sobre dado
+    // repetido. Os dois critérios ficam: cursor repetido E nada novo.
+    const f = fingir([{
+        status: 200,
+        corpo: pagina([...Array(POR_PAGINA).keys()].map((n) => n + 1), {}, 'o-mesmo'),
+    }]);
     const r = await enumerarMercados(f.buscar, { dormir: semSono });
-    assert.equal(r.completa, true);
-    assert.equal(r.requisicoes, 2, 'duas: a primeira e a que revelou a repetição');
+    assert.equal(r.completa, false, 'girar sobre dado repetido não é cobertura completa');
+    assert.ok(r.requisicoes <= 3, `pediu ${r.requisicoes} vezes`);
     assert.equal(r.mercados.length, POR_PAGINA, 'sem duplicados');
     assert.ok(r.requisicoes < TETO_DE_PAGINAS);
+    assert.match(r.falha ?? '', /cursor|nenhum mercado novo/);
 });
 
 test('HTTP 429 não insiste, e a cobertura sai INCOMPLETA', async () => {
     const f = fingir([
-        { status: 200, corpo: pagina([...Array(POR_PAGINA).keys()].map((n) => n + 1)) },
+        { status: 200, corpo: pagina([...Array(POR_PAGINA).keys()].map((n) => n + 1), {}, 'cur-1') },
         { status: 429, corpo: 'slow down' },
     ]);
     const r = await enumerarMercados(f.buscar, { dormir: semSono });
@@ -257,13 +279,23 @@ test('a idade do índice separa "orientar leitura" de "decidir tiro"', () => {
 });
 
 test('a frase de evidência traz os números que ela pediu, e declara o que falta', () => {
+    // A fixture diz: a API mandou 120 elementos, 118 decodificaram, e os 118
+    // estao na lista de trabalho. `devolvidos` e o DECODIFICADO e `mercados` e a
+    // lista — eu troquei os dois na primeira versao desta asserção, e o teste me
+    // corrigiu rodando a função de verdade.
     const f = comoLerADescoberta({
-        devolvidos: 120, mercados: 118, quePagam: 9, confirmados: 7,
+        devolvidos: 118, mercados: 118, quePagam: 9, confirmados: 7,
         devedores: 340, validados: 12, requisicoes: 14,
         completa: false, blocoIndexado: 52_600_000, blocoAgora: 52_600_050, falha: 'HTTP 429',
         tentou: true, statusHttp: [200, 429], desfecho: 'apiFalhou',
+        elementosRecebidos: 120,
     });
-    for (const p of ['120 mercado(s) a API devolveu, 118 legíveis', '9 com LLTV ≤ 77%',
+    // A FRASE MUDOU de propósito em 2026-10-14: era "120 mercado(s) a API
+    // devolveu, 118 legíveis", e os dois números viviam no mesmo campo. Com o
+    // HTTP 200 que produziu zero mercados, "recebidos" e "decodificados"
+    // passaram a ser contagens SEPARADAS — é o que distingue erro de contrato
+    // de lista vazia, e era a confusão delas que custou o diagnóstico.
+    for (const p of ['120 elemento(s) RECEBIDOS da API, 118 DECODIFICADOS', '9 com LLTV ≤ 77%',
         '7 CONFIRMADOS na corrente', '340 devedor(es) apontado(s), 12 validado(s)',
         '14 requisição(ões)', 'COBERTURA PARCIAL', 'HTTP 429',
         '2 mercado(s) que pagam NÃO foram confirmados']) {
@@ -376,7 +408,13 @@ test('o orçamento CORTA a paginação e declara o corte, sem laço', async () =
         // Ids distintos por pagina, senao `novos === 0` encerra antes do teto.
         return {
             status: 200,
-            text: async () => pagina([...Array(POR_PAGINA).keys()].map((i) => n * POR_PAGINA + i + 1)),
+            // Ids distintos E cursor novo por pagina, senao a enumeracao
+            // encerra antes de o orcamento ser o motivo — e o teste mediria
+            // outra coisa.
+            text: async () => pagina(
+                [...Array(POR_PAGINA).keys()].map((i) => n * POR_PAGINA + i + 1),
+                {}, `cur-${n}`,
+            ),
         };
     }, { dormir: async () => {}, orcamento });
     assert.equal(pedidas, 3, 'o orçamento tem de cortar na terceira requisição');

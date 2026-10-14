@@ -52,6 +52,16 @@ export interface RegistroDaDescoberta {
     tentou: boolean;
     /** Os status HTTP REAIS, na ordem. Lista vazia = o transporte lancou antes. */
     statusHttp: number[];
+    /**
+     * Quantos ELEMENTOS a API mandou, antes de eu decodificar.
+     *
+     * Separado de `mercadosEnumerados` porque em 2026-10-14 os dois eram o
+     * mesmo numero e um erro de contrato ficou indistinguivel de lista vazia:
+     * HTTP 200, zero mercados, e nada no log dizendo se a API mandou algo.
+     * `null` quando o registro e de antes deste campo existir — e `null` diz
+     * "nao registrei", nao "a API mandou zero".
+     */
+    mercadosRecebidos: number | null;
     mercadosEnumerados: number;
     mercadosQuePagam: number;
     mercadosConfirmados: number;
@@ -122,6 +132,7 @@ function lerRegistro(c: unknown): RegistroDaDescoberta | null {
         statusHttp: Array.isArray(r.statusHttp)
             ? r.statusHttp.filter((x): x is number => typeof x === 'number').slice(0, 30)
             : [],
+        mercadosRecebidos: inteiroOuNulo(r.mercadosRecebidos),
         mercadosEnumerados: inteiro(r.mercadosEnumerados),
         mercadosQuePagam: inteiro(r.mercadosQuePagam),
         mercadosConfirmados: inteiro(r.mercadosConfirmados),
@@ -235,7 +246,10 @@ export function resumoCurto(m: MemoriaDaDescoberta | null, agora: number): strin
         ? ` | tentativa posterior ${t.veioDoCache ? 'caiu no CACHE' : 'FALHOU'} há `
             + `${quantoTempo(agora - t.em)}`
         : '';
-    return `morpho ${rotulo} (há ${quantoTempo(f.idadeMs!)}): ${s.mercadosEnumerados} enumerados, `
+    const recebidos = s.mercadosRecebidos !== null && s.mercadosRecebidos !== s.mercadosEnumerados
+        ? `${s.mercadosRecebidos} recebidos/`
+        : '';
+    return `morpho ${rotulo} (há ${quantoTempo(f.idadeMs!)}): ${recebidos}${s.mercadosEnumerados} enumerados, `
         + `${s.mercadosQuePagam} na faixa, ${s.mercadosConfirmados} CONFIRMADOS, `
         + `${s.devedoresValidados}/${s.devedoresEncontrados} devedores validados`
         + `${s.coberturaCompleta ? '' : ' [cobertura PARCIAL]'}`

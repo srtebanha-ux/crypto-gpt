@@ -17,7 +17,7 @@ const AGORA = 1_700_000_000_000;
 
 const bom = (em: number, extra: Partial<RegistroDaDescoberta> = {}): RegistroDaDescoberta => ({
     em, desfecho: 'A API enumerou e a CORRENTE confirmou', tentou: true, statusHttp: [200],
-    mercadosEnumerados: 40, mercadosQuePagam: 9, mercadosConfirmados: 7,
+    mercadosRecebidos: 40, mercadosEnumerados: 40, mercadosQuePagam: 9, mercadosConfirmados: 7,
     devedoresEncontrados: 120, devedoresValidados: 15,
     blocoIndexado: 52_600_000, coberturaCompleta: true, falha: null,
     requisicoesHttp: 4, chamadasRpc: 20, veioDoCache: false, oQueBloqueia: null, ...extra,
@@ -25,7 +25,7 @@ const bom = (em: number, extra: Partial<RegistroDaDescoberta> = {}): RegistroDaD
 
 const ruim = (em: number): RegistroDaDescoberta => ({
     em, desfecho: 'A API FALHOU', tentou: true, statusHttp: [429],
-    mercadosEnumerados: 0, mercadosQuePagam: 0, mercadosConfirmados: 0,
+    mercadosRecebidos: 0, mercadosEnumerados: 0, mercadosQuePagam: 0, mercadosConfirmados: 0,
     devedoresEncontrados: 0, devedoresValidados: 0,
     blocoIndexado: null, coberturaCompleta: false, falha: 'HTTP 429 na página 0',
     requisicoesHttp: 1, chamadasRpc: 0, veioDoCache: false,

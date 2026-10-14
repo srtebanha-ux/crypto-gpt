@@ -92,7 +92,7 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
  * o Morpho paga o MESMO que a Aave — e aí nao ha razao para a obra.
  */
 import {
-    enumerarMercados, enumerarDevedores, soOsQuePagam, codificarIdToMarketParams,
+    enumerarMercados, enumerarDevedores, soOsQuePagam, soDaBase, codificarIdToMarketParams,
     codificarPosition, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
@@ -449,7 +449,12 @@ export async function descobrirMorphoPorApi(
     const enumeracao = await enumerarMercados(buscar, { orcamento });
     const legiveis = enumeracao.mercados.length > 0 ? enumeracao.mercados : (doDisco ?? []);
     const veioDoCache = enumeracao.mercados.length === 0 && doDisco !== null;
-    const quePagam = soOsQuePagam(legiveis);
+    // A BASE, pelo chain do PROPRIO item. Filtrar aqui e diferente de confiar
+    // no `chain_id` da URL: a API pode ignorar o parametro, e validar um
+    // mercado de outra rede contra a Base daria divergencia de campos — que
+    // leria como "mercado recusado" em vez de "mercado de outra chain".
+    const porChain = soDaBase(legiveis);
+    const quePagam = soOsQuePagam(porChain.daBase);
 
     if (veioDoCache) {
         log.warn('[MORPHO/API] A API não respondeu: sigo com o CACHE.', {
@@ -594,22 +599,32 @@ export async function descobrirMorphoPorApi(
     // O DESFECHO, entre as quatro situacoes que ela mandou separar. A ordem
     // importa: cada ramo exclui o anterior, e nenhuma delas e silenciosa.
     const desfecho: DesfechoDaDescoberta = !enumeracao.tentou
-        // Nenhuma requisicao saiu. So acontece com orcamento zerado — e e o
-        // estado que o incidente de 2026-10-14 produziu por outro caminho.
+        // Nenhuma requisicao saiu. So acontece com orcamento zerado.
         ? 'naoExecutou'
-        : rpcMudo
-            // A API deu e o RPC nao pode confirmar. Guardado, nao perdido.
-            ? 'rpcIndisponivel'
+        // ERRO DE CONTRATO vem ANTES de tudo, e e a correcao do log de
+        // 2026-10-14: HTTP 200 que nao decodificou nao e "vazio" nem "falha de
+        // rede". Sem este ramo, um nome de campo errado virava "a Base nao tem
+        // mercados Morpho" — a conclusao mais cara possivel, pelo motivo mais
+        // barato de consertar.
+        : enumeracao.erroDeSchema !== null
+            ? 'erroDeSchema'
             : enumeracao.falha !== null && legiveis.length === 0
                 // A requisicao saiu e a resposta nao serviu.
                 ? 'apiFalhou'
-                : quePagam.length === 0
-                    // Status 200, corpo legivel, zero na faixa. E RESPOSTA.
+                : enumeracao.elementosRecebidos === 0 && legiveis.length === 0
+                    // Formato RECONHECIDO e lista vazia. Agora sim e RESPOSTA,
+                    // e so pode ser dita depois de o formato ter sido lido.
                     ? 'apiVaziaDeVerdade'
-                    : confirmados === 0
-                        // Enumerou e a corrente recusou todos. E dado.
-                        ? 'validacaoRecusou'
-                        : 'confirmou';
+                    : quePagam.length === 0
+                        // Ha mercado e o FILTRO nao selecionou nenhum. E escolha
+                        // nossa, nao ausencia de dado.
+                        ? 'foraDaFaixa'
+                        : rpcMudo
+                            // A API deu e o RPC nao pode confirmar. Guardado.
+                            ? 'rpcIndisponivel'
+                            : confirmados === 0
+                                ? 'validacaoRecusou'
+                                : 'confirmou';
 
     log.info('[MORPHO/API] Descoberta SEM eth_getLogs.', {
         evidencia: comoLerADescoberta({
@@ -627,6 +642,15 @@ export async function descobrirMorphoPorApi(
             tentou: enumeracao.tentou,
             statusHttp: enumeracao.statusHttp,
             desfecho,
+            elementosRecebidos: enumeracao.elementosRecebidos,
+            erroDeSchema: enumeracao.erroDeSchema,
+            deOutraChain: porChain.deOutraChain,
+            paginouPorCursor: enumeracao.paginouPorCursor,
+            estadoDoRpc: rpcMudo
+                ? 'o eth_getCode não respondeu: validação não rodou, e os mercados ficam NÃO '
+                    + 'CONFIRMADOS para a próxima volta'
+                : `${disponibilidadeDoCanal('validacao', infra).degradado ? 'degradado' : 'livre'}`
+                    + ` — ${chamadasRpc} chamada(s) eth_call/eth_getCode nesta volta`,
             naoConfirmadosGuardados: quePagam.filter((x) => x.confirmadoNaCorrente !== true).length,
             porqueNaoValidou,
         }),
@@ -652,13 +676,38 @@ export async function descobrirMorphoPorApi(
     // válido."* `juntar` troca `ultimoSucesso` so por SUCESSO.
     const oQueBloqueia: string | null = (() => {
         if (!enumeracao.tentou) return 'o orçamento HTTP não deixou sair requisição nenhuma';
-        if (rpcMudo) return 'o RPC não respondeu ao eth_getCode: sem ele não valido mercado nenhum';
+        // O CONTRATO DE DADOS vem primeiro: ele e barato de consertar e explica
+        // o zero inteiro. Dizer "o RPC" sobre um erro de parser mandaria
+        // consertar a coisa errada.
+        if (enumeracao.erroDeSchema !== null) {
+            return `o CONTRATO de dados da API: ${enumeracao.erroDeSchema.slice(0, 220)}`;
+        }
         if (enumeracao.falha !== null && legiveis.length === 0) {
             return `a API da Morpho: ${enumeracao.falha}`;
         }
-        if (quePagam.length === 0) return null;
+        // SEM MERCADO NAO HA O QUE VALIDAR, entao o RPC nao e o bloqueio.
+        //
+        // Medido no artefato: com `data: []` o bloqueio saia "o RPC não
+        // respondeu ao eth_getCode", e isso mandaria consertar o RPC quando a
+        // resposta da API e que estava vazia. O portao do RPC tinha de vir
+        // DEPOIS de haver candidato — ele so bloqueia quem existe.
+        if (legiveis.length === 0) {
+            return 'a API respondeu no formato esperado e com ZERO mercados: não há o que '
+                + 'validar, e isto é RESPOSTA e não falha';
+        }
+        if (quePagam.length === 0) {
+            return 'nenhum mercado na faixa de LLTV ≤ 77%: o filtro é nosso, e os mercados '
+                + 'existem. Não há o que validar nesta volta';
+        }
+        if (rpcMudo) return 'o RPC não respondeu ao eth_getCode: sem ele não valido mercado nenhum';
         if (confirmados === 0) {
-            return 'os campos dos mercados divergiram da corrente: nenhum confirmado';
+            // O MOTIVO REAL, e nao um rotulo so. `apiConfereComACorrente` ja
+            // separa "a corrente nao devolveu parametros legiveis" (que e RPC
+            // ou id que a corrente nao conhece) de "divergiu em lltv" (que e
+            // dado) — e este bloqueio colapsava os dois em "divergiram",
+            // mandando consertar o parser quando o problema era a leitura.
+            return `nenhum mercado confirmado na corrente. Primeiro motivo: ${
+                recusados[0] ?? 'nenhum motivo registrado'}`;
         }
         if (devedores === 0) {
             return 'nenhum devedor veio do GraphQL para os mercados confirmados'
@@ -673,6 +722,7 @@ export async function descobrirMorphoPorApi(
         desfecho,
         tentou: enumeracao.tentou,
         statusHttp: enumeracao.statusHttp,
+        mercadosRecebidos: enumeracao.elementosRecebidos,
         mercadosEnumerados: legiveis.length,
         mercadosQuePagam: quePagam.length,
         mercadosConfirmados: confirmados,

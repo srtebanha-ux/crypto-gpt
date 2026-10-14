@@ -267,7 +267,9 @@ export class OrcamentoHttp {
 export type DesfechoDaDescoberta =
     | 'naoExecutou'
     | 'apiFalhou'
+    | 'erroDeSchema'
     | 'apiVaziaDeVerdade'
+    | 'foraDaFaixa'
     | 'validacaoRecusou'
     | 'rpcIndisponivel'
     | 'confirmou';
@@ -280,9 +282,21 @@ export function comoLerODesfecho(d: DesfechoDaDescoberta): string {
         case 'apiFalhou':
             return 'A API FALHOU: a requisição saiu e a resposta não serviu (status, corpo ou '
                 + 'transporte). Isto NÃO é "não há mercados"';
+        case 'erroDeSchema':
+            // O DESFECHO QUE FALTAVA, e e ele que explica o log de 2026-10-14:
+            // HTTP 200 e zero mercados. Sem este estado, "nao entendi a
+            // resposta" e "nao ha mercado" produziam a mesma linha.
+            return 'ERRO DE SCHEMA: a API respondeu HTTP 200 e eu NÃO soube ler o corpo. Isto NÃO '
+                + 'é "a Base não tem mercados Morpho" e NÃO é falha de rede: é contrato de dados. '
+                + 'O conserto é o parser, e a frase ao lado nomeia as chaves que chegaram';
         case 'apiVaziaDeVerdade':
-            return 'A API RESPONDEU VAZIO: status 200, corpo legível, zero mercados na faixa. '
-                + 'Esta é uma RESPOSTA, não uma falha';
+            return 'A API RESPONDEU VAZIO: status 200, corpo no formato esperado e ZERO elementos '
+                + 'na lista. Esta é uma RESPOSTA, não uma falha — e só pode ser dita depois de o '
+                + 'formato ter sido reconhecido';
+        case 'foraDaFaixa':
+            return 'A API ENUMEROU e NENHUM mercado ficou na faixa de LLTV ≤ 77%: os mercados '
+                + 'existem, e o filtro é que não selecionou nenhum. É escolha nossa, não ausência '
+                + 'de dado';
         case 'validacaoRecusou':
             return 'A API ENUMEROU e a CORRENTE RECUSOU todos: os campos divergiram. É dado, não '
                 + 'falha — e nenhum deles pode decidir transação';

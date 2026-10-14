@@ -75,6 +75,13 @@ export interface MercadoDaApi extends MercadoDoMorpho {
     blocoIndexado: number | null;
     /** `true` so depois de a CORRENTE confirmar os parametros. */
     confirmadoNaCorrente: boolean;
+    /**
+     * O chain id que o PROPRIO item declara. `null` quando a API nao informa.
+     *
+     * `null` nao e descarte: ver `soDaBase`. Serve para o log poder dizer que a
+     * API devolveu mercado de outra rede apesar do `chain_id` na URL.
+     */
+    chainId: number | null;
 }
 
 export interface ResultadoDaEnumeracao {
@@ -100,6 +107,18 @@ export interface ResultadoDaEnumeracao {
      */
     tentou: boolean;
     /**
+     * ERRO DE SCHEMA: a API respondeu 200 e eu NAO soube ler o corpo.
+     *
+     * `null` quando nao houve. Este campo existe porque em 2026-10-14 um HTTP
+     * 200 produziu zero mercados e o log nao distinguia "a Base nao tem
+     * mercado" de "eu nao entendi a resposta". As duas pedem consertos opostos.
+     */
+    erroDeSchema: string | null;
+    /** Quantos ELEMENTOS as listas trouxeram, antes da decodificacao. */
+    elementosRecebidos: number;
+    /** Quantas paginas vieram por CURSOR (contrato REST) e nao por offset. */
+    paginouPorCursor: boolean;
+    /**
      * Os status HTTP REAIS observados, um por requisicao, na ordem.
      *
      * Numeros, nao a minha prosa sobre eles: *"Status HTTP real"*. Lista vazia
@@ -122,14 +141,6 @@ export async function enumerarMercados(
         base?: string;
         porPagina?: number;
         dormir?: (ms: number) => Promise<void>;
-        /**
-         * O ORCAMENTO desta enumeracao: requisicoes, tempo e cancelamento.
-         *
-         * Ausente mantem o comportamento de antes (teto de paginas so), para
-         * nao mudar os chamadores que nao pediram orcamento. Presente, ele
-         * MANDA: `pedir()` nega e a enumeracao encerra declarando o motivo, e o
-         * `sinal` vai ao transporte para o que estiver em voo parar de verdade.
-         */
         orcamento?: OrcamentoHttp;
     } = {},
 ): Promise<ResultadoDaEnumeracao> {
@@ -139,26 +150,38 @@ export async function enumerarMercados(
     const mercados: MercadoDaApi[] = [];
     const vistos = new Set<string>();
     const statusHttp: number[] = [];
+    const cursoresUsados = new Set<string>();
     let requisicoes = 0;
     let paginas = 0;
     let devolvidos = 0;
+    let elementosRecebidos = 0;
     let blocoIndexado: number | null = null;
     let tentou = false;
+    let erroDeSchema: string | null = null;
+    let paginouPorCursor = false;
+    let cursor: string | null = null;
+
     const parcial = (falha: string | null, completa: boolean): ResultadoDaEnumeracao => ({
         mercados, devolvidos, paginas, requisicoes, blocoIndexado, falha, completa,
-        tentou, statusHttp,
+        tentou, statusHttp, erroDeSchema, elementosRecebidos, paginouPorCursor,
     });
 
     for (let pagina = 0; pagina < TETO_DE_PAGINAS; pagina += 1) {
-        // O ORCAMENTO PRIMEIRO: pedir antes de gastar, e o que ele nega nao sai.
         if (opcoes.orcamento && !opcoes.orcamento.pedir()) {
             return parcial(
                 `o orçamento encerrou a enumeração: ${opcoes.orcamento.encerrado ?? 'sem motivo registrado'}`,
                 false,
             );
         }
+        // PAGINACAO POR CURSOR, que e o contrato REST documentado.
+        //
+        // Era `offset`, e ela corrigiu. O `offset` fica como partida da PRIMEIRA
+        // pagina apenas quando nao ha cursor — sem ele a primeira requisicao
+        // nao teria como existir. A partir da segunda, quem manda e o cursor
+        // opaco que a API devolveu; sem cursor, a paginacao ENCERRA, porque
+        // inventar a proxima pagina e pedir o que nao foi oferecido.
         const url = `${base}?chain_id=${CHAIN_ID_DA_BASE}&limit=${porPagina}`
-            + `&offset=${pagina * porPagina}`;
+            + (cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`);
         requisicoes += 1;
         tentou = true;
         let cru: string;
@@ -198,7 +221,10 @@ export async function enumerarMercados(
         const lido = lerPaginaDeMercados(corpo);
         if (lido.blocoIndexado !== null) blocoIndexado = lido.blocoIndexado;
         devolvidos += lido.itens.length;
+        elementosRecebidos += lido.elementos;
         paginas += 1;
+        if (lido.erroDeSchema !== null && erroDeSchema === null) erroDeSchema = lido.erroDeSchema;
+
         let novos = 0;
         for (const m of lido.itens) {
             if (vistos.has(m.id)) continue;
@@ -206,12 +232,42 @@ export async function enumerarMercados(
             mercados.push(m);
             novos += 1;
         }
-        // PAGINA VAZIA ou SEM NADA NOVO encerra. "Sem nada novo" cobre a API que
-        // ignora o offset e devolve sempre a primeira pagina — e sem isso a
-        // paginacao viraria laco. Nao e suposicao sobre o servico: e o unico
-        // criterio de parada que funciona nos dois casos.
-        if (lido.itens.length === 0 || novos === 0) return parcial(null, true);
-        if (lido.itens.length < porPagina) return parcial(null, true);
+
+        // 200 COM ELEMENTOS E NENHUM DECODIFICADO NAO E "COBERTURA COMPLETA".
+        //
+        // E o defeito do log de 2026-10-14: a pagina "vazia" encerrava com
+        // `completa: true`, e um erro de contrato virava a afirmacao de que a
+        // enumeracao terminou e nao havia mercado. Agora isso e FALHA.
+        if (lido.erroDeSchema !== null) {
+            return parcial(lido.erroDeSchema, false);
+        }
+
+        // SEM CURSOR encerra: a API nao ofereceu proxima pagina.
+        const proximo = lido.cursor;
+        if (proximo === null) {
+            return parcial(null, true);
+        }
+        // CURSOR REPETIDO e laco: encerra DECLARANDO, porque continuar pediria
+        // a mesma pagina para sempre e a cobertura nao seria completa.
+        if (cursoresUsados.has(proximo)) {
+            return parcial(
+                `a API repetiu o cursor na página ${pagina}: encerro para não entrar em laço`,
+                false,
+            );
+        }
+        cursoresUsados.add(proximo);
+        cursor = proximo;
+        paginouPorCursor = true;
+
+        // Pagina que nao trouxe nada NOVO com cursor novo tambem encerra: a
+        // alternativa e girar sobre dados repetidos pagando requisicao.
+        if (lido.itens.length === 0 && lido.elementos === 0) return parcial(null, true);
+        if (novos === 0) {
+            return parcial(
+                `a página ${pagina} não trouxe nenhum mercado novo apesar do cursor: encerro`,
+                false,
+            );
+        }
         await dormir(ENTRE_PAGINAS_MS);
     }
     return parcial(`a paginação passou de ${TETO_DE_PAGINAS} páginas e eu parei`, false);
@@ -226,23 +282,230 @@ export async function enumerarMercados(
  * envelope. O que NAO e tolerado e campo essencial ausente: item sem `id` ou
  * sem `lltv` e descartado, nunca completado com padrao.
  */
-export function lerPaginaDeMercados(corpo: unknown): {
-    itens: MercadoDaApi[]; blocoIndexado: number | null;
-} {
+export interface PaginaLida {
+    itens: MercadoDaApi[];
+    blocoIndexado: number | null;
+    /** O cursor opaco da proxima pagina, quando a API devolve um. */
+    cursor: string | null;
+    /**
+     * Quantos ELEMENTOS a lista trazia, antes da decodificacao.
+     *
+     * Este e o numero que separa "a API nao mandou nada" de "a API mandou e eu
+     * nao entendi" — e as duas situacoes pediam consertos opostos enquanto
+     * produziam o mesmo zero.
+     */
+    elementos: number;
+    /**
+     * O DIAGNOSTICO quando vieram elementos e nenhum decodificou.
+     *
+     * `null` quando nao ha o que diagnosticar. Ele carrega NOMES DE CHAVE e
+     * contagens, nunca valores: ela pediu *"Não publique dados sensíveis nem
+     * corpos enormes nos logs."*
+     */
+    erroDeSchema: string | null;
+}
+
+/**
+ * Le uma pagina de mercados.
+ *
+ * O DEFEITO QUE ISTO CONSERTA, medido no Railway em 2026-10-14 sobre `598df41`:
+ * a API respondeu **HTTP 200** e a descoberta publicou **zero mercados
+ * enumerados**, com a memoria registrando SEM SUCESSO. Status bom e lista
+ * vazia: as duas unicas coisas que o log dizia, e elas nao distinguem "a Base
+ * nao tem mercado Morpho" de "eu nao soube ler o corpo".
+ *
+ * A causa provavel e o CONTRATO: a dona do bot aponta a documentacao do
+ * `GET /v1/blue/markets`, que define envelope `data`, paginacao por `cursor` e
+ * campos `market_id`, `lltv_wad`, `oracle_address`, `irm_address` — enquanto
+ * este parser exigia `id`/`uniqueKey` e `lltv`, que sao os nomes do GraphQL.
+ * Cada item seria recusado, `itens.length` cairia a zero, e o laco encerraria
+ * declarando `completa: true`. Zero por construcao.
+ *
+ * **Eu NAO pude conferir o contrato:** `api.morpho.org` e `docs.morpho.org`
+ * respondem 403 CONNECT neste sandbox. Entao os nomes REST entram por citacao
+ * DELA, declarada como tal, e nao da minha memoria — endereco e nome de campo
+ * escritos de cabeca sao o defeito do `0x80d1e0f4…` que a REGRA 0 registra.
+ *
+ * E e por isso que a correcao que DECIDE nao e a lista de nomes: e o
+ * `erroDeSchema`. Aceitar mais nomes e aposta; recusar-se a publicar zero
+ * quando vieram elementos que nao decodificaram e verificavel, e faz o proximo
+ * log do Railway dizer a verdade mesmo que eu tenha errado os nomes.
+ */
+export function lerPaginaDeMercados(corpo: unknown): PaginaLida {
     const itens: MercadoDaApi[] = [];
-    if (typeof corpo !== 'object' || corpo === null) return { itens, blocoIndexado: null };
+    const vazia = (erro: string | null): PaginaLida => ({
+        itens, blocoIndexado: null, cursor: null, elementos: 0, erroDeSchema: erro,
+    });
+    if (typeof corpo !== 'object' || corpo === null) {
+        return vazia(`o corpo não é objeto nem lista: é ${typeof corpo}`);
+    }
     const o = corpo as Record<string, unknown>;
-    const lista = Array.isArray(corpo) ? corpo
-        : Array.isArray(o.items) ? o.items
-            : Array.isArray(o.data) ? o.data
-                : Array.isArray((o.data as Record<string, unknown>)?.markets)
-                    ? ((o.data as Record<string, unknown>).markets as unknown[]) : [];
-    const bloco = lerBloco(o);
-    for (const cru of lista) {
+
+    // O ENVELOPE. `data` primeiro, porque e o do contrato REST documentado.
+    const dentroDeData = (typeof o.data === 'object' && o.data !== null && !Array.isArray(o.data))
+        ? o.data as Record<string, unknown>
+        : null;
+    const achado: { lista: unknown[]; onde: string } | null =
+        Array.isArray(corpo) ? { lista: corpo, onde: 'raiz (lista)' }
+            : Array.isArray(o.data) ? { lista: o.data, onde: 'data' }
+                : Array.isArray(o.items) ? { lista: o.items, onde: 'items' }
+                    : Array.isArray(o.markets) ? { lista: o.markets, onde: 'markets' }
+                        : Array.isArray(o.results) ? { lista: o.results, onde: 'results' }
+                            : dentroDeData !== null && Array.isArray(dentroDeData.markets)
+                                ? { lista: dentroDeData.markets as unknown[], onde: 'data.markets' }
+                                : dentroDeData !== null && Array.isArray(dentroDeData.items)
+                                    ? { lista: dentroDeData.items as unknown[], onde: 'data.items' }
+                                    : null;
+
+    const cursor = lerCursor(o, dentroDeData);
+    const bloco = lerBloco(o) ?? (dentroDeData === null ? null : lerBloco(dentroDeData));
+
+    // NENHUMA LISTA: isto NAO e lista vazia. 200 com envelope desconhecido e
+    // ERRO DE SCHEMA, e a frase nomeia as chaves que chegaram para a proxima
+    // volta nao depender de eu adivinhar.
+    if (achado === null) {
+        return {
+            itens, blocoIndexado: bloco, cursor, elementos: 0,
+            erroDeSchema: 'HTTP 200 e NENHUMA lista de mercados no corpo. Chaves do objeto: '
+                + `[${chavesDe(o)}]`
+                + (dentroDeData === null ? '' : ` | chaves de data: [${chavesDe(dentroDeData)}]`)
+                + '. Isto NÃO é "a Base não tem mercados": é "não encontrei o array"',
+        };
+    }
+
+    for (const cru of achado.lista) {
         const m = lerUmMercado(cru);
         if (m !== null) itens.push(m);
     }
-    return { itens, blocoIndexado: bloco };
+
+    // VEIO E NAO DECODIFICOU: o caso exato do log de 2026-10-14. A frase diz
+    // quantos vieram, de onde, e QUE CAMPOS faltaram no primeiro item — nomes,
+    // nunca valores.
+    const erroDeSchema = achado.lista.length > 0 && itens.length === 0
+        ? `HTTP 200 trouxe ${achado.lista.length} elemento(s) em "${achado.onde}" e NENHUM `
+            + `decodificou. ${porQueNaoDecodificou(achado.lista[0])}`
+        : null;
+
+    return { itens, blocoIndexado: bloco, cursor, elementos: achado.lista.length, erroDeSchema };
+}
+
+/** Os nomes das chaves, ordenados e com teto. NOMES, nunca valores. */
+function chavesDe(o: Record<string, unknown>, teto = 25): string {
+    const ks = Object.keys(o).sort();
+    return ks.slice(0, teto).join(', ') + (ks.length > teto ? `, …+${ks.length - teto}` : '');
+}
+
+/**
+ * Por que ESTE item nao virou mercado, campo por campo.
+ *
+ * E o que transforma "zero mercados" em causa acionavel. Publica o NOME do
+ * campo que faltou e as chaves que o item tinha — nunca os valores, que podem
+ * carregar o que nao deve entrar em log.
+ */
+export function porQueNaoDecodificou(cru: unknown): string {
+    if (typeof cru !== 'object' || cru === null) {
+        return `o primeiro elemento não é objeto: é ${typeof cru}`;
+    }
+    const o = cru as Record<string, unknown>;
+    const params = (typeof o.params === 'object' && o.params !== null
+        ? o.params as Record<string, unknown> : o);
+    const faltando: string[] = [];
+    const id = texto(o.id ?? o.uniqueKey ?? o.unique_key ?? o.market_id ?? o.marketId);
+    if (id === null) faltando.push('id/market_id (ausente)');
+    else if (!/^0x[0-9a-fA-F]{64}$/.test(id)) faltando.push('id/market_id (não é 32 bytes hex)');
+    if (endereco(params.loanAsset ?? params.loan_token ?? params.loanToken) === null) {
+        faltando.push('loan_token');
+    }
+    if (endereco(params.collateralAsset ?? params.collateral_token
+        ?? params.collateralToken) === null) {
+        faltando.push('collateral_token');
+    }
+    if (endereco(params.oracle ?? params.oracle_address ?? params.oracleAddress) === null) {
+        faltando.push('oracle_address');
+    }
+    if (endereco(params.irm ?? params.irm_address ?? params.irmAddress) === null) {
+        faltando.push('irm_address');
+    }
+    if (lerLltv(params.lltv ?? params.lltv_wad ?? params.lltvWad) === null) {
+        faltando.push('lltv/lltv_wad');
+    }
+    return `campos que eu não achei: [${faltando.join(', ')}]. `
+        + `Chaves que o elemento TEM: [${chavesDe(o)}]`
+        + (params !== o ? ` | dentro de params: [${chavesDe(params)}]` : '');
+}
+
+/**
+ * O CURSOR opaco da proxima pagina.
+ *
+ * Ela corrigiu isto: o contrato REST pagina por `cursor`, nao por `offset`.
+ * Aceita os lugares plausiveis porque eu nao pude conferir o corpo real, e
+ * devolve `null` quando nao ha — e `null` encerra a paginacao, que e o unico
+ * criterio seguro quando nao se sabe o formato.
+ */
+/**
+ * O CHAIN ID do proprio item. `null` quando a API nao informa.
+ *
+ * `null` NAO e descarte: a maioria das respostas filtradas por `chain_id` nao
+ * repete o campo em cada item, e exigi-lo jogaria fora todos os mercados.
+ * Quem descarta e `soDaBase`, e so quando o campo existe e e OUTRA rede.
+ */
+export function lerChain(
+    o: Record<string, unknown>, params: Record<string, unknown>,
+): number | null {
+    for (const fonte of [o, params]) {
+        for (const chave of ['chain_id', 'chainId']) {
+            const v = fonte[chave];
+            if (typeof v === 'number' && Number.isInteger(v) && v > 0) return v;
+            if (typeof v === 'string' && /^\d+$/.test(v.trim())) return Number.parseInt(v, 10);
+        }
+        const c = fonte.chain;
+        if (typeof c === 'object' && c !== null) {
+            const n = (c as Record<string, unknown>).id;
+            if (typeof n === 'number' && Number.isInteger(n) && n > 0) return n;
+            if (typeof n === 'string' && /^\d+$/.test(n.trim())) return Number.parseInt(n, 10);
+        }
+    }
+    return null;
+}
+
+/**
+ * So os mercados da BASE.
+ *
+ * Dois baldes, e e de proposito: `null` de chain NAO vai para fora. Ela pediu
+ * *"Valide a Base, chain ID 8453"* e tambem *"Não descarte mercados por erro
+ * de conversão numérica"* — entao desconhecido conta como candidato, e a
+ * contagem de descartados por chain sai separada para o log poder dizer que a
+ * API ignorou o filtro.
+ */
+export function soDaBase(ms: MercadoDaApi[]): {
+    daBase: MercadoDaApi[]; deOutraChain: number; semChain: number;
+} {
+    const daBase: MercadoDaApi[] = [];
+    let deOutraChain = 0;
+    let semChain = 0;
+    for (const m of ms) {
+        if (m.chainId === null) { semChain += 1; daBase.push(m); continue; }
+        if (m.chainId === CHAIN_ID_DA_BASE) { daBase.push(m); continue; }
+        deOutraChain += 1;
+    }
+    return { daBase, deOutraChain, semChain };
+}
+
+export function lerCursor(
+    o: Record<string, unknown>,
+    dentroDeData: Record<string, unknown> | null,
+): string | null {
+    const candidatos: unknown[] = [];
+    for (const fonte of [o, dentroDeData, o.pagination, o.page, o.meta,
+        dentroDeData?.pagination, dentroDeData?.page]) {
+        if (typeof fonte !== 'object' || fonte === null) continue;
+        const f = fonte as Record<string, unknown>;
+        candidatos.push(f.next_cursor, f.nextCursor, f.cursor, f.next);
+    }
+    for (const c of candidatos) {
+        if (typeof c === 'string' && c.trim() !== '') return c.trim();
+    }
+    return null;
 }
 
 function lerBloco(o: Record<string, unknown>): number | null {
@@ -254,19 +517,36 @@ function lerBloco(o: Record<string, unknown>): number | null {
     return null;
 }
 
-/** Um mercado da API, ou `null` quando falta campo essencial. */
+/**
+ * Um mercado da API, ou `null` quando falta campo essencial.
+ *
+ * ACEITA OS DOIS CONTRATOS: os nomes do REST documentado (`market_id`,
+ * `lltv_wad`, `oracle_address`, `irm_address`, `loan_token`,
+ * `collateral_token`) e os do GraphQL (`uniqueKey`, `lltv`, `oracle`, `irm`,
+ * `loanAsset`, `collateralAsset`).
+ *
+ * Os nomes REST entram por CITACAO da dona do bot, declarada: eu nao pude
+ * conferir contra o servico nem contra a documentacao — os dois respondem 403
+ * CONNECT neste sandbox. Aceitar mais nomes nao quebra a forma que ja
+ * funcionava, e o que fecha o diagnostico quando eu errar e o `erroDeSchema`
+ * da pagina, que nomeia as chaves recebidas.
+ *
+ * O que NAO e tolerado continua nao sendo: campo essencial ausente devolve
+ * `null`, nunca um padrao. Supor um LLTV seria inventar o premio, porque o
+ * incentivo e funcao dele.
+ */
 export function lerUmMercado(cru: unknown): MercadoDaApi | null {
     if (typeof cru !== 'object' || cru === null) return null;
     const o = cru as Record<string, unknown>;
-    const id = texto(o.id ?? o.uniqueKey ?? o.unique_key);
+    const id = texto(o.id ?? o.uniqueKey ?? o.unique_key ?? o.market_id ?? o.marketId);
     if (id === null || !/^0x[0-9a-fA-F]{64}$/.test(id)) return null;
     const params = (typeof o.params === 'object' && o.params !== null
         ? o.params as Record<string, unknown> : o);
     const loan = endereco(params.loanAsset ?? params.loan_token ?? params.loanToken);
     const col = endereco(params.collateralAsset ?? params.collateral_token ?? params.collateralToken);
-    const oracle = endereco(params.oracle);
-    const irm = endereco(params.irm);
-    const lltv = lerLltv(params.lltv);
+    const oracle = endereco(params.oracle ?? params.oracle_address ?? params.oracleAddress);
+    const irm = endereco(params.irm ?? params.irm_address ?? params.irmAddress);
+    const lltv = lerLltv(params.lltv ?? params.lltv_wad ?? params.lltvWad);
     // SEM LLTV NAO HA MERCADO UTIL: o incentivo e funcao dele, e supor um valor
     // seria inventar o premio. Igual para os enderecos.
     if (loan === null || col === null || oracle === null || irm === null || lltv === null) return null;
@@ -275,6 +555,11 @@ export function lerUmMercado(cru: unknown): MercadoDaApi | null {
         loanToken: loan, collateralToken: col, oracle, irm,
         lltv, bonusPct: bonusPct(lltv),
         blocoDaCriacao: 0,
+        // A CHAIN do proprio item, quando ela vem. Filtrar por ela e diferente
+        // de confiar no parametro da URL: a API pode ignorar o filtro, e um
+        // mercado de outra rede validado contra a Base daria divergencia que
+        // leria como "mercado recusado" em vez de "mercado de outra chain".
+        chainId: lerChain(o, params),
         blocoIndexado: lerBloco(o),
         confirmadoNaCorrente: false,
     };
@@ -626,24 +911,24 @@ export function comoLerADescoberta(e: {
     devedores: number; validados: number; requisicoes: number;
     completa: boolean; blocoIndexado: number | null; blocoAgora: number | null;
     falha: string | null;
-    /** A requisicao HTTP SAIU. Ausente nao escolhe lado: sai como DESCONHECIDO. */
     tentou?: boolean;
-    /** Os status HTTP reais, na ordem. Numeros, nao prosa minha sobre eles. */
     statusHttp?: number[];
-    /** As quatro situacoes separadas. Ver `comoLerODesfecho`. */
     desfecho?: DesfechoDaDescoberta;
-    /** Quantos ficaram guardados NAO CONFIRMADOS para a proxima volta. */
     naoConfirmadosGuardados?: number;
-    /** Por que a validacao nao rodou, quando nao rodou. */
     porqueNaoValidou?: string | null;
+    /** Quantos ELEMENTOS a API mandou, antes de eu decodificar. */
+    elementosRecebidos?: number;
+    /** O erro de contrato, quando 200 nao decodificou. */
+    erroDeSchema?: string | null;
+    /** Descartados por serem de OUTRA chain. */
+    deOutraChain?: number;
+    /** Paginou pelo cursor do contrato REST. */
+    paginouPorCursor?: boolean;
+    /** O estado do RPC e o motivo de recusa, em uma frase. */
+    estadoDoRpc?: string | null;
 }): string {
     const partes = [
-        // O PRIMEIRO campo e o que distingue as quatro situacoes. Ela pediu
-        // isso por nome, e as quatro pedem consertos opostos.
         e.desfecho === undefined ? 'desfecho NÃO REGISTRADO' : comoLerODesfecho(e.desfecho),
-        // "A requisicao saiu?" antes de qualquer numero sobre o conteudo dela:
-        // sem esta linha, lista vazia por agendamento e lista vazia por rede
-        // sao indistinguiveis — e foi essa confusao que custou 2026-10-14.
         e.tentou === undefined
             ? 'requisição HTTP: DESCONHECIDO (campo não registrado)'
             : e.tentou
@@ -652,26 +937,46 @@ export function comoLerADescoberta(e: {
                         ? 'NENHUM (o transporte lançou antes da resposta)'
                         : (e.statusHttp ?? []).join(', ')}`
                 : 'NENHUMA requisição HTTP saiu',
-        `${e.devolvidos} mercado(s) a API devolveu, ${e.mercados} legíveis`,
+        // AS ETAPAS SEPARADAS, e e isto que o log de 2026-10-14 nao tinha:
+        // "recebidos" e "decodificados" eram o mesmo numero, entao um erro de
+        // contrato era indistinguivel de uma lista vazia.
+        e.elementosRecebidos === undefined
+            ? `${e.devolvidos} mercado(s) decodificados (recebidos: NÃO REGISTRADO)`
+            : `${e.elementosRecebidos} elemento(s) RECEBIDOS da API, `
+                + `${e.devolvidos} DECODIFICADOS`,
+        `${e.mercados} na lista de trabalho`
+            + (e.deOutraChain === undefined || e.deOutraChain === 0
+                ? ''
+                : ` (${e.deOutraChain} descartado(s) por serem de OUTRA chain)`),
         `${e.quePagam} com LLTV ≤ 77%`,
         `${e.confirmados} CONFIRMADOS na corrente`,
         `${e.devedores} devedor(es) apontado(s), ${e.validados} validado(s) por eth_call`,
-        `${e.requisicoes} requisição(ões)`,
+        `${e.requisicoes} requisição(ões)`
+            + (e.paginouPorCursor === true ? ', paginado por CURSOR' : ''),
         idadeDoIndice(e.blocoIndexado, e.blocoAgora),
     ];
-    // A COBERTURA em TRES estados, e nao em dois. Ela pediu *"completa, parcial
-    // ou indeterminada"*, e sao coisas diferentes: parcial e uma medicao com
-    // teto declarado; indeterminada e nao saber se ha mais.
+    // O ERRO DE CONTRATO vem ANTES da cobertura: ele explica o zero, e sem ele
+    // a linha seguinte seria lida como "a Base não tem mercados Morpho".
+    if (e.erroDeSchema !== undefined && e.erroDeSchema !== null) {
+        partes.push(`ERRO DE CONTRATO: ${e.erroDeSchema}`);
+    }
     if (!e.tentou) {
         partes.push('COBERTURA INDETERMINADA: nenhuma requisição saiu, então eu não sei quantos '
             + 'mercados existem — e isto NÃO é zero');
+    } else if (e.erroDeSchema !== undefined && e.erroDeSchema !== null) {
+        // 200 que nao decodificou NAO e cobertura de nada.
+        partes.push('COBERTURA INDETERMINADA: a resposta veio e eu não a entendi, então o número '
+            + 'de mercados da Base continua DESCONHECIDO');
     } else if (!e.completa) {
         partes.push('COBERTURA PARCIAL: a paginação não terminou, então este número é PISO, '
             + 'não total');
     } else {
         partes.push('COBERTURA COMPLETA da enumeração: a paginação terminou');
     }
-    if (e.falha !== null) partes.push(`falha: ${e.falha}`);
+    if (e.falha !== null && e.falha !== e.erroDeSchema) partes.push(`falha: ${e.falha}`);
+    if (e.estadoDoRpc !== undefined && e.estadoDoRpc !== null) {
+        partes.push(`RPC: ${e.estadoDoRpc}`);
+    }
     if (e.confirmados < e.quePagam) {
         partes.push(`${e.quePagam - e.confirmados} mercado(s) que pagam NÃO foram confirmados: `
             + 'eles não entram em decisão nenhuma'
