@@ -100,6 +100,10 @@ import {
     disponibilidadeDoCanal, comoLerOsCanais, OrcamentoHttp,
     type EstadoDaInfra, type DesfechoDaDescoberta,
 } from './canais';
+import {
+    lerMemoria, juntar, nomeTemporario, resumoCurto as resumoDaDescoberta,
+    VERSAO_DA_MEMORIA, type MemoriaDaDescoberta, type RegistroDaDescoberta,
+} from './memoriaDaDescoberta';
 
 export const LLTV_MAXIMO_QUE_PAGA = new Decimal('0.77');
 
@@ -357,6 +361,19 @@ export async function descobrirMorphoPorApi(
         tetoDeRequisicoes?: number;
         /** Teto de tempo desta volta, em ms. Cancela o que estiver em voo. */
         tetoDeMs?: number;
+        /** Onde a MEMORIA da descoberta mora. Sobrevive ao deploy. */
+        caminhoDaMemoria?: string;
+        /**
+         * Contadores do inventario. Injetados porque `cacarAoVivo.ts` sobe o bot
+         * ao ser importado — este modulo nao pode importa-lo, e replicar o
+         * inventario aqui provaria a copia.
+         *
+         * HTTP e RPC entram SEPARADOS: requisicao a `api.morpho.org` nao consome
+         * CU de provedor de RPC, e somar as duas produziria uma projecao de
+         * consumo que nao existe.
+         */
+        contarHttp?: (host: string) => void;
+        contarRpc?: (metodo: string) => void;
     } = {},
 ): Promise<void> {
     const { readFile, writeFile, mkdir } = await import('fs/promises');
@@ -401,7 +418,19 @@ export async function descobrirMorphoPorApi(
     } catch { doDisco = null; }
 
     const agente = process.env.HTTPS_PROXY ? new ProxyAgent(process.env.HTTPS_PROXY) : undefined;
-    const buscar: TransporteHttp = opcoes.buscar ?? (async (url, o) => {
+    // A CONTAGEM DE HTTP MORA AQUI, num lugar so, por fora do transporte.
+    //
+    // Ela foi explicita: *"Não conte duas vezes uma chamada instrumentada em
+    // camadas diferentes."* Entao o contador envolve o transporte em vez de
+    // viver dentro dele: assim vale igual para o transporte real e para o
+    // injetado do teste, e nenhuma das duas camadas conta por conta propria.
+    const contado = (t: TransporteHttp): TransporteHttp => async (url, o) => {
+        try {
+            opcoes.contarHttp?.(new URL(url).host);
+        } catch { opcoes.contarHttp?.('host ilegível'); }
+        return t(url, o);
+    };
+    const buscarCru: TransporteHttp = opcoes.buscar ?? (async (url, o) => {
         // `fetch` do Node ignora o HTTPS_PROXY e cai numa politica mais estreita
         // — este arquivo ja registra isso. Dispatcher explicito.
         const r = await fetch(url, {
@@ -415,6 +444,7 @@ export async function descobrirMorphoPorApi(
         } as Parameters<typeof fetch>[1]);
         return { status: r.status, text: () => r.text() };
     });
+    const buscar: TransporteHttp = contado(buscarCru);
 
     const enumeracao = await enumerarMercados(buscar, { orcamento });
     const legiveis = enumeracao.mercados.length > 0 ? enumeracao.mercados : (doDisco ?? []);
@@ -444,6 +474,7 @@ export async function descobrirMorphoPorApi(
     let chamadasRpc = 0;
     const chamarRpc = async (data: string): Promise<string | null> => {
         chamadasRpc += 1;
+        opcoes.contarRpc?.('eth_call');
         try {
             const r = await fetch(url, {
                 ...(agente ? { dispatcher: agente } : {}),
@@ -472,6 +503,7 @@ export async function descobrirMorphoPorApi(
         const j = await r.json() as { result?: string };
         codigo = typeof j.result === 'string' ? j.result : null;
         chamadasRpc += 1;
+        opcoes.contarRpc?.('eth_getCode');
     } catch { codigo = null; }
     // AS DUAS CAUSAS SAO SEPARADAS, e pedem acoes OPOSTAS. A primeira versao
     // deste trecho dava `return` nas duas — e com isso um soluco de RPC jogava
@@ -556,6 +588,7 @@ export async function descobrirMorphoPorApi(
         const j = await r.json() as { result?: string };
         if (typeof j.result === 'string') blocoAgora = Number.parseInt(j.result, 16);
         chamadasRpc += 1;
+        opcoes.contarRpc?.('eth_blockNumber');
     } catch { blocoAgora = null; }
 
     // O DESFECHO, entre as quatro situacoes que ela mandou separar. A ordem
@@ -607,6 +640,86 @@ export async function descobrirMorphoPorApi(
             + 'corrente não entra, e devedor não validado por eth_call não é alvo. '
             + 'Cobertura de devedores é PISO: o teto desta volta é pequeno de propósito',
     });
+
+    // A MEMORIA, e ela e o conserto da cegueira operacional.
+    //
+    // Ela abriu um trecho de log 15,7 min depois do boot e perguntou se a API
+    // tinha executado. A resposta existia em UMA linha, no boot, e nada a
+    // re-imprimia. Agora o resultado vai ao disco com data e e re-impresso no
+    // `[BLOCO]`.
+    //
+    // E a REGRA DURA: *"Uma falha posterior não pode apagar o último resultado
+    // válido."* `juntar` troca `ultimoSucesso` so por SUCESSO.
+    const oQueBloqueia: string | null = (() => {
+        if (!enumeracao.tentou) return 'o orçamento HTTP não deixou sair requisição nenhuma';
+        if (rpcMudo) return 'o RPC não respondeu ao eth_getCode: sem ele não valido mercado nenhum';
+        if (enumeracao.falha !== null && legiveis.length === 0) {
+            return `a API da Morpho: ${enumeracao.falha}`;
+        }
+        if (quePagam.length === 0) return null;
+        if (confirmados === 0) {
+            return 'os campos dos mercados divergiram da corrente: nenhum confirmado';
+        }
+        if (devedores === 0) {
+            return 'nenhum devedor veio do GraphQL para os mercados confirmados'
+                + (falhasDeDevedores.length > 0 ? ` — ${falhasDeDevedores[0]}` : '');
+        }
+        if (validados === 0) return 'nenhum devedor passou a validação por eth_call';
+        return null;
+    })();
+
+    const registro: RegistroDaDescoberta = {
+        em: Date.now(),
+        desfecho,
+        tentou: enumeracao.tentou,
+        statusHttp: enumeracao.statusHttp,
+        mercadosEnumerados: legiveis.length,
+        mercadosQuePagam: quePagam.length,
+        mercadosConfirmados: confirmados,
+        devedoresEncontrados: devedores,
+        devedoresValidados: validados,
+        blocoIndexado: enumeracao.blocoIndexado,
+        coberturaCompleta: enumeracao.completa,
+        falha: enumeracao.falha,
+        requisicoesHttp: enumeracao.requisicoes + reqGraph,
+        chamadasRpc,
+        // A LISTA VEIO DO CACHE? Sem isto, uma volta com a API morta renovaria
+        // a idade do ultimo sucesso para sempre.
+        veioDoCache,
+        oQueBloqueia,
+    };
+    const caminhoMem = opcoes.caminhoDaMemoria
+        ?? process.env.CACA_MEMORIA_MORPHO
+        ?? '/app/data/descobertaMorpho.json';
+    try {
+        let antes: MemoriaDaDescoberta | null = null;
+        try {
+            antes = lerMemoria(JSON.parse(await readFile(caminhoMem, 'utf8')));
+        } catch { antes = null; }
+        const juntada = juntar(antes, registro);
+        await mkdir(dirname(caminhoMem), { recursive: true });
+        const tmp = nomeTemporario(caminhoMem);
+        await writeFile(tmp, JSON.stringify({ ...juntada, versao: VERSAO_DA_MEMORIA }));
+        const { rename } = await import('fs/promises');
+        await rename(tmp, caminhoMem);
+        log.info('[MORPHO/API] Memória da descoberta gravada.', {
+            caminho: caminhoMem,
+            agora: resumoDaDescoberta(juntada, Date.now()),
+            oUltimoSucessoSobreviveu: juntada.ultimoSucesso !== null
+                && antes?.ultimoSucesso !== null
+                && juntada.ultimoSucesso?.em === antes?.ultimoSucesso?.em
+                ? 'SIM: esta tentativa não foi sucesso e NÃO apagou o resultado anterior'
+                : 'esta tentativa é o resultado mais recente',
+        });
+    } catch (e) {
+        // NAO MATA A CACA. Falhar ao gravar a memoria e perder a resposta da
+        // proxima vez, nao perder o bot.
+        log.warn('[MORPHO/API] NÃO gravei a memória da descoberta.', {
+            caminho: caminhoMem,
+            erro: e instanceof Error ? e.message : String(e),
+            oQueIssoCusta: 'o próximo boot não saberá o resultado desta volta',
+        });
+    }
 
     // GRAVA o que foi confirmado, para a proxima volta nao recomecar.
     if (legiveis.length > 0) {

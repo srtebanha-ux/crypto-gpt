@@ -10,6 +10,8 @@ import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
 import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
 import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, sanitizar, OrcamentoDaTarefa, veredictoDaVarredura, FreioDeRecusas, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
 import { disponibilidadeDoCanal, comoLerOsCanais } from './canais';
+import { DisponibilidadeReal, autorizarVarredura } from './disponibilidadeReal';
+import { resumoCurto as resumoDaDescoberta, lerMemoria, type MemoriaDaDescoberta } from './memoriaDaDescoberta';
 import { diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs, lerErroJsonRpc, comoLerOErroJsonRpc, lerCorpoJson } from './cobertura';
 import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
@@ -1162,7 +1164,52 @@ const BOOT_EM = Date.now();
  * Contado, nao silencioso: uma coleta que nao rodou tem de aparecer, senao
  * "nenhum devedor novo" fica indistinguivel de "nao fui buscar".
  */
-const ADIADAS = { historico: 0, morpho: 0, varreduraCompleta: 0 };
+/**
+ * As tarefas secundarias ADIADAS nesta execucao.
+ *
+ * `morpho` SAIU, e nao por limpeza: ele era CONTADOR MORTO. Nada no codigo o
+ * incrementava — `grep -n "ADIADAS.morpho"` nao achava nenhuma escrita — e o
+ * log publicava `{"morpho":0}` em toda linha, como se fosse a medicao de que a
+ * tarefa nao tinha sido adiada. Era o campo que alguem consultaria para
+ * responder "a descoberta executou?", e ele respondia zero por construcao:
+ * ausencia com cara de resposta, no indicador da tarefa sob investigacao.
+ *
+ * Quem responde por essa tarefa agora e a MEMORIA DA DESCOBERTA, que sobrevive
+ * ao deploy e tem data — ver `src/memoriaDaDescoberta.ts`.
+ */
+const ADIADAS = { historico: 0, varreduraCompleta: 0 };
+
+/**
+ * DISPONIBILIDADE REAL por provedor E metodo, com idade.
+ *
+ * Criada pelo incidente de 2026-10-14: o PublicNode aceitou `eth_getLogs` de
+ * 10.000 blocos enquanto o censo continuava adiado, porque o portao olhava
+ * `CAPACIDADE.esgotados().length > 0` — a Alchemy, que nao servia trafego
+ * nenhum. Ver a docstring de `src/disponibilidadeReal.ts`.
+ */
+const DISPONIBILIDADE = new DisponibilidadeReal();
+
+/** A memoria da descoberta do Morpho, lida no boot e re-impressa no [BLOCO]. */
+let MEMORIA_MORPHO: MemoriaDaDescoberta | null = null;
+
+/**
+ * Le a memoria da descoberta do disco. NUNCA lanca.
+ *
+ * *"Cache corrompido sem derrubar o monitoramento."* Um JSON cortado aqui nao
+ * pode matar o laco de caca: este projeto ja viu um `SyntaxError` nao
+ * reconhecido virar laco infinito na escada de RPC. Arquivo torto devolve
+ * `null`, e `null` le como NUNCA EXECUTADO — que e a verdade sobre o que eu sei,
+ * nao sobre o que aconteceu, e a frase do log diz isso.
+ */
+async function lerMemoriaDoDisco(): Promise<MemoriaDaDescoberta | null> {
+    const caminho = process.env.CACA_MEMORIA_MORPHO ?? '/app/data/descobertaMorpho.json';
+    try {
+        const { readFile } = await import('fs/promises');
+        return lerMemoria(JSON.parse(await readFile(caminho, 'utf8')));
+    } catch {
+        return null;
+    }
+}
 
 
 /**
@@ -1185,12 +1232,18 @@ function registrarRecusa(
     host = hostDoRpc(rpc),
 ): DecisaoSobreRecusa {
     const d = decidirSobreRecusa({ mensagem: msg, ehTransporte: ehFalhaDeTransporte(msg) });
+    // A RECUSA E DESTE PROVEDOR E DESTE METODO. `marcarEsgotado` e a recusa que
+    // esperar nao resolve; qualquer outra entra como recuo e volta sozinha.
+    DISPONIBILIDADE.recusa(host, metodo, msg, d.marcarEsgotado);
     if (d.marcarEsgotado) {
         const novoEsgotamento = !CAPACIDADE.estaEsgotado(host);
         CAPACIDADE.esgotou(host, msg);
         if (novoEsgotamento) {
             const pausa = oQuePausar({
                 algumEsgotado: true, noFallback: !ESCADA.ehOPrimario(),
+                // QUEM DECIDE E QUEM ATENDE. A recusa pode ser do primario
+                // sondado enquanto o secundario serve: nesse caso nada pausa.
+                oAtivoEstaEsgotado: CAPACIDADE.estaEsgotado(hostDoRpc(rpc)),
             });
             log.error('[CAPACIDADE] Provedor com CAPACIDADE ESGOTADA.', {
                 metodo,
@@ -1236,6 +1289,10 @@ async function chamar<T>(metodo: string, params: unknown[], tentativas = 4,
             const r = await umaChamada<T>(metodo, params);
             ESCADA.deuCerto();
             VAZAO.deuCerto();
+            // A PROVA, com data: este metodo neste provedor respondeu AGORA. Ela
+            // vence em `PROVA_VENCE_EM_MS` — um `eth_getLogs` que passou as
+            // 16:49 nao prova disponibilidade as 17:30.
+            DISPONIBILIDADE.sucesso(hostDoRpc(rpc), metodo);
             // RECUPERACAO 1: uma leitura que PASSA prova disponibilidade. E a
             // unica forma de sair do esgotamento que nao e esperar nem supor.
             if (CAPACIDADE.confirmou(hostDoRpc(rpc), metodo)) {
@@ -1853,6 +1910,12 @@ let pedacoMedido: number | null = null;
  * blocos em 02/10 e 500 em 06/10, medido nos dois dias.
  */
 function anunciarPedaco(pedaco: number, tentativas: number): void {
+    // O TETO MEDIDO entra na disponibilidade DESTE provedor, e so dele: o
+    // `mainnet.base.org` servia 2.000 blocos em 02/10, 500 em 06/10 e 312 em
+    // 07/10, e o PublicNode aceitou 10.000 em 14/10. Generalizar um teto entre
+    // provedores produz janela que falha inteira e devolve "0 encontrados",
+    // que e resposta falsa com cara de medicao.
+    DISPONIBILIDADE.sucesso(hostDoRpc(rpc), 'eth_getLogs', pedaco);
     log.info('[RPC] Teto de eth_getLogs deste provedor, MEDIDO agora.', {
         provedor: hostDoRpc(rpc),
         aceita: `${pedaco.toLocaleString('pt-BR')} blocos por chamada`,
@@ -1958,7 +2021,22 @@ async function lerFaixaPartindoSePreciso(
         // adie histórico e descoberta secundária para preservar o monitoramento
         // essencial."* A faixa nao lida volta como FALHA — e falha declarada
         // abre lacuna no cursor em vez de avancar por cima dela.
-        if (VAZAO.estaEmRecuo() || CAPACIDADE.esgotados().length > 0) {
+        // O PORTAO OLHA O PROVEDOR ATIVO, e nao "algum provedor esgotado".
+        //
+        // MEDIDO no log de 2026-10-14: o PublicNode aceitou `eth_getLogs` de
+        // 10.000 blocos as 16:49:52 e a coleta avancou — enquanto este portao
+        // mantinha o censo adiado, porque `CAPACIDADE.esgotados()` trazia a
+        // ALCHEMY, que nao servia trafego nenhum. O esgotamento de um provedor
+        // bloqueava trabalho que outro provedor comprovadamente fazia. E a
+        // mesma subordinacao do incidente do canal HTTP, num eixo diferente.
+        //
+        // E ela pos a condicao que impede o conserto de virar o defeito oposto:
+        // disponibilidade NAO devolve orcamento. `autorizarVarredura` exige as
+        // tres coisas juntas — veredicto do provedor ATIVO para ESTE metodo,
+        // orcamento restante, e teto de blocos MEDIDO.
+        const aqui = hostDoRpc(rpc);
+        const v = DISPONIBILIDADE.veredicto(aqui, 'eth_getLogs');
+        if (VAZAO.estaEmRecuo() || !v.podeVarrer) {
             ADIADAS.historico += 1;
             return { lidas: [], falhas: 1 };
         }
@@ -2860,11 +2938,29 @@ async function principal(): Promise<'parar' | void> {
     const infraAgora = {
         provedoresEsgotados: CAPACIDADE.esgotados(),
         noFallback: !ESCADA.ehOPrimario(),
-        eventosRecusados: ADIADAS.historico > 0,
+        // DO VEREDICTO MEDIDO, e nao do orcamento do censo. Eu havia ligado
+        // isto a `ADIADAS.historico > 0` ontem, e sao duas perguntas
+        // diferentes: "o provedor recusa este metodo?" contra "eu decidi adiar
+        // esta tarefa?". O log de 2026-10-14 prova que divergem — o metodo
+        // aceitou 10.000 blocos enquanto a tarefa estava adiada, e a minha
+        // flag diria RECUSADO sobre um provedor que funciona.
+        eventosRecusados: DISPONIBILIDADE.veredicto(hostDoRpc(rpc), 'eth_getLogs').estado
+            === 'indisponivel',
     };
     // A LINHA QUE FALTAVA: o incidente foi invisivel porque nao havia nenhuma
     // frase dizendo que o canal HTTP estava livre. Nao dizer e indistinguivel
     // de nao poder — e este projeto persegue isso desde a primeira pagina.
+    // A MEMORIA DA DESCOBERTA, no boot: ela responde "a Morpho executou?" sem
+    // depender de alguem capturar a janela de log certa.
+    MEMORIA_MORPHO = await lerMemoriaDoDisco();
+    log.info('[MORPHO/MEMÓRIA] O que eu sei da última descoberta.', {
+        estado: resumoDaDescoberta(MEMORIA_MORPHO, Date.now()),
+        oQueIssoNaoE: MEMORIA_MORPHO === null
+            ? 'NUNCA EXECUTADO não é "não há mercados": é "não há registro". Ligue '
+                + 'CACA_MORPHO_API=1 para a descoberta rodar'
+            : 'resultado ANTIGO serve para saber o que existia, NÃO para decidir transação',
+    });
+
     log.info('[CANAIS] A disponibilidade é por CANAL, e não por assunto.', {
         canais: comoLerOsCanais(infraAgora),
         provedoresEsgotados: infraAgora.provedoresEsgotados,
@@ -2891,7 +2987,18 @@ async function principal(): Promise<'parar' | void> {
         void (async () => {
             try {
                 const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
-                await descobrirMorphoPorApi({ infra: infraAgora });
+                await descobrirMorphoPorApi({
+                    infra: infraAgora,
+                    // O INVENTARIO VE A DESCOBERTA. Antes ela usava `fetch` cru e
+                    // o consumo dela era invisivel — entao a ausencia dela no
+                    // `porTarefaEMetodo` nao provava nem que rodou nem que nao.
+                    // HTTP e RPC entram separados: HTTP nao consome CU.
+                    contarHttp: (host) => INVENTARIO.contarHttp('morpho', host),
+                    contarRpc: (metodo) => INVENTARIO.contar('morpho', metodo),
+                });
+                // Reler para o `[BLOCO]` passar a publicar o resultado desta
+                // volta sem esperar o proximo boot.
+                MEMORIA_MORPHO = await lerMemoriaDoDisco();
             } catch (e) {
                 log.error('[MORPHO/API] A descoberta falhou, e o bot segue caçando.', {
                     erro: e instanceof Error ? e.message : String(e),
@@ -4286,11 +4393,43 @@ async function principal(): Promise<'parar' | void> {
             const de = Math.max(0, ate - PASSO + 1);
             if (ate <= 0) break;
             if (!orcamento.pedir()) break;
+            // AS TRES CONDICOES JUNTAS, a cada janela e nao uma vez no comeco.
+            //
+            // A condicao dela: *"não transforme a recuperação parcial do
+            // eth_getLogs em autorização para consumir RPC indiscriminadamente"*.
+            // `autorizarVarredura` exige veredicto do provedor ATIVO para ESTE
+            // metodo, orcamento restante E teto de blocos MEDIDO — e um teto que
+            // passou numa consulta nao autoriza todas as consultas daquele
+            // tamanho, entao sem teto medido a resposta e sondar, nao varrer.
+            //
+            // Reavaliado por janela porque o provedor pode trocar no meio: a
+            // escada muda `rpc` sob os pes do laco.
+            const aqui = hostDoRpc(rpc);
+            const permissao = autorizarVarredura({
+                veredicto: DISPONIBILIDADE.veredicto(aqui, 'eth_getLogs'),
+                requisicoesRestantes: orcamento.restamTentativas(),
+                msRestantes: orcamento.restamMs(),
+                blocosDesejados: PASSO,
+            });
+            if (!permissao.pode) {
+                janelasQueFalharam += 1;
+                ADIADAS.historico += 1;
+                if (i === 0) {
+                    log.warn('[MERCADO] NÃO varro o histórico agora, e o motivo está medido.', {
+                        provedor: aqui,
+                        veredicto: DISPONIBILIDADE.comoLer(aqui, 'eth_getLogs'),
+                        porque: permissao.porque,
+                        oQueIssoNaoE: 'não é "não houve liquidação": é "não li". O monitoramento '
+                            + 'não é afetado — ele não passa por este portão',
+                    });
+                }
+                break;
+            }
             try {
                 const logs = await chamar<Array<{ address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string }>>('eth_getLogs', [{
                     address: REDE.pool,
                     fromBlock: `0x${de.toString(16)}`,
-                    toBlock: `0x${ate.toString(16)}`,
+                    toBlock: `0x${Math.min(ate, de + (permissao.blocosPorChamada ?? PASSO) - 1).toString(16)}`,
                     topics: [TOPIC_LIQUIDATION_CALL],
                 }], 1, 'demorada', 'historico');
                 janelasLidas += 1;
@@ -5313,6 +5452,22 @@ async function principal(): Promise<'parar' | void> {
                                 ),
                                 vazao: VAZAO.estado(),
                                 secundariasAdiadas: ADIADAS,
+                                // AS REQUISICOES HTTP, SEPARADAS. Elas nao
+                                // consomem CU de RPC, entao somar as duas
+                                // produziria uma projecao de consumo que nao
+                                // existe — e que pausaria tarefas por um
+                                // orcamento que ninguem esta gastando.
+                                http: INVENTARIO.totalHttp() === 0
+                                    ? 'nenhuma requisição HTTP nesta execução'
+                                    : INVENTARIO.requisicoesHttp(),
+                                // A DISPONIBILIDADE DO ATIVO, por metodo, curta.
+                                // Ela pediu o estado real de cada caminho
+                                // independente, sem relatorio gigante: duas
+                                // linhas respondem "o que esta bloqueando".
+                                disponibilidadeDoAtivo: [
+                                    DISPONIBILIDADE.comoLer(hostDoRpc(rpc), 'eth_call'),
+                                    DISPONIBILIDADE.comoLer(hostDoRpc(rpc), 'eth_getLogs'),
+                                ].join(' | '),
                             };
                         })(),
                         avisoDeBloco: ouvinte === null
@@ -5333,6 +5488,15 @@ async function principal(): Promise<'parar' | void> {
                             return g === null ? 'sem amostra' : `${g.etapa} (p50 ${g.p50.toFixed(1)}ms)`;
                         })(),
                         episodios: comoLerOsEpisodios(livro.resumo(pisoDaAposta().toNumber())),
+                        // A DESCOBERTA DO MORPHO, EM UMA LINHA, com IDADE.
+                        //
+                        // Ela abriu um trecho de log que comecava 15,7 min
+                        // depois do boot e perguntou se a API tinha executado —
+                        // e nem ela nem eu podiamos responder, porque o
+                        // resultado saia uma vez, no boot. Agora ele mora no
+                        // disco e e re-impresso aqui, com os tres estados
+                        // separados: NUNCA EXECUTADO, ATUAL e ANTIGO.
+                        morpho: resumoDaDescoberta(MEMORIA_MORPHO, Date.now()),
                         naBrasa: brasa.length,
                         // Sem isto, "mercado calmo" e "Binance morta" dao o
                         // mesmo log — e sao coisas opostas.
@@ -5783,7 +5947,16 @@ async function principal(): Promise<'parar' | void> {
                         log.info(`[BLOCO ${blocoAtual}] Varredura completa.`, {
                             episodios: comoLerOsEpisodios(livro.resumo(pisoDaAposta().toNumber())),
                             alvosChecados: aLer.length,
-                            naBrasa: brasa.length,
+                            // A DESCOBERTA DO MORPHO, EM UMA LINHA, com IDADE.
+                        //
+                        // Ela abriu um trecho de log que comecava 15,7 min
+                        // depois do boot e perguntou se a API tinha executado —
+                        // e nem ela nem eu podiamos responder, porque o
+                        // resultado saia uma vez, no boot. Agora ele mora no
+                        // disco e e re-impresso aqui, com os tres estados
+                        // separados: NUNCA EXECUTADO, ATUAL e ANTIGO.
+                        morpho: resumoDaDescoberta(MEMORIA_MORPHO, Date.now()),
+                        naBrasa: brasa.length,
                             // A ETIQUETA DESCREVE ESTE CICLO, com o corte que
                             // ELE usou — e nao o teto cravado.
                             //

@@ -9,6 +9,7 @@ import {
     CHAIN_ID_DA_BASE, POR_PAGINA, TETO_DE_PAGINAS, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
 import { OrcamentoHttp } from './canais';
+import { lerMemoria } from './memoriaDaDescoberta';
 import { SELETORES_DO_MORPHO } from './mercadosDoMorpho';
 
 const semSono = async () => {};
@@ -422,4 +423,110 @@ test('RPC indisponível guarda os mercados como NÃO CONFIRMADOS, e diz isso', (
     });
     assert.notEqual(f, recusou);
     assert.match(recusou, /os campos divergiram/);
+});
+
+test('5. a API da Morpho funciona INDEPENDENTEMENTE do estado do RPC', async () => {
+    // O incidente de 2026-10-14 por inteiro, contra a função de produção.
+    // Alchemy esgotada, no fallback, eventos recusados — e a enumeração ocorre.
+    const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
+    const { mkdtemp, readFile } = await import('fs/promises');
+    const { tmpdir } = await import('os');
+    const { join: j } = await import('path');
+    const dir = await mkdtemp(j(tmpdir(), 'morpho-'));
+
+    let requisicoes = 0;
+    const http: string[] = [];
+    const rpc: string[] = [];
+    await descobrirMorphoPorApi({
+        infra: {
+            provedoresEsgotados: ['base-mainnet.g.alchemy.com'],
+            noFallback: true,
+            eventosRecusados: true,
+        },
+        buscar: async () => {
+            requisicoes += 1;
+            return { status: 200, text: async () => pagina([1, 2, 3]) };
+        },
+        caminhoDoCache: j(dir, 'mercados.json'),
+        caminhoDaMemoria: j(dir, 'memoria.json'),
+        contarHttp: (h) => http.push(h),
+        contarRpc: (m) => rpc.push(m),
+        tetoDeValidacoes: 1,
+        tetoDeMercadosComDevedores: 0,
+    });
+
+    assert.ok(requisicoes > 0, 'a API não foi chamada com o RPC esgotado: é o incidente');
+    // A MEMÓRIA existe e responde, mesmo que o RPC não tenha confirmado nada.
+    const m = lerMemoria(JSON.parse(await readFile(j(dir, 'memoria.json'), 'utf8')));
+    assert.notEqual(m.ultimaTentativa, null);
+    assert.equal(m.ultimaTentativa?.tentou, true);
+    assert.deepEqual(m.ultimaTentativa?.statusHttp, [200]);
+    assert.ok(m.ultimaTentativa!.mercadosEnumerados >= 1);
+    // HTTP contado como HTTP, e as chamadas de RPC como RPC. Nunca misturadas.
+    assert.ok(http.length > 0, 'a requisição HTTP não entrou no inventário');
+    assert.ok(http.every((h) => !h.startsWith('eth_')), 'host HTTP virou método RPC');
+    assert.ok(rpc.every((x) => x.startsWith('eth_')), 'método RPC não parece método RPC');
+    // E cada requisição HTTP é contada UMA vez: a camada que conta é só uma.
+    assert.equal(http.length, requisicoes, 'contagem dupla de HTTP entre camadas');
+});
+
+test('6. API fora do ar com cache anterior válido: segue com o cache e DIZ', async () => {
+    const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
+    const { mkdtemp, writeFile, readFile } = await import('fs/promises');
+    const { tmpdir } = await import('os');
+    const { join: j } = await import('path');
+    const dir = await mkdtemp(j(tmpdir(), 'morpho-'));
+    const cache = j(dir, 'mercados.json');
+    const memoria = j(dir, 'memoria.json');
+
+    // Primeiro: uma volta que DEU CERTO, para haver cache e memória.
+    await descobrirMorphoPorApi({
+        infra: { provedoresEsgotados: [], noFallback: false },
+        buscar: async () => ({ status: 200, text: async () => pagina([1, 2, 3]) }),
+        caminhoDoCache: cache, caminhoDaMemoria: memoria,
+        tetoDeValidacoes: 1, tetoDeMercadosComDevedores: 0,
+    });
+    const bom = lerMemoria(JSON.parse(await readFile(memoria, 'utf8')));
+    assert.notEqual(bom.ultimoSucesso, null, 'a primeira volta não registrou sucesso');
+    const enumeradosAntes = bom.ultimoSucesso!.mercadosEnumerados;
+
+    // Agora a API cai. O cache tem de sustentar, e o último sucesso sobreviver.
+    await descobrirMorphoPorApi({
+        infra: { provedoresEsgotados: [], noFallback: false },
+        buscar: async () => { throw new Error('getaddrinfo ENOTFOUND api.morpho.org'); },
+        caminhoDoCache: cache, caminhoDaMemoria: memoria,
+        tetoDeValidacoes: 1, tetoDeMercadosComDevedores: 0,
+    });
+    const depois = lerMemoria(JSON.parse(await readFile(memoria, 'utf8')));
+    assert.equal(
+        depois.ultimoSucesso?.em, bom.ultimoSucesso?.em,
+        'a queda da API apagou o último resultado válido',
+    );
+    assert.equal(depois.ultimoSucesso?.mercadosEnumerados, enumeradosAntes);
+    assert.notEqual(depois.ultimaTentativa?.em, bom.ultimoSucesso?.em);
+    assert.notEqual(depois.ultimaTentativa?.falha, null);
+
+    // E o cache de mercados NÃO foi esvaziado pela queda.
+    const guardado = JSON.parse(await readFile(cache, 'utf8')) as { mercados?: unknown[] };
+    assert.ok((guardado.mercados ?? []).length > 0, 'a queda da API esvaziou o cache');
+});
+
+test('8. memória corrompida no disco não impede a descoberta nem lança', async () => {
+    const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
+    const { mkdtemp, writeFile, readFile } = await import('fs/promises');
+    const { tmpdir } = await import('os');
+    const { join: j } = await import('path');
+    const dir = await mkdtemp(j(tmpdir(), 'morpho-'));
+    const memoria = j(dir, 'memoria.json');
+    await writeFile(memoria, '{"ultimoSucesso": {"merc');  // JSON cortado
+
+    await descobrirMorphoPorApi({
+        infra: { provedoresEsgotados: [], noFallback: false },
+        buscar: async () => ({ status: 200, text: async () => pagina([7, 8]) }),
+        caminhoDoCache: j(dir, 'mercados.json'), caminhoDaMemoria: memoria,
+        tetoDeValidacoes: 1, tetoDeMercadosComDevedores: 0,
+    });
+    // Não lançou (chegamos aqui) e a memória foi REESCRITA com algo legível.
+    const m = lerMemoria(JSON.parse(await readFile(memoria, 'utf8')));
+    assert.notEqual(m.ultimaTentativa, null, 'a memória torta impediu a gravação nova');
 });

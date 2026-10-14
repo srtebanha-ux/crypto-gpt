@@ -813,7 +813,17 @@ test('a chave da recusa ignora credencial e detalhe variável', () => {
 test('o censo usa o freio DE VERDADE, com sucesso soltando', () => {
     const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
     const i = fonte.indexOf('async function quandoFoiAUltimaLiquidacao');
-    const corpo = fonte.slice(i, i + 6000).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    assert.ok(i > 0, 'a função do censo desapareceu');
+    // A FATIA VAI ATE O FIM DA FUNCAO, e nao a um numero magico.
+    //
+    // Era `i + 6000`, e em 2026-10-14 o portao de `autorizarVarredura` empurrou
+    // `freio.recusou` para fora dessa janela: o teste reprovou sem que nada do
+    // que ele guarda tivesse mudado. Teste amarrado a um deslocamento quebra a
+    // cada edicao vizinha — e um teste que reprova por motivo errado deixa de
+    // responder "quebrou?", que e a unica coisa que ele existe para fazer.
+    const fim = fonte.indexOf('\n}\n', i);
+    assert.ok(fim > i, 'não achei o fim da função');
+    const corpo = fonte.slice(i, fim).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
     assert.match(corpo, /new FreioDeRecusas\(\)/);
     assert.match(corpo, /freio\.passou\(\)/, 'sucesso solta o freio');
     assert.match(corpo, /freio\.recusou\(msg\)/);

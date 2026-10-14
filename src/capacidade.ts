@@ -286,12 +286,51 @@ export const CU_ESTIMADO_POR_METODO: Record<string, number> = {
 };
 
 export class Inventario {
-    /** chave: `${tarefa}|${metodo}` -> chamadas OBSERVADAS. */
+    /** chave: `${tarefa}|${metodo}` -> chamadas OBSERVADAS. SO RPC. */
     private readonly contas = new Map<string, number>();
+    /**
+     * chave: `${tarefa}|${host}` -> requisicoes HTTP OBSERVADAS.
+     *
+     * SEPARADO do RPC, e ela foi explicita: *"Inclua os gastos da descoberta no
+     * INVENTARIO, separando chamadas HTTP e métodos RPC. Não contabilize
+     * chamadas HTTP como unidades de consumo RPC."*
+     *
+     * E a razao e material, nao cosmetica: CU e a moeda do provedor de RPC. Uma
+     * requisicao a `api.morpho.org` nao consome CU nenhum, entao somar as duas
+     * produziria uma projecao de consumo que nao existe e que pausaria tarefas
+     * por um orcamento que nao esta sendo gasto. O mapa de pesos NUNCA e
+     * aplicado a este mapa.
+     */
+    private readonly contasHttp = new Map<string, number>();
 
     contar(tarefa: Tarefa, metodo: string, quantas = 1): void {
         const k = `${tarefa}|${metodo}`;
         this.contas.set(k, (this.contas.get(k) ?? 0) + quantas);
+    }
+
+    /**
+     * Uma requisicao HTTP que NAO e RPC. `host` e o destino, nao a URL inteira:
+     * URL carrega chave de API, e nada secreto entra em log.
+     */
+    contarHttp(tarefa: Tarefa, host: string, quantas = 1): void {
+        const k = `${tarefa}|${host}`;
+        this.contasHttp.set(k, (this.contasHttp.get(k) ?? 0) + quantas);
+    }
+
+    /** As requisicoes HTTP observadas. Sem CU: elas nao consomem CU de RPC. */
+    requisicoesHttp(): Array<{ tarefa: Tarefa; host: string; requisicoes: number }> {
+        return [...this.contasHttp.entries()]
+            .map(([k, requisicoes]) => {
+                const [tarefa, host] = k.split('|') as [Tarefa, string];
+                return { tarefa, host, requisicoes };
+            })
+            .sort((a, b) => b.requisicoes - a.requisicoes);
+    }
+
+    totalHttp(): number {
+        let t = 0;
+        for (const v of this.contasHttp.values()) t += v;
+        return t;
     }
 
     /** As chamadas observadas, por tarefa e metodo. Fato, sem estimativa. */
@@ -370,15 +409,59 @@ export class Inventario {
  * que esperam; a varredura completa esta no meio, e pausa por ultimo entre as
  * secundarias porque e ela que povoa a brasa.
  */
-export function oQuePausar(e: { algumEsgotado: boolean; noFallback: boolean }): {
+export function oQuePausar(e: {
+    algumEsgotado: boolean;
+    noFallback: boolean;
+    /**
+     * O PROVEDOR ATIVO esta esgotado?
+     *
+     * CORRIGE o incidente de 2026-10-14. `algumEsgotado` pausava as secundarias
+     * quando QUALQUER provedor estava esgotado — e o esgotado era a Alchemy,
+     * que nao servia trafego nenhum, enquanto o PublicNode aceitava
+     * `eth_getLogs` de 10.000 blocos. O esgotamento de um provedor bloqueava
+     * trabalho que outro provedor comprovadamente fazia.
+     *
+     * Quando este campo vem, ele MANDA sobre `algumEsgotado`: quem decide e o
+     * provedor que esta atendendo. Ausente mantem o comportamento antigo, para
+     * nao mudar chamador que ainda nao sabe responder.
+     */
+    oAtivoEstaEsgotado?: boolean;
+}): {
     pausar: Tarefa[]; porque: string;
 } {
+    // O ATIVO ESGOTADO pausa de verdade: se quem atende nao tem cota, nao ha
+    // trabalho secundario possivel.
+    if (e.oAtivoEstaEsgotado === true) {
+        return {
+            pausar: [...SECUNDARIAS],
+            porque: 'o provedor ATIVO está com capacidade esgotada: as secundárias param para o '
+                + 'que sobra de cota ficar com o monitoramento, que é o único que precisa estar '
+                + 'vivo no instante do alvo',
+        };
+    }
+    // ATIVO SAUDAVEL: outro provedor esgotado NAO pausa nada. Era aqui o
+    // defeito, e a frase diz o que mudou para a próxima sessão não reverter.
+    if (e.oAtivoEstaEsgotado === false) {
+        if (e.noFallback) {
+            return {
+                pausar: ['historico', 'morpho'],
+                porque: 'o provedor ativo responde, mas é de reserva: histórico e censo esperam '
+                    + 'para não sobrecarregá-lo. Outro provedor esgotado NÃO entra nesta conta — '
+                    + 'quem decide é quem atende',
+            };
+        }
+        return {
+            pausar: [],
+            porque: 'o provedor ativo responde e é o primário: nada a pausar. Capacidade esgotada '
+                + 'em provedor que não atende não bloqueia trabalho nenhum (medido em 2026-10-14)',
+        };
+    }
     if (e.algumEsgotado) {
         return {
             pausar: [...SECUNDARIAS],
-            porque: 'capacidade esgotada em algum provedor: as secundárias param para o que sobra '
-                + 'de cota ficar com o monitoramento, que é o único que precisa estar vivo no '
-                + 'instante do alvo',
+            porque: 'capacidade esgotada em algum provedor, e eu NÃO SEI o estado do ativo: as '
+                + 'secundárias param pelo lado seguro. Informe `oAtivoEstaEsgotado` para a '
+                + 'decisão sair do provedor que atende',
         };
     }
     if (e.noFallback) {
@@ -511,6 +594,23 @@ export class OrcamentoDaTarefa {
     porqueAcabou(): string | null { return this.motivoDoFim; }
     gastas(): number { return this.tentativasGastas; }
     decorridoMs(): number { return this.agora() - this.comecouEm; }
+
+    /**
+     * O QUE AINDA CABE. Existe para `autorizarVarredura` poder exigir orcamento
+     * restante sem adivinhar: disponibilidade de RPC nao devolve orcamento, e
+     * varrer com o orcamento no fim e gastar o que o monitoramento precisa.
+     *
+     * Zero quando o orcamento ja encerrou, nunca negativo.
+     */
+    restamTentativas(): number {
+        if (this.motivoDoFim !== null) return 0;
+        return Math.max(0, this.tetoDeTentativas - this.tentativasGastas);
+    }
+
+    restamMs(): number {
+        if (this.motivoDoFim !== null) return 0;
+        return Math.max(0, this.tetoDeMs - this.decorridoMs());
+    }
 
     comoLer(): string {
         return `${this.tarefa}: ${this.tentativasGastas} de ${this.tetoDeTentativas} tentativas, `
