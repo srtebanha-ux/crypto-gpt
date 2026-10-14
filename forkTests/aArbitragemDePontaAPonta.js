@@ -61,6 +61,7 @@ const Decimal = require('decimal.js');
 
 const {
     evaluateCycle, getAmountOut, simulateCycle,
+    saidaCrua, entradaNecessariaCrua, sobraDoFlashSwap,
 } = require('../dist/ammMath.js');
 
 // As fabricas cuja superficie de FLASH SWAP a corrente confirmou (ver o
@@ -373,6 +374,43 @@ describe('ENTREGA 1 — arbitragem com flash loan de ponta a ponta', function ()
         assert.ok(rel.lessThan('1e-12'),
             `contrato ${doContrato} contra avaliador ${esperado} (erro relativo ${rel.toExponential(3)})`);
         console.log(`    paridade sobre reserva real: erro relativo ${rel.toExponential(3)}`);
+    });
+
+    it('a aritmética do CAÇADOR CONTÍNUO é igual à do contrato, bit a bit', async function () {
+        // ENTREGA 2 decide com `saidaCrua`/`entradaNecessariaCrua` (BigInt), e
+        // não com `Decimal`: o pagamento do flash swap é arredondado PARA CIMA
+        // pelo contrato, e um `Decimal` que arredonda para baixo aprova o que a
+        // cadeia recusa. Esta igualdade EXATA contra o contrato implantado é o
+        // que faz daquelas funções uma leitura do contrato, e não uma
+        // reimplementação paralela.
+        const amostras = pools.slice(0, 12).filter(
+            (q) => q.reserve0.greaterThan(0) && q.reserve1.greaterThan(0),
+        );
+        assert.ok(amostras.length >= 3, 'poucos pools para a conferência');
+        let conferidas = 0;
+        for (const q of amostras) {
+            const cru = (v, d) => BigInt(v.mul(new Decimal(10).pow(d)).toFixed(0));
+            const rIn = cru(q.reserve0, q.dec0);
+            const rOut = cru(q.reserve1, q.dec1);
+            if (rIn <= 0n || rOut <= 0n) continue;
+            for (const div of [1000n, 97n, 7n]) {
+                const entrada = rIn / div;
+                if (entrada <= 0n) continue;
+                const noContrato = num(await ler(harness,
+                    mathIface.encodeFunctionData('amountOut', [entrada, rIn, rOut])));
+                assert.equal(saidaCrua(entrada, rIn, rOut), noContrato,
+                    `saidaCrua divergiu do contrato em ${q.address} com entrada ${entrada}`);
+                const saida = noContrato / 2n;
+                if (saida <= 0n || saida >= rOut) continue;
+                const entradaNoContrato = num(await ler(harness,
+                    mathIface.encodeFunctionData('amountIn', [saida, rIn, rOut])));
+                assert.equal(entradaNecessariaCrua(saida, rIn, rOut), entradaNoContrato,
+                    `entradaNecessariaCrua divergiu em ${q.address} com saída ${saida}`);
+                conferidas += 1;
+            }
+        }
+        assert.ok(conferidas >= 6, `só ${conferidas} conferências`);
+        console.log(`    ${conferidas} conferências EXATAS da aritmética do caçador contra o contrato`);
     });
 
     it('o contrato RECUSA operação sem margem — e a recusa é verificável', async function () {

@@ -173,3 +173,88 @@ export function cycleSpotRatio(hops: Hop[]): Decimal {
     }
     return ratio;
 }
+
+// ---------------------------------------------------------------------------
+// ARITMETICA CRUA, IDENTICA A DA EVM.
+//
+// POR QUE EXISTE, e nao e preferencia de estilo: a decisao do tiro tem de usar
+// a MESMA conta que o contrato executa. Em 2026-10-14, na ENTREGA 1, o caminho
+// por `Decimal` divergiu do `MathHarness` em 3,9e-20 — inofensivo ali, mas e
+// divisao inteira contra ponto flutuante decimal, e a diferenca cresce quando o
+// numero se aproxima do piso. Pior: o PAGAMENTO do flash swap e arredondado
+// PARA CIMA pelo contrato (`+ 1`), e um `Decimal` que arredonda para baixo
+// aprova uma operacao que a cadeia recusa.
+//
+// Entao estas duas funcoes espelham, em BigInt, as duas linhas de
+// `FlashArb._amountOut` e `FlashArb._amountIn`. O teste em fork
+// (`forkTests/aArbitragemDePontaAPonta.js`) exige que elas batam EXATAMENTE com
+// o `MathHarness` implantado, sobre reservas reais — e e essa igualdade que faz
+// delas uma leitura do contrato em vez de uma reimplementacao.
+// ---------------------------------------------------------------------------
+
+/**
+ * Saida de um swap V2, em unidades CRUAS. Espelha `FlashArb._amountOut`:
+ *
+ *     amountInComTaxa = amountIn * 997
+ *     (amountInComTaxa * reserveOut) / (reserveIn * 1000 + amountInComTaxa)
+ *
+ * `null` quando o pool nao tem liquidez — e `null`, nao zero: zero diria "o
+ * swap rende nada", e o que se sabe e "nao da para calcular".
+ */
+export function saidaCrua(
+    entrada: bigint, reservaEntra: bigint, reservaSai: bigint,
+): bigint | null {
+    if (reservaEntra <= 0n || reservaSai <= 0n || entrada <= 0n) return null;
+    const comTaxa = entrada * 997n;
+    return (comTaxa * reservaSai) / (reservaEntra * 1000n + comTaxa);
+}
+
+/**
+ * Entrada necessaria para obter `saida`, em unidades CRUAS. Espelha
+ * `FlashArb._amountIn`, com o `+ 1` que arredonda PARA CIMA:
+ *
+ *     (reserveIn * amountOut * 1000) / ((reserveOut - amountOut) * 997) + 1
+ *
+ * E este e o numero que o flash swap EXIGE de volta. Arredondar para baixo aqui
+ * produz uma avaliacao que aprova o que o pool recusa.
+ *
+ * `null` quando a saida pedida nao cabe na reserva: pedir `reserveOut` inteiro
+ * ou mais nao tem entrada finita, e devolver um numero ali seria inventar.
+ */
+export function entradaNecessariaCrua(
+    saida: bigint, reservaEntra: bigint, reservaSai: bigint,
+): bigint | null {
+    if (reservaEntra <= 0n || reservaSai <= 0n || saida <= 0n) return null;
+    if (saida >= reservaSai) return null;
+    return (reservaEntra * saida * 1000n) / ((reservaSai - saida) * 997n) + 1n;
+}
+
+/**
+ * A SOBRA de um flash swap de duas pernas, em unidades cruas do token DEVOLVIDO.
+ *
+ * Empresta `quantia` de T no pool de emprestimo, vende T por U no pool de
+ * venda, e devolve U ao pool de emprestimo. O lucro sobra em U — nao em T, e
+ * essa troca de token custou uma reversao real em fork
+ * (`LucroInsuficiente(232994792294, 109421743953172010)`) antes de ficar clara.
+ *
+ * `null` quando alguma perna nao calcula. Negativo e resposta valida: quer
+ * dizer que a operacao perde, e e exatamente o que o portao economico precisa
+ * saber.
+ */
+export function sobraDoFlashSwap(e: {
+    quantia: bigint;
+    /** Reserva de T no pool de VENDA (onde T entra). */
+    vendaReservaT: bigint;
+    /** Reserva de U no pool de VENDA (onde U sai). */
+    vendaReservaU: bigint;
+    /** Reserva de U no pool do EMPRESTIMO (onde U entra, pagando). */
+    emprestimoReservaU: bigint;
+    /** Reserva de T no pool do EMPRESTIMO (de onde T saiu). */
+    emprestimoReservaT: bigint;
+}): { recebido: bigint; devido: bigint; sobra: bigint } | null {
+    const recebido = saidaCrua(e.quantia, e.vendaReservaT, e.vendaReservaU);
+    if (recebido === null) return null;
+    const devido = entradaNecessariaCrua(e.quantia, e.emprestimoReservaU, e.emprestimoReservaT);
+    if (devido === null) return null;
+    return { recebido, devido, sobra: recebido - devido };
+}
