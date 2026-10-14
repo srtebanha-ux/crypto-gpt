@@ -775,6 +775,55 @@ export function lerDevedores(corpo: unknown): DevedorDaApi[] {
  * O teto existe pela mesma razao do de mercados: sem ele, uma API que ignora
  * `skip` pagina para sempre. E `novos === 0` encerra.
  */
+/**
+ * Por que o corpo do GraphQL NAO produziu devedor, ou `null` quando produziu.
+ *
+ * GEMEO do `erroDeSchema` dos mercados, e o defeito era o mesmo: **o GraphQL
+ * responde HTTP 200 mesmo quando a consulta falha**, com a causa no campo
+ * `errors`. `lerDevedores` devolvia `[]` e a enumeracao declarava
+ * `completa: true` — "zero devedores, cobertura completa" sobre um erro de
+ * consulta. Eu consertei isto no caminho dos mercados e deixei o gemeo solto:
+ * e a REGRA 3 do CLAUDE.md, pela oitava vez.
+ *
+ * Publica NOMES de chave e a mensagem do servico, nunca os valores dos itens.
+ */
+export function diagnosticarDevedores(corpo: unknown): string | null {
+    if (typeof corpo !== 'object' || corpo === null) {
+        return `o corpo não é objeto: é ${typeof corpo}`;
+    }
+    const o = corpo as Record<string, unknown>;
+    // O CAMPO `errors` do GraphQL, que vem COM status 200.
+    if (Array.isArray(o.errors) && o.errors.length > 0) {
+        const primeiro = o.errors[0];
+        const msg = typeof primeiro === 'object' && primeiro !== null
+            ? texto((primeiro as Record<string, unknown>).message) ?? 'sem message'
+            : String(primeiro);
+        return `o GraphQL respondeu 200 com ${o.errors.length} erro(s) de consulta: `
+            + `"${sanitizar(msg).slice(0, 180)}". Isto NÃO é "o mercado não tem devedores"`;
+    }
+    const d = o.data as Record<string, unknown> | undefined;
+    if (d === undefined || typeof d !== 'object' || d === null) {
+        return `o corpo não tem "data". Chaves do objeto: [${Object.keys(o).sort().join(', ')}]`;
+    }
+    const mp = d.marketPositions as Record<string, unknown> | undefined;
+    if (mp === undefined || typeof mp !== 'object' || mp === null) {
+        return 'o corpo não tem "data.marketPositions". Chaves de data: '
+            + `[${Object.keys(d).sort().join(', ')}]`;
+    }
+    if (!Array.isArray(mp.items)) {
+        return 'o corpo não tem "data.marketPositions.items" como lista. Chaves: '
+            + `[${Object.keys(mp).sort().join(', ')}]`;
+    }
+    // Lista veio e NENHUM item decodificou: enderecos ausentes ou tortos.
+    if (mp.items.length > 0 && lerDevedores(corpo).length === 0) {
+        const p0 = mp.items[0];
+        return `vieram ${mp.items.length} posição(ões) e NENHUMA decodificou (endereço ausente). `
+            + `Chaves do primeiro item: [${typeof p0 === 'object' && p0 !== null
+                ? Object.keys(p0 as Record<string, unknown>).sort().join(', ') : typeof p0}]`;
+    }
+    return null;
+}
+
 export async function enumerarDevedores(
     buscar: TransporteHttp,
     idDoMercado: string,
@@ -810,6 +859,11 @@ export async function enumerarDevedores(
         try { corpo = JSON.parse(cru); } catch {
             return { devedores, requisicoes, completa: false,
                 falha: `o GraphQL respondeu NÃO-JSON: "${sanitizar(cru.slice(0, 50))}"` };
+        }
+        // 200 QUE NAO DECODIFICA NAO E COBERTURA. Ver `diagnosticarDevedores`.
+        const diagnostico = diagnosticarDevedores(corpo);
+        if (diagnostico !== null) {
+            return { devedores, requisicoes, completa: false, falha: diagnostico };
         }
         const lidos = lerDevedores(corpo);
         let novos = 0;

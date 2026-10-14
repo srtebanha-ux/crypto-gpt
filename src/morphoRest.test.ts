@@ -457,3 +457,40 @@ test('o filtro que não seleciona ninguém NÃO lê como ausência de mercado', 
     assert.equal(t.desfecho, 'foraDaFaixa');
     assert.match(comoLerODesfecho('foraDaFaixa'), /o filtro é que não selecionou/);
 });
+
+test('GraphQL 200 com `errors` NÃO é "o mercado não tem devedores"', async () => {
+    // O GÊMEO do erro de schema dos mercados, e era o mesmo defeito: GraphQL
+    // responde 200 mesmo quando a consulta falha, e `lerDevedores` devolvia []
+    // com `completa: true`. Zero devedores e cobertura completa sobre um erro.
+    const { enumerarDevedores, diagnosticarDevedores } = await import('./morphoApi');
+
+    const r = await enumerarDevedores(async () => ({
+        status: 200,
+        text: async () => JSON.stringify({
+            errors: [{ message: 'Cannot query field "borrowShares" on type "Position"' }],
+        }),
+    }), H(1), { dormir: async () => {} });
+    assert.equal(r.completa, false, 'erro de consulta saiu como cobertura completa');
+    assert.notEqual(r.falha, null);
+    assert.match(r.falha!, /200 com 1 erro\(s\) de consulta/);
+    assert.match(r.falha!, /NÃO é "o mercado não tem devedores"/);
+    assert.equal(r.devedores.length, 0);
+
+    // Envelope desconhecido também é falha declarada, com as chaves nomeadas.
+    assert.match(diagnosticarDevedores({ resultado: [] })!, /não tem "data"/);
+    assert.match(diagnosticarDevedores({ data: {} })!, /marketPositions/);
+    assert.match(diagnosticarDevedores({ data: { marketPositions: {} } })!, /items/);
+
+    // E a lista VAZIA no formato certo continua sendo resposta, não falha.
+    assert.equal(diagnosticarDevedores({ data: { marketPositions: { items: [] } } }), null);
+});
+
+test('posições que vieram e não decodificaram são DECLARADAS, não ignoradas', async () => {
+    const { diagnosticarDevedores } = await import('./morphoApi');
+    const d = diagnosticarDevedores({
+        data: { marketPositions: { items: [{ state: { borrowShares: '1' } }] } },
+    });
+    assert.notEqual(d, null, 'posição sem endereço foi ignorada em silêncio');
+    assert.match(d!, /1 posição\(ões\) e NENHUMA decodificou/);
+    assert.match(d!, /state/, 'as chaves do item têm de aparecer');
+});
