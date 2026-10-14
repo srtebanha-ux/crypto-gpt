@@ -69,6 +69,25 @@ export interface Evidencia {
     pools: SondaDePool[];
     /** A mensagem da reversao da rota inteira. */
     mensagemDaRota: string;
+    /**
+     * QUEM reverteu, quando um trace disse.
+     *
+     * MEDIDO em 2026-10-14 (`forkTests/aRotaOpaca.js`): a unica rota opaca do
+     * bloco 52612934 reverteu na profundidade 4, e o `CALL` que entrou nela
+     * aponta para `0x4200…0006` — o WETH. Um token que ENTREGA EXATAMENTE o que
+     * manda, como o WETH mediu, so reverte uma transferencia por saldo
+     * insuficiente: entao quem pediu demais foi o NOSSO executor, e isso e
+     * identificacao positiva, nao palpite.
+     *
+     * Ausente quando nao houve trace. Ausencia nao vira veredicto.
+     */
+    origemDoTrace?: {
+        endereco: string;
+        /** O endereco e um token da rota cuja sonda mediu retencao ZERO. */
+        eTokenLimpo: boolean;
+        /** O endereco e um pool da rota. */
+        ePool: boolean;
+    } | null;
 }
 
 export interface Veredicto {
@@ -143,6 +162,28 @@ export function julgarFalha(e: Evidencia): Veredicto {
     // 4. TOKENS E POOLS PASSAM, e a rota cai. Duas leituras, e a mensagem da
     //    rota decide qual: invariante no limite e propriedade da COMBINACAO;
     //    saldo insuficiente e o nosso executor errando a conta.
+    // 4a. O TRACE IDENTIFICOU A ORIGEM, e ela e um token LIMPO.
+    //
+    // Um token que entrega exatamente o que manda nao tem por que recusar uma
+    // transferencia — a nao ser que o remetente nao tivesse o saldo. Entao o
+    // trace apontando para um token limpo e a identificacao positiva de que o
+    // NOSSO executor pediu mais do que tinha em maos, e nao uma reversao opaca.
+    //
+    // Conferido no bloco 52612934: a mesma rota com piso de lucro ZERO reverteu
+    // igual — logo nao foi o piso, foi nao haver com que pagar o emprestimo.
+    const o = e.origemDoTrace;
+    if (o !== undefined && o !== null && o.eTokenLimpo && !o.ePool) {
+        return {
+            causa: 'ERRO_DO_EXECUTOR',
+            culpados: [],
+            porque: `o trace aponta a origem da reversão em ${o.endereco}, que é um token da `
+                + 'rota cuja transferência MEDIU retenção zero. Um token limpo só recusa por '
+                + 'saldo insuficiente: quem pediu mais do que tinha foi o nosso executor. '
+                + 'Nenhuma peça é condenada — o defeito é a nossa conta',
+            excluiPermanentemente: false,
+        };
+    }
+
     const m = e.mensagemDaRota.toLowerCase();
     const nossoErro = m.includes('insufficient account balance')
         || m.includes('subtraction overflow')
@@ -196,6 +237,148 @@ export function julgarFalha(e: Evidencia): Veredicto {
             + 'Exclui esta rota, e NADA mais — as peças seguem elegíveis em outras rotas',
         excluiPermanentemente: false,
     };
+}
+
+/**
+ * O ESCOPO DE UMA EXCLUSAO — o MENOR que a evidencia sustenta.
+ *
+ * Pedido dela por nome: *"Faça a exclusão no menor escopo comprovado: token,
+ * direção, remetente, destinatário e pool, conforme a evidência disponível. Não
+ * transforme uma taxa dependente do remetente em blacklist global."*
+ *
+ * E o pedido nasceu de uma medicao: `0x7787…734f` retem 479/1000 saindo de um
+ * pool e 0/1000 saindo de outro — ele isenta enderecos. Uma blacklist global a
+ * partir da primeira medicao apagaria rotas que funcionam; uma a partir da
+ * segunda absolveria um token que cobra 48%.
+ *
+ * `null` em qualquer campo quer dizer "nao restringe por isto". Entao um escopo
+ * com `remetente` preenchido e MENOR que um sem: ele so cobre o que foi visto.
+ */
+export interface EscopoDaExclusao {
+    token: string;
+    /** O pool de onde o token saiu na medicao. `null` = nao restringe. */
+    remetente: string | null;
+    /** Para onde foi. `null` = nao restringe. */
+    destinatario: string | null;
+    /** A fracao retida, MEDIDA. `null` quando a transferencia reverteu. */
+    retidoPorMil: number | null;
+    /** A transferencia reverteu entre contas arbitrarias. */
+    reverteu: boolean;
+    /** A frase que sustenta, com os numeros. */
+    porque: string;
+}
+
+/**
+ * O escopo que a sonda sustenta — e nada maior.
+ *
+ * Uma transferencia que REVERTE e a evidencia mais forte que existe aqui: um
+ * token que nao transfere entre contas arbitrarias nao serve a flash swap
+ * nenhum, entao o escopo nao precisa do remetente. Uma transferencia que
+ * ENTREGA MENOS depende do par — e aí o remetente FICA no escopo.
+ */
+export function escopoDoVeredicto(s: SondaDeToken, remetente: string | null): EscopoDaExclusao {
+    const r = retidoPorMil(s);
+    if (s.reverteu) {
+        return {
+            token: s.token.toLowerCase(),
+            // SEM remetente de proposito: recusar transferencia nao e
+            // propriedade do par, e um flash swap exige duas transferencias.
+            remetente: null,
+            destinatario: null,
+            retidoPorMil: null,
+            reverteu: true,
+            porque: 'a transferência REVERTEU entre contas arbitrárias: nenhum remetente a '
+                + 'torna executável, então a exclusão é do token em qualquer rota',
+        };
+    }
+    return {
+        token: s.token.toLowerCase(),
+        // COM remetente: a taxa foi medida SAINDO DELE. Outro remetente pode
+        // ser isento, e medido foi: 479/1000 de um pool, 0/1000 de outro.
+        remetente: remetente === null ? null : remetente.toLowerCase(),
+        destinatario: null,
+        retidoPorMil: r,
+        reverteu: false,
+        porque: `retém ${r}/1000 SAINDO DE ${remetente ?? 'remetente não registrado'} `
+            + '(enviado ' + String(s.enviado) + ', recebido ' + String(s.recebido) + '). '
+            + 'A exclusão vale para este par; outro remetente pode ser isento, e isso foi MEDIDO',
+    };
+}
+
+/** O que de fato CHEGA, descontada a retencao medida. */
+export function recebidoEfetivo(bruto: bigint, retidoPorMil: number | null): bigint {
+    if (retidoPorMil === null || retidoPorMil <= 0) return bruto;
+    if (retidoPorMil >= 1000) return 0n;
+    return (bruto * BigInt(1000 - retidoPorMil)) / 1000n;
+}
+
+/**
+ * O REGISTRO das exclusoes, por escopo.
+ *
+ * Substitui a condenacao por associacao: aqui nada entra sem um
+ * `EscopoDaExclusao`, que por construcao so existe a partir de uma sonda sobre
+ * a PECA. E `cobre` responde a pergunta do caçador — *esta perna esta
+ * excluida?* — olhando o par, nao so o token.
+ */
+export class Exclusoes {
+    private readonly porToken = new Map<string, EscopoDaExclusao[]>();
+
+    registrar(e: EscopoDaExclusao): void {
+        const k = e.token.toLowerCase();
+        const lista = this.porToken.get(k) ?? [];
+        // Um escopo sem remetente ENGLOBA os com remetente do mesmo token:
+        // guardar os dois faria a leitura dizer duas coisas sobre o mesmo fato.
+        if (e.remetente === null) {
+            this.porToken.set(k, [e]);
+            return;
+        }
+        if (lista.some((x) => x.remetente === null)) return;
+        if (lista.some((x) => x.remetente === e.remetente)) return;
+        lista.push(e);
+        this.porToken.set(k, lista);
+    }
+
+    /**
+     * Esta transferencia esta coberta por uma exclusao PROVADA?
+     *
+     * `remetente` ausente so casa com escopo global: sem saber quem manda, um
+     * escopo de par nao pode ser afirmado nem negado, e afirmar seria o defeito
+     * que esta classe existe para impedir.
+     */
+    cobre(token: string, remetente?: string | null): EscopoDaExclusao | null {
+        const lista = this.porToken.get(token.toLowerCase());
+        if (lista === undefined) return null;
+        const global = lista.find((x) => x.remetente === null);
+        if (global !== undefined) return global;
+        if (remetente === undefined || remetente === null) return null;
+        return lista.find((x) => x.remetente === remetente.toLowerCase()) ?? null;
+    }
+
+    /** A retencao medida para este par, para a conta do valor efetivo. */
+    retencaoDe(token: string, remetente?: string | null): number | null {
+        const e = this.cobre(token, remetente);
+        return e === null ? null : e.retidoPorMil;
+    }
+
+    get quantos(): number {
+        return [...this.porToken.values()].reduce((a, l) => a + l.length, 0);
+    }
+
+    todos(): EscopoDaExclusao[] {
+        return [...this.porToken.values()].flat();
+    }
+
+    comoLer(): string {
+        if (this.porToken.size === 0) {
+            return 'nenhuma exclusão — e isto NÃO é "não há peça ruim": é "nenhuma sonda '
+                + 'comprovou uma ainda"';
+        }
+        const globais = this.todos().filter((e) => e.remetente === null).length;
+        const pares = this.quantos - globais;
+        return `${this.quantos} exclusão(ões) PROVADA(S) em ${this.porToken.size} token(s): `
+            + `${globais} do token em qualquer rota (transferência recusada), `
+            + `${pares} restrita(s) ao PAR medido (taxa depende do remetente)`;
+    }
 }
 
 export function comoLerOVeredicto(v: Veredicto): string {

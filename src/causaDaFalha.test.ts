@@ -173,3 +173,53 @@ test('a frase diz se a exclusão é da PEÇA ou só da ROTA', () => {
     })));
     assert.match(rota, /exclui SÓ esta rota/);
 });
+
+// MEDIDO em 2026-10-14, bloco 52612934, `forkTests/aRotaOpaca.js`: a unica rota
+// opaca reverteu na profundidade 4 e o `CALL` que entrou nela aponta para o
+// WETH. Um token que entrega exatamente o que manda so recusa por saldo
+// insuficiente — e a mesma rota com piso ZERO reverteu igual, entao nao foi o
+// piso. Isso e identificacao POSITIVA de erro nosso, e sai de CAUSA_DESCONHECIDA.
+test('o trace apontando um token LIMPO é ERRO_DO_EXECUTOR, não desconhecido', () => {
+    const v = julgarFalha(ev({
+        tokens: [limpo('0x4200000000000000000000000000000000000006'), limpo('0xB')],
+        pools: [poolOk('0xp1'), poolOk('0xp2')],
+        mensagemDaRota: 'Transaction reverted without a reason string',
+        origemDoTrace: {
+            endereco: '0x4200000000000000000000000000000000000006',
+            eTokenLimpo: true,
+            ePool: false,
+        },
+    }));
+    assert.equal(v.causa, 'ERRO_DO_EXECUTOR');
+    assert.deepEqual(v.culpados, [], 'condenou peça por um erro nosso');
+    assert.equal(v.excluiPermanentemente, false);
+    assert.match(v.porque, /o defeito é a nossa conta/);
+});
+
+// E a ponta oposta: trace apontando um POOL nao vira erro nosso. Sem isto o
+// ramo acima engoliria a evidencia que aponta para outro lado.
+test('o trace apontando um POOL não é lido como erro do executor', () => {
+    const v = julgarFalha(ev({
+        tokens: [limpo('0xA')],
+        pools: [poolOk('0xp1')],
+        mensagemDaRota: 'Transaction reverted without a reason string',
+        origemDoTrace: { endereco: '0xp1', eTokenLimpo: false, ePool: true },
+    }));
+    assert.equal(v.causa, 'CAUSA_DESCONHECIDA');
+    assert.deepEqual(v.culpados, []);
+});
+
+// AUSENCIA DE TRACE nao vira veredicto: sem `origemDoTrace` o caso opaco segue
+// desconhecido. E o default que este arquivo persegue — campo ausente lido como
+// se fosse resposta ja custou sete tiros neste projeto.
+test('sem trace, o caso opaco continua CAUSA_DESCONHECIDA', () => {
+    for (const origem of [undefined, null]) {
+        const v = julgarFalha(ev({
+            tokens: [limpo('0xA')],
+            pools: [poolOk('0xp1')],
+            mensagemDaRota: 'Transaction reverted without a reason string',
+            origemDoTrace: origem,
+        }));
+        assert.equal(v.causa, 'CAUSA_DESCONHECIDA', `origem ${String(origem)} virou veredicto`);
+    }
+});

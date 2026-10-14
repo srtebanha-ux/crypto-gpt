@@ -28,7 +28,10 @@ const {
 const {
     somarCusto, julgar, codificarGetL1Fee, ORACULO_DE_GAS_L1, GORJETA_PADRAO_WEI,
 } = require('../dist/custoDaBase.js');
-const { Hostis, causaDaReversao, comoLerACausa } = require('../dist/tokensHostis.js');
+const {
+    julgarFalha, comoLerOVeredicto, escopoDoVeredicto, Exclusoes, retidoPorMil,
+} = require('../dist/causaDaFalha.js');
+const { FUNIL, comoLerOFunil } = require('../dist/cacarArbitragem.js');
 
 const coder = AbiCoder.defaultAbiCoder();
 const sel = (a) => id(a).slice(0, 10);
@@ -41,6 +44,7 @@ const S = {
     token0: sel('token0()'),
     token1: sel('token1()'),
 };
+const erc20Min = new Interface(['function transfer(address to, uint256 v) returns (bool)']);
 const nIface = new Interface([
     'function executarRota((address pool,address tokenEntra,uint8 tipo,uint16 taxaPorDezMil)[] pernas, uint256 quantidade, uint256 lucroMinimo)',
     'function saidaV2(uint256 entrada, uint256 reservaEntra, uint256 reservaSai, uint16 taxa) pure returns (uint256)',
@@ -237,39 +241,143 @@ describe('rotas de 2, 3 e 4 swaps — descoberta, custo e execução', function 
             return;
         }
 
-        // O LACO QUE APRENDE: reverteu -> condena o token -> exclui as rotas
-        // que passam por ele -> desce a lista.
+        // O LACO QUE APRENDE — agora por CAUSA COMPROVADA, nao por associacao.
         //
-        // DEFEITO MEDIDO que isto conserta: sem o registro, as OITO melhores
-        // rotas do bloco atravessavam todas o mesmo token (`0x7787…734f`, 48%
-        // de taxa). Um token taxado faz a reserva parecer mal precificada,
-        // entao ele DOMINA o ranking de sobra e o motor simula o mesmo token
-        // para sempre, sem nunca chegar aos candidatos que importam.
-        const hostis = new Hostis();
+        // O que estava aqui antes condenava TODOS os tokens incomuns de uma
+        // rota que reverteu (`porAssociacao: suspeitos.length > 1`). Ela
+        // recusou, com razao: *"Não condene todos os tokens de uma rota que
+        // reverteu."* No bloco 52612934 aquilo excluiu 1.254 de 1.256
+        // candidatos a partir de DUAS simulacoes.
+        //
+        // Agora: reverteu -> SONDA cada peca sozinha -> `julgarFalha` diz a
+        // causa -> so TOKEN_HOSTIL e POOL_INCOMPATIVEL excluem a peca, e no
+        // MENOR escopo que a sonda sustenta (o PAR, quando a taxa depende de
+        // quem manda).
+        const ex = new Exclusoes();
         const tetoDeSimulacoes = Number(process.env.ARB_SIMULAR ?? 10);
         const resultados = [];
-        const hashDoCodigo = async (t) => {
-            const c = await chamar('eth_getCode', [t, 'latest']);
-            // Nao e keccak: e tamanho + prefixo. Serve de ancora de mudanca de
-            // codigo sem custar uma hash de 10 KB a cada volta, e qualquer
-            // troca de implementacao muda um dos dois.
-            return typeof c === 'string' ? `${(c.length - 2) / 2}:${c.slice(0, 18)}` : null;
+        const contas = await chamar('eth_accounts', []);
+        const destinoLimpo = contas[2];
+
+        // A SONDA: transferencia direta de um pool que detem o token para uma
+        // conta nova e vazia. O retorno traz quem mandou, porque o escopo da
+        // exclusao depende disso.
+        const sondarToken = async (token, detentor) => {
+            const base = {
+                token, rodou: false, enviado: null, recebido: null, reverteu: false, porque: '',
+            };
+            const tem = await saldo(token, detentor);
+            if (tem <= 0n) return { s: { ...base, porque: 'o detentor não tem o token' }, de: detentor };
+            const enviado = tem / 1000n;
+            if (enviado <= 0n) return { s: { ...base, porque: 'saldo pequeno demais' }, de: detentor };
+            await chamar('hardhat_impersonateAccount', [detentor]);
+            await chamar('hardhat_setBalance', [detentor, '0x56BC75E2D63100000']);
+            const antesD = await saldo(token, destinoLimpo);
+            let rc = null; let er = null;
+            try {
+                rc = await enviar(detentor, token,
+                    erc20Min.encodeFunctionData('transfer', [destinoLimpo, enviado]));
+            } catch (e) { er = String(e.message ?? e); }
+            await chamar('hardhat_stopImpersonatingAccount', [detentor]);
+            if (rc === null || rc.status !== '0x1') {
+                return {
+                    s: {
+                        ...base, rodou: true, enviado, reverteu: true,
+                        porque: `a transferência REVERTEU: ${(er ?? 'sem motivo').slice(0, 90)}`,
+                    },
+                    de: detentor,
+                };
+            }
+            const recebido = (await saldo(token, destinoLimpo)) - antesD;
+            return {
+                s: {
+                    ...base, rodou: true, enviado, recebido,
+                    porque: recebido === enviado ? 'entregou o que mandou' : `entregou ${recebido} de ${enviado}`,
+                },
+                de: detentor,
+            };
         };
 
         let i = 0;
         let simuladas = 0;
-        let puladasPorHostil = 0;
+        let puladasComProva = 0;
+        let inviaveisComTaxa = 0;
+        // Pernas (token|pool) em que a retencao MEDIDA nao bastou: uma rota
+        // por elas reverteu com a taxa ja descontada na conta.
+        const taxaInsuficiente = new Set();
+        let desconhecidas = 0;
+        let reverteram = 0;
         while (i < avaliadas.length && simuladas < tetoDeSimulacoes) {
             const a = avaliadas[i];
             i += 1;
             const r = a.rota;
-            const tokensDaRota = [...new Set(r.hops.flatMap((h) => [h.de, h.para]))];
-            const jaCondenado = hostis.rotaTemHostil(tokensDaRota);
-            if (jaCondenado.tem) {
-                puladasPorHostil += 1;
+            // EXCLUSAO PROVADA cobre esta rota? Olha o PAR (token + pool de
+            // onde ele sai), nao so o token — e TAXA NAO EXCLUI.
+            //
+            // A primeira versao disto pulava a rota por QUALQUER exclusao, e
+            // com isso 2.324 de 2.326 candidatos sairam por uma taxa de
+            // 29/1000. Isso e o que ela proibiu: *"Não descarte
+            // automaticamente uma rota apenas porque existe taxa."* E era a
+            // REGRA 3 outra vez — o caçador barra so `reverteu`, e aqui eu
+            // escrevi outra regra para a mesma pergunta.
+            //
+            // Transferencia RECUSADA barra (nenhum tamanho executa). Taxa
+            // MEDIDA entra na CONTA, e a rota e reavaliada com o valor
+            // efetivo: se a sobra nao sobrevive a taxa, a reprovacao e
+            // economica e tem numero.
+            const barrada = r.hops.some((h) => {
+                const e = ex.cobre(h.para, h.pool.endereco);
+                return e !== null && e.reverteu;
+            });
+            if (barrada) { puladasComProva += 1; continue; }
+
+            const pernasComTaxa = r.hops.filter((h) => {
+                const t = ex.retencaoDe(h.para, h.pool.endereco);
+                return t !== null && t > 0;
+            }).map((h) => `${h.para}|${h.pool.endereco}`.toLowerCase());
+            const temTaxa = pernasComTaxa.length > 0;
+
+            // PERNA JA REPROVADA COM EVIDENCIA: uma rota que passou por esta
+            // perna reverteu DEPOIS de a retencao medida ter sido aplicada na
+            // conta. Isso e evidencia sobre a PERNA — a retencao que uma
+            // transferencia pool->conta mede nao explica o que a rota sofre —
+            // e repetir a simulacao nela so gasta o orcamento reprovando o
+            // mesmo. Era o pedido dela: *"Não repita testes já comprovados sem
+            // motivo"* e *"evitando repetir amostras economicamente
+            // idênticas"*.
+            const jaReprovada = pernasComTaxa.find((k) => taxaInsuficiente.has(k));
+            if (jaReprovada !== undefined) {
+                inviaveisComTaxa += 1;
+                FUNIL.inviavelComTaxa += 1;
                 continue;
             }
 
+            if (temTaxa) {
+                // REAVALIA com a taxa medida descontada perna por perna.
+                const comTaxa = melhorTamanhoDaRota(
+                    r, 40, undefined,
+                    (tok, rem) => ex.retencaoDe(tok, rem),
+                    arbN,
+                );
+                if (comTaxa === null || comTaxa.sobra <= 0n) {
+                    inviaveisComTaxa += 1;
+                    FUNIL.inviavelComTaxa += 1;
+                    continue;
+                }
+                // Sobreviveu a taxa: segue para a simulacao integral com o
+                // tamanho RECALCULADO, nao com o tamanho otimista de antes.
+                a.quantia = comTaxa.quantia;
+                a.sobra = comTaxa.sobra;
+                console.log(`    [taxa] rota sobreviveu à retenção medida: quantia ${a.quantia},`
+                    + ` sobra ${a.sobra} — vai para simulação integral`);
+            }
+
+            // ESTADO LIMPO POR ROTA: um pool V2 confere o invariante contra
+            // `balanceOf`, e a sonda de token tira saldo de pools da rota. Sem
+            // o instantaneo, a rota seguinte reverte por causa da sonda
+            // anterior — e eu leria a minha contaminacao como "a rota falhou".
+            const instantaneo = await chamar('evm_snapshot', []);
+            try {
             const pernas = r.hops.map((h) => ({
                 pool: h.pool.endereco,
                 tokenEntra: h.de,
@@ -284,29 +392,92 @@ describe('rotas de 2, 3 e 4 swaps — descoberta, custo e execução', function 
                 rec = await enviar(dono, arbN, dados);
             } catch (e) { erro = String(e.message ?? e); }
             simuladas += 1;
+            FUNIL.simuladasIntegralmente += 1;
 
             if (rec === null || rec.status !== '0x1') {
-                // REJEITADO POR SIMULACAO. O token que NAO e o WETH leva a
-                // culpa: ele e o unico incomum na rota, e condenar o WETH
-                // pararia o motor inteiro.
-                const suspeitos = tokensDaRota.filter((t) => t !== WETH_DA_BASE);
-                const causa = causaDaReversao(erro ?? '');
-                for (const t of suspeitos) {
-                    hostis.marcar({
-                        token: t, causa, bloco,
-                        rota: r.hops.map((h) => h.pool.endereco),
-                        hashDoCodigo: await hashDoCodigo(t),
-                        retidoPorMil: null,
-                        // POR ASSOCIACAO quando ha mais de um suspeito: com
-                        // dois ou tres tokens incomuns na rota, qualquer um
-                        // pode ser o culpado, e condenar todos pune inocente.
-                        porAssociacao: suspeitos.length > 1,
+                reverteram += 1;
+                FUNIL.reverteram += 1;
+                // SONDA CADA PECA antes de condenar qualquer uma. Todos os
+                // detentores da rota, e fica a PIOR medicao: a taxa depende do
+                // par, medido (479/1000 de um pool, 0/1000 de outro).
+                const incomuns = [...new Set(r.hops.flatMap((h) => [h.de, h.para]))]
+                    .filter((t) => t !== WETH_DA_BASE);
+                const sondas = [];
+                for (const t of incomuns) {
+                    const detentores = [...new Set(r.hops.map((h) => h.pool)
+                        .filter((q) => q.token0 === t || q.token1 === t)
+                        .map((q) => q.endereco))];
+                    if (detentores.length === 0) {
+                        sondas.push({
+                            s: {
+                                token: t, rodou: false, enviado: null, recebido: null,
+                                reverteu: false, porque: 'sem detentor na rota',
+                            },
+                            de: null,
+                        });
+                        continue;
+                    }
+                    let pior = null;
+                    for (const d of detentores) {
+                        const x = await sondarToken(t, d);
+                        const rx = retidoPorMil(x.s);
+                        const rp = pior === null ? null : retidoPorMil(pior.s);
+                        if (pior === null || x.s.reverteu
+                            || (rx !== null && (rp === null || rx > rp))) pior = x;
+                        if (pior.s.reverteu) break;
+                    }
+                    sondas.push(pior);
+                }
+                // A SONDA DE POOL: o pool responde a interface do tipo que o
+                // motor declarou? Prova resposta de interface, NAO que aceita
+                // swap — e por isso POOL_INCOMPATIVEL exige tokens limpos.
+                const sondasDePool = [];
+                for (const h of r.hops) {
+                    const res = await ler(h.pool.endereco, S.getReserves);
+                    sondasDePool.push({
+                        pool: h.pool.endereco, rodou: true,
+                        passou: !!res && res !== '0x',
+                        porque: !res || res === '0x'
+                            ? 'o pool declarado v2 NÃO responde getReserves()'
+                            : 'responde getReserves (NÃO prova que aceita swap)',
                     });
                 }
-                resultados.push({ i: simuladas - 1, estado: 'REVERTEU', causa });
-                console.log(`    [${simuladas - 1}] REVERTEU (${causa}) — ${comoLerARota(r)}`);
-                console.log(`         ${(erro ?? 'sem motivo').slice(0, 120)}`);
-                console.log(`         condenei ${suspeitos.length} token(s): ${comoLerACausa(causa).slice(0, 90)}`);
+                const v = julgarFalha({
+                    tokens: sondas.map((x) => x.s),
+                    pools: sondasDePool,
+                    mensagemDaRota: erro ?? 'sem motivo',
+                });
+                if (v.causa === 'CAUSA_DESCONHECIDA') {
+                    desconhecidas += 1;
+                    FUNIL.desconhecidas += 1;
+                }
+                // E A EXCLUSAO SO AQUI, no menor escopo que a sonda sustenta.
+                if (v.excluiPermanentemente) {
+                    for (const culpado of v.culpados) {
+                        const x = sondas.find(
+                            (y) => y.s.token.toLowerCase() === culpado.toLowerCase(),
+                        );
+                        if (x === undefined) continue;
+                        const e = escopoDoVeredicto(x.s, x.de);
+                        ex.registrar(e);
+                        FUNIL.excluidasComCausa += 1;
+                        console.log(`         exclusão: ${e.porque.slice(0, 150)}`);
+                    }
+                }
+                // E A EVIDENCIA SOBRE A PERNA: a rota reverteu COM a retencao
+                // medida aplicada. Nao e "o token e pior do que parece" (isso
+                // seria inventar um numero): e "a retencao que eu consigo medir
+                // de fora NAO explica esta reversao", registrado na perna.
+                for (const k of pernasComTaxa) taxaInsuficiente.add(k);
+                if (pernasComTaxa.length > 0) {
+                    console.log(`         >>> a retenção MEDIDA já estava na conta e a rota`
+                        + ` reverteu: ${pernasComTaxa.length} perna(s) marcada(s) como`
+                        + ' "retenção medida não explica a reversão" — não simulo nelas de novo');
+                }
+                resultados.push({ i: simuladas - 1, estado: 'REVERTEU', causa: v.causa });
+                console.log(`    [${simuladas - 1}] REVERTEU — ${comoLerARota(r)}`);
+                console.log(`         ${(erro ?? 'sem motivo').slice(0, 110)}`);
+                console.log(`         >>> ${comoLerOVeredicto(v).slice(0, 200)}`);
                 continue;
             }
 
@@ -325,32 +496,26 @@ describe('rotas de 2, 3 e 4 swaps — descoberta, custo e execução', function 
             });
             const j = julgar(sobrou, custo);
             resultados.push({ i: simuladas - 1, estado: j.veredicto, sobrou, liquido: j.liquidoWei });
+            // `validadasEconomicamente` SO aqui: execucao integral bem-sucedida
+            // E liquido positivo depois de todos os custos. E o unico ponto do
+            // projeto que pode incrementar este campo.
+            if (j.veredicto === 'lucrativa') FUNIL.validadasEconomicamente += 1;
 
             console.log(`    [${simuladas - 1}] ${j.veredicto.toUpperCase()} — ${comoLerARota(r)}`);
             console.log(`         esperado ${a.sobra} | realizado ${sobrou} wei de WETH`);
             console.log(`         ${custo.comoLer}`);
             console.log(`         ${j.porque}`);
             assert.ok(sobrou > 0n, 'completou e não sobrou WETH');
-            const razao = new Decimal(sobrou.toString()).div(new Decimal(a.sobra.toString()));
-            if (razao.lessThanOrEqualTo('0.95')) {
-                // ENTREGOU MENOS do que a conta previu: alguem cobrou. Condena
-                // por MEDICAO, com a fracao retida registrada.
-                const suspeitos = tokensDaRota.filter((t) => t !== WETH_DA_BASE);
-                const retido = Number(new Decimal(1).minus(razao).mul(1000).toFixed(0));
-                for (const t of suspeitos) {
-                    hostis.marcar({
-                        token: t, causa: 'taxaDeTransferencia', bloco,
-                        rota: r.hops.map((h) => h.pool.endereco),
-                        hashDoCodigo: await hashDoCodigo(t), retidoPorMil: retido,
-                        porAssociacao: suspeitos.length > 1,
-                    });
-                }
-                console.log(`         >>> entregou ${razao.toFixed(6)} do previsto: ${retido}/1000`
-                    + ' retido no caminho. Tokens CONDENADOS por medição.');
+            } finally {
+                await chamar('evm_revert', [instantaneo]);
             }
         }
-        console.log(`\n    ${hostis.comoLer()}`);
-        console.log(`    ${puladasPorHostil} rota(s) PULADA(S) por atravessar token já condenado`);
+        console.log(`\n    ${ex.comoLer()}`);
+        console.log(`    ${puladasComProva} rota(s) PULADA(S) por tocar peça com causa COMPROVADA`);
+        console.log(`    ${inviaveisComTaxa} rota(s) REPROVADA(S) pela conta com a taxa medida`
+            + ' aplicada — não descartadas por TER taxa, reprovadas pelo valor efetivo');
+        console.log(`    ${desconhecidas} com CAUSA_DESCONHECIDA — nada condenado nelas`);
+        console.log(`    ${reverteram} reverteram de ${simuladas} simuladas integralmente`);
 
         const lucrativas = resultados.filter((x) => x.estado === 'lucrativa');
         console.log(`\n    RESUMO: ${resultados.length} simulada(s) |`
@@ -365,6 +530,30 @@ describe('rotas de 2, 3 e 4 swaps — descoberta, custo e execução', function 
                 + `${new Decimal(melhor.liquido.toString()).div(1e18).toFixed(12)} ETH`);
             console.log('    ISTO NÃO É LUCRO REALIZADO: nenhuma transação real foi enviada.');
         }
+        // O ESPACO DE BUSCA, MEDIDO aqui. Antes a linha imprimia `0 par(es)`
+        // porque este teste nunca preenchia o campo: etiqueta que nao descreve
+        // o conjunto, na linha que existe para ser auditada.
+        const porPar = new Map();
+        for (const q of poolsParaRota) {
+            const k = [q.token0, q.token1].sort().join('|');
+            const f = porPar.get(k);
+            if (f === undefined) porPar.set(k, new Set([q.fabrica])); else f.add(q.fabrica);
+        }
+        FUNIL.espacoDeBusca = [...porPar.values()].filter((f) => f.size >= 2).length;
+        FUNIL.rotasEncontradas = rotas.length;
+        FUNIL.estimadasPositivas = avaliadas.length;
+        console.log(`\n    ${comoLerOFunil('fork')}`);
+        if (FUNIL.validadasEconomicamente === 0) {
+            console.log('    ZERO economicamente validadas. LIMITAÇÕES DA AMOSTRA: um bloco,'
+                + ` ${poolsParaRota.length} pools das 4 fábricas com \`uniswapV2Call\` provado,`
+                + ` teto de ${tetoDeSimulacoes} simulações, e rotas de 2 a 4 swaps.`
+                + ' Não é "não existe arbitragem na Base": é esta amostra, neste bloco.');
+        }
         for (const x of resultados) assert.ok(String(x.estado).length > 0);
+        // NENHUMA exclusao sem escopo medido. O portao da regra desta rodada.
+        for (const e of ex.todos()) {
+            assert.ok(e.reverteu || typeof e.retidoPorMil === 'number',
+                `${e.token} excluído sem retenção medida nem recusa de transferência`);
+        }
     });
 });

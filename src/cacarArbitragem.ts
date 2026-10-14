@@ -34,6 +34,11 @@ import {
     MULTICALL3, codificarAggregate3, decodificarAggregate3Rapido, partirEmPedacos,
     CHAMADAS_POR_MULTICALL, type ChamadaMulti,
 } from './multicall';
+import {
+    acharRotas, melhorTamanhoDaRota, comoLerARota,
+    type Rota, type PoolParaRota, type Retencao,
+} from './rotas';
+import { Exclusoes } from './causaDaFalha';
 
 const log = createLogger('arb');
 const coder = AbiCoder.defaultAbiCoder();
@@ -546,6 +551,137 @@ function resumoCurto(livro: LivroDeTempos): string {
         : String(r);
 }
 
+/**
+ * O FUNIL AUDITAVEL, pedido por ela item por item: *"rotas encontradas,
+ * estimadas positivas, excluídas com causa comprovada, simuladas integralmente,
+ * revertidas, desconhecidas e economicamente validadas."*
+ *
+ * Os nomes nao sao sinonimos e o desenho depende disso:
+ *
+ *   excluidasComCausa      uma peca da rota tem exclusao PROVADA por sonda.
+ *                          NUNCA por associacao — e `Exclusoes` nao aceita
+ *                          registro sem um `EscopoDaExclusao`, que so nasce de
+ *                          uma medicao sobre a peca
+ *   inviavelComTaxa        a rota TEM taxa medida e foi AVALIADA com o valor
+ *                          efetivo; a sobra nao cobre o custo. Nao foi
+ *                          descartada por ter taxa: foi reprovada pela conta
+ *   estimadasPositivas     a conta diz que sobra. NAO e lucro: e estimativa
+ *   simuladasIntegralmente execucao completa tentada em FORK
+ *   reverteram             a execucao integral reverteu
+ *   desconhecidas          reverteu sem motivo legivel, ou a sonda nao rodou:
+ *                          nada condenado
+ *   validadasEconomicamente execucao integral BEM-SUCEDIDA em fork com lucro
+ *                          liquido positivo depois de todos os custos. E o
+ *                          UNICO campo que autoriza a palavra "lucrativa", e o
+ *                          cacador ao vivo NUNCA o incrementa: ele nao roda em
+ *                          fork, entao aqui ele e sempre 0 e a frase diz isso.
+ */
+export const FUNIL = {
+    rotasEncontradas: 0,
+    /**
+     * Pares presentes em DUAS fabricas. `null` = NAO MEDIDO neste caminho.
+     *
+     * Zero e uma resposta forte — "nao existe o que buscar" — e publicar zero
+     * onde ninguem mediu seria a etiqueta que nao descreve o conjunto. Foi o
+     * que a primeira versao desta linha fez no teste de fork.
+     */
+    espacoDeBusca: null as number | null,
+    excluidasComCausa: 0,
+    inviavelComTaxa: 0,
+    estimadasPositivas: 0,
+    simuladasIntegralmente: 0,
+    reverteram: 0,
+    desconhecidas: 0,
+    validadasEconomicamente: 0,
+};
+
+export function comoLerOFunil(ondeRodou: 'aoVivo' | 'fork'): string {
+    const f = FUNIL;
+    const nota = ondeRodou === 'aoVivo'
+        ? 'o caçador ao vivo NÃO executa: `validadasEconomicamente` só pode subir em fork, '
+            + 'então 0 aqui é propriedade do caminho e não ausência de oportunidade'
+        : 'execução integral em fork; lucro líquido positivo depois de todos os custos';
+    const espaco = f.espacoDeBusca === null
+        ? 'espaço de busca NÃO MEDIDO neste caminho'
+        : `espaço de busca ${f.espacoDeBusca} par(es) em duas fábricas`;
+    return `FUNIL — encontradas ${f.rotasEncontradas} (${espaco}) | excluídas COM CAUSA PROVADA ${f.excluidasComCausa} | `
+        + `inviáveis com a taxa MEDIDA aplicada ${f.inviavelComTaxa} | `
+        + `estimadas positivas ${f.estimadasPositivas} | simuladas integralmente `
+        + `${f.simuladasIntegralmente} | reverteram ${f.reverteram} | desconhecidas `
+        + `${f.desconhecidas} | VALIDADAS ECONOMICAMENTE ${f.validadasEconomicamente} — ${nota}`;
+}
+
+/**
+ * AVALIA rotas de 2 a 4 swaps com a classificacao causal ligada.
+ *
+ * Esta funcao substitui a exclusao por associacao no caminho do cacador: quem
+ * decide se uma perna esta barrada e `Exclusoes.cobre(token, remetente)`, que
+ * so responde sim a partir de uma sonda sobre a peca — e no MENOR escopo que a
+ * evidencia sustenta.
+ *
+ * E a taxa MEDIDA nao exclui a rota: ela entra na conta por `retencao`, e a
+ * rota e reprovada so se o valor EFETIVO nao cobrir o custo. Era o pedido dela:
+ * *"Não descarte automaticamente uma rota apenas porque existe taxa."*
+ */
+export function avaliarRotas(
+    pools: PoolDaFabrica[], gasWei: bigint, ex: Exclusoes,
+    // `maxHops` e 2 | 3 | 4 e nao `number` de proposito: `TAMANHOS_DE_ROTA`
+    // declara a entrega, e um 5 vindo de variavel de ambiente passaria calado
+    // por um `number` — o tipo e o portao.
+    opcoes: { maxHops?: 2 | 3 | 4; teto?: number; executor?: string; gasDaArbitragem?: bigint } = {},
+): {
+    rotas: number;
+    estimadas: { rota: Rota; quantia: bigint; sobra: bigint; liquido: bigint; comTaxa: boolean }[];
+    excluidasComCausa: number;
+    inviavelComTaxa: number;
+    semSobra: number;
+} {
+    const paraRota: PoolParaRota[] = pools.map((q) => ({
+        endereco: q.endereco, token0: q.token0, token1: q.token1,
+        reserva0: q.reserva0, reserva1: q.reserva1,
+        tipo: 'v2', taxaPorDezMil: 30, fabrica: q.fabrica,
+    }));
+    const rotas = acharRotas(paraRota, WETH_DA_BASE, {
+        maxHops: opcoes.maxHops ?? 4,
+        podeEmprestar: (q) => q.tipo === 'v2',
+        teto: opcoes.teto ?? 40_000,
+    });
+    const retencao: Retencao = (token, remetente) => ex.retencaoDe(token, remetente);
+    const custo = gasWei * (opcoes.gasDaArbitragem ?? GAS_DE_UMA_ARBITRAGEM);
+    const estimadas: {
+        rota: Rota; quantia: bigint; sobra: bigint; liquido: bigint; comTaxa: boolean;
+    }[] = [];
+    let excluidasComCausa = 0;
+    let inviavelComTaxa = 0;
+    let semSobra = 0;
+
+    for (const r of rotas) {
+        // 1. EXCLUSAO PROVADA: uma perna cujo token esta barrado SAINDO DAQUELE
+        //    pool (ou em qualquer rota, quando a transferencia reverte).
+        const barrada = r.hops.some((h) => ex.cobre(h.para, h.pool.endereco) !== null
+            && ex.cobre(h.para, h.pool.endereco)!.reverteu);
+        if (barrada) { excluidasComCausa += 1; continue; }
+
+        // 2. A TAXA MEDIDA entra na CONTA, nao no descarte.
+        const temTaxa = r.hops.some((h) => {
+            const t = ex.retencaoDe(h.para, h.pool.endereco);
+            return t !== null && t > 0;
+        });
+        const m = melhorTamanhoDaRota(r, 40, undefined, retencao, opcoes.executor);
+        if (m === null || m.sobra <= 0n) {
+            if (temTaxa) inviavelComTaxa += 1; else semSobra += 1;
+            continue;
+        }
+        const liquido = m.sobra - custo;
+        if (liquido <= 0n) {
+            if (temTaxa) inviavelComTaxa += 1; else semSobra += 1;
+            continue;
+        }
+        estimadas.push({ rota: r, quantia: m.quantia, sobra: m.sobra, liquido, comTaxa: temTaxa });
+    }
+    return { rotas: rotas.length, estimadas, excluidasComCausa, inviavelComTaxa, semSobra };
+}
+
 export const PLACAR = {
     blocos: 0,
     ciclos: 0,
@@ -593,6 +729,14 @@ async function principal(): Promise<void> {
     const tetoPorFabrica = Number(process.env.ARB_POOLS ?? 120);
     const tetoDeCiclos = Number(process.env.ARB_CICLOS ?? 0);
     const tetoDeRotas = Number(process.env.ARB_ROTAS ?? 400);
+    // `ARB_HOPS` fora de 2|3|4 MORRE aqui em vez de virar outra coisa em
+    // silencio. `Number('quatro')` e NaN, e NaN passaria por um `number`.
+    const hopsCrus = Number(process.env.ARB_HOPS ?? 4);
+    if (hopsCrus !== 2 && hopsCrus !== 3 && hopsCrus !== 4) {
+        throw new Error(`ARB_HOPS=${process.env.ARB_HOPS} não é 2, 3 nem 4. A entrega é de rotas `
+            + 'de 2 a 4 swaps; um valor fora disso não tem comportamento definido');
+    }
+    const hopsPedidos: 2 | 3 | 4 = hopsCrus;
 
     const { ProxyAgent, fetch } = await import('undici');
     const agente = process.env.HTTPS_PROXY ? new ProxyAgent(process.env.HTTPS_PROXY) : undefined;
@@ -651,6 +795,47 @@ async function principal(): Promise<void> {
 
     const livro = new LivroDeTempos();
     const anterior = new Map<string, PoolDaFabrica>();
+
+    // AS EXCLUSOES PROVADAS, lidas do disco.
+    //
+    // Elas nascem no fork (`forkTests/aCausaIsolada.js`), onde uma
+    // transferencia de verdade mede a retencao peca por peca. O cacador ao vivo
+    // NAO condena ninguem: ele so CONSOME prova. Isto e de proposito — condenar
+    // a partir de uma reversao ao vivo seria exatamente a condenacao por
+    // associacao que esta entrega existe para remover.
+    //
+    // Arquivo ausente ou torto da registro VAZIO, e a frase do log diz
+    // "nenhuma sonda comprovou uma ainda" — nao "nao ha peca ruim".
+    const exclusoes = new Exclusoes();
+    const caminhoDasExclusoes = process.env.ARB_EXCLUSOES ?? '.tmp/exclusoesProvadas.json';
+    try {
+        const fs = await import('node:fs');
+        if (fs.existsSync(caminhoDasExclusoes)) {
+            const cru = JSON.parse(fs.readFileSync(caminhoDasExclusoes, 'utf8')) as unknown;
+            const lista = Array.isArray(cru) ? cru : [];
+            for (const e of lista) {
+                const x = e as Record<string, unknown>;
+                if (typeof x.token !== 'string') continue;
+                exclusoes.registrar({
+                    token: x.token,
+                    remetente: typeof x.remetente === 'string' ? x.remetente : null,
+                    destinatario: typeof x.destinatario === 'string' ? x.destinatario : null,
+                    retidoPorMil: typeof x.retidoPorMil === 'number' ? x.retidoPorMil : null,
+                    reverteu: x.reverteu === true,
+                    porque: typeof x.porque === 'string' ? x.porque : 'sem frase no arquivo',
+                });
+            }
+        }
+    } catch (e) {
+        log.warn('[ARB] não consegui ler as exclusões provadas — sigo SEM nenhuma.', {
+            caminho: caminhoDasExclusoes,
+            erro: String(e),
+            oQueIssoNaoE: 'não é "nada está excluído": é "não li o arquivo". Sem ele a conta '
+                + 'não desconta taxa nenhuma e as rotas taxadas voltam a parecer lucrativas',
+        });
+    }
+    log.info(`[ARB] ${exclusoes.comoLer()}`, { caminho: caminhoDasExclusoes });
+
     let ciclo = 0;
     let blocoAnterior: number | null = null;
 
@@ -702,7 +887,42 @@ async function principal(): Promise<void> {
             continue;
         }
         const decisoes = candidatos.map((c) => decidir(c, gasWei, agora));
+
+        // ROTAS DE 2 A 4 SWAPS, com a classificacao causal ligada. O caminho de
+        // duas pernas acima continua porque e ele que esta provado de ponta a
+        // ponta em fork na ENTREGA 1; este avalia o resto do espaco, e e o que
+        // usa `Exclusoes` no lugar da condenacao por associacao.
+        const aN = avaliarRotas(pools, gasWei, exclusoes, {
+            maxHops: hopsPedidos,
+            teto: tetoDeRotas,
+            executor: process.env.ARB_EXECUTOR ?? undefined,
+        });
+        FUNIL.rotasEncontradas += aN.rotas;
+        FUNIL.espacoDeBusca = paresCruzados;
+        FUNIL.excluidasComCausa += aN.excluidasComCausa;
+        FUNIL.inviavelComTaxa += aN.inviavelComTaxa;
+        FUNIL.estimadasPositivas += aN.estimadas.length;
         fimDecisao();
+
+        if (aN.estimadas.length > 0) {
+            const melhorN = aN.estimadas.reduce((a, b) => (b.liquido > a.liquido ? b : a));
+            log.warn('[ARB-N] ESTIMADA POSITIVA em rota de 2–4 swaps — execução NÃO comprovada.', {
+                bloco: blocoAgora,
+                rota: comoLerARota(melhorN.rota),
+                swaps: melhorN.rota.hops.length,
+                quantia: melhorN.quantia.toString(),
+                sobra: melhorN.sobra.toString(),
+                liquidoDepoisDoGas: melhorN.liquido.toString(),
+                taxaMedidaNaConta: melhorN.comTaxa
+                    ? 'SIM: alguma perna tem retenção MEDIDA, e ela está descontada no valor '
+                        + 'efetivo — a rota não foi descartada por ter taxa, foi avaliada com ela'
+                    : 'nenhuma perna tem retenção medida',
+                oQueIssoNaoE: 'NÃO é lucro e NÃO é oportunidade validada: só execução integral '
+                    + 'bem-sucedida em fork, com lucro líquido positivo, vira '
+                    + '`validadasEconomicamente` — e este caminho não executa',
+            });
+        }
+        log.info('[ARB-N] ' + comoLerOFunil('aoVivo'), { exclusoes: exclusoes.comoLer() });
 
         PLACAR.avaliados += decisoes.length;
         for (const d of decisoes) {

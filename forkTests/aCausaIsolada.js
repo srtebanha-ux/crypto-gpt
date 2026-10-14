@@ -274,6 +274,141 @@ describe('a causa isolada, peça por peça', function () {
         assert.ok((await saldo(WETH_DA_BASE, cofre)) > antesCofre, 'o saque não chegou ao cofre');
     });
 
+    it('o LUCRO sai só da operação atual, com saldo preexistente e token taxado', async function () {
+        // Item 7 dela: *"Confirme em fork que o `FlashArbN` preserva saldos
+        // preexistentes e calcula lucro somente a partir da operação atual,
+        // mesmo quando há transferência com taxa."*
+        //
+        // O TESTE TEM DE DISCRIMINAR, e o anterior não discriminava: uma rota
+        // que reverte devolve tudo, então "saldo intacto" passaria mesmo com o
+        // contrato errado. Aqui o piso de lucro é posto ACIMA do que a rota
+        // rende e ABAIXO do saldo preexistente:
+        //
+        //   contrato CERTO  -> `_desteCiclo` ignora o preexistente, a sobra da
+        //                      operação não alcança o piso, REVERTE
+        //   contrato ERRADO -> `balanceOf` cru conta o preexistente como lucro
+        //                      da rota, o piso passa e a transação COMPLETA
+        //
+        // Então reverter é a prova, e completar seria o defeito.
+        if (avaliadas.length === 0) { this.skip(); return; }
+        const a = avaliadas[0];
+        const pernas = a.rota.hops.map((h) => ({
+            pool: h.pool.endereco, tokenEntra: h.de,
+            tipo: h.pool.tipo === 'v2' ? 0 : 1, taxaPorDezMil: h.pool.taxaPorDezMil,
+        }));
+        // O token em que o pagamento (e o lucro) acontece: o `de` do hop 0.
+        const tokenDoLucro = a.rota.hops[0].de;
+
+        const doador = poolsParaRota
+            .filter((q) => q.token0 === tokenDoLucro || q.token1 === tokenDoLucro)
+            .map((q) => ({ q, v: q.token0 === tokenDoLucro ? q.reserva0 : q.reserva1 }))
+            .sort((x, y) => (x.v < y.v ? 1 : -1))[0];
+        assert.ok(doador, 'preciso de um pool que detenha o token do lucro');
+        const preCarga = (await saldo(tokenDoLucro, doador.q.endereco)) / 100n;
+        assert.ok(preCarga > 0n, 'o doador não tem saldo para pré-carregar');
+
+        await chamar('hardhat_impersonateAccount', [doador.q.endereco]);
+        await chamar('hardhat_setBalance', [doador.q.endereco, '0x56BC75E2D63100000']);
+        await enviar(doador.q.endereco, tokenDoLucro,
+            erc20.encodeFunctionData('transfer', [arbN, preCarga]));
+        await chamar('hardhat_stopImpersonatingAccount', [doador.q.endereco]);
+        const preexistente = await saldo(tokenDoLucro, arbN);
+        assert.equal(preexistente, preCarga, 'o pré-carregamento não chegou');
+
+        // O PISO: maior que a sobra estimada da rota, menor que o preexistente.
+        // Se os dois não couberem na mesma faixa, o teste não discrimina e DIZ
+        // isso em vez de passar sem provar nada.
+        const piso = a.sobra + 1n;
+        if (piso >= preexistente) {
+            console.log(`    este bloco não discrimina: sobra ${a.sobra} e preexistente`
+                + ` ${preexistente} não deixam faixa para o piso. NADA provado aqui`);
+            this.skip();
+            return;
+        }
+        let rec = null;
+        try {
+            rec = await enviar(dono, arbN, nIface.encodeFunctionData('executarRota',
+                [pernas, a.quantia, piso]));
+        } catch { /* reverteu: e e isso que o contrato certo faz */ }
+        const completou = rec !== null && rec.status === '0x1';
+        console.log(`    token do lucro ${tokenDoLucro}`);
+        console.log(`    preexistente ${preexistente} | sobra estimada ${a.sobra} | piso ${piso}`);
+        console.log(`    a operação ${completou ? 'COMPLETOU' : 'reverteu'}`);
+        assert.equal(completou, false,
+            'a operação completou com um piso que só o saldo PREEXISTENTE alcança: '
+            + 'o contrato está contando saldo que não é desta operação como lucro');
+        assert.equal(await saldo(tokenDoLucro, arbN), preexistente,
+            'o saldo preexistente mudou numa transação que reverteu');
+        console.log('    >>> o piso que só o preexistente alcançaria NÃO foi alcançado:'
+            + ' `_desteCiclo` conta só o que a operação trouxe');
+
+        // E A METADE COM TAXA, e ela tem de DISCRIMINAR também.
+        //
+        // Nas rotas deste motor o token do lucro é sempre o WETH (a base), que
+        // mediu limpo — então um saldo preexistente de token TAXADO nunca
+        // alcança o piso, e "saldo intacto" passaria de graça numa rota que
+        // reverte. O discriminador é outro, e é exatamente o defeito dela:
+        //
+        //   o token taxado é INTERMEDIÁRIO. A perna que o recebe entrega MENOS
+        //   do que a conta previu. Com `balanceOf` cru, o contrato completaria
+        //   a perna seguinte com o estoque PREEXISTENTE — vendendo o que não é
+        //   da operação — e a rota poderia COMPLETAR. Com `_desteCiclo` ele só
+        //   dispõe do que a operação trouxe, e a rota reverte.
+        //
+        // Então pré-carrego GENEROSAMENTE o intermediário taxado e exijo que a
+        // operação continue revertendo.
+        const intermediarios = [...new Set(a.rota.hops.slice(0, -1).map((h) => h.para))]
+            .filter((t) => t !== tokenDoLucro);
+        let achouTaxado = null;
+        for (const t of intermediarios) {
+            const detentores = [...new Set(a.rota.hops.map((h) => h.pool)
+                .filter((q) => q.token0 === t || q.token1 === t).map((q) => q.endereco))];
+            for (const d of detentores) {
+                const s = await sondarToken(t, d, destino);
+                const rr = retidoPorMil(s);
+                if (s.rodou && !s.reverteu && rr !== null && rr > 0) {
+                    achouTaxado = { t, d, r: rr };
+                    break;
+                }
+            }
+            if (achouTaxado !== null) break;
+        }
+        if (achouTaxado === null) {
+            console.log(`    nenhum intermediário desta rota tem retenção MEDIDA (sondei`
+                + ` ${intermediarios.length}): a metade "com taxa" NÃO foi exercitada neste`
+                + ' bloco, e isso fica DECLARADO em vez de passar como se tivesse sido');
+            return;
+        }
+        const tt = achouTaxado.t;
+        const temTt = await saldo(tt, achouTaxado.d);
+        await chamar('hardhat_impersonateAccount', [achouTaxado.d]);
+        await chamar('hardhat_setBalance', [achouTaxado.d, '0x56BC75E2D63100000']);
+        // METADE do estoque do pool: generoso de propósito. Se o contrato
+        // tocasse no preexistente, teria de onde completar toda perna curta.
+        await enviar(achouTaxado.d, tt,
+            erc20.encodeFunctionData('transfer', [arbN, temTt / 2n]));
+        await chamar('hardhat_stopImpersonatingAccount', [achouTaxado.d]);
+        const ttAntes = await saldo(tt, arbN);
+        assert.ok(ttAntes > 0n, 'o pré-carregamento do token taxado não chegou');
+        let rec2 = null;
+        try {
+            rec2 = await enviar(dono, arbN, nIface.encodeFunctionData('executarRota',
+                [pernas, a.quantia, 0n]));
+        } catch { /* reverteu */ }
+        const completou2 = rec2 !== null && rec2.status === '0x1';
+        console.log(`    intermediário taxado ${tt} retém ${achouTaxado.r}/1000;`
+            + ` pré-carreguei ${ttAntes} no contrato`);
+        console.log(`    com piso ZERO e estoque preexistente do intermediário, a operação`
+            + ` ${completou2 ? 'COMPLETOU' : 'reverteu'}`);
+        assert.equal(completou2, false,
+            'a rota completou tendo estoque preexistente do intermediário taxado: o contrato '
+            + 'completou a perna curta com saldo que não é desta operação');
+        assert.equal(await saldo(tt, arbN), ttAntes,
+            'o estoque preexistente do intermediário TAXADO mudou numa transação que reverteu');
+        console.log('    >>> a perna curta NÃO foi completada pelo estoque: `_desteCiclo` limita'
+            + ' a venda ao que a operação trouxe, mesmo com token taxado');
+    });
+
     it('SONDA cada peça e julga a causa — sem condenar por associação', async function () {
         if (avaliadas.length === 0) { this.skip(); return; }
         const teto = Number(process.env.ARB_SIMULAR ?? 8);
@@ -428,10 +563,24 @@ describe('a causa isolada, peça por peça', function () {
             console.log(`    ${c}  ${n} de ${avaliadas.length} rotas  [${v.causa}]`);
         }
         console.log(`    rotas que NÃO tocam nenhuma peça provada: ${sobrevivem}`);
-        console.log('    LEITURA: a sobra positiva destas rotas vinha da taxa de transferência —'
-            + ' um token taxado faz a reserva do pool parecer mal precificada, então ele SOBE no'
-            + ' ranking de sobra. A exclusão é por transferência MEDIDA, token por token, não por'
-            + ' associação.');
+        // A LEITURA sai dos numeros DESTE laco, e nao de uma frase guardada.
+        //
+        // A versao anterior afirmava "a sobra positiva destas rotas vinha da
+        // taxa de transferência" — verdade quando 508 de 509 tocavam um token
+        // taxado, e FALSA depois do conserto do pagamento, quando a maioria
+        // passou a nao tocar peca nenhuma. Etiqueta guardada e etiqueta que
+        // para de descrever o conjunto.
+        const fracaoPodada = avaliadas.length === 0
+            ? null
+            : Math.round(((avaliadas.length - sobrevivem) / avaliadas.length) * 100);
+        console.log(`    LEITURA: ${fracaoPodada === null ? 'sem candidato para ler'
+            : `${fracaoPodada}% dos candidatos tocam uma peça com causa COMPROVADA`}.`
+            + (fracaoPodada !== null && fracaoPodada >= 50
+                ? ' A maioria da sobra positiva vem de token taxado: a taxa faz a reserva parecer'
+                    + ' mal precificada, então o token SOBE no ranking de sobra.'
+                : ' A maioria dos candidatos NÃO toca peça condenada — então a sobra positiva'
+                    + ' aqui não é artefato de taxa, e quem decide é a execução integral.')
+            + ' Em todo caso a exclusão é por transferência MEDIDA, token por token.');
         console.log(`    COBERTURA: ${poolsParaRota.length} pools, ${rotas.length} rotas,`
             + ` ${avaliadas.length} com sobra positiva, ${colapsadas} duplicadas colapsadas`);
         // NENHUMA peça pode estar condenada sem evidência isolada sobre ela.

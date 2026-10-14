@@ -112,15 +112,55 @@ export function entradaDoHop(h: Hop, saida: bigint): bigint | null {
 export function percorrer(
     r: Rota, entrada: bigint,
     cotarFora?: (h: Hop, entrada: bigint) => bigint | null,
+    retencao?: Retencao,
 ): bigint | null {
     let valor = entrada;
     for (const h of r.hops) {
         const local = saidaDoHop(h, valor);
         const proximo = local ?? (cotarFora ? cotarFora(h, valor) : null);
         if (proximo === null || proximo <= 0n) return null;
-        valor = proximo;
+        // O QUE SAI DO POOL NAO E O QUE CHEGA NO PROXIMO.
+        //
+        // O pool manda `proximo` do token `h.para` para o endereco seguinte, e
+        // um token com taxa de transferencia entrega menos. O pool seguinte
+        // calcula a saida pelo que ENTROU no saldo dele, nao pelo que foi
+        // mandado — entao a conta tem de descontar aqui, a cada perna.
+        //
+        // Sem isto a rota com token taxado parecia LUCRATIVA e revertia: a taxa
+        // faz a reserva parecer mal precificada, o token sobe no ranking de
+        // sobra, e o pagamento chega curto. Era o que carregava 508 das 509
+        // rotas de sobra positiva medidas no bloco 52612934.
+        valor = retencao === undefined
+            ? proximo
+            : descontar(proximo, retencao(h.para, h.pool.endereco));
+        if (valor <= 0n) return null;
     }
     return valor;
+}
+
+/**
+ * A RETENCAO de uma transferencia, em por mil, ou `null` quando nao se mediu.
+ *
+ * Recebe o token e QUEM MANDA, porque medido em 2026-10-14 a taxa depende do
+ * par: `0x7787…734f` retem 479/1000 saindo de um pool e 0/1000 de outro.
+ * Passar so o token transformaria uma medicao de par em propriedade global.
+ */
+export type Retencao = (token: string, remetente: string) => number | null;
+
+/** Desconta a retencao. `null` nao e zero: e "nao medi", e nao altera a conta. */
+export function descontar(bruto: bigint, retidoPorMil: number | null): bigint {
+    if (retidoPorMil === null || retidoPorMil <= 0) return bruto;
+    if (retidoPorMil >= 1000) return 0n;
+    return (bruto * BigInt(1000 - retidoPorMil)) / 1000n;
+}
+
+/** O BRUTO que precisa sair para `liquido` chegar. Arredonda PARA CIMA. */
+export function brutoParaEntregar(liquido: bigint, retidoPorMil: number | null): bigint | null {
+    if (retidoPorMil === null || retidoPorMil <= 0) return liquido;
+    if (retidoPorMil >= 1000) return null;
+    const g = BigInt(1000 - retidoPorMil);
+    // Para CIMA: para baixo manda menos do que o pool exige e ele reverte.
+    return (liquido * 1000n + g - 1n) / g;
 }
 
 /**
@@ -136,17 +176,63 @@ export function percorrer(
 export function sobraDaRota(
     r: Rota, quantia: bigint,
     cotarFora?: (h: Hop, entrada: bigint) => bigint | null,
+    retencao?: Retencao,
+    /** Quem manda o token emprestado para a primeira venda. O executor. */
+    executor?: string,
 ): { recebido: bigint; devido: bigint; sobra: bigint } | null {
     if (r.hops.length < 2) return null;
     const primeiro = r.hops[0]!;
+    // O EMPRESTIMO tambem e uma transferencia: o pool do hop 0 manda `quantia`
+    // do token emprestado para ca, e um token taxado entrega menos. O que entra
+    // na primeira venda e o LIQUIDO.
+    const entraNaVenda = retencao === undefined
+        ? quantia
+        : descontar(quantia, retencao(primeiro.para, primeiro.pool.endereco));
+    if (entraNaVenda <= 0n) return null;
     // As pernas de VENDA: do hop 1 ao fim. O hop 0 e o emprestimo.
     const vendas: Rota = { ...r, hops: r.hops.slice(1) };
-    const recebido = percorrer(vendas, quantia, cotarFora);
+    const recebido = percorrer(vendas, entraNaVenda, cotarFora, retencao);
     if (recebido === null) return null;
     // O PAGAMENTO: quanto do token devolvido o pool do hop 0 exige para ter
     // soltado `quantia` do token emprestado.
-    const inverso: Hop = { pool: primeiro.pool, de: primeiro.para, para: primeiro.de };
-    const devido = entradaDoHop(inverso, quantia);
+    // O PAGAMENTO É `entradaDoHop(primeiro, quantia)`, e NÃO do hop invertido.
+    //
+    // DEFEITO MEDIDO em 2026-10-14, e ele explica o padrão que custou esta
+    // entrega inteira. O código usava
+    //
+    //     inverso = { de: primeiro.para, para: primeiro.de }
+    //     devido  = entradaDoHop(inverso, quantia)
+    //
+    // o que lê as reservas TROCADAS: calcula quanto do token TOMADO faria sair
+    // `quantia` do token PAGO — a pergunta ao contrário.
+    //
+    // No flash swap tiramos `quantia` de `primeiro.para` e devolvemos
+    // `primeiro.de`. O pool exige `getAmountIn(quantia, reserva de .de,
+    // reserva de .para)`, que é exatamente `entradaDoHop(primeiro, quantia)`:
+    // `entradaDoHop` já lê `daEntrada` do `de` e `daSaida` do `para`.
+    //
+    // Conferido contra o `getAmountIn` canônico, pool 1e21 WETH / 1.3e21 M,
+    // tomando 1e18 de M:
+    //
+    //     como estava  1305216952157774626
+    //     corrigido     772139358800033666
+    //     getAmountIn   772139358800033666   <- bate
+    //
+    // Em pool EQUILIBRADO os dois dão o mesmo número, e é por isso que passou:
+    // os testes de paridade usavam reservas iguais. Em pool desequilibrado —
+    // isto é, em todo pool onde existe arbitragem — ele erra para os DOIS
+    // lados, criando sobra que não existe (e a execução reverte com
+    // 'UniswapV2: K') e escondendo sobra que existe.
+    const liquidoDevido = entradaDoHop(primeiro, quantia);
+    if (liquidoDevido === null) return null;
+    // E O PAGAMENTO TAMBEM E TAXADO: o pool confere o saldo que CHEGOU nele,
+    // entao o executor precisa MANDAR mais para o liquido fechar. Sem este
+    // arredondamento para cima a conta aprova o que o pool recusa — e a
+    // reversao se chama 'UniswapV2: K'.
+    const devido = retencao === undefined
+        ? liquidoDevido
+        // O token PAGO é `primeiro.de`, e quem o manda é o executor.
+        : brutoParaEntregar(liquidoDevido, retencao(primeiro.de, executor ?? ''));
     if (devido === null) return null;
     return { recebido, devido, sobra: recebido - devido };
 }
@@ -168,11 +254,13 @@ export function tetoDaRota(r: Rota): bigint {
 export function melhorTamanhoDaRota(
     r: Rota, passos = 50,
     cotarFora?: (h: Hop, entrada: bigint) => bigint | null,
+    retencao?: Retencao,
+    executor?: string,
 ): { quantia: bigint; sobra: bigint; recebido: bigint; devido: bigint } | null {
     const teto = tetoDaRota(r);
     if (teto <= 0n) return null;
     const em = (q: bigint): bigint => {
-        const s = sobraDaRota(r, q, cotarFora);
+        const s = sobraDaRota(r, q, cotarFora, retencao, executor);
         return s === null ? -1n : s.sobra;
     };
     let baixo = 1n;
@@ -188,7 +276,7 @@ export function melhorTamanhoDaRota(
         const s = em(q);
         if (s > melhorSobra) { melhor = q; melhorSobra = s; }
     }
-    const s = sobraDaRota(r, melhor, cotarFora);
+    const s = sobraDaRota(r, melhor, cotarFora, retencao, executor);
     if (s === null) return null;
     return { quantia: melhor, ...s };
 }
