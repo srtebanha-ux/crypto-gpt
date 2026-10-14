@@ -2857,6 +2857,24 @@ async function principal(): Promise<'parar' | void> {
             porque: 'é tarefa secundária: ela espera, o monitoramento não. A variável continua '
                 + 'ligada e a varredura roda quando a capacidade voltar',
         });
+    } else if (process.env.CACA_MORPHO_API === '1') {
+        // A DESCOBERTA SEM `eth_getLogs`: a API enumera, a corrente valida.
+        // Roda desgrudada do laco, igual a varredura por evento.
+        log.warn('[MORPHO/API] Vou descobrir mercados pela API, UMA vez, em paralelo.', {
+            porque: 'o eth_getLogs está recusado nos provedores configurados; a API da Morpho '
+                + 'enumera e o eth_call valida',
+            depois: 'apague CACA_MORPHO_API quando a linha [MORPHO/API] sair',
+        });
+        void (async () => {
+            try {
+                const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
+                await descobrirMorphoPorApi();
+            } catch (e) {
+                log.error('[MORPHO/API] A descoberta falhou, e o bot segue caçando.', {
+                    erro: e instanceof Error ? e.message : String(e),
+                });
+            }
+        })();
     } else if (process.env.CACA_MERCADOS_MORPHO === '1') {
         log.warn('[MORPHO] Vou varrer os mercados UMA vez, em paralelo. Isto não atrasa a caça.', {
             porque: 'o eth_getLogs do RPC público recusou 23 de 24 janelas no sandbox; aqui ele responde',

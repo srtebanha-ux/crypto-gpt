@@ -91,6 +91,12 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
  * alvo real da Aave de 2026-10-07 rendeu 4,56% de bonus. Ou seja, acima de 77%
  * o Morpho paga o MESMO que a Aave — e aí nao ha razao para a obra.
  */
+import {
+    enumerarMercados, enumerarDevedores, soOsQuePagam, codificarIdToMarketParams,
+    codificarPosition, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
+    paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
+} from './morphoApi';
+
 export const LLTV_MAXIMO_QUE_PAGA = new Decimal('0.77');
 
 export interface MercadoDoMorpho {
@@ -312,4 +318,213 @@ if (require.main === module) {
         log.error('Parei.', { erro: e instanceof Error ? e.message : String(e) });
         process.exitCode = 1;
     });
+}
+
+/**
+ * A DESCOBERTA SEM `eth_getLogs`: API para enumerar, corrente para validar.
+ *
+ * `varrerMercadosDoMorpho` (acima) depende de `eth_getLogs`, e em 2026-10-14 ele
+ * estava recusado em TODOS os provedores configurados. Esta funcao e o caminho
+ * que nao depende dele. Ela NAO substitui a outra: quando o `getLogs` voltar, as
+ * duas se conferem — e divergencia entre elas e achado, nao ruido.
+ *
+ * Roda desgrudada do laco de caca, igual a irma: nenhuma descoberta pode atrasar
+ * um tiro, e se ela falhar o bot segue cacando com o que tem.
+ */
+export async function descobrirMorphoPorApi(
+    opcoes: {
+        /** O transporte HTTP da API. Injetado para o teste e para o proxy. */
+        buscar?: TransporteHttp;
+        /** Quantos mercados validar na corrente nesta volta. Teto de orcamento. */
+        tetoDeValidacoes?: number;
+        /** Quantos mercados consultar devedores. Cada um e uma requisicao. */
+        tetoDeMercadosComDevedores?: number;
+        caminhoDoCache?: string;
+    } = {},
+): Promise<void> {
+    const { readFile, writeFile, mkdir } = await import('fs/promises');
+    const { dirname } = await import('path');
+    const caminho = opcoes.caminhoDoCache
+        ?? process.env.CACA_CACHE_MORPHO
+        ?? '/app/data/mercadosMorpho.json';
+    const tetoValid = opcoes.tetoDeValidacoes ?? 12;
+    const tetoDev = opcoes.tetoDeMercadosComDevedores ?? 3;
+
+    // O CACHE PRIMEIRO: se a API cair, e ele que mantem o monitoramento. Ler
+    // antes de pedir nada tambem responde "o que eu já sabia" na mesma linha.
+    let doDisco: MercadoDaApi[] | null = null;
+    try {
+        doDisco = doCache(JSON.parse(await readFile(caminho, 'utf8')));
+    } catch { doDisco = null; }
+
+    const agente = process.env.HTTPS_PROXY ? new ProxyAgent(process.env.HTTPS_PROXY) : undefined;
+    const buscar: TransporteHttp = opcoes.buscar ?? (async (url, o) => {
+        // `fetch` do Node ignora o HTTPS_PROXY e cai numa politica mais estreita
+        // — este arquivo ja registra isso. Dispatcher explicito.
+        const r = await fetch(url, {
+            ...(agente ? { dispatcher: agente } : {}),
+            method: o?.method ?? 'GET',
+            headers: o?.headers,
+            body: o?.body,
+        } as Parameters<typeof fetch>[1]);
+        return { status: r.status, text: () => r.text() };
+    });
+
+    const enumeracao = await enumerarMercados(buscar);
+    const legiveis = enumeracao.mercados.length > 0 ? enumeracao.mercados : (doDisco ?? []);
+    const veioDoCache = enumeracao.mercados.length === 0 && doDisco !== null;
+    const quePagam = soOsQuePagam(legiveis);
+
+    if (veioDoCache) {
+        log.warn('[MORPHO/API] A API não respondeu: sigo com o CACHE.', {
+            falha: enumeracao.falha,
+            mercadosNoCache: legiveis.length,
+            quePagam: quePagam.length,
+            oQueIssoNaoE: 'não é "não há mercados": é "não consegui enumerar agora". '
+                + 'O cache mantém o monitoramento possível e NÃO é cobertura nova',
+        });
+    }
+
+    // A CORRENTE VALIDA, e so ela autoriza. Teto de validacoes porque cada uma
+    // e um `eth_call`, e orcamento e orcamento.
+    const escada = listaDeRpcs(process.env, RPCS_PARA_TENTAR.base ?? ['https://mainnet.base.org']);
+    const url = escada[0]!;
+    // O ENDERECO DO MORPHO sai da MESMA variavel que a varredura por evento usa,
+    // com o mesmo padrao — e ele NAO entra por confianca: `julgarMorpho` confere
+    // a superficie no `eth_getCode` antes de qualquer `eth_call`. Em 2026-10-09
+    // os 10 seletores e o callback `0xcf7ea196` foram confirmados assim.
+    const morpho = (process.env.MORPHO_CANDIDATOS
+        ?? '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb').split(',')[0]!.trim();
+    let chamadasRpc = 0;
+    const chamarRpc = async (data: string): Promise<string | null> => {
+        chamadasRpc += 1;
+        try {
+            const r = await fetch(url, {
+                ...(agente ? { dispatcher: agente } : {}),
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    jsonrpc: '2.0', id: 1, method: 'eth_call',
+                    params: [{ to: morpho, data }, 'latest'],
+                }),
+            } as Parameters<typeof fetch>[1]);
+            const j = await r.json() as { result?: string; error?: unknown };
+            return typeof j.result === 'string' ? j.result : null;
+        } catch { return null; }
+    };
+
+    // A SUPERFICIE, antes de tudo: endereco que nao e o Morpho nao vale um
+    // `eth_call`, e aceitar por memoria e o defeito do `0x80d1e0f4…`.
+    let codigo: string | null = null;
+    try {
+        const r = await fetch(url, {
+            ...(agente ? { dispatcher: agente } : {}),
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getCode', params: [morpho, 'latest'] }),
+        } as Parameters<typeof fetch>[1]);
+        const j = await r.json() as { result?: string };
+        codigo = typeof j.result === 'string' ? j.result : null;
+        chamadasRpc += 1;
+    } catch { codigo = null; }
+    const juri = julgarMorpho(codigo ?? '');
+    if (!juri.eh) {
+        log.error('[MORPHO/API] O endereço NÃO tem a superfície do Morpho Blue: não valido nada.', {
+            endereco: morpho,
+            faltando: juri.faltando.slice(0, 5),
+            lido: codigo === null ? 'eth_getCode não respondeu' : `${codigo.length} caracteres`,
+            oQueIssoNaoE: 'não é "o Morpho não existe": é "este endereço não é ele, ou eu não '
+                + 'consegui ler o código". Sem identificação positiva não gasto eth_call',
+            comoDestravar: 'MORPHO_CANDIDATOS=0x… com o endereço correto',
+        });
+        return;
+    }
+
+    let confirmados = 0;
+    const recusados: string[] = [];
+    for (const m of quePagam.slice(0, tetoValid)) {
+        const cru = await chamarRpc(codificarIdToMarketParams(m.id));
+        const veredicto = apiConfereComACorrente(m, cru === null ? null : lerIdToMarketParams(cru));
+        m.confirmadoNaCorrente = veredicto.confere;
+        if (veredicto.confere) confirmados += 1;
+        else recusados.push(`${m.id.slice(0, 10)}…: ${veredicto.porque}`);
+    }
+
+    // OS DEVEDORES, so dos mercados CONFIRMADOS. Pedir devedor de mercado que a
+    // corrente nao confirmou seria gastar requisicao sobre dado que nao decide.
+    let devedores = 0;
+    let validados = 0;
+    let reqGraph = 0;
+    const falhasDeDevedores: string[] = [];
+    for (const m of quePagam.filter((x) => x.confirmadoNaCorrente).slice(0, tetoDev)) {
+        const r = await enumerarDevedores(buscar, m.id);
+        reqGraph += r.requisicoes;
+        devedores += r.devedores.length;
+        if (r.falha !== null) falhasDeDevedores.push(`${m.id.slice(0, 10)}…: ${r.falha}`);
+        // VALIDA NA CORRENTE: a API aponta, o `position` confirma. Teto pequeno
+        // de proposito — o objetivo desta volta e provar o caminho, nao varrer.
+        for (const d of r.devedores.slice(0, 5)) {
+            const cru = await chamarRpc(codificarPosition(m.id, d.endereco));
+            const p = cru === null ? null : lerPosition(cru);
+            if (p !== null && p.borrowShares > 0n) validados += 1;
+        }
+    }
+
+    let blocoAgora: number | null = null;
+    try {
+        const r = await fetch(url, {
+            ...(agente ? { dispatcher: agente } : {}),
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
+        } as Parameters<typeof fetch>[1]);
+        const j = await r.json() as { result?: string };
+        if (typeof j.result === 'string') blocoAgora = Number.parseInt(j.result, 16);
+        chamadasRpc += 1;
+    } catch { blocoAgora = null; }
+
+    log.info('[MORPHO/API] Descoberta SEM eth_getLogs.', {
+        evidencia: comoLerADescoberta({
+            devolvidos: enumeracao.devolvidos,
+            mercados: legiveis.length,
+            quePagam: quePagam.length,
+            confirmados,
+            devedores,
+            validados,
+            requisicoes: enumeracao.requisicoes + reqGraph,
+            completa: enumeracao.completa,
+            blocoIndexado: enumeracao.blocoIndexado,
+            blocoAgora,
+            falha: enumeracao.falha,
+        }),
+        chamadasEthCall: chamadasRpc,
+        deOndeVeioALista: veioDoCache ? 'CACHE (a API não respondeu)' : 'API',
+        mercadosRecusadosNaCorrente: recusados.slice(0, 5),
+        falhasDeDevedores: falhasDeDevedores.slice(0, 3),
+        oQueIssoNAOProva: 'a API ENUMERA; ela não decide tiro. Mercado não confirmado pela '
+            + 'corrente não entra, e devedor não validado por eth_call não é alvo. '
+            + 'Cobertura de devedores é PISO: o teto desta volta é pequeno de propósito',
+    });
+
+    // GRAVA o que foi confirmado, para a proxima volta nao recomecar.
+    if (legiveis.length > 0) {
+        try {
+            await mkdir(dirname(caminho), { recursive: true });
+            const tmp = `${caminho}.${process.pid}.${Date.now()}.tmp`;
+            await writeFile(tmp, JSON.stringify(
+                paraCache(legiveis, enumeracao.blocoIndexado, enumeracao.completa, Date.now()),
+            ));
+            const { rename } = await import('fs/promises');
+            await rename(tmp, caminho);
+            log.info('[MORPHO/API] Cache gravado.', {
+                caminho, mercados: legiveis.length, completo: enumeracao.completa,
+                porque: 'nome único por gravação e rename atômico — a mesma regra do cache de '
+                    + 'devedores, que já custou uma gravação perdida a este projeto',
+            });
+        } catch (e) {
+            log.warn('[MORPHO/API] NÃO gravei o cache.', {
+                erro: e instanceof Error ? e.message : String(e),
+            });
+        }
+    }
 }
