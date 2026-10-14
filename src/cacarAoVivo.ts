@@ -9,6 +9,7 @@ import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, c
 import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
 import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
 import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, sanitizar, OrcamentoDaTarefa, veredictoDaVarredura, FreioDeRecusas, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
+import { disponibilidadeDoCanal, comoLerOsCanais } from './canais';
 import { diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs, lerErroJsonRpc, comoLerOErroJsonRpc, lerCorpoJson } from './cobertura';
 import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
@@ -2843,38 +2844,80 @@ async function principal(): Promise<'parar' | void> {
      * Ele roda DESGRUDADO do laco de caca: nenhuma varredura de mercado pode
      * atrasar um tiro, e se ela falhar o bot nao morre por isso.
      */
-    if (process.env.CACA_MERCADOS_MORPHO === '1'
-        && oQuePausar({
-            algumEsgotado: CAPACIDADE.esgotados().length > 0,
-            noFallback: !ESCADA.ehOPrimario(),
-        }).pausar.includes('morpho')) {
-        // TAREFA SECUNDARIA PAUSADA. Ela mandou: *"Pause ou reduza tarefas
-        // secundárias antes de sobrecarregar o fallback."* O censo do Morpho
-        // responde uma pergunta que espera; o monitoramento nao.
-        log.warn('[MORPHO] NÃO vou varrer os mercados agora, e o motivo é orçamento.', {
-            provedoresEsgotados: CAPACIDADE.esgotados(),
-            noFallback: !ESCADA.ehOPrimario(),
-            porque: 'é tarefa secundária: ela espera, o monitoramento não. A variável continua '
-                + 'ligada e a varredura roda quando a capacidade voltar',
-        });
-    } else if (process.env.CACA_MORPHO_API === '1') {
+    // OS DOIS CAMINHOS DO MORPHO SAO INDEPENDENTES, e esta foi a correcao do
+    // incidente de 2026-10-14.
+    //
+    // Eles moravam numa cadeia `if / else if`. O primeiro ramo casa quando a
+    // capacidade de RPC acaba — e e EXATAMENTE quando o segundo mais importa,
+    // porque ele nao usa RPC para enumerar. No log dela o primeiro ramo casou,
+    // imprimiu "o motivo e orcamento", e o `else if` impediu que o caminho novo
+    // fosse ao menos AVALIADO. Nas palavras dela: *"voce criou uma alternativa
+    // ao eth_getLogs, mas manteve essa alternativa subordinada ao bloqueio do
+    // caminho antigo"*.
+    //
+    // Agora sao dois `if` separados, e cada um pergunta ao SEU canal. Quem
+    // decide e `disponibilidadeDoCanal`, num lugar so (`src/canais.ts`).
+    const infraAgora = {
+        provedoresEsgotados: CAPACIDADE.esgotados(),
+        noFallback: !ESCADA.ehOPrimario(),
+        eventosRecusados: ADIADAS.historico > 0,
+    };
+    // A LINHA QUE FALTAVA: o incidente foi invisivel porque nao havia nenhuma
+    // frase dizendo que o canal HTTP estava livre. Nao dizer e indistinguivel
+    // de nao poder — e este projeto persegue isso desde a primeira pagina.
+    log.info('[CANAIS] A disponibilidade é por CANAL, e não por assunto.', {
+        canais: comoLerOsCanais(infraAgora),
+        provedoresEsgotados: infraAgora.provedoresEsgotados,
+        noFallback: infraAgora.noFallback,
+    });
+
+    if (process.env.CACA_MORPHO_API === '1') {
         // A DESCOBERTA SEM `eth_getLogs`: a API enumera, a corrente valida.
         // Roda desgrudada do laco, igual a varredura por evento.
-        log.warn('[MORPHO/API] Vou descobrir mercados pela API, UMA vez, em paralelo.', {
-            porque: 'o eth_getLogs está recusado nos provedores configurados; a API da Morpho '
-                + 'enumera e o eth_call valida',
-            depois: 'apague CACA_MORPHO_API quando a linha [MORPHO/API] sair',
+        //
+        // E NAO E GATEADA PELO ESTADO DO RPC. `disponibilidadeDoCanal('apiHttp')`
+        // nao le nenhum campo de RPC, de proposito, e um teste exige isso em
+        // todas as combinacoes de estado.
+        const canal = disponibilidadeDoCanal('apiHttp', infraAgora);
+        log.warn('[MORPHO/API] FLAG RECONHECIDA. Vou descobrir mercados pela API, UMA vez, em paralelo.', {
+            flag: 'CACA_MORPHO_API=1',
+            canal: canal.pode ? 'apiHttp LIVRE' : 'apiHttp PAUSADO',
+            porqueOCanal: canal.porque,
+            rpcEsgotado: infraAgora.provedoresEsgotados.length > 0
+                ? `SIM (${infraAgora.provedoresEsgotados.join(', ')}) — e isto NÃO bloqueia este canal`
+                : 'não',
+            depois: 'apague CACA_MORPHO_API quando a linha [MORPHO/API] Descoberta sair',
         });
         void (async () => {
             try {
                 const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
-                await descobrirMorphoPorApi();
+                await descobrirMorphoPorApi({ infra: infraAgora });
             } catch (e) {
                 log.error('[MORPHO/API] A descoberta falhou, e o bot segue caçando.', {
                     erro: e instanceof Error ? e.message : String(e),
+                    oQueIssoNaoE: 'não é "a API retornou vazio" nem "os mercados não passaram na '
+                        + 'validação": é a tarefa estourando. Ver [MORPHO/API] Descoberta, que '
+                        + 'não saiu',
                 });
             }
         })();
+    }
+
+    if (process.env.CACA_MERCADOS_MORPHO === '1'
+        && !disponibilidadeDoCanal('rpcEventos', infraAgora).pode) {
+        // TAREFA SECUNDARIA PAUSADA. Ela mandou: *"Pause ou reduza tarefas
+        // secundárias antes de sobrecarregar o fallback."* O censo do Morpho
+        // responde uma pergunta que espera; o monitoramento nao.
+        //
+        // E a frase agora DIZ que o outro caminho existe, porque foi a ausencia
+        // disso que me fez concluir "a rotina do Morpho foi adiada" quando o
+        // que estava adiado era so o caminho por EVENTO.
+        log.warn('[MORPHO] NÃO vou varrer os mercados POR EVENTO agora, e o motivo é orçamento.', {
+            canal: 'rpcEventos',
+            porque: disponibilidadeDoCanal('rpcEventos', infraAgora).porque,
+            oQueIssoNaoBloqueia: 'o canal apiHttp continua livre: CACA_MORPHO_API=1 descobre os '
+                + 'mesmos mercados sem eth_getLogs, e NÃO depende desta pausa',
+        });
     } else if (process.env.CACA_MERCADOS_MORPHO === '1') {
         log.warn('[MORPHO] Vou varrer os mercados UMA vez, em paralelo. Isto não atrasa a caça.', {
             porque: 'o eth_getLogs do RPC público recusou 23 de 24 janelas no sandbox; aqui ele responde',

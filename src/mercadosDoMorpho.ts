@@ -96,6 +96,10 @@ import {
     codificarPosition, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
+import {
+    disponibilidadeDoCanal, comoLerOsCanais, OrcamentoHttp,
+    type EstadoDaInfra, type DesfechoDaDescoberta,
+} from './canais';
 
 export const LLTV_MAXIMO_QUE_PAGA = new Decimal('0.77');
 
@@ -340,6 +344,19 @@ export async function descobrirMorphoPorApi(
         /** Quantos mercados consultar devedores. Cada um e uma requisicao. */
         tetoDeMercadosComDevedores?: number;
         caminhoDoCache?: string;
+        /**
+         * O estado da infraestrutura, para a decisao de CANAL.
+         *
+         * Ele entra para o log poder DIZER que o RPC estava esgotado e que isso
+         * nao bloqueou a enumeracao. Ele NAO e consultado para autorizar a
+         * chamada HTTP: `disponibilidadeDoCanal('apiHttp')` nao le campo de RPC,
+         * e foi essa subordinacao que impediu a descoberta de executar.
+         */
+        infra?: EstadoDaInfra;
+        /** Teto de requisicoes HTTP desta volta. */
+        tetoDeRequisicoes?: number;
+        /** Teto de tempo desta volta, em ms. Cancela o que estiver em voo. */
+        tetoDeMs?: number;
     } = {},
 ): Promise<void> {
     const { readFile, writeFile, mkdir } = await import('fs/promises');
@@ -349,6 +366,32 @@ export async function descobrirMorphoPorApi(
         ?? '/app/data/mercadosMorpho.json';
     const tetoValid = opcoes.tetoDeValidacoes ?? 12;
     const tetoDev = opcoes.tetoDeMercadosComDevedores ?? 3;
+    const infra: EstadoDaInfra = opcoes.infra
+        ?? { provedoresEsgotados: [], noFallback: false };
+
+    // O CANAL DECIDE, e so ele. `apiHttp` nao le estado de RPC: ver a
+    // docstring de `disponibilidadeDoCanal`. Esta chamada esta aqui para a
+    // politica ter UM dono, e nao para criar um portao novo.
+    const canal = disponibilidadeDoCanal('apiHttp', infra);
+    if (!canal.pode) {
+        log.warn('[MORPHO/API] A TAREFA NÃO EXECUTOU.', {
+            evidencia: comoLerADescoberta({
+                devolvidos: 0, mercados: 0, quePagam: 0, confirmados: 0, devedores: 0,
+                validados: 0, requisicoes: 0, completa: false, blocoIndexado: null,
+                blocoAgora: null, falha: null, tentou: false, statusHttp: [],
+                desfecho: 'naoExecutou',
+            }),
+            porque: canal.porque,
+        });
+        return;
+    }
+
+    // ORCAMENTO PROPRIO: requisicoes, tempo e CANCELAMENTO de verdade. Ele e
+    // o unico limitador deste canal — nao a cota de RPC, que e de outro.
+    const orcamento = new OrcamentoHttp(
+        opcoes.tetoDeRequisicoes ?? 40,
+        opcoes.tetoDeMs ?? 45_000,
+    );
 
     // O CACHE PRIMEIRO: se a API cair, e ele que mantem o monitoramento. Ler
     // antes de pedir nada tambem responde "o que eu já sabia" na mesma linha.
@@ -366,11 +409,14 @@ export async function descobrirMorphoPorApi(
             method: o?.method ?? 'GET',
             headers: o?.headers,
             body: o?.body,
+            // O SINAL VIAJA. Sem isto o orcamento seria letra morta no caminho
+            // mais lento, que e exatamente o defeito medido em `cotacoesDaBinance`.
+            ...(o?.signal ? { signal: o.signal } : {}),
         } as Parameters<typeof fetch>[1]);
         return { status: r.status, text: () => r.text() };
     });
 
-    const enumeracao = await enumerarMercados(buscar);
+    const enumeracao = await enumerarMercados(buscar, { orcamento });
     const legiveis = enumeracao.mercados.length > 0 ? enumeracao.mercados : (doDisco ?? []);
     const veioDoCache = enumeracao.mercados.length === 0 && doDisco !== null;
     const quePagam = soOsQuePagam(legiveis);
@@ -427,22 +473,51 @@ export async function descobrirMorphoPorApi(
         codigo = typeof j.result === 'string' ? j.result : null;
         chamadasRpc += 1;
     } catch { codigo = null; }
+    // AS DUAS CAUSAS SAO SEPARADAS, e pedem acoes OPOSTAS. A primeira versao
+    // deste trecho dava `return` nas duas — e com isso um soluco de RPC jogava
+    // fora a enumeracao inteira que a API acabara de entregar. Ela mandou o
+    // contrario, e esta certa: *"Se a API responder e o RPC estiver
+    // indisponivel, preserve os mercados encontrados como NAO CONFIRMADOS e
+    // processe as validacoes posteriormente."*
+    //
+    //     codigo === null   -> NAO CONSEGUI LER. Nao e sobre o endereco.
+    //                          Guarda o que a API deu, nao confirmado, e valida
+    //                          na proxima volta
+    //     codigo lido e a   -> ESTE ENDERECO NAO E O MORPHO. Conclusao, nao
+    //     superficie falha     ausencia: aqui parar e certo, e `return` fica
     const juri = julgarMorpho(codigo ?? '');
-    if (!juri.eh) {
+    const rpcMudo = codigo === null;
+    if (!rpcMudo && !juri.eh) {
         log.error('[MORPHO/API] O endereço NÃO tem a superfície do Morpho Blue: não valido nada.', {
             endereco: morpho,
             faltando: juri.faltando.slice(0, 5),
-            lido: codigo === null ? 'eth_getCode não respondeu' : `${codigo.length} caracteres`,
-            oQueIssoNaoE: 'não é "o Morpho não existe": é "este endereço não é ele, ou eu não '
-                + 'consegui ler o código". Sem identificação positiva não gasto eth_call',
+            lido: `${codigo!.length} caracteres`,
+            oQueIssoE: 'é CONCLUSÃO, não ausência: o eth_getCode respondeu e a superfície não '
+                + 'bate. Sem identificação positiva não gasto eth_call',
             comoDestravar: 'MORPHO_CANDIDATOS=0x… com o endereço correto',
         });
         return;
     }
+    // Por que a validacao nao vai rodar, quando nao vai. Guardado como TEXTO
+    // para viajar com a evidencia, em vez de eu reconstruir a frase la embaixo.
+    const porqueNaoValidou: string | null = rpcMudo
+        ? 'o eth_getCode não respondeu (RPC indisponível): não confirmo superfície nem mercado, '
+            + 'e NÃO jogo a enumeração fora — ela fica guardada como NÃO CONFIRMADA'
+        : null;
+    if (rpcMudo) {
+        log.warn('[MORPHO/API] O RPC não respondeu: guardo a enumeração como NÃO CONFIRMADA.', {
+            endereco: morpho,
+            canalRpc: disponibilidadeDoCanal('validacao', infra).porque,
+            oQueIssoNaoE: 'não é "o endereço não é o Morpho" (isso exige o código LIDO) e não é '
+                + '"não há mercados": é "não consegui validar agora"',
+            oQueAcontece: 'os mercados vão ao cache com confirmadoNaCorrente=false e a validação '
+                + 'roda na próxima volta, quando o RPC voltar',
+        });
+    }
 
     let confirmados = 0;
     const recusados: string[] = [];
-    for (const m of quePagam.slice(0, tetoValid)) {
+    for (const m of rpcMudo ? [] : quePagam.slice(0, tetoValid)) {
         const cru = await chamarRpc(codificarIdToMarketParams(m.id));
         const veredicto = apiConfereComACorrente(m, cru === null ? null : lerIdToMarketParams(cru));
         m.confirmadoNaCorrente = veredicto.confere;
@@ -483,6 +558,26 @@ export async function descobrirMorphoPorApi(
         chamadasRpc += 1;
     } catch { blocoAgora = null; }
 
+    // O DESFECHO, entre as quatro situacoes que ela mandou separar. A ordem
+    // importa: cada ramo exclui o anterior, e nenhuma delas e silenciosa.
+    const desfecho: DesfechoDaDescoberta = !enumeracao.tentou
+        // Nenhuma requisicao saiu. So acontece com orcamento zerado — e e o
+        // estado que o incidente de 2026-10-14 produziu por outro caminho.
+        ? 'naoExecutou'
+        : rpcMudo
+            // A API deu e o RPC nao pode confirmar. Guardado, nao perdido.
+            ? 'rpcIndisponivel'
+            : enumeracao.falha !== null && legiveis.length === 0
+                // A requisicao saiu e a resposta nao serviu.
+                ? 'apiFalhou'
+                : quePagam.length === 0
+                    // Status 200, corpo legivel, zero na faixa. E RESPOSTA.
+                    ? 'apiVaziaDeVerdade'
+                    : confirmados === 0
+                        // Enumerou e a corrente recusou todos. E dado.
+                        ? 'validacaoRecusou'
+                        : 'confirmou';
+
     log.info('[MORPHO/API] Descoberta SEM eth_getLogs.', {
         evidencia: comoLerADescoberta({
             devolvidos: enumeracao.devolvidos,
@@ -496,7 +591,14 @@ export async function descobrirMorphoPorApi(
             blocoIndexado: enumeracao.blocoIndexado,
             blocoAgora,
             falha: enumeracao.falha,
+            tentou: enumeracao.tentou,
+            statusHttp: enumeracao.statusHttp,
+            desfecho,
+            naoConfirmadosGuardados: quePagam.filter((x) => x.confirmadoNaCorrente !== true).length,
+            porqueNaoValidou,
         }),
+        orcamento: orcamento.comoLer(),
+        canais: comoLerOsCanais(infra),
         chamadasEthCall: chamadasRpc,
         deOndeVeioALista: veioDoCache ? 'CACHE (a API não respondeu)' : 'API',
         mercadosRecusadosNaCorrente: recusados.slice(0, 5),

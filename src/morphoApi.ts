@@ -30,6 +30,7 @@ import { AbiCoder } from 'ethers';
 import { bonusPct } from './morpho';
 import { LLTV_MAXIMO_QUE_PAGA, SELETORES_DO_MORPHO, type MercadoDoMorpho } from './mercadosDoMorpho';
 import { sanitizar } from './capacidade';
+import { OrcamentoHttp, comoLerODesfecho, type DesfechoDaDescoberta } from './canais';
 
 const coder = AbiCoder.defaultAbiCoder();
 
@@ -57,6 +58,15 @@ export interface TransporteHttp {
         method?: string;
         headers?: Record<string, string>;
         body?: string;
+        /**
+         * O CANCELAMENTO, e ele e um sinal de verdade e nao um booleano meu.
+         *
+         * Este projeto ja mediu o custo de nao passar sinal: `cotacoesDaBinance`
+         * montava o proprio timeout e nunca via o podao do orcamento, entao a
+         * perna que nunca respondia segurava a volta inteira e o teto era letra
+         * morta. Um `fetch` ignorado nao e um `fetch` cancelado.
+         */
+        signal?: AbortSignal;
     }): Promise<{ status: number; text(): Promise<string> }>;
 }
 
@@ -79,6 +89,24 @@ export interface ResultadoDaEnumeracao {
     falha: string | null;
     /** `true` quando TODAS as paginas vieram. Paginacao cortada nao e cobertura. */
     completa: boolean;
+    /**
+     * A requisicao HTTP SAIU, ao menos uma.
+     *
+     * Ela pediu isto por nome: *"Requisicao HTTP realmente iniciada"*. E o
+     * discriminador entre "a tarefa nao executou" e "a API falhou", que pedem
+     * consertos opostos — agendamento contra rede. Sem este campo as duas
+     * situacoes produzem a mesma lista vazia, e foi a confusao delas que custou
+     * o deploy de 2026-10-14.
+     */
+    tentou: boolean;
+    /**
+     * Os status HTTP REAIS observados, um por requisicao, na ordem.
+     *
+     * Numeros, nao a minha prosa sobre eles: *"Status HTTP real"*. Lista vazia
+     * com `tentou: true` quer dizer que o transporte lancou antes de haver
+     * resposta — que e diferente de um 200 com corpo ruim.
+     */
+    statusHttp: number[];
 }
 
 /**
@@ -90,54 +118,82 @@ export interface ResultadoDaEnumeracao {
  */
 export async function enumerarMercados(
     buscar: TransporteHttp,
-    opcoes: { base?: string; porPagina?: number; dormir?: (ms: number) => Promise<void> } = {},
+    opcoes: {
+        base?: string;
+        porPagina?: number;
+        dormir?: (ms: number) => Promise<void>;
+        /**
+         * O ORCAMENTO desta enumeracao: requisicoes, tempo e cancelamento.
+         *
+         * Ausente mantem o comportamento de antes (teto de paginas so), para
+         * nao mudar os chamadores que nao pediram orcamento. Presente, ele
+         * MANDA: `pedir()` nega e a enumeracao encerra declarando o motivo, e o
+         * `sinal` vai ao transporte para o que estiver em voo parar de verdade.
+         */
+        orcamento?: OrcamentoHttp;
+    } = {},
 ): Promise<ResultadoDaEnumeracao> {
     const base = opcoes.base ?? 'https://api.morpho.org/v1/blue/markets';
     const porPagina = Math.min(opcoes.porPagina ?? POR_PAGINA, POR_PAGINA);
     const dormir = opcoes.dormir ?? ((ms: number) => new Promise<void>((r) => { setTimeout(r, ms); }));
     const mercados: MercadoDaApi[] = [];
     const vistos = new Set<string>();
+    const statusHttp: number[] = [];
     let requisicoes = 0;
     let paginas = 0;
     let devolvidos = 0;
     let blocoIndexado: number | null = null;
+    let tentou = false;
+    const parcial = (falha: string | null, completa: boolean): ResultadoDaEnumeracao => ({
+        mercados, devolvidos, paginas, requisicoes, blocoIndexado, falha, completa,
+        tentou, statusHttp,
+    });
 
     for (let pagina = 0; pagina < TETO_DE_PAGINAS; pagina += 1) {
+        // O ORCAMENTO PRIMEIRO: pedir antes de gastar, e o que ele nega nao sai.
+        if (opcoes.orcamento && !opcoes.orcamento.pedir()) {
+            return parcial(
+                `o orçamento encerrou a enumeração: ${opcoes.orcamento.encerrado ?? 'sem motivo registrado'}`,
+                false,
+            );
+        }
         const url = `${base}?chain_id=${CHAIN_ID_DA_BASE}&limit=${porPagina}`
             + `&offset=${pagina * porPagina}`;
         requisicoes += 1;
+        tentou = true;
         let cru: string;
         let status: number;
         try {
-            const r = await buscar(url, { headers: { Accept: 'application/json' } });
+            const r = await buscar(url, {
+                headers: { Accept: 'application/json' },
+                ...(opcoes.orcamento ? { signal: opcoes.orcamento.sinal } : {}),
+            });
             status = r.status;
+            statusHttp.push(status);
             cru = await r.text();
         } catch (e) {
-            return {
-                mercados, devolvidos, paginas, requisicoes, blocoIndexado,
-                falha: `o transporte falhou na página ${pagina}: `
+            return parcial(
+                `o transporte falhou na página ${pagina}: `
                     + sanitizar(e instanceof Error ? e.message : String(e)),
-                completa: false,
-            };
+                false,
+            );
         }
         if (status !== 200) {
-            return {
-                mercados, devolvidos, paginas, requisicoes, blocoIndexado,
-                falha: `a API respondeu HTTP ${status} na página ${pagina}`
+            return parcial(
+                `a API respondeu HTTP ${status} na página ${pagina}`
                     + (status === 429 ? ' (limite de requisições: não insisto)' : ''),
-                completa: false,
-            };
+                false,
+            );
         }
         let corpo: unknown;
         try {
             corpo = JSON.parse(cru);
         } catch {
-            return {
-                mercados, devolvidos, paginas, requisicoes, blocoIndexado,
-                falha: `a API respondeu NÃO-JSON na página ${pagina}: começa com `
+            return parcial(
+                `a API respondeu NÃO-JSON na página ${pagina}: começa com `
                     + `"${sanitizar(cru.slice(0, 50))}"`,
-                completa: false,
-            };
+                false,
+            );
         }
         const lido = lerPaginaDeMercados(corpo);
         if (lido.blocoIndexado !== null) blocoIndexado = lido.blocoIndexado;
@@ -154,19 +210,11 @@ export async function enumerarMercados(
         // ignora o offset e devolve sempre a primeira pagina — e sem isso a
         // paginacao viraria laco. Nao e suposicao sobre o servico: e o unico
         // criterio de parada que funciona nos dois casos.
-        if (lido.itens.length === 0 || novos === 0) {
-            return { mercados, devolvidos, paginas, requisicoes, blocoIndexado, falha: null, completa: true };
-        }
-        if (lido.itens.length < porPagina) {
-            return { mercados, devolvidos, paginas, requisicoes, blocoIndexado, falha: null, completa: true };
-        }
+        if (lido.itens.length === 0 || novos === 0) return parcial(null, true);
+        if (lido.itens.length < porPagina) return parcial(null, true);
         await dormir(ENTRE_PAGINAS_MS);
     }
-    return {
-        mercados, devolvidos, paginas, requisicoes, blocoIndexado,
-        falha: `a paginação passou de ${TETO_DE_PAGINAS} páginas e eu parei`,
-        completa: false,
-    };
+    return parcial(`a paginação passou de ${TETO_DE_PAGINAS} páginas e eu parei`, false);
 }
 
 /**
@@ -578,8 +626,32 @@ export function comoLerADescoberta(e: {
     devedores: number; validados: number; requisicoes: number;
     completa: boolean; blocoIndexado: number | null; blocoAgora: number | null;
     falha: string | null;
+    /** A requisicao HTTP SAIU. Ausente nao escolhe lado: sai como DESCONHECIDO. */
+    tentou?: boolean;
+    /** Os status HTTP reais, na ordem. Numeros, nao prosa minha sobre eles. */
+    statusHttp?: number[];
+    /** As quatro situacoes separadas. Ver `comoLerODesfecho`. */
+    desfecho?: DesfechoDaDescoberta;
+    /** Quantos ficaram guardados NAO CONFIRMADOS para a proxima volta. */
+    naoConfirmadosGuardados?: number;
+    /** Por que a validacao nao rodou, quando nao rodou. */
+    porqueNaoValidou?: string | null;
 }): string {
     const partes = [
+        // O PRIMEIRO campo e o que distingue as quatro situacoes. Ela pediu
+        // isso por nome, e as quatro pedem consertos opostos.
+        e.desfecho === undefined ? 'desfecho NÃO REGISTRADO' : comoLerODesfecho(e.desfecho),
+        // "A requisicao saiu?" antes de qualquer numero sobre o conteudo dela:
+        // sem esta linha, lista vazia por agendamento e lista vazia por rede
+        // sao indistinguiveis — e foi essa confusao que custou 2026-10-14.
+        e.tentou === undefined
+            ? 'requisição HTTP: DESCONHECIDO (campo não registrado)'
+            : e.tentou
+                ? `requisição HTTP INICIADA, status ${
+                    (e.statusHttp ?? []).length === 0
+                        ? 'NENHUM (o transporte lançou antes da resposta)'
+                        : (e.statusHttp ?? []).join(', ')}`
+                : 'NENHUMA requisição HTTP saiu',
         `${e.devolvidos} mercado(s) a API devolveu, ${e.mercados} legíveis`,
         `${e.quePagam} com LLTV ≤ 77%`,
         `${e.confirmados} CONFIRMADOS na corrente`,
@@ -587,14 +659,27 @@ export function comoLerADescoberta(e: {
         `${e.requisicoes} requisição(ões)`,
         idadeDoIndice(e.blocoIndexado, e.blocoAgora),
     ];
-    if (!e.completa) {
-        partes.push('COBERTURA INCOMPLETA: a paginação não terminou, então este número é PISO, '
+    // A COBERTURA em TRES estados, e nao em dois. Ela pediu *"completa, parcial
+    // ou indeterminada"*, e sao coisas diferentes: parcial e uma medicao com
+    // teto declarado; indeterminada e nao saber se ha mais.
+    if (!e.tentou) {
+        partes.push('COBERTURA INDETERMINADA: nenhuma requisição saiu, então eu não sei quantos '
+            + 'mercados existem — e isto NÃO é zero');
+    } else if (!e.completa) {
+        partes.push('COBERTURA PARCIAL: a paginação não terminou, então este número é PISO, '
             + 'não total');
+    } else {
+        partes.push('COBERTURA COMPLETA da enumeração: a paginação terminou');
     }
     if (e.falha !== null) partes.push(`falha: ${e.falha}`);
     if (e.confirmados < e.quePagam) {
         partes.push(`${e.quePagam - e.confirmados} mercado(s) que pagam NÃO foram confirmados: `
-            + 'eles não entram em decisão nenhuma');
+            + 'eles não entram em decisão nenhuma'
+            + (e.porqueNaoValidou ? ` — ${e.porqueNaoValidou}` : ''));
+    }
+    if (e.naoConfirmadosGuardados !== undefined && e.naoConfirmadosGuardados > 0) {
+        partes.push(`${e.naoConfirmadosGuardados} guardado(s) como NÃO CONFIRMADOS para validar na `
+            + 'próxima volta: a enumeração não se perde quando o RPC cai');
     }
     return partes.join(' | ');
 }

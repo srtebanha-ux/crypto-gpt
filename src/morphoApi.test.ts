@@ -8,6 +8,7 @@ import {
     consultaDeDevedores, lerDevedores, paraCache, doCache, idadeDoIndice, comoLerADescoberta,
     CHAIN_ID_DA_BASE, POR_PAGINA, TETO_DE_PAGINAS, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
+import { OrcamentoHttp } from './canais';
 import { SELETORES_DO_MORPHO } from './mercadosDoMorpho';
 
 const semSono = async () => {};
@@ -259,13 +260,35 @@ test('a frase de evidência traz os números que ela pediu, e declara o que falt
         devolvidos: 120, mercados: 118, quePagam: 9, confirmados: 7,
         devedores: 340, validados: 12, requisicoes: 14,
         completa: false, blocoIndexado: 52_600_000, blocoAgora: 52_600_050, falha: 'HTTP 429',
+        tentou: true, statusHttp: [200, 429], desfecho: 'apiFalhou',
     });
     for (const p of ['120 mercado(s) a API devolveu, 118 legíveis', '9 com LLTV ≤ 77%',
         '7 CONFIRMADOS na corrente', '340 devedor(es) apontado(s), 12 validado(s)',
-        '14 requisição(ões)', 'COBERTURA INCOMPLETA', 'HTTP 429',
+        '14 requisição(ões)', 'COBERTURA PARCIAL', 'HTTP 429',
         '2 mercado(s) que pagam NÃO foram confirmados']) {
         assert.ok(f.includes(p), `falta "${p}"`);
     }
+});
+
+test('a cobertura tem TRÊS estados, e eles não se confundem', () => {
+    // Ela pediu *"Cobertura completa, parcial ou indeterminada"* — e sao tres
+    // coisas, nao duas. Este teste substituiu a asserção da frase
+    // "COBERTURA INCOMPLETA", que colapsava parcial e indeterminada num rotulo
+    // so: uma medicao com teto declarado nao e a mesma coisa que nao saber se
+    // ha mais. O teste afirma a REGRA, para sobreviver a proxima remedicao.
+    const base = {
+        devolvidos: 0, mercados: 0, quePagam: 0, confirmados: 0, devedores: 0, validados: 0,
+        requisicoes: 0, blocoIndexado: null, blocoAgora: null, falha: null,
+    };
+    const indeterminada = comoLerADescoberta({ ...base, completa: false, tentou: false, statusHttp: [] });
+    const parcial = comoLerADescoberta({ ...base, completa: false, tentou: true, statusHttp: [429] });
+    const completa = comoLerADescoberta({ ...base, completa: true, tentou: true, statusHttp: [200] });
+    assert.match(indeterminada, /COBERTURA INDETERMINADA/);
+    assert.match(parcial, /COBERTURA PARCIAL/);
+    assert.match(completa, /COBERTURA COMPLETA/);
+    assert.equal(new Set([indeterminada, parcial, completa]).size, 3);
+    // O que NAO pode: "nenhuma requisição saiu" lido como zero mercados.
+    assert.match(indeterminada, /isto NÃO é zero/);
 });
 
 test('cobertura completa não publica ressalva que não existe', () => {
@@ -273,8 +296,130 @@ test('cobertura completa não publica ressalva que não existe', () => {
         devolvidos: 10, mercados: 10, quePagam: 3, confirmados: 3,
         devedores: 5, validados: 5, requisicoes: 2,
         completa: true, blocoIndexado: 100, blocoAgora: 110, falha: null,
+        tentou: true, statusHttp: [200], desfecho: 'confirmou',
     });
-    assert.ok(!/INCOMPLETA/.test(f));
+    assert.ok(!/PARCIAL|INDETERMINADA/.test(f));
     assert.ok(!/NÃO foram confirmados/.test(f));
     assert.ok(!/falha/.test(f));
+});
+
+// ---------------------------------------------------------------------------
+// O INCIDENTE DE 2026-10-14: a descoberta nao executou, e a causa era
+// agendamento. O que segue trava os comportamentos que ela pediu por nome.
+// ---------------------------------------------------------------------------
+
+test('a API cair NÃO derruba o monitoramento: ela devolve falha declarada e segue', async () => {
+    // Ela pediu: *"Inclua outro demonstrando que o monitoramento principal
+    // continua funcionando se a API cair."* O que este modulo pode provar e a
+    // metade dele: a enumeracao FALHA DECLARANDO em vez de lancar, porque uma
+    // excecao que sobe mata o laco que a chamou.
+    for (const queda of [
+        async () => { throw new Error('getaddrinfo ENOTFOUND api.morpho.org'); },
+        async () => ({ status: 403, text: async () => 'Forbidden' }),
+        async () => ({ status: 500, text: async () => '<!DOCTYPE html><html>' }),
+        async () => ({ status: 200, text: async () => '<!DOCTYPE html>' }),
+    ]) {
+        const r = await enumerarMercados(queda as never, { dormir: async () => {} });
+        // NAO LANCOU: e isto que mantem o monitoramento de pe.
+        assert.equal(r.mercados.length, 0);
+        assert.notEqual(r.falha, null, 'a queda tem de virar falha DECLARADA');
+        assert.equal(r.completa, false, 'queda não produz cobertura completa');
+        // E a requisicao SAIU: e o que distingue "a API falhou" de "a tarefa
+        // nao executou", que pedem consertos opostos.
+        assert.equal(r.tentou, true);
+    }
+});
+
+test('"a tarefa não executou" e "a API falhou" são DISTINGUÍVEIS pela evidência', async () => {
+    // As duas produzem zero mercados. Se a frase fosse a mesma, o incidente de
+    // 2026-10-14 seria invisivel outra vez — e foi exatamente por isso que ele
+    // passou: lista vazia por agendamento lida como lista vazia por rede.
+    const naoExecutou = comoLerADescoberta({
+        devolvidos: 0, mercados: 0, quePagam: 0, confirmados: 0, devedores: 0, validados: 0,
+        requisicoes: 0, completa: false, blocoIndexado: null, blocoAgora: null, falha: null,
+        tentou: false, statusHttp: [], desfecho: 'naoExecutou',
+    });
+    const apiFalhou = comoLerADescoberta({
+        devolvidos: 0, mercados: 0, quePagam: 0, confirmados: 0, devedores: 0, validados: 0,
+        requisicoes: 1, completa: false, blocoIndexado: null, blocoAgora: null,
+        falha: 'a API respondeu HTTP 429 na página 0', tentou: true, statusHttp: [429],
+        desfecho: 'apiFalhou',
+    });
+    assert.notEqual(naoExecutou, apiFalhou);
+    assert.match(naoExecutou, /NENHUMA requisição HTTP saiu/);
+    assert.match(naoExecutou, /COBERTURA INDETERMINADA/);
+    assert.match(apiFalhou, /requisição HTTP INICIADA, status 429/);
+    assert.match(apiFalhou, /COBERTURA PARCIAL/);
+    // E "vazia de verdade" e uma RESPOSTA, nao uma falha.
+    const vazia = comoLerADescoberta({
+        devolvidos: 12, mercados: 12, quePagam: 0, confirmados: 0, devedores: 0, validados: 0,
+        requisicoes: 1, completa: true, blocoIndexado: null, blocoAgora: null, falha: null,
+        tentou: true, statusHttp: [200], desfecho: 'apiVaziaDeVerdade',
+    });
+    assert.match(vazia, /é uma RESPOSTA, não uma falha/);
+    assert.match(vazia, /COBERTURA COMPLETA/);
+});
+
+test('o orçamento CORTA a paginação e declara o corte, sem laço', async () => {
+    let pedidas = 0;
+    // A fixture usa o MESMO ajudante `pagina` dos testes acima. A primeira
+    // versao deste teste inventou os nomes dos campos (`uniqueKey`,
+    // `oracleAddress`) e os itens foram todos RECUSADOS pelo leitor: a
+    // paginacao parou na primeira pagina por pagina "vazia", e eu quase li
+    // isso como defeito do orcamento. Era defeito da MINHA fixture, e provar
+    // com uma copia prova a copia.
+    const orcamento = new OrcamentoHttp(3, 60_000);
+    const r = await enumerarMercados(async () => {
+        const n = pedidas;
+        pedidas += 1;
+        // Ids distintos por pagina, senao `novos === 0` encerra antes do teto.
+        return {
+            status: 200,
+            text: async () => pagina([...Array(POR_PAGINA).keys()].map((i) => n * POR_PAGINA + i + 1)),
+        };
+    }, { dormir: async () => {}, orcamento });
+    assert.equal(pedidas, 3, 'o orçamento tem de cortar na terceira requisição');
+    assert.equal(r.completa, false, 'corte por orçamento NÃO é cobertura completa');
+    assert.match(r.falha ?? '', /orçamento encerrou/);
+    assert.equal(r.statusHttp.length, 3, 'os status reais são registrados, um por requisição');
+    assert.equal(orcamento.sinal.aborted, true, 'o corte CANCELA o que estiver em voo');
+});
+
+test('o sinal do orçamento CHEGA ao transporte', async () => {
+    // Aceitar o sinal e nao passa-lo e a REGRA 3: a regra em dois lugares,
+    // implementada em um. Este projeto ja pagou por isso em `cotacoesDaBinance`.
+    let recebeu: AbortSignal | undefined;
+    const orcamento = new OrcamentoHttp(1, 60_000);
+    await enumerarMercados(async (_u, o) => {
+        recebeu = o?.signal;
+        return { status: 200, text: async () => JSON.stringify({ items: [] }) };
+    }, { dormir: async () => {}, orcamento });
+    assert.ok(recebeu !== undefined, 'o transporte não recebeu o sinal do orçamento');
+    assert.equal(recebeu, orcamento.sinal, 'recebeu um sinal que não é o do orçamento');
+});
+
+test('RPC indisponível guarda os mercados como NÃO CONFIRMADOS, e diz isso', () => {
+    // Ela mandou: *"Se a API responder e o RPC estiver indisponível, preserve
+    // os mercados encontrados como NÃO CONFIRMADOS e processe as validações
+    // posteriormente."* A primeira versao dava `return` e jogava a enumeracao
+    // fora por um soluco de RPC.
+    const f = comoLerADescoberta({
+        devolvidos: 40, mercados: 40, quePagam: 9, confirmados: 0, devedores: 0, validados: 0,
+        requisicoes: 1, completa: true, blocoIndexado: null, blocoAgora: null, falha: null,
+        tentou: true, statusHttp: [200], desfecho: 'rpcIndisponivel',
+        naoConfirmadosGuardados: 9,
+        porqueNaoValidou: 'o eth_getCode não respondeu (RPC indisponível)',
+    });
+    assert.match(f, /NÃO CONFIRMADOS/);
+    assert.match(f, /9 guardado\(s\) como NÃO CONFIRMADOS/);
+    assert.match(f, /não se perde quando o RPC cai/);
+    assert.match(f, /eth_getCode não respondeu/);
+    // E nao se confunde com "a corrente recusou", que e DADO e nao falha.
+    const recusou = comoLerADescoberta({
+        devolvidos: 40, mercados: 40, quePagam: 9, confirmados: 0, devedores: 0, validados: 0,
+        requisicoes: 1, completa: true, blocoIndexado: null, blocoAgora: null, falha: null,
+        tentou: true, statusHttp: [200], desfecho: 'validacaoRecusou',
+    });
+    assert.notEqual(f, recusou);
+    assert.match(recusou, /os campos divergiram/);
 });

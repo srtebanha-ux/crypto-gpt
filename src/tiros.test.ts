@@ -5,6 +5,8 @@ import {
     lerRecibo, placarVazio, contarTiro, comoEstaIndo, placarParaCache, placarDoCache,
     oQueACorrenteDiz,
 } from './tiros';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 const D = (n: number) => new Decimal(n);
 
@@ -59,11 +61,32 @@ test('o NONCE contradiz o placar quando a memória se perdeu', () => {
     // tinham saído — e o log imprimia "Nenhum tiro ainda". O placar morava em
     // memória e o container reinicia várias vezes por dia. Meia hora de
     // investigação para descobrir que a ausência era de MEMÓRIA, não de tiro.
+    //
+    // A FRASE MUDOU em 2026-10-14, e a mudança é um ganho, não uma concessão:
+    // este teste exigia `6 saíram sem eu lembrar`, e a reconciliação de
+    // 2026-10-09 (partição do nonce + leitura dos recibos, cobertura 100% de 0
+    // a 44) RESPONDEU aquela pergunta: as transações de nonce 0 a 5 são
+    // instalação, duas delas deploys de 3,67M de gás. Continuar dizendo "não
+    // sei" sobre o que foi medido é publicar dúvida que não existe.
+    //
+    // O que o teste guarda é a REGRA — o nonce contradizendo o placar tem de
+    // SAIR no log, porque foi a ausência disso que custou meia hora — e não a
+    // redação de 2026-10-06.
     const frase = comoEstaIndo(placarVazio(), 6);
     assert.ok(frase.includes('Nenhum tiro que eu lembre'), frase);
     assert.ok(frase.includes('6 transações'), frase);
-    assert.ok(frase.includes('6 saíram sem eu lembrar'), frase);
+    assert.ok(frase.includes('6 não estão nesta contagem'), frase);
+    // E diz o que são, porque isso está medido.
+    assert.ok(frase.includes('de instalação'), frase);
+});
+
+test('o que NÃO está reconciliado continua mandando conferir no basescan', () => {
+    // A outra metade da regra acima: quando sobra transação fora da janela
+    // medida, a frase não pode fingir explicação. O ponteiro para a prova de
+    // fora tem de continuar lá.
+    const frase = comoEstaIndo(placarVazio(), 80);
     assert.ok(frase.includes('basescan'), frase);
+    assert.ok(frase.includes('eu não sei'), frase);
 });
 
 test('o nonce em acordo com o placar não acrescenta ruído', () => {
@@ -237,4 +260,88 @@ test('cache SEM o campo não escolhe lado — o defeito do log de 13:14', () => 
     const depois = contarTiro(velho, 'reverteu', null, true);
     assert.equal(depois.especulativos, 1);
     assert.ok(comoEstaIndo(depois).includes('1 eram aposta'), comoEstaIndo(depois));
+});
+
+test('a frase do nonce NÃO chama de desconhecida a transação já reconciliada', () => {
+    // O CASO REAL do Railway em 2026-10-14: placar 31, nonce 45. A frase dizia
+    // "14 saíram sem eu lembrar" — aritmeticamente certo e FACTUALMENTE
+    // enganoso, porque as 14 estão inteiramente explicadas no registro de
+    // 2026-10-09 (8 tiros apagados do disco pelo write do boot + 6 de
+    // instalação, nonce 0 a 5, duas delas deploys de 3,67M de gás).
+    //
+    // Publicar dúvida sobre o que se tem medido é a ausência com cara de
+    // resposta ao contrário, e ela mandou: *"Não reconstrua novamente as
+    // transações. Use os registros e provas existentes."*
+    const p = {
+        disparados: 31, acertou: 0, reverteu: 31, sumiu: 0,
+        lucroEstimadoUsd: new Decimal(0), especulativos: 31,
+    };
+    const f = oQueACorrenteDiz(p, 45) ?? '';
+    assert.match(f, /14 não estão nesta contagem/);
+    assert.match(f, /14 JÁ ESTÃO RECONCILIADAS/);
+    assert.match(f, /Nenhuma transação desta carteira está sem explicação/);
+    assert.ok(!/sem eu lembrar/.test(f), 'não pode chamar de desconhecida a que está reconciliada');
+    // E a PROVA viaja com a afirmação: sem ela isto seria um ajuste para a
+    // conta fechar, que é exatamente o que este projeto não aceita.
+    assert.match(f, /cobertura 100% de nonce 0 a 44/);
+});
+
+test('a reconciliação NÃO se estende para fora da janela que ela cobre', () => {
+    // REGRA 4 deste projeto: a varredura mediu até o nonce 45. Um nonce acima
+    // tem transação que ela não viu, e aplicar o registro ali seria estender
+    // uma medição para fora da janela dela.
+    const p = {
+        disparados: 31, acertou: 0, reverteu: 31, sumiu: 0,
+        lucroEstimadoUsd: new Decimal(0), especulativos: 31,
+    };
+    const f = oQueACorrenteDiz(p, 50) ?? '';
+    assert.match(f, /14 JÁ ESTÃO RECONCILIADAS/);
+    assert.match(f, /Restam 5 FORA da janela reconciliada/);
+    assert.match(f, /essas eu não sei/);
+});
+
+test('a frase descreve o GRUPO que ela conta, e não o registro inteiro', () => {
+    // O defeito que eu cometi DENTRO deste conserto: com nonce 2 e placar 0, a
+    // frase dizia "2 JÁ ESTÃO RECONCILIADAS (8 tiros … e 6 instalação)" —
+    // número certo, prosa errada, porque 2 transações não vêm de um grupo de 8.
+    // Etiqueta que não descreve o conjunto, no conserto da etiqueta que não
+    // descrevia o conjunto.
+    const p = {
+        disparados: 0, acertou: 0, reverteu: 0, sumiu: 0,
+        lucroEstimadoUsd: new Decimal(0), especulativos: null,
+    };
+    const f = oQueACorrenteDiz(p, 2) ?? '';
+    assert.match(f, /2 JÁ ESTÃO RECONCILIADAS/);
+    assert.match(f, /2 de instalação/);
+    assert.ok(!/8 tiro/.test(f), 'citou um grupo de 8 para explicar 2 transações');
+    // A atribuição segue a ORDEM DO NONCE: instalação (0 a 5) vem antes.
+    const oitoDeNove = oQueACorrenteDiz({ ...p }, 9) ?? '';
+    assert.match(oitoDeNove, /6 de instalação/);
+    assert.match(oitoDeNove, /3 tiro\(s\) de 07\/10/);
+});
+
+test('a reconciliação NÃO entra no placar nem vai ao disco', () => {
+    // Somar aqui inflaria o denominador de uma taxa de acerto com tiros que
+    // este cache nunca registrou — e as 8 foram todas REVERSÕES: nada a
+    // creditar. Lê o CÓDIGO porque o risco é estrutural: uma sessão futura
+    // "corrigindo" o placar com este número.
+    const fonte = readFileSync(join(__dirname, 'tiros.ts'), 'utf8');
+    const i = fonte.indexOf('RECONCILIADAS_FORA_DO_PLACAR');
+    assert.ok(i > 0);
+    // O registro é usado SÓ dentro de `oQueACorrenteDiz`, que produz texto.
+    const usos = [...fonte.matchAll(/RECONCILIADAS_FORA_DO_PLACAR/g)].map((m) => m.index!);
+    const inicioDaFrase = fonte.indexOf('export function oQueACorrenteDiz');
+    const fimDaFrase = fonte.indexOf('\n}', fonte.indexOf('Confira no basescan.', inicioDaFrase));
+    for (const u of usos) {
+        const naDeclaracao = u < inicioDaFrase;
+        const naFrase = u > inicioDaFrase && u < fimDaFrase;
+        assert.ok(
+            naDeclaracao || naFrase,
+            'o registro de reconciliação é usado fora da frase: ele não pode entrar no placar',
+        );
+    }
+    assert.ok(
+        !/placarParaCache[\s\S]{0,400}RECONCILIADAS_FORA_DO_PLACAR/.test(fonte),
+        'a reconciliação chegou ao gravador do cache',
+    );
 });

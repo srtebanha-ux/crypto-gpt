@@ -199,12 +199,107 @@ export function placarDoCache(x: unknown): PlacarDosTiros {
  * poderia ter mandado outra coisa. Por isso a frase fala em TRANSACOES e
  * manda conferir, em vez de afirmar tiros que nao foram contados.
  */
+/**
+ * AS TRANSACOES JA RECONCILIADAS FORA DO PLACAR, com a prova de cada grupo.
+ *
+ * Isto NAO e um palpite nem um ajuste para a conta fechar. E o registro de uma
+ * reconciliacao que ja foi feita e esta documentada no CLAUDE.md (2026-10-09):
+ * as transacoes da carteira foram achadas por particao recursiva do nonce
+ * (`eth_getTransactionCount` e monotonico) e LIDAS nos recibos, com ZERO nonce
+ * sem transacao achada — cobertura 100% de nonce 0 a 44.
+ *
+ * Ela mandou: *"Nao reconstrua novamente as transacoes. Use os registros e
+ * provas existentes."* Entao e isso: os numeros abaixo vem daquela varredura,
+ * e nenhum deles foi recalculado aqui.
+ *
+ * POR QUE O PLACAR DIVERGE, e a divergencia e dele e nao da corrente:
+ *
+ *     a corrente (nonce)        45 transacoes saidas
+ *     o placar no Railway       31 tiros contados
+ *     diferenca                 14
+ *
+ * E as 14 estao INTEIRAMENTE explicadas, em dois grupos de causas diferentes:
+ *
+ *     8 tiros de 07/10   foram contados e DEPOIS APAGADOS DO DISCO pelo write
+ *                        do boot, que nao levava o campo `placar`. O defeito
+ *                        esta consertado (e o teste que le os gravadores de
+ *                        cache o impede de voltar), mas o conserto impede a
+ *                        PROXIMA perda — nao desfaz esta. Todos reverteram
+ *     6 de instalacao    nonce 0 a 5. As de nonce 4 e 5 gastaram 3,67M de gas
+ *                        cada: sao DEPLOYS DE CONTRATO. Nenhuma foi tiro
+ *
+ * O que isto corrige na frase: `45 - 31 = 14` e aritmeticamente certo e
+ * FACTUALMENTE enganoso, porque trata como desconhecidas 14 transacoes das
+ * quais nenhuma e desconhecida. Dizer "sairam sem eu lembrar" sobre transacao
+ * reconciliada e ausencia com cara de resposta ao contrario: eu TENHO a
+ * resposta e publico a duvida.
+ *
+ * E o que ele NAO faz, de proposito: NAO entra em `disparados`, nao mexe em
+ * `acertou` e nao vai ao disco. O placar continua contando o que ele proprio
+ * viu — somar aqui inflaria o denominador de uma taxa de acerto com tiros que
+ * este cache nunca registrou, e as 8 foram todas REVERSOES: nada a creditar.
+ */
+export const RECONCILIADAS_FORA_DO_PLACAR = {
+    /** Tiros reais, lidos nos recibos, apagados do disco pelo write do boot. */
+    tirosPerdidosDoDisco: 8,
+    /** Deploys e instalacao: nonce 0 a 5, nenhuma delas um tiro. */
+    instalacao: 6,
+    /** O nonce ate onde a reconciliacao por recibo tem cobertura 100%. */
+    nonceReconciliadoAte: 45,
+    prova: 'CLAUDE.md 2026-10-09: partição recursiva do nonce + leitura dos recibos, '
+        + 'cobertura 100% de nonce 0 a 44, zero nonce sem transação achada',
+} as const;
+
 export function oQueACorrenteDiz(p: PlacarDosTiros, nonce: number | null | undefined): string | null {
     if (nonce === null || nonce === undefined || !Number.isFinite(nonce) || nonce < 0) return null;
     if (nonce <= p.disparados) return null;
     const faltam = nonce - p.disparados;
-    return `A corrente diz ${nonce} transações já saídas desta carteira e eu contei ${p.disparados} tiro(s): `
-        + `${faltam} saíram sem eu lembrar — antes deste boot, ou antes de existir cache. Confira no basescan.`;
+    const r = RECONCILIADAS_FORA_DO_PLACAR;
+    // A RECONCILIACAO SO VALE DENTRO DA JANELA QUE ELA COBRE.
+    //
+    // Ela foi medida ate o nonce 45. Um nonce ACIMA disso tem transacao que
+    // aquela varredura nao viu, e aplicar o registro ali seria estender uma
+    // medicao para fora da janela dela — a REGRA 4 deste projeto. Entao: o que
+    // cabe na janela e explicado, e o que passa dela continua desconhecido.
+    const explicaveis = Math.max(0, Math.min(faltam, r.nonceReconciliadoAte - p.disparados));
+    const reconciliadas = Math.min(explicaveis, r.tirosPerdidosDoDisco + r.instalacao);
+    const semExplicacao = faltam - reconciliadas;
+    const base = `A corrente diz ${nonce} transações já saídas desta carteira e eu contei `
+        + `${p.disparados} tiro(s): ${faltam} não estão nesta contagem.`;
+    if (reconciliadas === 0) {
+        return `${base} Saíram sem eu lembrar — antes deste boot, ou antes de existir cache. `
+            + 'Confira no basescan.';
+    }
+    // A FRASE DESCREVE O CONJUNTO QUE ELA CONTA, e nao o registro inteiro.
+    //
+    // A primeira versao citava os dois grupos sempre: com nonce 2 e placar 0
+    // ela dizia "2 JA ESTAO RECONCILIADAS (8 tiros … e 6 instalacao)" — numero
+    // certo, prosa errada, porque 2 transacoes nao podem vir de um grupo de 8.
+    // Etiqueta que nao descreve o conjunto, que e o defeito que este projeto
+    // persegue desde a primeira pagina, cometido dentro do conserto dele.
+    //
+    // A atribuicao segue a ORDEM DO NONCE, que e o que a corrente garante: os
+    // nonces 0 a 5 sao a instalacao, e os tiros vem depois dela.
+    const daInstalacao = Math.min(reconciliadas, r.instalacao);
+    const dosTirosPerdidos = reconciliadas - daInstalacao;
+    const grupos: string[] = [];
+    if (daInstalacao > 0) {
+        grupos.push(`${daInstalacao} de instalação (nonces 0 a 5`
+            + (daInstalacao >= r.instalacao ? ', duas delas deploys de contrato de 3,67M de gás' : '')
+            + ')');
+    }
+    if (dosTirosPerdidos > 0) {
+        grupos.push(`${dosTirosPerdidos} tiro(s) de 07/10 que o write do boot apagou do disco, `
+            + 'todos revertidos');
+    }
+    const parteReconciliada = `Dessas, ${reconciliadas} JÁ ESTÃO RECONCILIADAS por fora `
+        + `(${grupos.join('; ')}): ${r.prova}.`;
+    if (semExplicacao === 0) {
+        return `${base} ${parteReconciliada} Nenhuma transação desta carteira está sem `
+            + 'explicação — a contagem do placar é que está incompleta, não a corrente.';
+    }
+    return `${base} ${parteReconciliada} Restam ${semExplicacao} FORA da janela reconciliada `
+        + `(que vai até o nonce ${r.nonceReconciliadoAte}): essas eu não sei. Confira no basescan.`;
 }
 
 /**
