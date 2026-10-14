@@ -6,6 +6,7 @@ import {
     exigirResultado, RespostaSemResultado, coberturaVazia, coberturaCompleta,
     fracaoQueFalhou, comoLerACobertura, idDoLote, classificarRecusa,
     diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs, lerErroJsonRpc, comoLerOErroJsonRpc,
+    lerCorpoJson, CorpoNaoEhJson,
 } from './cobertura';
 import { codificarAggregate3, decodificarAggregate3Rapido } from './multicall';
 
@@ -283,4 +284,64 @@ test('a forma não é a causa, e a frase não deixa confundir', () => {
 test('a credencial não passa pelo leitor de erro', () => {
     const e = lerErroJsonRpc({ error: [-1, 'denied at https://h/v2/CHAVE_SECRETA_LONGA_1234'] });
     assert.ok(!comoLerOErroJsonRpc(e).includes('CHAVE_SECRETA_LONGA_1234'));
+});
+
+test('corpo HTML era SyntaxError cru: a escada não o reconhecia e repetia para sempre', async () => {
+    const { ehFalhaDeTransporte } = require('./escadaDeRpc');
+    // O ERRO DE ANTES, como o log de 2026-10-14 o trouxe.
+    const cru = "Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON";
+    assert.equal(ehFalhaDeTransporte(cru), false,
+        'não casava como transporte, então a escada NUNCA trocava de provedor');
+
+    const res = {
+        status: 200,
+        headers: { get: (n: string) => (n === 'content-type' ? 'text/html' : null) },
+        text: async () => '<!DOCTYPE html><html><body>Service Unavailable</body></html>',
+    };
+    await assert.rejects(() => lerCorpoJson(res, 'eth_call'), (e: Error) => {
+        assert.ok(e instanceof CorpoNaoEhJson);
+        assert.equal(e.status, 200);
+        assert.equal(e.tipo, 'text/html');
+        assert.match(e.message, /HTTP 200/);
+        assert.match(e.message, /content-type text\/html/);
+        assert.match(e.message, /<!DOCTYPE html>/);
+        // E O QUE CONSERTA: agora a escada reconhece e troca de degrau.
+        assert.equal(ehFalhaDeTransporte(e.message), true);
+        return true;
+    });
+});
+
+test('JSON válido passa, e o status chega na falha mesmo sem content-type', async () => {
+    const ok = {
+        status: 200, headers: { get: () => 'application/json' },
+        text: async () => '{"jsonrpc":"2.0","id":1,"result":"0x1"}',
+    };
+    assert.deepEqual(await lerCorpoJson(ok, 'eth_call'), { jsonrpc: '2.0', id: 1, result: '0x1' });
+    const ruim = { status: 502, headers: { get: () => null }, text: async () => 'Bad Gateway' };
+    await assert.rejects(() => lerCorpoJson(ruim, 'eth_blockNumber'), (e: CorpoNaoEhJson) => {
+        assert.equal(e.status, 502);
+        assert.equal(e.tipo, null);
+        assert.match(e.message, /content-type ausente/);
+        return true;
+    });
+});
+
+test('a página de erro não publica credencial', async () => {
+    const res = {
+        status: 401, headers: { get: () => 'text/html' },
+        text: async () => '<!DOCTYPE html>key CHAVE_SECRETA_MUITO_LONGA_1234 invalid',
+    };
+    await assert.rejects(() => lerCorpoJson(res, 'eth_call'), (e: Error) => {
+        assert.ok(!e.message.includes('CHAVE_SECRETA_MUITO_LONGA_1234'));
+        return true;
+    });
+});
+
+test('toda leitura de corpo passa por `lerCorpoJson`: `res.json()` cru não voltou', () => {
+    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
+    const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    assert.deepEqual(codigo.match(/await res\.json\(\)/g) ?? [], [],
+        '`res.json()` estoura SyntaxError cru, que a escada não reconhece');
+    assert.equal((codigo.match(/lerCorpoJson</g) ?? []).length, 3,
+        'os três caminhos que leem corpo de RPC');
 });

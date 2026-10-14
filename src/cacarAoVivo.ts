@@ -9,7 +9,7 @@ import { emDolar, lucroEstimado, ehPoeira, comparaPremio, dividaMinimaQueVale, c
 import { resumoDoCiclo, soOHost } from './resumoDoCiclo';
 import { GovernadorDeVazao, AgrupadorDeAvisos } from './vazaoDoProvedor';
 import { ControleDeCapacidade, Inventario, oQuePausar, decidirSobreRecusa, sanitizar, OrcamentoDaTarefa, veredictoDaVarredura, FreioDeRecusas, type Tarefa, type DecisaoSobreRecusa } from './capacidade';
-import { diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs, lerErroJsonRpc, comoLerOErroJsonRpc } from './cobertura';
+import { diagnosticarRecusaDeLogs, comoLerODiagnosticoDeLogs, lerErroJsonRpc, comoLerOErroJsonRpc, lerCorpoJson } from './cobertura';
 import { exigirResultado, coberturaVazia, comoLerACobertura, coberturaCompleta, idDoLote, classificarRecusa, type Cobertura } from './cobertura';
 import { posturaPorMargem, posturaPorChegada, posturaMaisForte, ritmoDaPostura, dormirDeOlho, quemArmar, valeArmar, atirarAntesDoCruzamento, atirarNaEscritaIminente, DESVIO_TIPICO_PCT, SALTO_P90_PCT, APOSTA_MINIMA_USD, premioQueSePagaNoAcaso, quantasVezesOAcaso, pisoEfetivoDaAposta, type Postura } from './adiantar';
 import { SELETOR_BASEFEE, LIMITE_DE_GAS, PISO_DA_GORJETA_WEI, gorjetaPorGas, tetoPorGas, lerBasefee, fracaoAdaptativa, sobraDepoisDaGorjeta, custoDeUmaDerrota, gorjetaQueCabeNoSaldo, derrotasQueAguenta, fracaoDoSaldoQueValeArriscar, adiantadoExigido, maxFeeQueOSaldoAdianta, custoDoTiroUsd, valeATentativa, numeroDoAmbiente, lanceAmordacado, mataACacaDeMigalhas, decidirTiro, faixaQueAtira, politicaDoTiro, comoLerAPolitica, tiroDeProvaArmado, GAS_TIPICO_DE_UMA_CACADA, TETO_DA_FRACAO, limiteDeGasDoTiro, GORJETA_DA_FRENTE_GWEI, GAS_MEDIDO_DE_UMA_REVERSAO, politicaDaAposta, custoDeUmaErradaUsd, gorjetaQueMaximizaOValor, premioQueSePagaComAFatia, chanceDeSerOTopoDaFatia } from './prontidao';
@@ -957,7 +957,7 @@ async function sondarProvedor(
             body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: metodo, params }),
             signal: AbortSignal.timeout(TIMEOUT_MS),
         });
-        const corpo = (await res.json()) as { result?: unknown; error?: { message?: string } };
+        const corpo = await lerCorpoJson<{ result?: unknown; error?: { message?: string } }>(res, metodo);
         if (corpo.error) return { ok: false, erro: corpo.error.message ?? 'erro sem mensagem' };
         if (!('result' in corpo)) return { ok: false, erro: 'resposta sem `result`' };
         return { ok: true };
@@ -1097,7 +1097,7 @@ async function umaChamada<T>(metodo: string, params: unknown[]): Promise<T> {
         body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: metodo, params }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    const corpo = (await res.json()) as { result?: T; error?: unknown };
+    const corpo = await lerCorpoJson<{ result?: T; error?: unknown }>(res, metodo);
     // A FORMA DO ERRO NAO PODE COMER A MENSAGEM. `corpo.error.message` dava
     // `undefined` quando o `error` chegava como `[code, message]` — e foi assim
     // que 5.750 posicoes se perderam com "erro sem mensagem" no log.
@@ -1317,7 +1317,7 @@ async function chamarCru(
         body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'eth_call', params }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    const corpo = (await res.json()) as { result?: string; error?: { data?: string } | unknown };
+    const corpo = await lerCorpoJson<{ result?: string; error?: { data?: string } | unknown }>(res, 'eth_call');
     if (corpo.error !== undefined && corpo.error !== null) {
         const lido = lerErroJsonRpc(corpo, res.status);
         const dados = typeof corpo.error === 'object' && corpo.error !== null

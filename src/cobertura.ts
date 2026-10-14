@@ -380,3 +380,56 @@ export function comoLerOErroJsonRpc(e: ErroJsonRpc): string {
     }
     return partes.join(' | ');
 }
+
+/**
+ * O CORPO, exigido como JSON — e a falha com NOME quando ele nao e JSON.
+ *
+ * MEDIDO no log de 2026-10-14: TODA chamada falhava com
+ * `Unexpected token '<', "<!DOCTYPE "... is not valid JSON`. O provedor estava
+ * devolvendo uma PAGINA HTML em vez de resposta JSON-RPC — gateway, pagina de
+ * erro ou de autenticacao.
+ *
+ * E o defeito nao era a pagina: era a CLASSIFICACAO. `res.json()` estourava um
+ * `SyntaxError` cru, que nao casa com `ehFalhaDeTransporte` nem com
+ * `classificarRecusa` — entao a escada NUNCA trocava de provedor e o laco de
+ * fora reiniciava a cada segundo, para sempre, com o log repetindo a mesma
+ * linha a cada 6 segundos.
+ *
+ * Corpo que nao e JSON e FALHA DO PROVEDOR, e a mensagem diz o status HTTP, o
+ * `content-type` e os primeiros bytes — com as palavras que a escada reconhece.
+ */
+export class CorpoNaoEhJson extends Error {
+    constructor(
+        public readonly metodo: string,
+        public readonly status: number,
+        public readonly tipo: string | null,
+        public readonly inicio: string,
+    ) {
+        // "network" e "bad gateway" estao aqui de proposito: sao as palavras que
+        // `ehFalhaDeTransporte` reconhece, e e o reconhecimento que faz a escada
+        // trocar de provedor em vez de repetir contra a mesma pagina.
+        super(
+            `o provedor respondeu NAO-JSON em ${metodo}: HTTP ${status}, `
+            + `content-type ${tipo ?? 'ausente'}, começa com "${inicio}". `
+            + 'Isto é falha de transporte do provedor (network/bad gateway), não resposta: '
+            + 'trocar de degrau é o que resolve, repetir não',
+        );
+        this.name = 'CorpoNaoEhJson';
+    }
+}
+
+/** Le o corpo como JSON, ou estoura `CorpoNaoEhJson` com o diagnostico. */
+export async function lerCorpoJson<T>(
+    res: { status: number; headers: { get(n: string): string | null }; text(): Promise<string> },
+    metodo: string,
+): Promise<T> {
+    const texto = await res.text();
+    try {
+        return JSON.parse(texto) as T;
+    } catch {
+        throw new CorpoNaoEhJson(
+            metodo, res.status, res.headers.get('content-type'),
+            sanitizar(texto.slice(0, 60).replace(/\s+/g, ' ').trim()),
+        );
+    }
+}
