@@ -39,6 +39,7 @@ import {
     type Rota, type PoolParaRota, type Retencao,
 } from './rotas';
 import { Exclusoes, classificar, type EstadoDaOportunidade } from './causaDaFalha';
+import { candidatasMistas, limitacaoDominante, funilVazio, type PoolMisto } from './rotasMistas';
 
 const log = createLogger('arb');
 const coder = AbiCoder.defaultAbiCoder();
@@ -846,15 +847,14 @@ async function principal(): Promise<void> {
             + 'índice cobria ZERO dos 79 pools que alimentaram 33 arbitragens reais',
         porVenue: `${porAtividade.porVenue.v2} V2, ${porAtividade.porVenue.v3} V3, `
             + `${porAtividade.porVenue.aerodrome} Aerodrome negociaram`,
-        oQueOsNaoV2Significam: (porAtividade.porVenue.v3 + porAtividade.porVenue.aerodrome) > 0
-            ? `${porAtividade.porVenue.v3 + porAtividade.porVenue.aerodrome} pool(s) de `
-                + 'liquidez concentrada negociaram e ficam NÃO VALIDADOS neste caminho: '
-                + '`avaliarRotas` só empresta em pool V2. Quem executa rota mista é o '
-                + '`CacadorV3` (provado em fork: execução atômica, status=1, líquido '
-                + '0,0598 WETH), e ele precisa de cotação on-chain por contrato implantado — '
-                + 'que o caçador ao vivo não tem. NÃO é "não há oportunidade ali": é '
-                + 'limitação do avaliador, e está contada como tal'
-            : 'nenhum pool de liquidez concentrada negociou na janela',
+        // POOL NAO E OPORTUNIDADE. Esta linha dizia "N pools de liquidez
+        // concentrada ficam NAO VALIDADOS", e ela cortou isso por nome: *"Não
+        // confunda quantidade de pools observados com quantidade de
+        // oportunidades."* A contagem de ROTA sai na linha `[ARB-N] rotas
+        // MISTAS`, que roda a mesma `candidatasMistas` do avaliador em fork.
+        osConcentradosViramRota: `${porAtividade.concentrados.length} pool(s) concentrado(s) `
+            + 'com tokens lidos entram na descoberta de ROTA mista — a contagem de rotas sai '
+            + 'na linha [ARB-N], e não é esta',
         oQueIssoNaoE: porAtividade.metodoIndisponivel
             ? 'o nó NÃO SUPORTA eth_getBlockReceipts: a parte por ATIVIDADE não rodou, e o '
                 + 'universo é só o por índice — o que tem cobertura MEDIDA de ZERO nos pools '
@@ -980,20 +980,34 @@ async function principal(): Promise<void> {
         // oportunidade" seria transformar limitacao do avaliador em ausencia de
         // mercado, que e o erro que custou um mes a este projeto.
         if (ciclo === 1) {
-            const concentrados = porAtividade.porVenue.v3 + porAtividade.porVenue.aerodrome;
-            FUNIL.estados.NAO_VALIDADA += concentrados;
-            if (concentrados > 0) {
-                log.warn('[ARB-N] pools de liquidez concentrada NÃO VALIDADOS neste caminho.', {
-                    v3: porAtividade.porVenue.v3,
-                    aerodrome: porAtividade.porVenue.aerodrome,
-                    porque: '`avaliarRotas` só sabe emprestar em pool V2. A rota mista é '
-                        + 'executada pelo `CacadorV3` e está PROVADA em fork (execução '
-                        + 'atômica, recibo status=1, empréstimo quitado, líquido 0,0598 WETH '
-                        + 'com deslocamento induzido)',
-                    oQueFalta: 'cotação on-chain das pernas V3 exige contrato implantado; o '
-                        + 'caçador ao vivo não tem um. Por isso NÃO VALIDADA, e não DESCARTADA',
-                });
-            }
+            // DESCOBERTA DE ROTA, nao contagem de pool.
+            //
+            // A versao anterior somava os pools concentrados em NAO_VALIDADA e
+            // publicava "125" — confundindo quantidade de pool com quantidade
+            // de oportunidade, que foi o que ela proibiu por nome. Agora a
+            // mesma `candidatasMistas` que o avaliador em fork usa roda aqui, e
+            // o numero publicado e de ROTAS DISTINTAS (par + direcao).
+            const mistas = candidatasMistas(porAtividade.concentrados, WETH_DA_BASE);
+            const fm = funilVazio();
+            fm.blocosObservados = porAtividade.blocosLidos;
+            fm.poolsVistos = {
+                v3: porAtividade.porVenue.v3, aerodrome: porAtividade.porVenue.aerodrome,
+            };
+            fm.rotasDistintas = mistas.length;
+            FUNIL.estados.NAO_VALIDADA += mistas.length;
+            log.warn('[ARB-N] rotas MISTAS V3+Aerodrome descobertas.', {
+                poolsConcentrados: `${porAtividade.porVenue.v3} V3 + `
+                    + `${porAtividade.porVenue.aerodrome} Aerodrome`,
+                rotasDistintas: mistas.length,
+                direcoes: `${mistas.filter((x) => x.direcao === 'A').length} com o Aerodrome `
+                    + `emprestando, ${mistas.filter((x) => x.direcao === 'B').length} com o V3`,
+                oQueFalta: 'cotar e simular exige o `CacadorV3` implantado. Em fork isso roda '
+                    + 'com implantação EFÊMERA e zero ETH (`forkTests/aCacaMista.js`); daqui, '
+                    + 'ao vivo, não há contrato na rede, então estas rotas ficam NÃO VALIDADAS',
+                oQueIssoNaoE: 'NÃO é contagem de pools: é rota distinta (par + direção). E NÃO '
+                    + 'é "não há oportunidade": é limitação do avaliador ao vivo',
+                limitacao: limitacaoDominante(fm),
+            });
         }
         FUNIL.rotasEncontradas += aN.rotas;
         FUNIL.espacoDeBusca = paresCruzados;
@@ -1191,6 +1205,16 @@ export async function universoPorAtividade(
      */
     porVenue: { v2: number; v3: number; aerodrome: number };
     /**
+     * Os pools de liquidez concentrada com os TOKENS lidos, prontos para
+     * `candidatasMistas`.
+     *
+     * Antes esta funcao devolvia so a CONTAGEM deles, e o cacador publicava
+     * "125 NAO VALIDADOS" — que confunde quantidade de pool com quantidade de
+     * oportunidade, exatamente o que ela proibiu. Com os tokens, a descoberta
+     * de ROTA roda aqui mesmo.
+     */
+    concentrados: PoolMisto[];
+    /**
      * O no NAO SUPORTA `eth_getBlockReceipts`.
      *
      * MEDIDO em 2026-10-15: o fork do Hardhat responde "Method
@@ -1211,6 +1235,7 @@ export async function universoPorAtividade(
             pools: [], porFabrica: new Map(), falhas: 1, blocosLidos: 0,
             blocosFalhos: 0, poolsVistos: 0, recusadosPorFabrica: 0,
             metodoIndisponivel: false, porVenue: { v2: 0, v3: 0, aerodrome: 0 },
+            concentrados: [],
         };
     }
     // O `topic0` do `Swap` da V2, CALCULADO. Endereco e assinatura de cabeca
@@ -1263,6 +1288,7 @@ export async function universoPorAtividade(
             pools: [], porFabrica: new Map(), falhas: 0, blocosLidos,
             blocosFalhos, poolsVistos: 0, recusadosPorFabrica: 0,
             metodoIndisponivel: true, porVenue: { v2: 0, v3: 0, aerodrome: 0 },
+            concentrados: [],
         };
     }
     // OS MAIS ATIVOS primeiro: se o teto cortar, corta o que negocia menos.
@@ -1277,6 +1303,26 @@ export async function universoPorAtividade(
     // `factory()` em lote: e ele que diz se o pool e de um tipo que sabemos
     // emprestar. Sem isso o universo entraria com pool de liquidez concentrada,
     // cuja conta nao e esta.
+    // OS CONCENTRADOS, com os tokens lidos: e deles que sai a ROTA mista.
+    const concentrados: PoolMisto[] = [];
+    const deConcentrado = candidatos.filter((x) => {
+        const t = tipoVisto.get(x);
+        return t === 'v3' || t === 'aerodrome';
+    }).slice(0, teto);
+    const lidosConc = await emLote(deConcentrado, async (pool) => ({
+        pool,
+        t0: endDe(await lerComPaciencia(chamar, pool, SELETORES.token0)),
+        t1: endDe(await lerComPaciencia(chamar, pool, SELETORES.token1)),
+    }));
+    for (const { pool, t0, t1 } of lidosConc) {
+        if (t0 === null || t1 === null) continue;
+        concentrados.push({
+            endereco: pool, token0: t0, token1: t1,
+            venue: tipoVisto.get(pool) === 'v3' ? 'v3' : 'aerodrome',
+            taxa: null,
+        });
+    }
+
     const fatias = await emLote(candidatos.slice(0, teto * 2), async (pool) => ({
         pool, fabrica: endDe(await lerComPaciencia(chamar, pool, SELETORES.factory)),
     }));
@@ -1301,5 +1347,6 @@ export async function universoPorAtividade(
             v3: [...tipoVisto.values()].filter((x) => x === 'v3').length,
             aerodrome: [...tipoVisto.values()].filter((x) => x === 'aerodrome').length,
         },
+        concentrados,
     };
 }

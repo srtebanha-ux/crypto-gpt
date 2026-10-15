@@ -192,3 +192,30 @@ export function codificarGetL1Fee(txSerializada: string): string {
         + bytes.toString(16).padStart(64, '0')
         + corpo;
 }
+
+/**
+ * O TETO do custo L1, pelo `getL1FeeUpperBound` do PROPRIO oraculo.
+ *
+ * DEFEITO QUE ISTO CONSERTA, apontado por ela: os testes alimentavam
+ * `getL1Fee(bytes)` com `'02'.repeat(N)` — BYTES FICTICIOS — e publicavam o
+ * resultado como custo exato. O custo L1 depende do CONTEUDO (byte zero e byte
+ * nao-zero tem pesos diferentes), entao um numero tirado de bytes inventados
+ * nao e medicao de nada.
+ *
+ * `getL1FeeUpperBound(uint256)` recebe o TAMANHO da transacao nao assinada e
+ * devolve um TETO — e teto declarado e honesto, ao contrario de uma exatidao
+ * fabricada. Conferido na corrente em 2026-10-10: para 310 bytes devolveu
+ * US$ 0,00000444.
+ *
+ * `bytesDoCalldata` e o tamanho REAL do calldata que vai na transacao. O resto
+ * e o envelope (nonce, gas, to, value, assinatura, RLP), e 160 bytes cobre
+ * folgado uma transacao tipo 2 — a direcao do erro e para CIMA, que e o lado
+ * seguro de um teto.
+ */
+export const ENVELOPE_DE_TRANSACAO_BYTES = 160;
+
+export function codificarTetoDeL1(bytesDoCalldata: number): string {
+    const tamanho = BigInt(bytesDoCalldata + ENVELOPE_DE_TRANSACAO_BYTES);
+    return id('getL1FeeUpperBound(uint256)').slice(0, 10)
+        + tamanho.toString(16).padStart(64, '0');
+}
