@@ -223,3 +223,98 @@ export function comoLerACandidata(c: Candidata): string {
 }
 
 export { coder };
+
+/**
+ * O WETH9 NAO EMITE `Transfer` AO EMBRULHAR NEM AO DESEMBRULHAR.
+ *
+ * DEFEITO MEDIDO em 2026-10-15, e ele inflou o benchmark inteiro. A transacao
+ * `0x87724fb1…` lia como +2.050.547.563.717.009 wei de WETH de lucro. Lida
+ * inteira:
+ *
+ *     WETH por `Transfer` do pool V3 ....... +2050547563717009
+ *     WETH por `Withdrawal` (sem Transfer) . -2050547563717009
+ *     V4 `Swap` amount0 .................... -2050547563717009  <- o ETH pago
+ *     saldo nativo do contrato ............. 0 antes, 0 depois
+ *     USDC ................................. +9508
+ *     gas .................................. -1336880840970 wei
+ *
+ * O ETH desembrulhado foi INTEIRO pagar o V4, ao wei. O lucro real era +9.508
+ * unidades de USDC (US$ 0,0095) contra US$ 0,0035 de gas — nao US$ 5,30.
+ * **Errei por ~800x**, e a causa e que `deltasDosTransfers` so ve `Transfer`.
+ *
+ * `Deposit(dst, wad)`  = +wad de WETH, -wad de nativo
+ * `Withdrawal(src,wad)`= -wad de WETH, +wad de nativo
+ *
+ * E o NATIVO que sai por chamada interna (pagar o PoolManager do V4 em moeda
+ * nativa) NAO aparece em log nenhum. Entao uma transacao com fluxo nativo so e
+ * reconciliavel com o saldo nativo lido na corrente — e sem isso ela e
+ * NAO VALIDADA, nunca "lucrativa".
+ */
+export const TOPICO_WETH_DEPOSIT = id('Deposit(address,uint256)');
+export const TOPICO_WETH_WITHDRAWAL = id('Withdrawal(address,uint256)');
+
+export interface AjusteDeWeth {
+    /** Por endereco: delta de WETH que os eventos de wrap/unwrap causam. */
+    weth: Map<string, bigint>;
+    /** Por endereco: delta de NATIVO que eles causam (sinal oposto). */
+    nativo: Map<string, bigint>;
+    /** Houve wrap ou unwrap nesta transacao. */
+    houveWrap: boolean;
+}
+
+export function ajusteDeWeth(logs: Log[], weth: string): AjusteDeWeth {
+    const w = weth.toLowerCase();
+    const dw = new Map<string, bigint>();
+    const dn = new Map<string, bigint>();
+    let houveWrap = false;
+    const soma = (m: Map<string, bigint>, k: string, v: bigint): void => {
+        m.set(k, (m.get(k) ?? 0n) + v);
+    };
+    for (const l of logs) {
+        if (l.address.toLowerCase() !== w) continue;
+        const t = (l.topics[0] ?? '').toLowerCase();
+        if (t !== TOPICO_WETH_DEPOSIT && t !== TOPICO_WETH_WITHDRAWAL) continue;
+        if (l.topics.length < 2) continue;
+        const quem = `0x${l.topics[1]!.slice(-40)}`.toLowerCase();
+        let v: bigint;
+        try { v = BigInt(l.data); } catch { continue; }
+        houveWrap = true;
+        if (t === TOPICO_WETH_DEPOSIT) {
+            soma(dw, quem, v);
+            soma(dn, quem, -v);
+        } else {
+            soma(dw, quem, -v);
+            soma(dn, quem, v);
+        }
+    }
+    return { weth: dw, nativo: dn, houveWrap };
+}
+
+/** O PoolManager do V4 na Base, CONFERIDO na corrente: 24.009 bytes de codigo. */
+export const POOL_MANAGER_V4 = '0x498581ff718922c3f8e6a244956af099b2652b2b';
+
+/**
+ * Esta transacao move moeda NATIVA de um jeito que os logs nao mostram?
+ *
+ * Duas pistas, e qualquer uma basta: houve wrap/unwrap de WETH, ou o
+ * PoolManager do V4 aparece (ele liquida em nativo por chamada interna). Nos
+ * dois casos o lucro NAO e reconciliavel so por log — e dizer "lucrativa" ali
+ * seria o erro de 800x outra vez.
+ */
+export function precisaDeSaldoNativo(logs: Log[], weth: string): boolean {
+    if (ajusteDeWeth(logs, weth).houveWrap) return true;
+    return logs.some((l) => l.address.toLowerCase() === POOL_MANAGER_V4);
+}
+
+/** Aplica o ajuste de wrap/unwrap sobre os deltas de `Transfer`. */
+export function deltasReconciliados(
+    logs: Log[], weth: string,
+): { deltas: Map<string, Map<string, bigint>>; precisaNativo: boolean } {
+    const deltas = deltasDosTransfers(logs);
+    const aj = ajusteDeWeth(logs, weth);
+    const w = weth.toLowerCase();
+    const m = deltas.get(w) ?? new Map<string, bigint>();
+    for (const [quem, d] of aj.weth) m.set(quem, (m.get(quem) ?? 0n) + d);
+    if (m.size > 0) deltas.set(w, m);
+    return { deltas, precisaNativo: precisaDeSaldoNativo(logs, weth) };
+}

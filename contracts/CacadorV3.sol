@@ -61,6 +61,29 @@ interface IERC20 {
     function transfer(address to, uint256 v) external returns (bool);
 }
 
+interface IPoolAerodrome {
+    /**
+     * Velodrome V2 / Aerodrome: pede-se a SAIDA, e o pool chama
+     * `hook(sender, amount0Out, amount1Out, data)` quando `data` nao e vazio.
+     * O pagamento e conferido pelo invariante do proprio pool.
+     *
+     * CONFERIDO POR CHAMADA na Base, 2026-10-15, no pool `0x566bee7e…`: ele e
+     * um PROXY DE 45 BYTES, entao procurar seletor no bytecode nao prova nada
+     * — este CLAUDE.md ja registra essa armadilha. `stable()` devolveu false,
+     * `token0/token1` devolveram WETH e `0xfb31f85a…`, `factory()` devolveu
+     * `0x420dd381…` e `getAmountOut` respondeu. E a chamada que identifica.
+     */
+    function swap(
+        uint256 amount0Out,
+        uint256 amount1Out,
+        address to,
+        bytes calldata data
+    ) external;
+    function getAmountOut(uint256 amountIn, address tokenIn) external view returns (uint256);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+}
+
 interface IPoolV3 {
     /**
      * `amountSpecified` POSITIVO e entrada exata; negativo e saida exata.
@@ -100,7 +123,24 @@ contract CacadorV3 {
         address pool;
         /** O token que ENTRA nesta perna. O outro lado do pool e o que sai. */
         address tokenEntra;
+        /** 0 = pool V3 (liquidez concentrada). 1 = Aerodrome volatil. */
+        uint8 tipo;
+        /**
+         * Para perna AERODROME: quanto do `tokenEntra` pagar.
+         *
+         * Vem de FORA de proposito. O Aerodrome confere o pagamento pelo
+         * invariante dele e nao expõe `getAmountIn`; calcular aqui seria
+         * reimplementar a conta do pool, que e justamente o que a ordem dela
+         * proibe. Quem acha o minimo e `cotar`, por bisseccao com `eth_call`,
+         * e a cada tentativa e o POOL que aceita ou recusa.
+         *
+         * Ignorado em perna V3, onde o proprio callback diz o devido.
+         */
+        uint256 pagamento;
     }
+
+    uint8 internal constant TIPO_V3 = 0;
+    uint8 internal constant TIPO_AERODROME = 1;
 
     struct Caca {
         bool viva;
@@ -130,6 +170,8 @@ contract CacadorV3 {
     error EstagioErrado(uint8 estagio);
     error PernasInvalidas(uint256 quantas);
     error PernaNaoEncaixa(uint8 indice, address esperado, address veio);
+    error TipoDePernaDesconhecido(uint8 tipo);
+    error PagamentoNaoDeclarado(uint8 indice);
     error PoolSemEsteToken(address pool, address token);
     error NadaEntrou();
     error LucroInsuficiente(uint256 obtido, uint256 piso);
@@ -245,16 +287,9 @@ contract CacadorV3 {
             total: uint8(rota.length)
         });
 
-        bool zeroForOne = _direcao(rota[0].pool, tokenBase);
-        // ENTRADA EXATA (positivo): gastamos `quantia` do tokenBase. O pool
-        // manda a saida para ca e cobra no callback.
-        IPoolV3(rota[0].pool).swap(
-            address(this),
-            zeroForOne,
-            int256(quantia),
-            zeroForOne ? MIN_SQRT + 1 : MAX_SQRT - 1,
-            abi.encode(uint8(0))
-        );
+        // A PERNA 0 e a fonte de credito: ela manda a saida antes de cobrar, e
+        // o pagamento dela e adiado ate o ciclo fechar.
+        _dispararPerna(0, rota[0], quantia);
 
         lucro = _desteCiclo(tokenBase);
         if (lucro < lucroMinimo) revert LucroInsuficiente(lucro, lucroMinimo);
@@ -265,6 +300,58 @@ contract CacadorV3 {
 
         _enviar(tokenBase, cofre, lucro);
         emit Cacou(rota[0].pool, rota[rota.length - 1].pool, lucro);
+    }
+
+    /**
+     * DISPARA a perna `i`, do tipo que ela declara.
+     *
+     * `entra` e quanto do `tokenEntra` esta disponivel para ela. Em V3 vira
+     * entrada exata; em Aerodrome vira o pagamento declarado e a saida sai do
+     * `getAmountOut` do PROPRIO pool.
+     */
+    function _dispararPerna(uint8 i, Perna memory pr, uint256 entra) internal {
+        caca.indice = i;
+        caca.poolEsperado = pr.pool;
+        if (pr.tipo == TIPO_V3) {
+            bool zeroForOne = _direcao(pr.pool, pr.tokenEntra);
+            IPoolV3(pr.pool).swap(
+                address(this),
+                zeroForOne,
+                int256(entra),
+                zeroForOne ? MIN_SQRT + 1 : MAX_SQRT - 1,
+                abi.encode(i)
+            );
+            return;
+        }
+        if (pr.tipo == TIPO_AERODROME) {
+            // O pagamento e declarado; a SAIDA e a conta do pool.
+            uint256 paga = pr.pagamento;
+            if (paga == 0) revert PagamentoNaoDeclarado(i);
+            if (paga > entra && i > 0) revert PagamentoCurto(entra, paga);
+            uint256 sai = IPoolAerodrome(pr.pool).getAmountOut(paga, pr.tokenEntra);
+            if (sai == 0) revert NadaEntrou();
+            bool entraEhToken0 = IPoolV3(pr.pool).token0() == pr.tokenEntra;
+            IPoolAerodrome(pr.pool).swap(
+                entraEhToken0 ? 0 : sai,
+                entraEhToken0 ? sai : 0,
+                address(this),
+                abi.encode(i)
+            );
+            return;
+        }
+        revert TipoDePernaDesconhecido(pr.tipo);
+    }
+
+    /**
+     * O `hook` do Aerodrome — o mesmo papel do callback do V3.
+     *
+     * O pool chama isto quando `data` nao e vazio, DEPOIS de ter mandado a
+     * saida. Entao a logica e identica: perna 0 adia o pagamento ate o ciclo
+     * fechar; perna interna paga na hora, porque ja tem em maos o token que
+     * deve.
+     */
+    function hook(address, uint256, uint256, bytes calldata data) external {
+        _cumprirPerna(abi.decode(data, (uint8)), 0);
     }
 
     /**
@@ -286,17 +373,27 @@ contract CacadorV3 {
         int256 amount1Delta,
         bytes calldata data
     ) external {
+        // O positivo dos deltas e o que o pool quer receber; o negativo e o que
+        // ele ja mandou.
+        uint256 devido = amount0Delta > 0 ? uint256(amount0Delta) : uint256(amount1Delta);
+        _cumprirPerna(abi.decode(data, (uint8)), devido);
+    }
+
+    /**
+     * O corpo comum aos dois callbacks.
+     *
+     * `devidoV3` e zero em perna Aerodrome: ali o que se deve e o `pagamento`
+     * declarado, e o pool confere pelo invariante dele.
+     */
+    function _cumprirPerna(uint8 declarado, uint256 devidoV3) internal {
         Caca memory c = caca;
         if (!c.viva) revert SemCaca();
         if (msg.sender != c.poolEsperado) revert ChamadaInesperada(msg.sender, c.poolEsperado);
-        uint8 declarado = abi.decode(data, (uint8));
         if (declarado != c.indice) revert EstagioErrado(declarado);
 
         uint8 i = c.indice;
         Perna memory minha = pernas[i];
-        // O positivo dos deltas e o que o pool quer receber; o negativo e o que
-        // ele ja mandou.
-        uint256 devido = amount0Delta > 0 ? uint256(amount0Delta) : uint256(amount1Delta);
+        uint256 devido = minha.tipo == TIPO_V3 ? devidoV3 : minha.pagamento;
 
         if (i > 0) {
             uint256 tem = _desteCiclo(minha.tokenEntra);
@@ -308,17 +405,7 @@ contract CacadorV3 {
             Perna memory proxima = pernas[i + 1];
             uint256 entra = _desteCiclo(proxima.tokenEntra);
             if (entra == 0) revert NadaEntrou();
-
-            caca.indice = i + 1;
-            caca.poolEsperado = proxima.pool;
-            bool zeroForOne = _direcao(proxima.pool, proxima.tokenEntra);
-            IPoolV3(proxima.pool).swap(
-                address(this),
-                zeroForOne,
-                int256(entra),
-                zeroForOne ? MIN_SQRT + 1 : MAX_SQRT - 1,
-                abi.encode(i + 1)
-            );
+            _dispararPerna(i + 1, proxima, entra);
             // Volta ao meu indice para o fim da minha chamada.
             caca.indice = i;
             caca.poolEsperado = msg.sender;

@@ -12,6 +12,8 @@ import assert from 'node:assert/strict';
 import {
     deltasDosTransfers, quemLevouLucro, custoDoRecibo, liquidoEmWeth,
     candidatasDosLogs, TOPICO_DE_SWAP, TOPICO_TRANSFER, type Log,
+    ajusteDeWeth, deltasReconciliados, precisaDeSaldoNativo,
+    TOPICO_WETH_DEPOSIT, TOPICO_WETH_WITHDRAWAL, POOL_MANAGER_V4,
 } from './quemGanha';
 
 const WETH = '0x4200000000000000000000000000000000000006';
@@ -105,4 +107,62 @@ test('o líquido só existe quando o ganho é em WETH', () => {
     // Ganho em outro token: `null`, porque converter sem preco seria inventar.
     const outro = { endereco: ARB, ganhos: [{ token: TOKEN, quanto: 100n }] };
     assert.equal(liquidoEmWeth(outro, 40n, WETH), null);
+});
+
+// MEDIDO em 2026-10-15 na transacao `0x87724fb1…`: o WETH9 nao emite `Transfer`
+// ao embrulhar nem ao desembrulhar, e por isso o benchmark leu +0,00205 WETH
+// onde o liquido real era ZERO de WETH. Erro de ~800x no numero que escolhe a
+// amostra.
+test('wrap/unwrap de WETH entra na conta — `Transfer` sozinho erra', () => {
+    const POOL = '0x1111111111111111111111111111111111111111';
+    const BENEF = '0x2222222222222222222222222222222222222222';
+    const wad = 2050547563717009n;
+    const logs: Log[] = [
+        // O pool manda WETH ao beneficiario...
+        {
+            address: WETH, topics: [TOPICO_TRANSFER, p32(POOL), p32(BENEF)],
+            data: `0x${wad.toString(16)}`, transactionHash: '0xt',
+            blockNumber: '0x1', logIndex: '0x0',
+        },
+        // ...e ele desembrulha TUDO. Sem `Transfer` nenhum.
+        {
+            address: WETH, topics: [TOPICO_WETH_WITHDRAWAL, p32(BENEF)],
+            data: `0x${wad.toString(16)}`, transactionHash: '0xt',
+            blockNumber: '0x1', logIndex: '0x1',
+        },
+    ];
+    // Só por `Transfer`: pareceria lucro.
+    const soTransfer = deltasDosTransfers(logs).get(WETH)!.get(BENEF);
+    assert.equal(soTransfer, wad);
+    // Reconciliado: ZERO.
+    const { deltas, precisaNativo } = deltasReconciliados(logs, WETH);
+    assert.equal(deltas.get(WETH)!.get(BENEF), 0n,
+        'o desembrulho não foi descontado: é o erro de 800x do benchmark');
+    assert.equal(precisaNativo, true,
+        'houve unwrap e a transação não foi marcada como precisando de saldo nativo');
+});
+
+test('o embrulho conta ao contrário, e o nativo tem sinal oposto', () => {
+    const BENEF = '0x2222222222222222222222222222222222222222';
+    const logs: Log[] = [{
+        address: WETH, topics: [TOPICO_WETH_DEPOSIT, p32(BENEF)],
+        data: '0x64', transactionHash: '0xt', blockNumber: '0x1', logIndex: '0x0',
+    }];
+    const aj = ajusteDeWeth(logs, WETH);
+    assert.equal(aj.weth.get(BENEF), 100n);
+    assert.equal(aj.nativo.get(BENEF), -100n);
+    assert.equal(aj.houveWrap, true);
+});
+
+test('a presença do PoolManager V4 exige saldo nativo, mesmo sem wrap', () => {
+    // O V4 liquida em moeda nativa por chamada interna: nao ha log. Uma
+    // transacao que o toca nao e reconciliavel so por log, e chamar aquilo de
+    // "lucrativa" foi o erro medido.
+    const logs: Log[] = [{
+        address: POOL_MANAGER_V4, topics: ['0xdeadbeef'], data: '0x',
+        transactionHash: '0xt', blockNumber: '0x1', logIndex: '0x0',
+    }];
+    assert.equal(precisaDeSaldoNativo(logs, WETH), true);
+    // E sem V4 e sem wrap, nao exige.
+    assert.equal(precisaDeSaldoNativo([], WETH), false);
 });
