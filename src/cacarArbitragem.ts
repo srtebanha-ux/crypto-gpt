@@ -1226,6 +1226,11 @@ async function principal(): Promise<void> {
         // confunda quantidade de pools observados com quantidade de
         // oportunidades."* A contagem de ROTA sai na linha `[ARB-N] rotas
         // MISTAS`, que roda a mesma `candidatasMistas` do avaliador em fork.
+        tokensDosConcentrados: `${porAtividade.tokensPedidos - porAtividade.tokensQueFalharam} `
+            + `de ${porAtividade.tokensPedidos} com token0/token1 lidos `
+            + `(${porAtividade.tokensQueFalharam} falharam). Medido FORA do caçador no mesmo `
+            + 'universo: 194 de 194 respondem e dão 30 rotas mistas — então um número alto aqui '
+            + 'é perda do LEITOR, não do mercado',
         osConcentradosViramRota: `${porAtividade.concentrados.length} pool(s) concentrado(s) `
             + 'com tokens lidos entram na descoberta de ROTA mista — a contagem de rotas sai '
             + 'na linha [ARB-N], e não é esta',
@@ -1753,6 +1758,16 @@ export async function universoPorAtividade(
      */
     concentrados: PoolMisto[];
     /**
+     * Pools concentrados que NAO responderam `token0`/`token1`.
+     *
+     * Medido fora do cacador, no MESMO universo: 194 de 194 respondem, 0
+     * perdidos, e dao 30 rotas mistas. Se este numero for alto aqui, a perda e
+     * do leitor do cacador — nao do mercado e nao do no. Sem o contador, "2
+     * rotas" era indistinguivel de "o mercado so tem 2".
+     */
+    tokensQueFalharam: number;
+    tokensPedidos: number;
+    /**
      * O no NAO SUPORTA `eth_getBlockReceipts`.
      *
      * MEDIDO em 2026-10-15: o fork do Hardhat responde "Method
@@ -1772,6 +1787,7 @@ export async function universoPorAtividade(
         return {
             pools: [], porFabrica: new Map(), falhas: 1, blocosLidos: 0,
             blocosFalhos: 0, poolsVistos: 0, recusadosPorFabrica: 0,
+            tokensQueFalharam: 0, tokensPedidos: 0,
             metodoIndisponivel: false, porVenue: { v2: 0, v3: 0, aerodrome: 0 },
             concentrados: [],
         };
@@ -1826,7 +1842,7 @@ export async function universoPorAtividade(
             pools: [], porFabrica: new Map(), falhas: 0, blocosLidos,
             blocosFalhos, poolsVistos: 0, recusadosPorFabrica: 0,
             metodoIndisponivel: true, porVenue: { v2: 0, v3: 0, aerodrome: 0 },
-            concentrados: [],
+            concentrados: [], tokensQueFalharam: 0, tokensPedidos: 0,
         };
     }
     // OS MAIS ATIVOS primeiro: se o teto cortar, corta o que negocia menos.
@@ -1847,26 +1863,55 @@ export async function universoPorAtividade(
         const t = tipoVisto.get(x);
         return t === 'v3' || t === 'aerodrome';
     }).slice(0, teto);
-    const lidosConc = await emLote(deConcentrado, async (pool) => ({
-        pool,
-        t0: endDe(await lerComPaciencia(chamar, pool, SELETORES.token0)),
-        t1: endDe(await lerComPaciencia(chamar, pool, SELETORES.token1)),
-        // `stable()` so no Aerodrome, e so `false` autoriza descarte pelo
-        // filtro: o teto das reservas e demonstrado para `x·y = k`, e o pool
-        // stable usa `x³y + y³x = k`. Resposta ausente fica `null`.
-        estavel: tipoVisto.get(pool) === 'aerodrome'
-            ? ((q) => (q === null ? null : q !== 0n))(
-                numDe(await lerComPaciencia(chamar, pool, SELETORES.estavel)),
-            )
-            : null,
-    }));
-    for (const { pool, t0, t1, estavel } of lidosConc) {
-        if (t0 === null || t1 === null) continue;
+    // OS TOKENS EM MULTICALL, e nao uma chamada por pool por token.
+    //
+    // MEDIDO em 2026-10-15, dentro e fora do cacador, no MESMO universo:
+    //
+    //   per-call (`lerComPaciencia` por token)  89 de 286 pools lidos
+    //   multicall (`lerEmLote`)                194 de 194, e 30 ROTAS mistas
+    //
+    // Com o caminho per-call a varredura publicava universo cheio e rota vazia:
+    // "2 rotas" era limitacao do LEITOR com cara de ausencia de mercado. E nao
+    // e o no que recusa — 601 leituras em tres pedacos devolveram 601.
+    //
+    // Isto NAO amplia o universo: le o MESMO conjunto ja descoberto, em ~3
+    // requisicoes em vez de 600. Gasta MENOS RPC, nao mais.
+    //
+    // `stable()` SO no Aerodrome: no V3 ele nao existe, e pedir leitura que nao
+    // pode responder gastaria um terco do orcamento para receber falha.
+    const pedidosDeToken: ChamadaMulti[] = [];
+    const pedeEstavel = new Map<string, number>();
+    for (const pool of deConcentrado) {
+        pedidosDeToken.push({ alvo: pool, dados: SELETORES.token0 });
+        pedidosDeToken.push({ alvo: pool, dados: SELETORES.token1 });
+    }
+    for (const pool of deConcentrado) {
+        if (tipoVisto.get(pool) !== 'aerodrome') continue;
+        pedeEstavel.set(pool, pedidosDeToken.length);
+        pedidosDeToken.push({ alvo: pool, dados: SELETORES.estavel });
+    }
+    const lidosEmLote = pedidosDeToken.length === 0
+        ? []
+        : await lerEmLote(chamar, pedidosDeToken);
+    let tokensQueFalharam = 0;
+    for (let i = 0; i < deConcentrado.length; i += 1) {
+        const pool = deConcentrado[i]!;
+        const r0 = lidosEmLote[i * 2];
+        const r1 = lidosEmLote[i * 2 + 1];
+        const iEst = pedeEstavel.get(pool);
+        const rs = iEst === undefined ? undefined : lidosEmLote[iEst];
+        const t0 = r0 !== undefined && r0.ok ? endDe(r0.dados) : null;
+        const t1 = r1 !== undefined && r1.ok ? endDe(r1.dados) : null;
+        if (t0 === null || t1 === null) { tokensQueFalharam += 1; continue; }
+        const ehAero = tipoVisto.get(pool) === 'aerodrome';
+        const est = rs !== undefined && rs.ok ? primeiraPalavra(rs.dados) : null;
         concentrados.push({
-            endereco: pool, token0: t0, token1: t1,
-            venue: tipoVisto.get(pool) === 'v3' ? 'v3' : 'aerodrome',
+            endereco: pool,
+            token0: t0,
+            token1: t1,
+            venue: ehAero ? 'aerodrome' : 'v3',
             taxa: null,
-            estavel,
+            estavel: ehAero && est !== null ? est !== 0n : null,
         });
     }
 
@@ -1895,5 +1940,7 @@ export async function universoPorAtividade(
             aerodrome: [...tipoVisto.values()].filter((x) => x === 'aerodrome').length,
         },
         concentrados,
+        tokensQueFalharam,
+        tokensPedidos: deConcentrado.length,
     };
 }
