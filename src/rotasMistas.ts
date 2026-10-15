@@ -225,6 +225,14 @@ export interface FunilMisto {
     semProvaMatematica: number;
     expirado: number;
     falhaDeExecucao: number;
+    /**
+     * Cotacoes cujo estado MUDOU entre a leitura e a cotacao.
+     *
+     * Nao e expiracao e nao e falta de spread: e a conta ter sido feita com
+     * dados de dois instantes. *"Nao declare uma arbitragem lucrativa
+     * utilizando dados incompativeis."*
+     */
+    estadosInconsistentes: number;
 }
 
 export const funilVazio = (): FunilMisto => ({
@@ -250,6 +258,7 @@ export const funilVazio = (): FunilMisto => ({
     semProvaMatematica: 0,
     expirado: 0,
     falhaDeExecucao: 0,
+    estadosInconsistentes: 0,
 });
 
 /**
@@ -330,7 +339,8 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         + `SEM DADO POR: ${f.faltaDeSpread} falta de spread, `
         + `${f.limitacaoDeCobertura} cobertura, ${f.faltaDeDados} falta de dados, `
         + `${f.semProvaMatematica} SEM PROVA do invariante (pool stable: não descartado), `
-        + `${f.expirado} EXPIRADO, ${f.falhaDeExecucao} falha de execução | `
+        + `${f.expirado} EXPIRADO, ${f.estadosInconsistentes} ESTADO_INCONSISTENTE, `
+        + `${f.falhaDeExecucao} falha de execução | `
         + limitacaoDominante(f);
 }
 
@@ -551,6 +561,16 @@ export interface LeiturasDoEstado {
     reservasAerodrome: Map<string, { r0: bigint; r1: bigint } | null>;
     /** O bloco do estado. E ele que diz a IDADE do dado na decisao. */
     bloco: number;
+    /**
+     * O SALDO DA BASE em cada pool V3, cru.
+     *
+     * Ele existe porque a capacidade de EMPRESTIMO e do pool que empresta, e na
+     * direcao B quem empresta e o V3. Dimensionar a direcao B pela reserva do
+     * AERODROME — o que o codigo fazia — e o defeito que ela nomeou: *"Nao
+     * reutilize a liquidez de um pool como se fosse a capacidade de emprestimo
+     * de outro."* Ausente = nao li, e sem isso nao se dimensiona nada.
+     */
+    saldoDaBaseNoV3?: Map<string, bigint | null>;
 }
 
 export interface Triagem {

@@ -496,3 +496,16 @@ test('pool STABLE não é descartado, e não é contado como falta de dado', () 
         'a leitura VEIO: chamar isto de falta de dado mandaria consertar o RPC quando o que '
         + 'falta é a demonstração matemática');
 });
+
+test('o funil separa ESTADO_INCONSISTENTE de expiração e de falta de spread', () => {
+    const f = funilVazio();
+    f.estadosAvaliados = 1;
+    f.rotasDistintas = 4;
+    f.cotacoesTentadas = 2;
+    f.estadosInconsistentes = 2;
+    const frase = comoLerOFunilMisto(f);
+    assert.match(frase, /2 ESTADO_INCONSISTENTE/);
+    assert.match(frase, /0 EXPIRADO/,
+        'expiração e inconsistência são causas diferentes: uma é chegar tarde, a outra é somar '
+        + 'dois instantes. Pedem consertos opostos');
+});

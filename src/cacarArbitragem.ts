@@ -48,6 +48,7 @@ import {
     QUOTER_V2, SELETORES_DA_COTACAO, quoterServeOPool, codificarQuoteV3, codificarGetAmountOut,
     primeiraPalavra, escadaDeTamanhos, LivroDeSinais, EstadoDosPools,
     COTADOR_LOCAL, codificarCotarCiclo, lerRespostaDaCotacao, lerCodigoDoCotador,
+    impressaoDoEstado, estadoInconsistente,
     type SinalDeArbitragem,
 } from './cotarMista';
 import { codificarTetoDeL1, ORACULO_DE_GAS_L1, somarCusto, julgar } from './custoDaBase';
@@ -75,6 +76,11 @@ const LIVRO_DE_SINAIS = new LivroDeSinais();
 
 /** O bytecode JA COMPILADO do `CacadorV3`, do artefato local. */
 const CODIGO_DO_COTADOR = lerCodigoDoCotador();
+
+/** A ultima impressao de estado avaliada, e quantos ciclos a repetiram. */
+const ULTIMA_IMPRESSAO = { valor: '', repetidas: 0 };
+/** Estados novos vistos com o MESMO bloco confirmado: mudanca INTRABLOCO. */
+const INTRABLOCO = { detectadas: 0 };
 
 
 const log = createLogger('arb');
@@ -194,9 +200,15 @@ export async function lerEstadoMisto(
 ): Promise<LeiturasDoEstado> {
     const v3 = [...new Set(candidatas.map((c) => c.poolV3.toLowerCase()))];
     const aero = [...new Set(candidatas.map((c) => c.poolAerodrome.toLowerCase()))];
+    // O SALDO DA BASE no pool V3 entra aqui porque e a capacidade de
+    // EMPRESTIMO dele — e na direcao B e o V3 que empresta.
     const pedidos: ChamadaMulti[] = [
         ...v3.map((q) => ({ alvo: q, dados: SELETORES.slot0 })),
         ...aero.map((q) => ({ alvo: q, dados: SELETORES.getReserves })),
+        ...v3.map((q) => ({
+            alvo: WETH_DA_BASE,
+            dados: SELETORES_DA_COTACAO.balanceOf + q.replace('0x', '').padStart(64, '0'),
+        })),
     ];
     const r = pedidos.length === 0 ? [] : await lerEmLote(chamar, pedidos, etiqueta);
     const sqrtPorPoolV3 = new Map<string, bigint | null>();
@@ -226,7 +238,13 @@ export async function lerEstadoMisto(
         const q = c.poolV3.toLowerCase();
         if (c.token0DoV3 !== null) token0PorPool.set(q, c.token0DoV3.toLowerCase());
     }
-    return { sqrtPorPoolV3, token0PorPool, reservasAerodrome, bloco };
+    const saldoDaBaseNoV3 = new Map<string, bigint | null>();
+    for (let i = 0; i < v3.length; i += 1) {
+        const resp = r[v3.length + aero.length + i];
+        const bom = resp !== undefined && resp.ok && resp.dados.length >= 66;
+        saldoDaBaseNoV3.set(v3[i]!, bom ? BigInt(resp.dados.slice(0, 66)) : null);
+    }
+    return { sqrtPorPoolV3, token0PorPool, reservasAerodrome, bloco, saldoDaBaseNoV3 };
 }
 
 /**
@@ -307,18 +325,33 @@ export async function cotarAfetadas(
     // O TAMANHO sai da LIQUIDEZ do pool que empresta, nunca de numero meu.
     const comTamanho: Array<{ c: CandidataMista; quantia: bigint }> = [];
     for (const c of afetadas) {
-        const res = L.reservasAerodrome.get(c.poolAerodrome.toLowerCase()) ?? null;
-        const t0Aero = c.token0DoAero;
-        const rBase = res === null || t0Aero === null
-            ? null
-            : (t0Aero === base ? res.r0 : res.r1);
+        // A CAPACIDADE DE EMPRESTIMO E DO POOL QUE EMPRESTA.
+        //
+        // Direcao A: o Aerodrome empresta -> a reserva de base DELE.
+        // Direcao B: o V3 empresta -> o saldo de base DELE.
+        //
+        // A versao anterior usava a reserva do Aerodrome nas DUAS, e ela cortou
+        // isso por nome: *"Nao reutilize a liquidez de um pool como se fosse a
+        // capacidade de emprestimo de outro."* Na direcao B isso dimensionava o
+        // emprestimo do V3 pela liquidez de um pool que nao empresta nada ali.
+        let rBase: bigint | null = null;
+        if (c.direcao === 'A') {
+            const res = L.reservasAerodrome.get(c.poolAerodrome.toLowerCase()) ?? null;
+            const t0Aero = c.token0DoAero;
+            rBase = res === null || t0Aero === null
+                ? null
+                : (t0Aero === base ? res.r0 : res.r1);
+        } else {
+            rBase = L.saldoDaBaseNoV3?.get(c.poolV3.toLowerCase()) ?? null;
+        }
         const escada = rBase === null ? [] : escadaDeTamanhos(rBase);
         const quantia = escada[0];
         if (quantia === undefined) {
             fora.push(sinal(
                 c, null,
-                'SEM DADO: não sei a liquidez de base do pool que empresta, e o tamanho sai dela '
-                + '— nunca de um número meu',
+                `SEM DADO: não sei a liquidez de base do pool que EMPRESTA (${c.direcao === 'A'
+                    ? 'reserva do Aerodrome' : 'saldo de base do pool V3'}), e o tamanho sai dela `
+                + '— nunca de um número meu, e nunca da liquidez do outro pool',
             ));
             continue;
         }
@@ -1466,7 +1499,33 @@ async function principal(): Promise<void> {
         //
         // SO AS ROTAS AFETADAS por mudanca de estado, por ordem dela: um pool
         // cujo estado nao mudou nao precisa de leitura nova no mesmo bloco.
-        if (MISTAS.length > 0 && blocoAgora > 0 && blocoAgora !== blocoDaTriagem) {
+        // O GATILHO E A MUDANCA DE ESTADO, nao o numero do bloco.
+        //
+        // DEFEITO CORRIGIDO: era `blocoAgora !== blocoDaTriagem`, entao o
+        // cacador avaliava UMA vez por bloco confirmado e toda mudanca
+        // INTRABLOCO — a Base monta o bloco em fatias de ~200ms — era invisivel
+        // por construcao. Agora quem decide e a IMPRESSAO do estado dos pools.
+        // AMOSTRAS DE `pending` DENTRO DO MESMO CICLO.
+        //
+        // MEDIDO em 2026-10-15: o ciclo inteiro custa ~3,6s (300 estados em
+        // 18,1 min) e o bloco da Base dura ~2s. Entao uma amostra por ciclo NAO
+        // consegue ver duas versoes do mesmo bloco — o gatilho por impressao
+        // deixou de barrar, e a CADENCIA passou a ser o limite. Amostrar aqui,
+        // espacado, e o menor conserto: nao cria laco novo nem bot novo, e cada
+        // amostra custa UM multicall.
+        const amostras = Math.max(1, Number(process.env.ARB_AMOSTRAS_PENDING ?? 3));
+        const espacoMs = Math.max(0, Number(process.env.ARB_ESPACO_AMOSTRA_MS ?? 450));
+        for (let amostra = 0; amostra < amostras && MISTAS.length > 0 && blocoAgora > 0;
+            amostra += 1) {
+            if (amostra > 0) {
+                // eslint-disable-next-line no-await-in-loop
+                await new Promise<void>((r) => { setTimeout(r, espacoMs); });
+            }
+            // O bloco pode ter virado entre amostras: quem decide o INTRABLOCO
+            // e o bloco DESTA amostra, nao o do comeco do ciclo.
+            // eslint-disable-next-line no-await-in-loop
+            const blocoDaAmostra = Number(numDe(await chamar('eth_blockNumber', [])) ?? 0n);
+            if (blocoDaAmostra === 0) continue;
             // O ESTADO E `pending`, e isso foi PROVADO antes de ser usado
             // (2026-10-15, `mainnet.base.org`): `eth_getBlockByNumber('pending')`
             // devolve o bloco `latest + 1` com 1 a 182 transacoes JA dentro, e a
@@ -1477,7 +1536,7 @@ async function principal(): Promise<void> {
                 ? 'latest' : 'pending';
             const t0 = Date.now();
             const fimTri = av.etapa('prefiltro');
-            const L = await lerEstadoMisto(chamar, MISTAS, blocoAgora, etiqueta);
+            const L = await lerEstadoMisto(chamar, MISTAS, blocoDaAmostra, etiqueta);
             const tri = triarCandidatas(MISTAS, WETH_DA_BASE, L);
             fimTri();
             FM.estadosAvaliados += 1;
@@ -1495,6 +1554,16 @@ async function principal(): Promise<void> {
             for (const [pool, v] of L.reservasAerodrome) {
                 cru.set(pool, v === null ? null : `ae:${v.r0}/${v.r1}`);
             }
+            // A IMPRESSAO decide se ha o que avaliar. Estado identico ao
+            // anterior nao e avaliado de novo, MESMO no mesmo bloco — e estado
+            // diferente E avaliado, mesmo com o bloco confirmado igual.
+            const impressao = impressaoDoEstado(cru);
+            if (impressao === ULTIMA_IMPRESSAO.valor) {
+                ULTIMA_IMPRESSAO.repetidas += 1;
+                continue;
+            }
+            if (blocoDaAmostra === blocoDaTriagem) INTRABLOCO.detectadas += 1;
+            ULTIMA_IMPRESSAO.valor = impressao;
             const poolsQueMudaram = new Set(ESTADOS_DOS_POOLS.mudaram(cru));
             const afetadas = tri.valem.filter(
                 (c) => (poolsQueMudaram.has(c.poolV3.toLowerCase())
@@ -1511,15 +1580,42 @@ async function principal(): Promise<void> {
                 const fimCot = av.etapa('cotacao');
                 const tc = Date.now();
                 const sinais = await cotarAfetadas(
-                    chamarEmLote, chamar, afetadas, L, etiqueta, blocoAgora, t0, gasWei,
+                    chamarEmLote, chamar, afetadas, L, etiqueta, blocoDaAmostra, t0, gasWei,
                     CODIGO_DO_COTADOR,
                 );
                 LIVRO_DE_SINAIS.registrarCotacao(Date.now() - tc);
                 fimCot();
+                // O ESTADO AINDA E O MESMO? Releitura dos pools das rotas
+                // cotadas. Se mudou, a cotacao combinou leitura de um snapshot
+                // com preco de outro, e isso NAO vira lucro: vira
+                // ESTADO_INCONSISTENTE.
+                const Ldepois = await lerEstadoMisto(chamar, afetadas, blocoDaAmostra, etiqueta);
+                const cruDepois = new Map<string, string | null>();
+                for (const [pool, v] of Ldepois.sqrtPorPoolV3) {
+                    cruDepois.set(pool, v === null ? null : `v3:${v}`);
+                }
+                for (const [pool, v] of Ldepois.reservasAerodrome) {
+                    cruDepois.set(pool, v === null ? null : `ae:${v.r0}/${v.r1}`);
+                }
+                for (const sn of sinais) {
+                    const rota = afetadas.find((c) => c.chave === sn.rota);
+                    if (rota === undefined) continue;
+                    if (!estadoInconsistente(cru, cruDepois, [rota.poolV3, rota.poolAerodrome])) {
+                        continue;
+                    }
+                    FM.estadosInconsistentes += 1;
+                    sn.motivo = 'ESTADO_INCONSISTENTE: o estado dos pools desta rota MUDOU entre '
+                        + 'a leitura e a cotação. Declarar lucro aqui seria somar reserva de um '
+                        + `snapshot com preço de outro (era: ${sn.motivo.slice(0, 60)})`;
+                    // O numero nao e apagado — ele existiu —, mas deixa de
+                    // contar como oportunidade: a conta nao e sobre um estado.
+                    sn.lucroLiquidoEstimado = null;
+                }
                 cotadasAgora = sinais.length;
                 FM.cotacoesTentadas += sinais.length;
                 for (const sn of sinais) {
                     LIVRO_DE_SINAIS.registrar(sn);
+                    if (sn.motivo.startsWith('ESTADO_INCONSISTENTE')) continue;
                     if (sn.lucroBrutoEstimado !== null && sn.lucroBrutoEstimado > 0n) {
                         brutosPositivos += 1;
                         FM.cotacoesComSobra += 1;
@@ -1530,7 +1626,10 @@ async function principal(): Promise<void> {
             FUNIL.estados.NAO_VALIDADA += afetadas.length - cotadasAgora;
 
             log.warn('[ARB-N] rotas MISTAS V3+Aerodrome: estado, triagem e COTAÇÃO AO VIVO.', {
-                bloco: blocoAgora,
+                bloco: blocoDaAmostra,
+                amostraDoCiclo: `${amostra + 1} de ${amostras} (espaçadas ${espacoMs}ms: o ciclo `
+                    + 'custa ~3,6s e o bloco da Base ~2s, então uma amostra por ciclo não vê '
+                    + 'duas versões do mesmo bloco)',
                 etiqueta: `${etiqueta} (pré-confirmado: provado com 1–182 txs dentro e cotação `
                     + 'diferente da de `latest`)',
                 estadosAvaliados: FM.estadosAvaliados,
@@ -1540,6 +1639,11 @@ async function principal(): Promise<void> {
                     + 'outras têm os dois pools no MESMO estado já avaliado, e recotar repetiria '
                     + 'a resposta',
                 cotacoesExecutadas: cotadasAgora,
+                mudancasIntrabloco: `${INTRABLOCO.detectadas} estado(s) novo(s) detectado(s) com `
+                    + 'o MESMO bloco confirmado — é o que o gatilho por número de bloco não via',
+                estadosRepetidosIgnorados: `${ULTIMA_IMPRESSAO.repetidas} ciclo(s) com estado `
+                    + 'IDÊNTICO não foram reavaliados (recotar repetiria a resposta)',
+                estadosInconsistentes: FM.estadosInconsistentes,
                 comSobraBruta: brutosPositivos,
                 descartadasComProva: tri.recusadasPorSpread.length,
                 semDadoParaDecidir: tri.semDados,
@@ -1550,7 +1654,7 @@ async function principal(): Promise<void> {
                 latencia: LIVRO_DE_SINAIS.comoLer(),
                 limitacao: limitacaoDominante(FM),
             });
-            blocoDaTriagem = blocoAgora;
+            blocoDaTriagem = blocoDaAmostra;
         }
         FUNIL.rotasEncontradas += aN.rotas;
         FUNIL.espacoDeBusca = paresCruzados;

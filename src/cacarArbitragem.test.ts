@@ -226,3 +226,74 @@ test('o placar NÃO usa a palavra APROVADO para o que não executou', () => {
     assert.match(f, /execução NÃO comprovada/);
     assert.ok(!/APROVADA|APROVADO/.test(f), 'o placar voltou a dizer APROVADO');
 });
+
+// --- DIMENSIONAMENTO: cada direção empresta do SEU pool ---------------------
+//
+// DEFEITO CORRIGIDO em 2026-10-15, apontado por ela: *"Não reutilize a liquidez
+// de um pool como se fosse a capacidade de empréstimo de outro."* O código
+// dimensionava as DUAS direções pela reserva do Aerodrome — na direção B quem
+// empresta é o V3, e a reserva do Aerodrome não diz nada sobre isso.
+
+test('a direção A empresta do Aerodrome e a B do V3, com a liquidez de CADA um', async () => {
+    const { cotarAfetadas } = await import('./cacarArbitragem');
+    const { candidatasMistas } = await import('./rotasMistas');
+    const WETH = '0x4200000000000000000000000000000000000006';
+    const TOK = '0xfb31f85a8367210b2e4ed2360d2da9dc2d2ccc95';
+    const AERO = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const V3 = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const rotas = candidatasMistas([
+        {
+            endereco: AERO, token0: WETH, token1: TOK, venue: 'aerodrome', taxa: null,
+            estavel: false,
+        },
+        { endereco: V3, token0: WETH, token1: TOK, venue: 'v3', taxa: 500 },
+    ], WETH);
+
+    // Liquidez MUITO diferente nos dois: se o tamanho vier do pool errado, a
+    // quantia aparece com a ordem de grandeza do outro.
+    const RESERVA_AERO = 1_000_000n * 10n ** 18n;
+    const SALDO_V3 = 7n * 10n ** 18n;
+    const estado = {
+        sqrtPorPoolV3: new Map([[V3, 2n ** 96n]]),
+        token0PorPool: new Map<string, string>(),
+        reservasAerodrome: new Map([[AERO, { r0: RESERVA_AERO, r1: RESERVA_AERO }]]),
+        saldoDaBaseNoV3: new Map([[V3, SALDO_V3]]),
+        bloco: 1,
+    };
+
+    const quantiasVistas: bigint[] = [];
+    const emLote = async (
+        pedidos: Array<{ metodo: string; params: unknown[] }>,
+    ): Promise<Array<{ ok: boolean; dados: string | null }>> => {
+        for (const q of pedidos) {
+            const dados = String((q.params[0] as { data: string }).data);
+            // A quantia é o segundo argumento de cabeça do `cotar`.
+            quantiasVistas.push(BigInt(`0x${dados.slice(74, 138)}`));
+        }
+        // Reversão com número: ciclo que não fechou.
+        return pedidos.map(() => ({
+            ok: false,
+            dados: `0xba64f239${'0'.repeat(63)}1${'0'.repeat(63)}2`,
+        }));
+    };
+    const chamar = async (): Promise<unknown> => `0x${'0'.repeat(64)}`;
+
+    const sinais = await cotarAfetadas(
+        emLote, chamar as never, rotas, estado, 'pending', 1, Date.now(), 1_000_000n,
+        `0x${'60'.repeat(60)}`,
+    );
+    assert.equal(sinais.length, rotas.length);
+    assert.equal(quantiasVistas.length, 2, 'as duas direções foram cotadas');
+
+    // A escada começa em 1/10.000 da liquidez do pool que EMPRESTA.
+    const esperadoA = RESERVA_AERO / 10_000n;
+    const esperadoB = SALDO_V3 / 10_000n;
+    assert.ok(quantiasVistas.includes(esperadoA),
+        `a direção A tem de emprestar do Aerodrome (${esperadoA}), e as quantias foram `
+        + `${quantiasVistas.join(', ')}`);
+    assert.ok(quantiasVistas.includes(esperadoB),
+        `a direção B tem de emprestar do V3 (${esperadoB}) — usar a reserva do Aerodrome aqui `
+        + 'dimensionaria o empréstimo de um pool pela liquidez de outro');
+    assert.notEqual(esperadoA, esperadoB,
+        'o teste só prova algo porque as duas liquidezes são diferentes');
+});

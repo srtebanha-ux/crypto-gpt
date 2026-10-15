@@ -489,6 +489,55 @@ describe('o executor misto FECHA quando existe deslocamento', function () {
             'com o deslocamento induzido nenhuma quantia fecha: o bloqueio é do EXECUTOR, '
             + 'não da economia');
 
+        // 3b. O COTADOR POR OVERRIDE, conferido contra o EXECUTOR nesta MESMA
+        //     rota V3 + Aerodrome e neste MESMO estado.
+        //
+        // A prova anterior do override era V3+V3, e ela recusou generalizar
+        // dali: *"Nao considere uma prova V3 + V3 suficiente para validar
+        // automaticamente toda combinacao de protocolos."* Na rede nao da para
+        // conferir rota mista com um segundo cotador — medido em 15 blocos:
+        // ZERO rotas mistas usam pool V3 da fabrica canonica, entao o QuoterV2
+        // nao serve nenhuma delas. Quem confere, entao, e o EXECUTOR.
+        const {
+            codificarCotarCiclo, lerRespostaDaCotacao, COTADOR_LOCAL,
+        } = require('../dist/cotarMista.js');
+        const artefato = await hre.artifacts.readArtifact('CacadorV3');
+        let porOverride = null;
+        let overrideIndisponivel = null;
+        try {
+            await chamar('eth_call', [
+                {
+                    from: '0x0000000000000000000000000000000000000000',
+                    to: COTADOR_LOCAL,
+                    data: codificarCotarCiclo(rota, melhor.quantia),
+                    gas: '0xB71B00',
+                },
+                'latest',
+                { [COTADOR_LOCAL]: { code: artefato.deployedBytecode } },
+            ]);
+            overrideIndisponivel = 'não reverteu: o padrão Quoter responde revertendo';
+        } catch (e) {
+            const dado = (e && (e.data || (e.error && e.error.data))) || null;
+            const lido = lerRespostaDaCotacao(typeof dado === 'string' ? dado : null);
+            if (lido === null) {
+                overrideIndisponivel = `reversão não identificada: ${String(dado).slice(0, 12)}`;
+            } else {
+                porOverride = lido.sobra;
+            }
+        }
+        if (porOverride === null) {
+            console.log(`    OVERRIDE em rota MISTA: NÃO comparável (${overrideIndisponivel}).`
+                + ' BURACO DECLARADO: o caminho por override segue validado só em V3+V3.');
+        } else {
+            console.log(`    OVERRIDE em rota MISTA: sobra ${porOverride}`
+                + ` | cotação pelo contrato implantado: ${melhor.bruto}`
+                + ` | diferença ${porOverride - melhor.bruto}`);
+            assert.equal(porOverride, melhor.bruto,
+                'o cotador por OVERRIDE tem de dar o MESMO número que o contrato implantado na '
+                + 'mesma rota e no mesmo estado. Se diverge, o override não pode ser usado para '
+                + 'decidir dinheiro em rota mista');
+        }
+
         // 4. EXECUTA e EXIGE recibo.
         const antesArb = await saldo(WETH, arb);
         const antesTok = await saldo(TOKEN, arb);

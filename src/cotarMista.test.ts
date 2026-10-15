@@ -8,6 +8,7 @@ import {
     escadaDeTamanhos, percentis, LivroDeSinais, EstadoDosPools, type SinalDeArbitragem,
     codificarCotarCiclo, lerRespostaDaCotacao, lerCodigoDoCotador,
     SELETOR_LUCRO_INSUFICIENTE, SELETOR_PAGAMENTO_CURTO, COTADOR_LOCAL,
+    impressaoDoEstado, estadoInconsistente,
 } from './cotarMista';
 
 const WETH = '0x4200000000000000000000000000000000000006';
@@ -214,4 +215,51 @@ test('sem artefato NÃO há cotação, e isso não vira zero', () => {
         + 'segunda é o mercado');
     assert.equal(COTADOR_LOCAL, COTADOR_LOCAL.toLowerCase(),
         'o endereço do override entra na chave do mapa de override e é comparado em minúsculo');
+});
+
+// --- MUDANCA INTRABLOCO e CONSISTENCIA DE ESTADO ---------------------------
+
+test('DUAS mudanças de pending no MESMO bloco confirmado são estados distintos', () => {
+    // O gatilho antigo era `blocoAgora !== blocoDaTriagem`: com o bloco
+    // confirmado igual, nada era reavaliado e toda mudança intrabloco ficava
+    // invisível. A impressão do estado é o que a torna visível.
+    const bloco = 52_660_000;
+    const a = impressaoDoEstado(new Map([['p1', 'v3:100'], ['p2', 'ae:5/7']]));
+    const b = impressaoDoEstado(new Map([['p1', 'v3:101'], ['p2', 'ae:5/7']]));
+    const c = impressaoDoEstado(new Map([['p1', 'v3:101'], ['p2', 'ae:6/7']]));
+    assert.notEqual(a, b, 'primeira mudança intrabloco');
+    assert.notEqual(b, c, 'segunda mudança intrabloco');
+    const distintos = new Set([a, b, c]);
+    assert.equal(distintos.size, 3,
+        `três estados distintos no bloco confirmado ${bloco}: um gatilho por número de bloco `
+        + 'veria UM');
+    // Estado idêntico NÃO é estado novo: recotar repetiria a resposta.
+    assert.equal(impressaoDoEstado(new Map([['p2', 'ae:5/7'], ['p1', 'v3:100']])), a,
+        'a impressão não pode depender da ordem de iteração do mapa');
+});
+
+test('ausência entra na impressão como ausência, não como zero', () => {
+    const comNulo = impressaoDoEstado(new Map([['p1', null]]));
+    const comZero = impressaoDoEstado(new Map([['p1', 'v3:0']]));
+    assert.notEqual(comNulo, comZero,
+        '"não li" e "li zero" são estados diferentes, e tratá-los como iguais faria uma falha de '
+        + 'RPC parecer um pool esvaziado');
+});
+
+test('ESTADO_INCONSISTENTE olha só os pools DA ROTA', () => {
+    const antes = new Map<string, string | null>([
+        ['pv3', 'v3:100'], ['paero', 'ae:5/7'], ['alheio', 'v3:1'],
+    ]);
+    const depois = new Map<string, string | null>([
+        ['pv3', 'v3:100'], ['paero', 'ae:5/7'], ['alheio', 'v3:999'],
+    ]);
+    assert.equal(estadoInconsistente(antes, depois, ['pv3', 'paero']), false,
+        'pool alheio ter mudado não torna esta cotação inconsistente — tratar como se tornasse '
+        + 'jogaria fora cotação boa');
+    depois.set('pv3', 'v3:101');
+    assert.equal(estadoInconsistente(antes, depois, ['pv3', 'paero']), true,
+        'o pool da rota mudou entre a leitura e a cotação: a conta somou dois instantes');
+    // Pool que não foi relido NÃO afirma mudança.
+    assert.equal(estadoInconsistente(antes, new Map(), ['pv3', 'paero']), false,
+        'não reli não é "mudou": inventar mudança descartaria oportunidade real');
 });

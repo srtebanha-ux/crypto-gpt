@@ -40,6 +40,7 @@ export const SELETORES_DA_COTACAO = {
     fee: sel('fee()'),
     quoteExactInputSingle: sel('quoteExactInputSingle((address,address,uint256,uint24,uint160))'),
     getAmountOut: sel('getAmountOut(uint256,address)'),
+    balanceOf: sel('balanceOf(address)'),
 };
 
 const palavra = (v: bigint): string => v.toString(16).padStart(64, '0');
@@ -224,6 +225,31 @@ export class LivroDeSinais {
  * neste projeto: 48 caracteres de `slot0` sao quase todos zero, e "o pool nao
  * mudou" era propriedade do meu instrumento, nao do pool.
  */
+/**
+ * A IMPRESSAO de um estado — o que diz se houve mudanca DENTRO do mesmo bloco.
+ *
+ * Ela cortou o gatilho anterior por nome: *"Nao dependa exclusivamente de
+ * `eth_blockNumber` para decidir quando avaliar `pending`. Demonstre que o
+ * sistema reconhece estados pre-confirmados diferentes mesmo quando o numero do
+ * ultimo bloco confirmado e o mesmo."*
+ *
+ * Esta certa, e era defeito: o caçador avaliava UMA vez por bloco confirmado
+ * (`blocoAgora !== blocoDaTriagem`), entao toda mudanca intrabloco — e a Base
+ * monta o bloco em fatias de ~200ms — era invisivel por construcao.
+ *
+ * O provedor publico NAO expoe versao de estado: `eth_getBlockByNumber('pending')`
+ * devolve hash zerado (medido). Entao a identificacao e por FINGERPRINT dos
+ * proprios pools, e a limitacao fica declarada: duas mudancas que se cancelem
+ * exatamente leem como uma; e uma mudanca em pool que nao vigiamos nao aparece.
+ */
+export function impressaoDoEstado(cru: Map<string, string | null>): string {
+    // Ordenado para a impressao nao depender da ordem de iteracao.
+    return [...cru.entries()]
+        .map(([k, v]) => `${k}=${v ?? '?'}`)
+        .sort()
+        .join('|');
+}
+
 export class EstadoDosPools {
     private readonly ultimo = new Map<string, string>();
 
@@ -243,6 +269,31 @@ export class EstadoDosPools {
     }
 
     get quantosConhecidos(): number { return this.ultimo.size; }
+
+    /** A impressao do que esta guardado, para comparar estados inteiros. */
+    impressao(): string { return impressaoDoEstado(this.ultimo as Map<string, string | null>); }
+}
+
+/**
+ * O ESTADO MUDOU ENTRE A LEITURA E A COTACAO?
+ *
+ * *"Nao combine indiscriminadamente reservas, precos e cotacoes de snapshots
+ * diferentes. Se o estado mudar durante a avaliacao, revalide a oportunidade ou
+ * marque ESTADO_INCONSISTENTE."*
+ *
+ * Compara SO os pools da rota avaliada: um pool alheio ter mudado nao torna
+ * esta cotacao inconsistente, e tratar como se tornasse jogaria fora cotacao
+ * boa.
+ */
+export function estadoInconsistente(
+    antes: Map<string, string | null>, depois: Map<string, string | null>, poolsDaRota: string[],
+): boolean {
+    for (const p of poolsDaRota) {
+        const k = p.toLowerCase();
+        if (!depois.has(k)) continue; // nao reli: nao afirmo mudanca
+        if (antes.get(k) !== depois.get(k)) return true;
+    }
+    return false;
 }
 
 /**
