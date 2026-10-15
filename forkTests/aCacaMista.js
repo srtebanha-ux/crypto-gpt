@@ -48,9 +48,13 @@ const WETH = '0x4200000000000000000000000000000000000006';
 const TOP_V3 = id('Swap(address,address,int256,int256,uint160,uint128,int24)');
 const TOP_AERO = id('Swap(address,address,uint256,uint256,uint256,uint256)');
 const SELETOR_SWAP_V3 = sel('swap(address,bool,int256,uint160,bytes)');
-// O `epsilon` das razoes maximas, igual ao do cacador ao vivo: ele tem de ser
-// MENOR que todo tamanho avaliado, senao a razao do Aerodrome deixa de ser teto.
-const EPSILON = 10n ** 12n;
+// NAO EXISTE MAIS EPSILON. Ela comprovou que `getAmountOut(epsilon)/epsilon`
+// nao e razao maxima — a razao cai com o tamanho e fica sempre abaixo da
+// marginal — e que o mesmo inteiro cru valia coisas diferentes em tokens de
+// decimais diferentes. O teto agora sai das RESERVAS, demonstrado do invariante.
+// Ainda ha uma chamada de `getAmountOut` na IDENTIFICACAO do pool: ali ela so
+// responde "este contrato tem a interface do Aerodrome", e nao decide economia.
+const SONDA_DE_INTERFACE = 10n ** 12n;
 
 const S = {
     balanceOf: sel('balanceOf(address)'),
@@ -59,6 +63,8 @@ const S = {
     fee: sel('fee()'),
     getAmountOut: sel('getAmountOut(uint256,address)'),
     slot0: sel('slot0()'),
+    getReserves: sel('getReserves()'),
+    estavel: sel('stable()'),
 };
 const iface = new Interface([
     'function executarRota((address pool,address tokenEntra,uint8 tipo,uint256 pagamento)[] rota, uint256 quantia, uint256 lucroMinimo) returns (uint256)',
@@ -135,7 +141,11 @@ describe('o caçador misto em observação', function () {
         // por ter negociado depois do estado em que e avaliado.
         const QUANTOS = Number(process.env.MISTA_BLOCOS ?? 250);
         const ESTADOS = Number(process.env.MISTA_ESTADOS ?? 5);
-        const topo = Number(await upstream('eth_blockNumber', []));
+        // `MISTA_TOPO` fixa a janela para REAVALIAR os mesmos estados de uma
+        // corrida anterior. Sem ela, a janela e o topo da corrente.
+        const topo = process.env.MISTA_TOPO
+            ? Number(process.env.MISTA_TOPO)
+            : Number(await upstream('eth_blockNumber', []));
         const fimDaDescoberta = topo - ESTADOS;
         const inicio = fimDaDescoberta - QUANTOS + 1;
         const vistos = new Map();
@@ -211,9 +221,16 @@ describe('o caçador misto em observação', function () {
                 // bytes, entao a chamada e a unica identificacao possivel.
                 // eslint-disable-next-line no-await-in-loop
                 const q = await ler(endereco, S.getAmountOut
-                    + coder.encode(['uint256', 'address'], [EPSILON, a]).slice(2));
+                    + coder.encode(['uint256', 'address'], [SONDA_DE_INTERFACE, a]).slice(2));
                 if (q === null || q === '0x') continue;
-                pools.push({ endereco, token0: a, token1: b2, venue: 'aerodrome', taxa: null });
+                // `stable()`: so `false` autoriza o descarte pelo filtro.
+                // Ausencia fica `null`, e `null` manda cotar.
+                // eslint-disable-next-line no-await-in-loop
+                const est = num(await ler(endereco, S.estavel));
+                pools.push({
+                    endereco, token0: a, token1: b2, venue: 'aerodrome', taxa: null,
+                    estavel: est === null ? null : est !== 0n,
+                });
             }
         }
         f.poolsVistos = {
@@ -289,6 +306,7 @@ describe('o caçador misto em observação', function () {
         // filtro recusou, e soma-las a `cotacoesTentadas` faria o funil afirmar
         // que uma rota descartada foi avaliada economicamente.
         let expiradasNaAuditoria = 0;
+        const auditarPorEstado = Number(process.env.MISTA_AUDITAR ?? 6);
         const limitePorEstado = Number(process.env.MISTA_COTAR ?? 60);
         for (let b = primeiro; b <= topo; b += 1) {
             // Cada estado e um bloco DIFERENTE da corrente. Isto e o que
@@ -321,22 +339,22 @@ describe('o caçador misto em observação', function () {
             // Aerodrome. E a mesma informacao que `lerEstadoMisto` le ao vivo.
             const tLeitura0 = agora();
             const sqrtPorPoolV3 = new Map();
-            const saidaAerodrome = new Map();
+            const reservasAerodrome = new Map();
             const v3s = [...new Set(candidatas.map((c) => c.poolV3))];
             // eslint-disable-next-line no-await-in-loop
             await Promise.all(v3s.map(async (pool) => {
                 const r = await ler(pool, S.slot0);
                 sqrtPorPoolV3.set(pool, (r && r.length >= 66) ? BigInt(`0x${r.slice(2, 66)}`) : null);
             }));
-            const aeros = [...new Set(candidatas.map(
-                (c) => `${c.poolAerodrome}|${c.direcao === 'A' ? WETH.toLowerCase() : c.token}`,
-            ))];
+            const aeros = [...new Set(candidatas.map((c) => c.poolAerodrome))];
             // eslint-disable-next-line no-await-in-loop
-            await Promise.all(aeros.map(async (k) => {
-                const [pool, token] = k.split('|');
-                const r = await ler(pool, S.getAmountOut
-                    + coder.encode(['uint256', 'address'], [EPSILON, token]).slice(2));
-                saidaAerodrome.set(k, num(r));
+            await Promise.all(aeros.map(async (pool) => {
+                const r = await ler(pool, S.getReserves);
+                // `getReserves()` devolve tres palavras; as duas primeiras sao
+                // as reservas CRUAS. Menos que isso e ausencia, nao zero.
+                reservasAerodrome.set(pool, (r && r.length >= 130)
+                    ? { r0: BigInt(`0x${r.slice(2, 66)}`), r1: BigInt(`0x${r.slice(66, 130)}`) }
+                    : null);
             }));
             const tLeitura = agora();
             T.leituraDoEstado.push(tLeitura - tLeitura0);
@@ -344,10 +362,11 @@ describe('o caçador misto em observação', function () {
             // O PRE-FILTRO: a MESMA funcao do cacador ao vivo.
             const tPre0 = agora();
             const tri = triarCandidatas(candidatas, WETH, {
-                sqrtPorPoolV3, token0PorPool: new Map(), saidaAerodrome, epsilon: EPSILON, bloco: b,
+                sqrtPorPoolV3, token0PorPool: new Map(), reservasAerodrome, bloco: b,
             });
             T.prefiltro.push(agora() - tPre0);
             f.estadosAvaliados += 1;
+            f.rotasTriadas += tri.valem.length;
             f.faltaDeSpread += tri.recusadasPorSpread.length;
             f.faltaDeDados += tri.semDados;
 
@@ -361,24 +380,32 @@ describe('o caçador misto em observação', function () {
             // rejeição nunca pode rejeitar uma rota que o executor comprovou
             // lucrativa naquele mesmo estado."* Uma amostra das RECUSADAS e
             // cotada de qualquer jeito, e nenhuma pode devolver sobra bruta.
-            for (const c of tri.recusadasPorSpread.slice(0, 3)) {
+            // A AUDITORIA DE UM TAMANHO SO NAO PROVA NADA SOBRE OS OUTROS, e
+            // ela cortou isso por nome: *"Não use o resultado das nove
+            // auditorias em um único tamanho como prova para todos os
+            // tamanhos."* Cada recusada e cotada em VARIOS tamanhos — e sao os
+            // mesmos tamanhos que a cotacao de verdade usa.
+            for (const c of tri.recusadasPorSpread.slice(0, auditarPorEstado)) {
                 const poolBase = c.direcao === 'A' ? c.poolAerodrome : c.poolV3;
                 // eslint-disable-next-line no-await-in-loop
                 const wethNoPool = await saldo(WETH, poolBase);
                 if (wethNoPool === 0n) continue;
-                const q = wethNoPool / 200n;
-                if (q === 0n) continue;
-                auditadas += 1;
-                const tAud = agora();
-                // eslint-disable-next-line no-await-in-loop
-                const r = await cotarNo(arb, dono, c, q, q);
-                const idadeAud = agora() - tLeitura;
-                T.idadeDoDadoMs.push(idadeAud);
-                T.totalPorOportunidade.push(agora() - tAud);
-                if (intervaloMs !== null && idadeAud > intervaloMs) expiradasNaAuditoria += 1;
-                assert.ok(!(r.ok && r.bruto > 0n),
-                    `INVARIANTE VIOLADA no estado ${b}: o filtro recusou ${c.chave} e o `
-                    + `executor devolveu sobra bruta ${r.bruto} no MESMO estado`);
+                for (const fr of [10_000n, 1000n, 200n, 50n, 10n]) {
+                    const q = wethNoPool / fr;
+                    if (q === 0n) continue;
+                    auditadas += 1;
+                    const tAud = agora();
+                    // eslint-disable-next-line no-await-in-loop
+                    const r = await cotarNo(arb, dono, c, q, q);
+                    const idadeAud = agora() - tLeitura;
+                    T.idadeDoDadoMs.push(idadeAud);
+                    T.totalPorOportunidade.push(agora() - tAud);
+                    if (intervaloMs !== null && idadeAud > intervaloMs) expiradasNaAuditoria += 1;
+                    assert.ok(!(r.ok && r.bruto > 0n),
+                        `INVARIANTE VIOLADA no estado ${b}: o filtro recusou ${c.chave} e o `
+                        + `executor devolveu sobra bruta ${r.bruto} no tamanho ${q}, no MESMO `
+                        + 'estado');
+                }
             }
 
             // ===== 6. COTACAO das que passaram, com o tamanho por fracao da
@@ -431,8 +458,9 @@ describe('o caçador misto em observação', function () {
             + ` com sobra bruta | ${evitadas} DESCARTADAS pelo pré-filtro`
             + ` | ${auditadas} recusadas AUDITADAS contra a invariante`);
         console.log('    INVARIANTE DELA, exercitada em estado REAL: nenhuma das'
-            + ` ${auditadas} rotas que o filtro recusou devolveu sobra bruta quando cotada no`
-            + ' MESMO estado. O teste falharia no `assert` se alguma devolvesse.');
+            + ` ${auditadas} cotações de rotas RECUSADAS devolveu sobra bruta no MESMO estado,`
+            + ' e cada rota foi cotada em CINCO tamanhos (1/10.000 a 1/10 da liquidez do pool'
+            + ' que empresta). O teste falharia no `assert` se alguma devolvesse.');
 
         // ===== 7. SIMULACAO ATOMICA COMPLETA. So ela classifica EXECUTAVEL.
         //

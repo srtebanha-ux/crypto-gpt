@@ -16,7 +16,13 @@ const AERO = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const V3 = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
 const pool = (e: string, t0: string, t1: string, venue: 'v3' | 'aerodrome'): PoolMisto => ({
-    endereco: e, token0: t0, token1: t1, venue, taxa: venue === 'v3' ? 3000 : null,
+    endereco: e,
+    token0: t0,
+    token1: t1,
+    venue,
+    taxa: venue === 'v3' ? 3000 : null,
+    // `stable() == false` LIDO: so com isso existe teto demonstrado.
+    estavel: venue === 'aerodrome' ? false : null,
 });
 
 test('um par {Aerodrome, V3} rende as DUAS direções', () => {
@@ -137,11 +143,73 @@ test('a razão do V3 sai do preço spot, e o lado inverte com o token de entrada
     assert.equal(razaoMaximaV3(0n, true), null);
 });
 
-test('a razão do Aerodrome é a conta DELE, e epsilon zero não vira razão', () => {
-    assert.deepEqual(razaoMaximaAerodrome(300n, 100n), { num: 300n, den: 100n });
-    assert.equal(razaoMaximaAerodrome(null, 100n), null);
-    assert.equal(razaoMaximaAerodrome(300n, 0n), null);
-    assert.equal(razaoMaximaAerodrome(0n, 100n), null);
+test('a razão do Aerodrome sai das RESERVAS, e só para volatile comprovado', () => {
+    // `rSai / rEntra`, cru, sem descontar taxa: descontar aperta o teto e um
+    // teto apertado RECUSA rota boa, que e o defeito que ela achou.
+    assert.deepEqual(razaoMaximaAerodrome(100n, 300n, true), { num: 300n, den: 100n });
+    // STABLE nao tem teto demonstrado: `x³y + y³x = k` nao e `x·y = k`.
+    assert.equal(razaoMaximaAerodrome(100n, 300n, false), null,
+        'pool stable não pode ser descartado por um teto que só vale para o invariante xy=k');
+    assert.equal(razaoMaximaAerodrome(100n, 300n, null), null,
+        '`stable()` sem resposta é ausência, e ausência não descarta');
+    assert.equal(razaoMaximaAerodrome(null, 300n, true), null);
+    assert.equal(razaoMaximaAerodrome(0n, 300n, true), null);
+    assert.equal(razaoMaximaAerodrome(100n, 0n, true), null);
+});
+
+test('O FALSO NEGATIVO que ela comprovou: a cotação finita NÃO é teto', () => {
+    // A formula EXATA do Aerodrome volatile, com taxa de 30bp.
+    const saida = (x: bigint, rEntra: bigint, rSai: bigint, taxaBp: bigint): bigint => {
+        const xf = (x * (10_000n - taxaBp)) / 10_000n;
+        return (rSai * xf) / (rEntra + xf);
+    };
+    const rEntra = 1000n * 10n ** 18n;
+    const rSai = 1000n * 10n ** 18n;
+    // MEDIDO: a razao CAI com o tamanho e fica sempre abaixo da marginal.
+    const r1 = saida(10n ** 12n, rEntra, rSai, 30n);
+    const r2 = saida(100n * 10n ** 18n, rEntra, rSai, 30n);
+    assert.ok(r1 * (100n * 10n ** 18n) > r2 * 10n ** 12n,
+        'a razão saída/entrada tem de CAIR com o tamanho — é isso que torna a cotação num '
+        + 'tamanho um teto só para os tamanhos MAIORES que ele, nunca para os menores');
+    assert.ok(r2 * rEntra < rSai * (100n * 10n ** 18n),
+        'a cotação finita fica SEMPRE abaixo da marginal rSai/rEntra: usá-la como teto é usar '
+        + 'um número menor que o máximo, e um teto menor que o máximo produz falso negativo');
+
+    // O ESTADO DO FALSO NEGATIVO. O V3 paga 5% a mais que 1:1, modelado pelas
+    // reservas VIRTUAIS que a liquidez concentrada implica — ali a conta do V3
+    // dentro de um tick e exatamente `x·y = k`.
+    const vEntra = 1000n * 10n ** 18n;
+    const vSai = (1050n * 10n ** 18n);
+    const sqrtV3 = sqrtDe(1.05);
+
+    // 1) O FILTRO ANTIGO, reproduzido: razao do Aerodrome pela cotacao de um
+    //    tamanho finito (100 WETH, que era um dos tamanhos avaliados).
+    const epsilonAntigo = 100n * 10n ** 18n;
+    const razaoAntiga = { num: saida(epsilonAntigo, rEntra, rSai, 30n), den: epsilonAntigo };
+    const razaoV3 = razaoMaximaV3(sqrtV3, true)!;
+    assert.equal(produtoPassaDeUm(razaoAntiga, razaoV3), false,
+        'o filtro ANTIGO tem de REJEITAR este estado — é o falso negativo que ela comprovou');
+
+    // 2) A EXECUCAO MENOR e lucrativa de verdade, pelas formulas exatas das
+    //    duas pernas (1 WETH contra reservas de 1000).
+    const entrada = 10n ** 18n;
+    const noMeio = saida(entrada, rEntra, rSai, 30n);
+    const devolta = saida(noMeio, vEntra, vSai, 5n); // V3 em 5bp
+    assert.ok(devolta > entrada,
+        `a execução de 1 WETH devolve ${devolta} contra ${entrada} que entraram: é LUCRATIVA, `
+        + 'e o filtro antigo a descartava');
+
+    // 3) O FILTRO NOVO PRESERVA ela.
+    const novo = semSpreadEmTamanhoNenhum({
+        direcao: 'A',
+        sqrtPriceX96: sqrtV3,
+        tokenDoMeioEhToken0NoV3: true,
+        reservaEntraNoAero: rEntra,
+        reservaSaiNoAero: rSai,
+        aeroEhVolatile: true,
+    });
+    assert.equal(novo.vale, true,
+        'INVARIANTE: o filtro novo não pode rejeitar a rota que a execução prova lucrativa');
 });
 
 test('o produto é comparado com 1 sem dividir inteiros', () => {
@@ -163,9 +231,10 @@ test('AS UNIDADES BATEM nas duas direções — o defeito que ela achou', () => 
                 direcao,
                 sqrtPriceX96: Q96,
                 tokenDoMeioEhToken0NoV3: tokenEhZero,
-                // 1:1 tambem no Aerodrome.
-                saidaAerodromeNoEpsilon: 10n ** 12n,
-                epsilon: 10n ** 12n,
+                // 1:1 tambem no Aerodrome, pelas reservas.
+                reservaEntraNoAero: 10n ** 21n,
+                reservaSaiNoAero: 10n ** 21n,
+                aeroEhVolatile: true,
             });
             assert.equal(v.vale, false,
                 `direção ${direcao}, token0=${tokenEhZero}: 1:1 em ambos não fecha`);
@@ -180,14 +249,14 @@ test('spread REAL de 20% passa o filtro nas duas direções', () => {
     // Direcao A: compra token no Aerodrome a 1 token/WETH e vende no V3 a
     // 1,2 WETH/token.  Direcao B: compra no V3 e vende no Aerodrome, e aí quem
     // paga mais e o Aerodrome.
-    const eps = 10n ** 12n;
     const aPassa = semSpreadEmTamanhoNenhum({
         direcao: 'A',
         // V3: token do meio e token0, e 1 token0 -> 1,2 token1(WETH).
         sqrtPriceX96: (Q96 * 1095445n) / 1000000n, // sqrt(1,2) ~ 1,0954
         tokenDoMeioEhToken0NoV3: true,
-        saidaAerodromeNoEpsilon: eps, // 1 token por WETH
-        epsilon: eps,
+        reservaEntraNoAero: 10n ** 21n, // 1 token por WETH
+        reservaSaiNoAero: 10n ** 21n,
+        aeroEhVolatile: true,
     });
     assert.equal(aPassa.vale, true, 'direção A com 20% de spread foi rejeitada');
 
@@ -197,8 +266,9 @@ test('spread REAL de 20% passa o filtro nas duas direções', () => {
         sqrtPriceX96: Q96,
         tokenDoMeioEhToken0NoV3: true,
         // Aerodrome paga 1,2 WETH por token.
-        saidaAerodromeNoEpsilon: (eps * 12n) / 10n,
-        epsilon: eps,
+        reservaEntraNoAero: 10n ** 21n,
+        reservaSaiNoAero: (10n ** 21n * 12n) / 10n,
+        aeroEhVolatile: true,
     });
     assert.equal(bPassa.vale, true, 'direção B com 20% de spread foi rejeitada');
 });
@@ -207,9 +277,8 @@ test('DECIMAIS diferentes não quebram o filtro', () => {
     // Token de 6 casas contra WETH de 18: a razao fica em 1e-12, e o produto
     // com o inverso volta a ~1. Se o codigo tivesse qualquer suposicao de
     // decimais, isto quebraria.
-    const eps = 10n ** 18n;
-    // Aerodrome: 1 WETH (1e18) -> 1 token de 6 casas (1e6). Razao 1e-12.
-    const saida = 10n ** 6n;
+    // Aerodrome: reservas de 1000 WETH (1e21) contra 1000 tokens de 6 casas
+    // (1e9). Razao 1e-12, em unidade CRUA nas duas pontas.
     // V3 paga de volta 1 WETH por token: razao 1e12. Produto = 1, nao passa.
     // sqrtP tal que token1/token0 = 1e12, com o token do meio como token0.
     const sqrt = Q96 * 10n ** 6n; // (1e6)^2 = 1e12
@@ -217,8 +286,9 @@ test('DECIMAIS diferentes não quebram o filtro', () => {
         direcao: 'A',
         sqrtPriceX96: sqrt,
         tokenDoMeioEhToken0NoV3: true,
-        saidaAerodromeNoEpsilon: saida,
-        epsilon: eps,
+        reservaEntraNoAero: 10n ** 21n,
+        reservaSaiNoAero: 10n ** 9n,
+        aeroEhVolatile: true,
     });
     assert.equal(v.vale, false, 'com decimais diferentes e produto exatamente 1, não fecha');
 
@@ -227,24 +297,42 @@ test('DECIMAIS diferentes não quebram o filtro', () => {
         direcao: 'A',
         sqrtPriceX96: (sqrt * 1005n) / 1000n,
         tokenDoMeioEhToken0NoV3: true,
-        saidaAerodromeNoEpsilon: saida,
-        epsilon: eps,
+        reservaEntraNoAero: 10n ** 21n,
+        reservaSaiNoAero: 10n ** 9n,
+        aeroEhVolatile: true,
     });
     assert.equal(melhor.vale, true, '1% de spread com decimais diferentes foi rejeitado');
 });
 
 test('AUSÊNCIA de dado manda COTAR — nunca descarta', () => {
+    const cheio = {
+        sqrtPriceX96: Q96 as bigint | null,
+        reservaEntraNoAero: 10n ** 21n as bigint | null,
+        reservaSaiNoAero: 10n ** 21n as bigint | null,
+        aeroEhVolatile: true as boolean | null,
+    };
     for (const falta of [
-        { sqrtPriceX96: null, saidaAerodromeNoEpsilon: 10n ** 12n },
-        { sqrtPriceX96: Q96, saidaAerodromeNoEpsilon: null },
+        { ...cheio, sqrtPriceX96: null },
+        { ...cheio, reservaEntraNoAero: null },
+        { ...cheio, reservaSaiNoAero: null },
     ]) {
         for (const direcao of ['A', 'B'] as const) {
             const v = semSpreadEmTamanhoNenhum({
-                direcao, tokenDoMeioEhToken0NoV3: true, epsilon: 10n ** 12n, ...falta,
+                direcao, tokenDoMeioEhToken0NoV3: true, ...falta,
             });
             assert.equal(v.vale, true, `direção ${direcao}: ausência de dado descartou rota`);
             assert.match(v.porque, /ausência não descarta/);
         }
+    }
+    // POOL STABLE: nao e ausencia de dado, e a frase tem de dizer OUTRA coisa —
+    // o teto nao esta demonstrado para o invariante dele.
+    for (const estavel of [true, null]) {
+        const v = semSpreadEmTamanhoNenhum({
+            direcao: 'A', tokenDoMeioEhToken0NoV3: true, ...cheio, aeroEhVolatile: estavel === true ? false : null,
+        });
+        if (estavel === true) continue;
+        assert.equal(v.vale, true);
+        assert.match(v.porque, /não é COMPROVADAMENTE volatile/);
     }
 });
 
@@ -253,8 +341,9 @@ test('a recusa é sobre TODOS os tamanhos, e a frase diz por quê', () => {
         direcao: 'A',
         sqrtPriceX96: Q96,
         tokenDoMeioEhToken0NoV3: true,
-        saidaAerodromeNoEpsilon: 10n ** 12n / 2n,
-        epsilon: 10n ** 12n,
+        reservaEntraNoAero: 10n ** 21n,
+        reservaSaiNoAero: 10n ** 21n / 2n,
+        aeroEhVolatile: true,
     });
     assert.equal(v.vale, false);
     // A justificativa tem de ser a concavidade, nao "testei um tamanho".
@@ -274,19 +363,19 @@ const sqrtDe = (p: number): bigint => BigInt(Math.floor(Math.sqrt(p) * 2 ** 96))
 // As DUAS leituras do Aerodrome sao diferentes de proposito: entrar com WETH e
 // entrar com o token sao perguntas distintas ao mesmo pool, e usar uma resposta
 // para as duas foi o que deixou este teste aprovar as duas direcoes de uma vez.
+// As reservas do Aerodrome na ordem `token0, token1` — e `token0` do pool de
+// teste e o WETH, entao `r0` e a reserva de WETH.
 const estado = (e: {
     sqrt: bigint | null;
-    aeroComWeth: bigint | null;
-    aeroComTok: bigint | null;
-    epsilon?: bigint;
+    rWeth: bigint | null;
+    rTok: bigint | null;
 }): LeiturasDoEstado => ({
     sqrtPorPoolV3: new Map([[V3.toLowerCase(), e.sqrt]]),
     token0PorPool: new Map(),
-    saidaAerodrome: new Map([
-        [`${AERO.toLowerCase()}|${WETH.toLowerCase()}`, e.aeroComWeth],
-        [`${AERO.toLowerCase()}|${TOK.toLowerCase()}`, e.aeroComTok],
-    ]),
-    epsilon: e.epsilon ?? 1_000_000n,
+    reservasAerodrome: new Map([[
+        AERO.toLowerCase(),
+        e.rWeth === null || e.rTok === null ? null : { r0: e.rWeth, r1: e.rTok },
+    ]]),
     bloco: 1,
 });
 
@@ -307,7 +396,7 @@ test('a triagem recusa as DUAS direções quando os dois pools estão 1:1', () =
     // WETH e token0 no V3, preco 1: a razao e 1 nos dois lados. O Aerodrome
     // devolve epsilon exato: razao 1. Produto 1, que NAO passa de 1.
     const cs = asCandidatas();
-    const t = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1), aeroComWeth: 1_000_000n, aeroComTok: 1_000_000n }));
+    const t = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1), rWeth: 10n ** 21n, rTok: 10n ** 21n }));
     assert.equal(t.valem.length, 0, 'sem spread nenhuma direção pode passar');
     assert.equal(t.recusadasPorSpread.length, cs.length);
     assert.equal(t.semDados, 0, 'havia dado: a recusa é sobre spread, não sobre ausência');
@@ -323,7 +412,7 @@ test('a triagem passa a direção em que existe spread, e só ela', () => {
     // Direcao A (Aerodrome empresta, V3 vende): 1,2 x 1 = 1,2 -> PASSA.
     // Direcao B (V3 empresta, Aerodrome vende): 1 x (1/1,2) = 0,83 -> recusa.
     const cs = asCandidatas();
-    const t = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1), aeroComWeth: 1_200_000n, aeroComTok: 833_333n }));
+    const t = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1), rWeth: 10n ** 21n, rTok: (10n ** 21n * 12n) / 10n }));
     assert.equal(t.valem.length, 1, 'uma direção fecha e a outra não: as duas são perguntas '
         + 'diferentes, e avaliar só uma era metade da busca');
     assert.equal(t.valem[0]!.direcao, 'A');
@@ -332,13 +421,13 @@ test('a triagem passa a direção em que existe spread, e só ela', () => {
 
 test('AUSÊNCIA de dado manda cotar e é contada SEPARADA de falta de spread', () => {
     const cs = asCandidatas();
-    const semSqrt = triarCandidatas(cs, WETH, estado({ sqrt: null, aeroComWeth: 1_000_000n, aeroComTok: 1_000_000n }));
+    const semSqrt = triarCandidatas(cs, WETH, estado({ sqrt: null, rWeth: 10n ** 21n, rTok: 10n ** 21n }));
     assert.equal(semSqrt.valem.length, cs.length, 'sem `slot0` não há produto, e "não sei" '
         + 'nunca autoriza descartar rota');
     assert.equal(semSqrt.semDados, cs.length);
     assert.equal(semSqrt.recusadasPorSpread.length, 0);
 
-    const semAero = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1), aeroComWeth: null, aeroComTok: null }));
+    const semAero = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1), rWeth: null, rTok: null }));
     assert.equal(semAero.valem.length, cs.length);
     assert.equal(semAero.semDados, cs.length,
         'falta de dado e falta de spread pedem consertos OPOSTOS: uma é o avaliador, a outra é '
@@ -349,12 +438,12 @@ test('a INVARIANTE dela: o filtro não pode recusar rota com spread de verdade',
     // 20% de spread real, nas duas direcoes, e em decimais diferentes (o
     // Aerodrome respondendo em 6 casas contra 18 do WETH).
     const cs = asCandidatas();
-    const paraA = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1), aeroComWeth: 1_200_000n, aeroComTok: 833_333n }));
+    const paraA = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1), rWeth: 10n ** 21n, rTok: (10n ** 21n * 12n) / 10n }));
     assert.ok(paraA.valem.some((c) => c.direcao === 'A'),
         'INVARIANTE: um filtro de rejeição nunca pode rejeitar uma rota que o executor '
         + 'comprovaria lucrativa naquele mesmo estado');
     // Agora o spread esta do outro lado: o V3 paga 1,2 token por WETH.
-    const paraB = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1.2), aeroComWeth: 1_000_000n, aeroComTok: 1_000_000n }));
+    const paraB = triarCandidatas(cs, WETH, estado({ sqrt: sqrtDe(1.2), rWeth: 10n ** 21n, rTok: 10n ** 21n }));
     assert.ok(paraB.valem.some((c) => c.direcao === 'B'),
         'a direção B foi a que FECHOU na prova de execução atômica (0,0598 WETH líquido): um '
         + 'filtro que a recusa apaga a única rota provada deste projeto');
@@ -384,4 +473,26 @@ test('o funil separa DESCOBERTA de ESTADO AVALIADO na própria frase', () => {
     assert.match(frase, /5 ESTADO\(S\) distinto\(s\) avaliado\(s\)/,
         '250 blocos observados não são 250 estados avaliados: o `hardhat_reset` acontecia uma '
         + 'vez e tudo era cotado no mesmo estado');
+});
+
+test('pool STABLE não é descartado, e não é contado como falta de dado', () => {
+    const pools = [
+        { ...pool(AERO, WETH, TOK, 'aerodrome' as const), estavel: true },
+        pool(V3, WETH, TOK, 'v3' as const),
+    ];
+    const cs = candidatasMistas(pools, WETH);
+    // O estado esta COMPLETO: `slot0` e reservas lidos, e as razoes dariam
+    // produto 1. Mesmo assim nada pode ser descartado — o teto das reservas sai
+    // do invariante `x·y = k`, e o pool stable usa outro.
+    const t = triarCandidatas(cs, WETH, estado({
+        sqrt: sqrtDe(1), rWeth: 10n ** 21n, rTok: 10n ** 21n,
+    }));
+    assert.equal(t.recusadasPorSpread.length, 0,
+        'pool stable descartado por um teto que não vale para o invariante dele é exatamente o '
+        + 'falso negativo que ela proibiu');
+    assert.equal(t.valem.length, cs.length);
+    assert.equal(t.semProvaDoInvariante, cs.length);
+    assert.equal(t.semDados, 0,
+        'a leitura VEIO: chamar isto de falta de dado mandaria consertar o RPC quando o que '
+        + 'falta é a demonstração matemática');
 });

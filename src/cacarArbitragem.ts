@@ -44,15 +44,6 @@ import {
     type PoolMisto, type CandidataMista, type LeiturasDoEstado,
 } from './rotasMistas';
 
-/**
- * O `epsilon` das razoes maximas: 1e-6 WETH, em wei.
- *
- * Ele tem de ser MENOR que todo tamanho avaliado. A razao `saida/entrada` cai
- * com o tamanho, entao um epsilon grande devolveria razao menor que a
- * verdadeira — e o filtro passaria a RECUSAR rota lucrativa, que e o defeito
- * que ela achou na direcao B.
- */
-const EPSILON_DA_RAZAO = 10n ** 12n;
 
 const log = createLogger('arb');
 const coder = AbiCoder.defaultAbiCoder();
@@ -138,56 +129,44 @@ const SELETORES = {
     // sabemos emprestar de um de liquidez concentrada, cuja conta nao e esta.
     factory: sel('factory()'),
     // O ESTADO que o filtro de spread precisa, e so ele: `slot0()` traz o
-    // `sqrtPriceX96` do V3 (a razao maxima no tamanho infinitesimal) e
-    // `getAmountOut` e a conta do PROPRIO pool Aerodrome.
+    // `sqrtPriceX96` do V3 e `getReserves()` traz as reservas CRUAS do
+    // Aerodrome, de onde sai o teto demonstrado do invariante `x·y = k`.
     slot0: sel('slot0()'),
-    getAmountOut: sel('getAmountOut(uint256,address)'),
+    // `stable()` diz QUAL invariante o pool usa. So `false` autoriza descarte.
+    estavel: sel('stable()'),
 };
 
-/** `getAmountOut(epsilon, tokenEntra)` codificado. */
-const codificarGetAmountOut = (quantia: bigint, token: string): string => (
-    SELETORES.getAmountOut
-    + quantia.toString(16).padStart(64, '0')
-    + token.toLowerCase().replace('0x', '').padStart(64, '0')
-);
-
 /**
- * O ESTADO DE UM BLOCO para as rotas mistas — `slot0` dos V3 e
- * `getAmountOut(epsilon, X)` dos Aerodrome, em LOTE.
+ * O ESTADO DE UM BLOCO para as rotas mistas — `slot0` dos V3 e `getReserves`
+ * dos Aerodrome, em LOTE.
  *
  * Ele existe aqui, e nao em `rotasMistas.ts`, porque e leitura de corrente: a
  * TRIAGEM mora la e e a mesma nos dois caminhos (`triarCandidatas`). Duplicar a
  * triagem seria a REGRA 3; duplicar a leitura e inevitavel, porque o transporte
  * do fork e outro.
  *
- * `epsilon` tem de ser menor que todo tamanho avaliado, senao a razao do
- * Aerodrome deixa de ser teto e o filtro passa a recusar rota boa.
+ * ELA DERRUBOU A VERSAO ANTERIOR desta funcao, 2026-10-15: ela lia
+ * `getAmountOut(epsilon, X)` e usava `saida/epsilon` como razao maxima. Duas
+ * coisas estavam erradas, e as duas podiam DESCARTAR ARBITRAGEM LUCRATIVA — uma
+ * cotacao de tamanho finito nao e teto dos tamanhos menores, e o `epsilon` era
+ * o MESMO inteiro cru para tokens de decimais diferentes. Reserva nao tem
+ * epsilon, e o teto dela esta demonstrado.
  */
 export async function lerEstadoMisto(
     chamar: Transporte,
     candidatas: CandidataMista[],
-    tokenBase: string,
-    epsilon: bigint,
     bloco: number,
 ): Promise<LeiturasDoEstado> {
-    const base = tokenBase.toLowerCase();
     const v3 = [...new Set(candidatas.map((c) => c.poolV3.toLowerCase()))];
-    // Chave `${pool}|${tokenEntra}`: na direcao A entra a BASE no Aerodrome, na
-    // B entra o token do meio. Sao leituras DIFERENTES do mesmo pool.
-    const aero = [...new Set(candidatas.map(
-        (c) => `${c.poolAerodrome.toLowerCase()}|${c.direcao === 'A' ? base : c.token.toLowerCase()}`,
-    ))];
+    const aero = [...new Set(candidatas.map((c) => c.poolAerodrome.toLowerCase()))];
     const pedidos: ChamadaMulti[] = [
-        ...v3.map((p) => ({ alvo: p, dados: SELETORES.slot0 })),
-        ...aero.map((k) => {
-            const [pool, token] = k.split('|');
-            return { alvo: pool!, dados: codificarGetAmountOut(epsilon, token!) };
-        }),
+        ...v3.map((q) => ({ alvo: q, dados: SELETORES.slot0 })),
+        ...aero.map((q) => ({ alvo: q, dados: SELETORES.getReserves })),
     ];
     const r = pedidos.length === 0 ? [] : await lerEmLote(chamar, pedidos);
     const sqrtPorPoolV3 = new Map<string, bigint | null>();
     const token0PorPool = new Map<string, string>();
-    const saidaAerodrome = new Map<string, bigint | null>();
+    const reservasAerodrome = new Map<string, { r0: bigint; r1: bigint } | null>();
     for (let i = 0; i < v3.length; i += 1) {
         const resp = r[i];
         // `slot0` devolve 7 campos; o primeiro e o `sqrtPriceX96`. Resposta
@@ -198,17 +177,21 @@ export async function lerEstadoMisto(
     }
     for (let i = 0; i < aero.length; i += 1) {
         const resp = r[v3.length + i];
-        const bom = resp !== undefined && resp.ok && resp.dados.length >= 66;
-        saidaAerodrome.set(aero[i]!, bom ? BigInt(resp.dados.slice(0, 66)) : null);
+        // `getReserves()` do Velodrome V2 devolve tres palavras; as duas
+        // primeiras sao as reservas. Menos que isso e ausencia, nao zero.
+        const bom = resp !== undefined && resp.ok && resp.dados.length >= 130;
+        reservasAerodrome.set(aero[i]!, bom
+            ? { r0: BigInt(resp.dados.slice(0, 66)), r1: BigInt(`0x${resp.dados.slice(66, 130)}`) }
+            : null);
     }
     // `token0` dos V3 ja veio da descoberta: as candidatas conhecem o token do
     // meio, e quem diz de que lado ele esta e o pool. Sem ele o filtro inverte
     // o lado da razao, entao `null` manda cotar em vez de recusar.
     for (const c of candidatas) {
-        const p = c.poolV3.toLowerCase();
-        if (c.token0DoV3 !== null) token0PorPool.set(p, c.token0DoV3.toLowerCase());
+        const q = c.poolV3.toLowerCase();
+        if (c.token0DoV3 !== null) token0PorPool.set(q, c.token0DoV3.toLowerCase());
     }
-    return { sqrtPorPoolV3, token0PorPool, saidaAerodrome, epsilon, bloco };
+    return { sqrtPorPoolV3, token0PorPool, reservasAerodrome, bloco };
 }
 
 export interface PoolDaFabrica {
@@ -1095,7 +1078,7 @@ async function principal(): Promise<void> {
         // cujo estado nao mudou nao precisa de leitura nova no mesmo bloco.
         if (MISTAS.length > 0 && blocoAgora > 0 && blocoAgora !== blocoDaTriagem) {
             const fimTri = av.etapa('prefiltro');
-            const L = await lerEstadoMisto(chamar, MISTAS, WETH_DA_BASE, EPSILON_DA_RAZAO, blocoAgora);
+            const L = await lerEstadoMisto(chamar, MISTAS, blocoAgora);
             const tri = triarCandidatas(MISTAS, WETH_DA_BASE, L);
             // EXPIRADO, nao prejuizo: se o bloco andou entre a leitura do
             // estado e a decisao, a triagem decidiu sobre um estado que nao
@@ -1105,8 +1088,14 @@ async function principal(): Promise<void> {
             const expirou = blocoNaDecisao > blocoAgora;
             fimTri();
             FM.estadosAvaliados += 1;
-            FM.cotacoesTentadas += tri.valem.length;
+            // TRIADA NAO E COTADA. Ela cortou isto por nome: *"`cotacoesTentadas`
+            // só pode aumentar quando houver uma cotação realmente executada.
+            // Uma rota que passou pela triagem é TRIADA, não COTADA."* Aqui, ao
+            // vivo, nenhuma cotacao acontece — nao ha contrato na rede —, entao
+            // `cotacoesTentadas` tem de ficar em ZERO.
+            FM.rotasTriadas += tri.valem.length;
             FM.faltaDeDados += tri.semDados;
+            FM.semProvaMatematica += tri.semProvaDoInvariante;
             if (expirou) {
                 FM.expirado += tri.valem.length;
             } else {
@@ -1118,9 +1107,12 @@ async function principal(): Promise<void> {
                 bloco: blocoAgora,
                 estadosAvaliados: FM.estadosAvaliados,
                 rotasDistintas: MISTAS.length,
-                passaramNoFiltro: tri.valem.length,
+                triadasQuePassaram: `${tri.valem.length} TRIADAS (não cotadas: ao vivo não `
+                    + 'há contrato na rede, e cotação é outra métrica)',
                 descartadasComProva: tri.recusadasPorSpread.length,
                 semDadoParaDecidir: tri.semDados,
+                semProvaDoInvariante: `${tri.semProvaDoInvariante} (pool stable: o teto só está `
+                    + 'demonstrado para `x·y = k`, então não descarto — fica NÃO VALIDADA)',
                 idadeDoDado: `${blocoNaDecisao - blocoAgora} bloco(s) na hora da decisão`,
                 expirou: expirou
                     ? 'SIM: o bloco andou antes da decisão — contado como EXPIRADO, não como '
@@ -1439,13 +1431,22 @@ export async function universoPorAtividade(
         pool,
         t0: endDe(await lerComPaciencia(chamar, pool, SELETORES.token0)),
         t1: endDe(await lerComPaciencia(chamar, pool, SELETORES.token1)),
+        // `stable()` so no Aerodrome, e so `false` autoriza descarte pelo
+        // filtro: o teto das reservas e demonstrado para `x·y = k`, e o pool
+        // stable usa `x³y + y³x = k`. Resposta ausente fica `null`.
+        estavel: tipoVisto.get(pool) === 'aerodrome'
+            ? ((q) => (q === null ? null : q !== 0n))(
+                numDe(await lerComPaciencia(chamar, pool, SELETORES.estavel)),
+            )
+            : null,
     }));
-    for (const { pool, t0, t1 } of lidosConc) {
+    for (const { pool, t0, t1, estavel } of lidosConc) {
         if (t0 === null || t1 === null) continue;
         concentrados.push({
             endereco: pool, token0: t0, token1: t1,
             venue: tipoVisto.get(pool) === 'v3' ? 'v3' : 'aerodrome',
             taxa: null,
+            estavel,
         });
     }
 

@@ -406,21 +406,34 @@ describe('o executor misto FECHA quando existe deslocamento', function () {
         // recusar aqui, ele e um falso negativo — e era, antes do conserto: na
         // direcao B ele comparava um teto em TOKEN com um custo em WETH.
         const { semSpreadEmTamanhoNenhum } = require('../dist/rotasMistas.js');
-        const EPS = 10n ** 12n;
         const slot0V3 = await ler(V3, sel('slot0()'));
         const sqrtV3 = (slot0V3 && slot0V3.length >= 66)
             ? BigInt(`0x${slot0V3.slice(2, 66)}`) : null;
         const t0V3 = endDe(await ler(V3, sel('token0()')));
-        // Na direcao B a perna do Aerodrome VENDE o token do meio, entao a
-        // cotacao dele e `getAmountOut(epsilon, TOKEN)`.
-        const saidaAero = num(await ler(AERO, sel('getAmountOut(uint256,address)')
-            + coder.encode(['uint256', 'address'], [EPS, TOKEN]).slice(2)));
+        // As RESERVAS CRUAS do Aerodrome, de onde sai o teto demonstrado. A
+        // versao anterior passava `getAmountOut(epsilon)` — que ela comprovou
+        // nao ser teto — e, pior, com os nomes de campo ANTIGOS: o filtro
+        // recebia `aeroEhVolatile` como `undefined` e passava por AUSENCIA.
+        // Uma invariante que passa por ausencia nao pode falhar, e um teste que
+        // nao pode falhar nao e teste.
+        const t0Aero = endDe(await ler(AERO, sel('token0()')));
+        const resAero = await ler(AERO, sel('getReserves()'));
+        const res = (resAero && resAero.length >= 130)
+            ? { r0: BigInt(`0x${resAero.slice(2, 66)}`), r1: BigInt(`0x${resAero.slice(66, 130)}`) }
+            : null;
+        const estAero = num(await ler(AERO, sel('stable()')));
+        const ehVolatile = estAero === null ? null : estAero === 0n;
+        // Na direcao B a perna do Aerodrome VENDE o token do meio: entra TOKEN.
+        const entraEhToken0 = t0Aero === TOKEN;
+        console.log(`    AERODROME ${AERO}: stable()=${estAero === null ? 'sem resposta' : estAero !== 0n}`
+            + ` | reservas ${res === null ? 'não li' : `${res.r0}/${res.r1}`}`);
         const filtro = semSpreadEmTamanhoNenhum({
             direcao: 'B',
             sqrtPriceX96: sqrtV3,
             tokenDoMeioEhToken0NoV3: t0V3 === TOKEN,
-            saidaAerodromeNoEpsilon: saidaAero,
-            epsilon: EPS,
+            reservaEntraNoAero: res === null ? null : (entraEhToken0 ? res.r0 : res.r1),
+            reservaSaiNoAero: res === null ? null : (entraEhToken0 ? res.r1 : res.r0),
+            aeroEhVolatile: ehVolatile,
         });
         console.log(`    FILTRO na direção B: ${filtro.vale ? 'PASSOU' : 'RECUSOU'}`
             + ` — ${filtro.porque.slice(0, 110)}`);

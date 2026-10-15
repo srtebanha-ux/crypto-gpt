@@ -32,6 +32,11 @@ export interface PoolMisto {
     venue: Venue;
     /** Fee tier do V3, em centesimos de ponto base. `null` no Aerodrome. */
     taxa: number | null;
+    /**
+     * `stable()` do pool Aerodrome. `false` = volatile COMPROVADO, e so nesse
+     * caso existe teto demonstrado. `null` = nao li, e nao li nao descarta.
+     */
+    estavel?: boolean | null;
 }
 
 /** Uma perna na forma que o `CacadorV3` recebe. */
@@ -57,6 +62,10 @@ export interface CandidataMista {
      * leitura nova. `null` manda cotar: lado desconhecido nao descarta.
      */
     token0DoV3: string | null;
+    /** `token0` do pool AERODROME, em minusculo — diz qual reserva e a de entrada. */
+    token0DoAero: string | null;
+    /** `stable()` do pool Aerodrome. So `false` autoriza descarte. */
+    aeroEstavel: boolean | null;
     /** A chave que identifica a rota, para nao contar a mesma duas vezes. */
     chave: string;
 }
@@ -82,6 +91,7 @@ export function candidatasMistas(
     const aeroPorToken = new Map<string, string[]>();
     const v3PorToken = new Map<string, string[]>();
     const token0PorPool = new Map<string, string>();
+    const estavelPorPool = new Map<string, boolean | null>();
     for (const q of pools) {
         const t = outro(q);
         if (t === null) continue;
@@ -90,6 +100,7 @@ export function candidatasMistas(
         l.push(q.endereco.toLowerCase());
         m.set(t, l);
         token0PorPool.set(q.endereco.toLowerCase(), q.token0.toLowerCase());
+        estavelPorPool.set(q.endereco.toLowerCase(), q.estavel ?? null);
     }
     const fora: CandidataMista[] = [];
     const vistas = new Set<string>();
@@ -108,6 +119,8 @@ export function candidatasMistas(
                         poolV3: pv,
                         direcao,
                         token0DoV3: token0PorPool.get(pv) ?? null,
+                        token0DoAero: token0PorPool.get(pa) ?? null,
+                        aeroEstavel: estavelPorPool.get(pa) ?? null,
                         chave,
                     });
                 }
@@ -169,6 +182,19 @@ export interface FunilMisto {
     poolsVistos: { v3: number; aerodrome: number };
     /** Rotas DISTINTAS (par + direcao), nao pools. */
     rotasDistintas: number;
+    /**
+     * Rotas que PASSARAM a triagem — e isto nao e cotacao.
+     *
+     * ORDEM DELA, 2026-10-15: *"`cotacoesTentadas` só pode aumentar quando
+     * houver uma cotação realmente executada. Uma rota que passou pela triagem
+     * é TRIADA, não COTADA."* Eu estava somando a triagem em `cotacoesTentadas`
+     * no cacador ao vivo, onde cotacao nenhuma acontece: o funil publicava
+     * cotacao que nunca existiu. As cinco etapas — DESCOBERTA, TRIAGEM,
+     * COTACAO, EXECUCAO EM FORK e EXECUCAO NA REDE — tem contador proprio, e
+     * nenhuma soma com a outra.
+     */
+    rotasTriadas: number;
+    /** Cotacoes REALMENTE executadas (um `eth_call` que foi e voltou). */
     cotacoesTentadas: number;
     cotacoesComSobra: number;
     simulacoesCompletas: number;
@@ -195,6 +221,8 @@ export interface FunilMisto {
     faltaDeSpread: number;
     limitacaoDeCobertura: number;
     faltaDeDados: number;
+    /** Nao descartado por NAO HAVER PROVA para o invariante daquele pool. */
+    semProvaMatematica: number;
     expirado: number;
     falhaDeExecucao: number;
 }
@@ -204,6 +232,7 @@ export const funilVazio = (): FunilMisto => ({
     estadosAvaliados: 0,
     poolsVistos: { v3: 0, aerodrome: 0 },
     rotasDistintas: 0,
+    rotasTriadas: 0,
     cotacoesTentadas: 0,
     cotacoesComSobra: 0,
     simulacoesCompletas: 0,
@@ -218,6 +247,7 @@ export const funilVazio = (): FunilMisto => ({
     faltaDeSpread: 0,
     limitacaoDeCobertura: 0,
     faltaDeDados: 0,
+    semProvaMatematica: 0,
     expirado: 0,
     falhaDeExecucao: 0,
 });
@@ -242,6 +272,13 @@ export function limitacaoDominante(f: FunilMisto): string {
         return 'COBERTURA: nenhuma rota mista existe no universo observado — não há par '
             + '{Aerodrome, V3} compartilhando token com a base. Nada aqui é sobre custo ou '
             + 'latência';
+    }
+    if (f.cotacoesTentadas === 0 && f.rotasTriadas > 0) {
+        // TRIADA e nao cotada: o filtro deixou passar e nada foi cotado. A
+        // causa nao e o mercado, e sim nao haver cotador neste caminho.
+        return 'SEM COTAÇÃO: o filtro deixou passar rotas e nenhuma foi COTADA neste caminho. '
+            + 'Isto não é "não há oportunidade" nem "não há spread": é ausência de cotador, e a '
+            + 'conclusão econômica depende de uma cotação que não aconteceu';
     }
     if (f.cotacoesTentadas === 0 && f.faltaDeSpread > 0) {
         // ETIQUETA QUE DESCREVE O CONJUNTO. Com zero cotacao tentada, dizer
@@ -274,9 +311,16 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         + ` e ${f.estadosAvaliados} ESTADO(S) distinto(s) avaliado(s) | pools `
         + `${f.poolsVistos.v3} V3 + ${f.poolsVistos.aerodrome} Aerodrome | `
         + `${f.rotasDistintas} ROTA(S) DISTINTA(S) (par + direção, não pools) | `
-        + `${f.cotacoesTentadas} cotação(ões), ${f.cotacoesComSobra} com sobra bruta | `
+        + `${f.rotasTriadas} TRIADA(S) (passaram o filtro; triada não é cotada) | `
+        + `${f.cotacoesTentadas} cotação(ões) EXECUTADA(S), `
+        + `${f.cotacoesComSobra} com sobra bruta`
+        // AS CAUSAS sao das COTACOES, e ficavam colados em "simulacoes
+        // revertidas" — uma corrida com 36 cotacoes e ZERO simulacoes publicou
+        // "0 revertida(s) [33x PagamentoCurto]", etiqueta descrevendo um
+        // conjunto vazio com os motivos de outro.
+        + `${causas === '' ? '' : ` [motivos: ${causas}]`} | `
         + `${f.simulacoesCompletas} simulação(ões) ATÔMICA(S) completa(s), `
-        + `${f.simulacoesRevertidas} revertida(s)${causas === '' ? '' : ` [${causas}]`} | `
+        + `${f.simulacoesRevertidas} revertida(s) | `
         + `ORIGENS: ${f.deslocamentoArtificial} deslocamento artificial, `
         + `${f.historicaDepoisDaExecucao} histórica vista depois do fato, `
         + `${f.detectadaEmObservacao} detectada em observação sem futuro, `
@@ -285,6 +329,7 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         + `${f.melhorLiquidoWei === null ? 'nenhum' : `${f.melhorLiquidoWei} wei`} | `
         + `SEM DADO POR: ${f.faltaDeSpread} falta de spread, `
         + `${f.limitacaoDeCobertura} cobertura, ${f.faltaDeDados} falta de dados, `
+        + `${f.semProvaMatematica} SEM PROVA do invariante (pool stable: não descartado), `
         + `${f.expirado} EXPIRADO, ${f.falhaDeExecucao} falha de execução | `
         + limitacaoDominante(f);
 }
@@ -347,17 +392,53 @@ export function razaoMaximaV3(
 }
 
 /**
- * A razao maxima de um pool Aerodrome, pela conta DELE num tamanho pequeno.
+ * A razao maxima de um pool Aerodrome VOLATILE, DEMONSTRADA do invariante.
  *
- * `epsilon` tem de ser menor que qualquer tamanho que se va avaliar: a razao
- * cai com o tamanho, entao um `epsilon` grande devolveria uma razao MENOR que a
- * verdadeira e o filtro passaria a recusar rota boa.
+ * ELA DERRUBOU A VERSAO ANTERIOR, 2026-10-15, e estava certa:
+ * *"`getAmountOut(epsilon) / epsilon` NÃO É UMA RAZÃO MÁXIMA. Em pools
+ * Aerodrome volatile, o resultado de uma entrada finita já sofre impacto de
+ * preço... usá-la como teto pode produzir falso negativo."* E: *"VOCÊ USA O
+ * MESMO EPSILON BRUTO PARA TOKENS DIFERENTES. `10^12` representa 0,000001 WETH
+ * com 18 decimais, mas 1.000.000 de tokens com 6 decimais."*
+ *
+ * MEDIDO com a formula exata (reservas 1000/1000, taxa 30bp):
+ *
+ *     x = 1e12  ->  saida/x = 0,99700000
+ *     x = 1e18  ->  saida/x = 0,99600698
+ *     x = 1e20  ->  saida/x = 0,90661089
+ *     marginal (rSai/rEntra) = 1,00000000
+ *
+ * A razao CAI com o tamanho e fica SEMPRE abaixo da marginal — entao a cotacao
+ * num tamanho finito e um teto do que vem DEPOIS dele, nunca do que vem antes.
+ * E `x = 1` devolveu ZERO por truncamento de inteiro, que o filtro antigo lia
+ * como "sem dado" num token de 6 casas.
+ *
+ * A DEMONSTRACAO do teto certo, do invariante `x·y = k`:
+ *
+ *     saida(x) = rSai · x' / (rEntra + x'),  com x' = x·(1 − taxa) <= x
+ *
+ *     saida(x)/x = rSai·x' / (x·(rEntra + x'))
+ *                <= rSai·x' / (x·rEntra)          porque rEntra + x' >= rEntra
+ *                <= rSai / rEntra                 porque x' <= x
+ *
+ * Vale para TODO x > 0, inclusive abaixo de qualquer epsilon, e nao desconta
+ * taxa — descontar tornaria o teto mais apertado e, portanto, capaz de recusar
+ * rota boa. As reservas sao CRUAS nas duas pontas, entao a razao e "unidade
+ * crua de saida por unidade crua de entrada": a mesma unidade da razao do V3,
+ * que vem de `sqrtPriceX96`. Os decimais se cancelam no produto sem nenhuma
+ * normalizacao, e NAO existe mais epsilon para errar de unidade.
+ *
+ * SO PARA VOLATILE: o pool stable usa outro invariante (`x³y + y³x = k`), e
+ * este teto nao esta demonstrado para ele. `ehVolatile !== true` devolve `null`,
+ * e `null` manda cotar.
  */
 export function razaoMaximaAerodrome(
-    saidaNoEpsilon: bigint | null, epsilon: bigint,
+    reservaEntra: bigint | null, reservaSai: bigint | null, ehVolatile: boolean | null,
 ): RazaoMaxima | null {
-    if (saidaNoEpsilon === null || saidaNoEpsilon <= 0n || epsilon <= 0n) return null;
-    return { num: saidaNoEpsilon, den: epsilon };
+    if (ehVolatile !== true) return null;
+    if (reservaEntra === null || reservaSai === null) return null;
+    if (reservaEntra <= 0n || reservaSai <= 0n) return null;
+    return { num: reservaSai, den: reservaEntra };
 }
 
 /** O produto de duas razoes passa de 1? Por multiplicacao cruzada, sem dividir. */
@@ -391,12 +472,18 @@ export function semSpreadEmTamanhoNenhum(e: {
     sqrtPriceX96: bigint | null;
     /** No pool V3, o token do MEIO e o token0? */
     tokenDoMeioEhToken0NoV3: boolean;
+    /** Reserva CRUA do token que ENTRA na perna do Aerodrome. */
+    reservaEntraNoAero: bigint | null;
+    /** Reserva CRUA do token que SAI na perna do Aerodrome. */
+    reservaSaiNoAero: bigint | null;
     /**
-     * `getAmountOut(epsilon, X)` do Aerodrome, onde X e o token que ENTRA na
-     * perna dele: WETH na direcao A, o token do meio na direcao B.
+     * O pool Aerodrome e COMPROVADAMENTE volatile (`stable() == false`)?
+     *
+     * `null` ou `true` (stable) NAO descarta: o teto so esta demonstrado para o
+     * invariante `x·y = k`. Pool stable, token de comportamento nao
+     * convencional e estado sem leitura ficam NAO VALIDADOS, por ordem dela.
      */
-    saidaAerodromeNoEpsilon: bigint | null;
-    epsilon: bigint;
+    aeroEhVolatile: boolean | null;
 }): VeredictoDoSpread {
     // No V3 a perna da direcao A vende o token do meio (entra o token do
     // meio); na direcao B ela compra (entra o WETH, isto e, NAO o token do
@@ -405,20 +492,25 @@ export function semSpreadEmTamanhoNenhum(e: {
         ? e.tokenDoMeioEhToken0NoV3
         : !e.tokenDoMeioEhToken0NoV3;
     const rV3 = razaoMaximaV3(e.sqrtPriceX96 ?? 0n, entraPeloToken0NoV3);
-    const rAero = razaoMaximaAerodrome(e.saidaAerodromeNoEpsilon, e.epsilon);
+    const rAero = razaoMaximaAerodrome(
+        e.reservaEntraNoAero, e.reservaSaiNoAero, e.aeroEhVolatile,
+    );
     const razoes = e.direcao === 'A'
         ? { emprestimo: rAero, venda: rV3 }
         : { emprestimo: rV3, venda: rAero };
 
     if (rV3 === null || rAero === null) {
         // AUSENCIA NAO RECUSA. Sem uma das razoes nao ha produto, e "nao sei"
-        // nunca autoriza descartar — autoriza cotar.
-        return {
-            vale: true,
-            porque: 'falta uma das razões (sem `slot0` ou sem cotação do Aerodrome): sem o '
-                + 'produto não há prova de inviabilidade, e ausência não descarta rota',
-            razoes,
-        };
+        // nunca autoriza descartar — autoriza cotar. O pool stable cai aqui de
+        // proposito: o teto nao esta demonstrado para o invariante dele.
+        const porque = e.aeroEhVolatile === true
+            ? 'falta o `slot0` do V3 ou as reservas do Aerodrome: sem o produto não há prova '
+                + 'de inviabilidade, e ausência não descarta rota'
+            : 'o pool Aerodrome não é COMPROVADAMENTE volatile (recebi '
+                + `\`${String(e.aeroEhVolatile)}\` onde só \`true\` autoriza descartar`
+                + '): o teto só está demonstrado para o invariante `x·y = k`, então esta '
+                + 'rota fica NÃO VALIDADA em vez de descartada';
+        return { vale: true, porque, razoes };
     }
     if (produtoPassaDeUm(rAero, rV3)) {
         return {
@@ -449,10 +541,14 @@ export interface LeiturasDoEstado {
     sqrtPorPoolV3: Map<string, bigint | null>;
     /** `token0` por pool, tudo em minusculo. */
     token0PorPool: Map<string, string>;
-    /** `getAmountOut(epsilon, tokenEntra)`, chave `${pool}|${tokenEntra}`. */
-    saidaAerodrome: Map<string, bigint | null>;
-    /** O `epsilon` usado, que tem de ser menor que todo tamanho avaliado. */
-    epsilon: bigint;
+    /**
+     * As reservas CRUAS por pool Aerodrome, na ordem `token0, token1`.
+     *
+     * Elas substituiram `getAmountOut(epsilon, ...)`, que NAO era teto e
+     * dependia de um epsilon em unidade crua — o mesmo `10^12` valendo
+     * 0,000001 com 18 casas e 1.000.000 com 6. Reserva nao tem epsilon.
+     */
+    reservasAerodrome: Map<string, { r0: bigint; r1: bigint } | null>;
     /** O bloco do estado. E ele que diz a IDADE do dado na decisao. */
     bloco: number;
 }
@@ -462,8 +558,19 @@ export interface Triagem {
     valem: CandidataMista[];
     /** Recusadas com PROVA valida em todo tamanho. */
     recusadasPorSpread: CandidataMista[];
-    /** Entraram em `valem` por FALTA DE DADO, nao por spread. Contadas a parte. */
+    /** Entraram em `valem` por FALTA DE DADO (leitura que nao veio). */
     semDados: number;
+    /**
+     * Entraram em `valem` por NAO HAVER PROVA para o invariante do pool.
+     *
+     * ORDEM DELA: *"Para pools stable, tokens de comportamento não convencional
+     * ou estados sem prova matemática, NÃO descarte pelo filtro. Classifique
+     * como não validado."* Isto nao e falta de dado: a leitura veio, e diz que
+     * o pool usa `x³y + y³x = k`, para o qual o teto nao esta demonstrado. As
+     * duas pedem acoes diferentes — uma e o RPC, a outra e matematica que falta
+     * fazer — e somar as duas esconderia qual das duas e.
+     */
+    semProvaDoInvariante: number;
     veredictos: Map<string, VeredictoDoSpread>;
 }
 
@@ -483,24 +590,31 @@ export function triarCandidatas(
         valem: [] as CandidataMista[],
         recusadasPorSpread: [] as CandidataMista[],
         semDados: 0,
+        semProvaDoInvariante: 0,
         veredictos: new Map<string, VeredictoDoSpread>(),
     };
     for (const c of cs) {
         const t0V3 = L.token0PorPool.get(c.poolV3.toLowerCase()) ?? c.token0DoV3;
         // Na direcao A o Aerodrome recebe a BASE; na B recebe o token do meio.
         const entraNoAero = c.direcao === 'A' ? base : c.token.toLowerCase();
+        const res = L.reservasAerodrome.get(c.poolAerodrome.toLowerCase()) ?? null;
+        // Qual reserva e a de ENTRADA depende do `token0` do pool do Aerodrome.
+        // Sem ele a ordem e desconhecida, e trocar as duas inverteria a razao.
+        const entraEhToken0NoAero = c.token0DoAero !== null && c.token0DoAero === entraNoAero;
+        const temOrdem = c.token0DoAero !== null && res !== null;
         const v = semSpreadEmTamanhoNenhum({
             direcao: c.direcao,
             sqrtPriceX96: L.sqrtPorPoolV3.get(c.poolV3.toLowerCase()) ?? null,
             tokenDoMeioEhToken0NoV3: t0V3 !== null && t0V3 === c.token.toLowerCase(),
-            saidaAerodromeNoEpsilon: t0V3 === null
-                ? null
-                : L.saidaAerodrome.get(`${c.poolAerodrome.toLowerCase()}|${entraNoAero}`) ?? null,
-            epsilon: L.epsilon,
+            reservaEntraNoAero: temOrdem ? (entraEhToken0NoAero ? res.r0 : res.r1) : null,
+            reservaSaiNoAero: temOrdem ? (entraEhToken0NoAero ? res.r1 : res.r0) : null,
+            aeroEhVolatile: t0V3 === null ? null : (c.aeroEstavel === null ? null : !c.aeroEstavel),
         });
         t.veredictos.set(c.chave, v);
         if (!v.vale) { t.recusadasPorSpread.push(c); continue; }
-        if (v.razoes.emprestimo === null || v.razoes.venda === null) t.semDados += 1;
+        if (v.razoes.emprestimo === null || v.razoes.venda === null) {
+            if (c.aeroEstavel === true) t.semProvaDoInvariante += 1; else t.semDados += 1;
+        }
         t.valem.push(c);
     }
     return t;
