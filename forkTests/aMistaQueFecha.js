@@ -397,6 +397,37 @@ describe('o executor misto FECHA quando existe deslocamento', function () {
         console.log(`      getAmountOut(1e15 WETH) antes ${antesCot} -> depois ${depoisCot}`);
         assert.ok(depoisCot < antesCot, 'o empurrão não moveu o preço do Aerodrome');
 
+        // 3b. A INVARIANTE DELA, conferida ANTES de executar:
+        //
+        //   *"um filtro de rejeição nunca pode rejeitar uma rota que o
+        //   executor comprovou lucrativa naquele mesmo estado."*
+        //
+        // Esta e a direcao B, e e a que rendeu 0,0598 WETH. Se o filtro a
+        // recusar aqui, ele e um falso negativo — e era, antes do conserto: na
+        // direcao B ele comparava um teto em TOKEN com um custo em WETH.
+        const { semSpreadEmTamanhoNenhum } = require('../dist/rotasMistas.js');
+        const EPS = 10n ** 12n;
+        const slot0V3 = await ler(V3, sel('slot0()'));
+        const sqrtV3 = (slot0V3 && slot0V3.length >= 66)
+            ? BigInt(`0x${slot0V3.slice(2, 66)}`) : null;
+        const t0V3 = endDe(await ler(V3, sel('token0()')));
+        // Na direcao B a perna do Aerodrome VENDE o token do meio, entao a
+        // cotacao dele e `getAmountOut(epsilon, TOKEN)`.
+        const saidaAero = num(await ler(AERO, sel('getAmountOut(uint256,address)')
+            + coder.encode(['uint256', 'address'], [EPS, TOKEN]).slice(2)));
+        const filtro = semSpreadEmTamanhoNenhum({
+            direcao: 'B',
+            sqrtPriceX96: sqrtV3,
+            tokenDoMeioEhToken0NoV3: t0V3 === TOKEN,
+            saidaAerodromeNoEpsilon: saidaAero,
+            epsilon: EPS,
+        });
+        console.log(`    FILTRO na direção B: ${filtro.vale ? 'PASSOU' : 'RECUSOU'}`
+            + ` — ${filtro.porque.slice(0, 110)}`);
+        assert.equal(filtro.vale, true,
+            'INVARIANTE VIOLADA: o filtro rejeitou a rota que o executor prova lucrativa neste '
+            + 'mesmo estado. Um filtro de rejeição não pode fazer isso');
+
         // 3. A ROTA: V3 empresta (WETH entra, token sai) e o Aerodrome vende o
         //    token, agora caro ali. `pagamento = 0` na perna interna = gasta o
         //    que esta em maos.

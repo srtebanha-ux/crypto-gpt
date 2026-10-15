@@ -1,18 +1,31 @@
-// O CACADOR MISTO EM MODO OBSERVACAO — descobre, cota, dimensiona, simula.
+// O CACADOR MISTO EM MODO OBSERVACAO — descobre, TRIA, cota, dimensiona, simula.
 //
-// Isto e a integracao, nao um modulo ao lado: a descoberta e `candidatasMistas`
-// de `src/rotasMistas.ts`, o MESMO arquivo que o cacador ao vivo usa, e a
-// execucao e o `CacadorV3` que a prova de atomicidade ja validou.
+// Isto e a integracao, nao um modulo ao lado: a descoberta e a TRIAGEM sao
+// `candidatasMistas` e `triarCandidatas` de `src/rotasMistas.ts`, o MESMO
+// arquivo que o cacador ao vivo usa, e a execucao e o `CacadorV3` que a prova
+// de atomicidade ja validou.
 //
-// ELA CORRIGIU DUAS COISAS MINHAS, e as duas estao aqui:
+// ELA CORRIGIU QUATRO COISAS MINHAS, e as quatro estao aqui:
 //
 //   1. *"Não alegue que é obrigatório gastar ETH para cotar."* Certo: o
-//      `cotar` roda em fork com implantacao EFEMERA, e nenhum ETH e gasto. A
-//      desculpa de "precisa de quoter implantado" era falsa.
+//      `cotar` roda em fork com implantacao EFEMERA, e nenhum ETH e gasto.
 //   2. *"Não apresente como exata uma taxa calculada sobre bytes fictícios."*
-//      Certo: `'02'.repeat(N)` nao mede nada, porque o custo L1 depende do
-//      CONTEUDO. Agora o L1 vem de `getL1FeeUpperBound(tamanho real)`, que e
-//      TETO declarado em vez de exatidao fabricada.
+//      Certo: o L1 vem de `getL1FeeUpperBound(tamanho real)`, declarado TETO.
+//   3. *"250 BLOCOS OBSERVADOS NÃO SÃO 250 ESTADOS AVALIADOS."* Certo, e era o
+//      pior dos quatro: o `hardhat_reset` acontecia UMA vez, no fim da janela,
+//      e as rotas eram cotadas todas naquele unico estado. Agora os dois
+//      numeros existem separados e sao MEDIDOS separados: a janela de
+//      DESCOBERTA e uma coisa, e `estadosAvaliados` — cada um com o seu
+//      `hardhat_reset` — e outra.
+//   4. *"Não chame tempo total de varredura de latência sinal→decisão."*
+//      Certo: a latencia agora e POR OPORTUNIDADE, com o instante do sinal, o
+//      da leitura do estado, o tempo de pre-filtro, de cotacao, de simulacao, a
+//      IDADE DO DADO na decisao e o total — e o tempo de varredura e publicado
+//      com o nome dele, que e tempo de varredura.
+//
+// SEM INFORMACAO FUTURA, por construcao: a janela de descoberta TERMINA antes
+// do primeiro estado avaliado. Nenhum pool entra no universo de um estado por
+// ter negociado depois dele.
 //
 // AS CINCO ORIGENS ficam separadas no funil. Esta corrida preenche apenas
 // `detectadaEmObservacao` e `validadaEmFork`: nao ha deslocamento artificial
@@ -23,7 +36,7 @@ const { AbiCoder, Interface, id } = require('ethers');
 
 const {
     candidatasMistas, pernasDaCandidata, funilVazio, comoLerOFunilMisto, limitacaoDominante,
-    valeSimular,
+    triarCandidatas,
 } = require('../dist/rotasMistas.js');
 const {
     codificarTetoDeL1, ORACULO_DE_GAS_L1, somarCusto, julgar,
@@ -35,6 +48,9 @@ const WETH = '0x4200000000000000000000000000000000000006';
 const TOP_V3 = id('Swap(address,address,int256,int256,uint160,uint128,int24)');
 const TOP_AERO = id('Swap(address,address,uint256,uint256,uint256,uint256)');
 const SELETOR_SWAP_V3 = sel('swap(address,bool,int256,uint160,bytes)');
+// O `epsilon` das razoes maximas, igual ao do cacador ao vivo: ele tem de ser
+// MENOR que todo tamanho avaliado, senao a razao do Aerodrome deixa de ser teto.
+const EPSILON = 10n ** 12n;
 
 const S = {
     balanceOf: sel('balanceOf(address)'),
@@ -97,26 +113,35 @@ async function upstream(metodo, params) {
 }
 
 const agora = () => Number(process.hrtime.bigint() / 1000n) / 1000; // ms
+const med = (a) => (a.length === 0 ? null
+    : a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)]);
 
 describe('o caçador misto em observação', function () {
     this.timeout(7_200_000);
 
-    it('descobre, cota, dimensiona e simula — com funil econômico', async function () {
+    it('descobre, tria e avalia ESTADOS DISTINTOS — com funil e latência por oportunidade', async function () {
         p = hre.network.provider;
         const url = hre.config.networks.hardhat.forking.url;
         const f = funilVazio();
-        const tempos = { sinalAteDecisao: [], cotacao: [], simulacao: [] };
+        // LATENCIA POR OPORTUNIDADE. `varredura` NAO e latencia e vive separada.
+        const T = {
+            leituraDoEstado: [], prefiltro: [], cotacao: [], simulacao: [],
+            totalPorOportunidade: [], idadeDoDadoMs: [], varredura: [],
+        };
 
-        // ===== 1. OBSERVACAO: pools que NEGOCIARAM, em N blocos consecutivos.
+        // ===== 1. DESCOBERTA: pools que NEGOCIARAM, em N blocos consecutivos.
         //
-        // Sem informacao futura por construcao: a janela termina no bloco em
-        // que a avaliacao vai rodar, e nada depois dele e lido.
+        // A janela TERMINA antes do primeiro estado avaliado: nenhum pool entra
+        // por ter negociado depois do estado em que e avaliado.
         const QUANTOS = Number(process.env.MISTA_BLOCOS ?? 250);
+        const ESTADOS = Number(process.env.MISTA_ESTADOS ?? 5);
         const topo = Number(await upstream('eth_blockNumber', []));
-        const inicio = topo - QUANTOS + 1;
+        const fimDaDescoberta = topo - ESTADOS;
+        const inicio = fimDaDescoberta - QUANTOS + 1;
         const vistos = new Map();
         let lidos = 0; let falhos = 0;
-        for (let b = inicio; b <= topo; b += 1) {
+        const tVarre = agora();
+        for (let b = inicio; b <= fimDaDescoberta; b += 1) {
             // eslint-disable-next-line no-await-in-loop
             let recs = null;
             try {
@@ -137,27 +162,21 @@ describe('o caçador misto em observação', function () {
                 }
             }
         }
-        f.blocosObservados = lidos;
-        console.log(`    OBSERVACAO: blocos ${inicio}..${topo} | lidos ${lidos},`
+        T.varredura.push(agora() - tVarre);
+        f.blocosVarridosParaDescoberta = lidos;
+        console.log(`    DESCOBERTA: blocos ${inicio}..${fimDaDescoberta} | lidos ${lidos},`
             + ` falhos ${falhos} | ${vistos.size} pool(s) com Swap`);
+        console.log(`    ESTADOS A AVALIAR: ${fimDaDescoberta + 1}..${topo} (${ESTADOS}),`
+            + ' todos DEPOIS da janela de descoberta — sem informação futura');
         assert.ok(lidos >= 250 || QUANTOS < 250,
             `a amostra pedida era de 250 blocos e só ${lidos} foram lidos`);
 
-        // ===== 2. O FORK no topo da janela, e a implantacao EFEMERA.
-        await chamar('hardhat_reset', [{ forking: { jsonRpcUrl: url, blockNumber: topo } }]);
-        const contas = await chamar('eth_accounts', []);
-        const [dono, cofre] = contas;
-        const bloco = await chamar('eth_getBlockByNumber', ['latest', false]);
-        const baseFeeWei = BigInt(bloco.baseFeePerGas ?? '0x0');
-        const art = await hre.artifacts.readArtifact('CacadorV3');
-        const dep = await chamar('eth_sendTransaction', [{
-            from: dono, data: art.bytecode + coder.encode(['address'], [cofre]).slice(2),
-            gas: '0xB71B00',
-        }]);
-        const arb = (await chamar('eth_getTransactionReceipt', [dep])).contractAddress;
-        console.log(`    FORK no bloco ${topo} | CacadorV3 EFÊMERO em ${arb} (zero ETH gasto)`);
-
-        // ===== 3. OS POOLS, com ABI CONFIRMADA pelo proprio pool.
+        // ===== 2. OS POOLS, com ABI CONFIRMADA pelo proprio pool.
+        //
+        // O fork vai para o PRIMEIRO estado: a identificacao e feita uma vez, e
+        // ela e sobre o CODIGO do pool, que nao muda de bloco para bloco.
+        const primeiro = fimDaDescoberta + 1;
+        await chamar('hardhat_reset', [{ forking: { jsonRpcUrl: url, blockNumber: primeiro } }]);
         const pools = [];
         const teto = Number(process.env.MISTA_POOLS ?? 220);
         for (const [endereco, v] of [...vistos.entries()]
@@ -192,7 +211,7 @@ describe('o caçador misto em observação', function () {
                 // bytes, entao a chamada e a unica identificacao possivel.
                 // eslint-disable-next-line no-await-in-loop
                 const q = await ler(endereco, S.getAmountOut
-                    + coder.encode(['uint256', 'address'], [10n ** 12n, a]).slice(2));
+                    + coder.encode(['uint256', 'address'], [EPSILON, a]).slice(2));
                 if (q === null || q === '0x') continue;
                 pools.push({ endereco, token0: a, token1: b2, venue: 'aerodrome', taxa: null });
             }
@@ -204,19 +223,36 @@ describe('o caçador misto em observação', function () {
         console.log(`    POOLS com ABI confirmada: ${f.poolsVistos.v3} V3,`
             + ` ${f.poolsVistos.aerodrome} Aerodrome`);
 
-        // ===== 4. ROTAS DISTINTAS — e isto NAO e a contagem de pools.
+        // ===== 3. ROTAS DISTINTAS — e isto NAO e a contagem de pools.
         const candidatas = candidatasMistas(pools, WETH);
         f.rotasDistintas = candidatas.length;
         console.log(`    ROTAS DISTINTAS (par + direção): ${candidatas.length}`);
         if (candidatas.length === 0) {
+            f.limitacaoDeCobertura += 1;
             console.log(`\n    ${comoLerOFunilMisto(f)}`);
             console.log('    Zero ROTAS com pools observados não é contradição: rota mista exige'
                 + ' um pool Aerodrome E um pool V3 compartilhando o MESMO token com o WETH.');
             return;
         }
 
-        // ===== 5. COTACAO pelo PROPRIO pool, e o tamanho por bisseccao.
-        const cotar = async (c, quantia, pagamento) => {
+        // ===== 4. O INTERVALO ENTRE BLOCOS, medido na PROPRIA corrente.
+        //
+        // E ele que diz quando um sinal EXPIROU: passado um intervalo, o estado
+        // que foi lido ja nao e o estado da corrente. O numero nao e meu — sai
+        // dos timestamps dos blocos da janela.
+        const tsPrimeiro = Number((await upstream(
+            'eth_getBlockByNumber', [`0x${primeiro.toString(16)}`, false],
+        )).timestamp);
+        const tsTopo = Number((await upstream(
+            'eth_getBlockByNumber', [`0x${topo.toString(16)}`, false],
+        )).timestamp);
+        const intervaloMs = ESTADOS > 1
+            ? ((tsTopo - tsPrimeiro) * 1000) / (topo - primeiro)
+            : null;
+        console.log(`    INTERVALO ENTRE BLOCOS, medido nos timestamps: ${intervaloMs === null
+            ? 'não dá para medir com 1 estado' : `${intervaloMs.toFixed(0)}ms`}`);
+
+        const cotarNo = async (arb, dono, c, quantia, pagamento) => {
             const pernas = pernasDaCandidata(c, WETH, pagamento);
             const t0 = agora();
             try {
@@ -224,10 +260,10 @@ describe('o caçador misto em observação', function () {
                     from: dono, to: arb, gas: '0xB71B00',
                     data: iface.encodeFunctionData('cotar', [pernas, quantia]),
                 }, 'latest']);
-                tempos.cotacao.push(agora() - t0);
+                T.cotacao.push(agora() - t0);
                 return { ok: false, causa: 'nao reverteu' };
             } catch (e) {
-                tempos.cotacao.push(agora() - t0);
+                T.cotacao.push(agora() - t0);
                 const m = String(e.message ?? e);
                 const dado = (e && (e.data || (e.error && e.error.data))) || null;
                 if (dado) {
@@ -244,85 +280,178 @@ describe('o caçador misto em observação', function () {
             }
         };
 
-        // O PRE-FILTRO, medido: cada `cotar` completo custou 544,5 ms na
-        // corrida anterior (mediana de 144), o que da ~20 s para 36 rotas
-        // contra blocos de 2 s. O teto pelo preco spot custa UMA leitura de
-        // `slot0` e so RECUSA — nunca aprova.
-        const slot0Cache = new Map();
-        const sqrtDe = async (pool) => {
-            if (slot0Cache.has(pool)) return slot0Cache.get(pool);
-            const r = await ler(pool, S.slot0);
-            // `slot0` devolve sqrtPriceX96 na PRIMEIRA palavra.
-            const v = (r && r.length >= 66) ? BigInt(`0x${r.slice(2, 66)}`) : null;
-            slot0Cache.set(pool, v);
-            return v;
-        };
-        let evitadas = 0;
-        const tempoPrefiltro = [];
-
-        const tSinal = agora();
+        // ===== 5. OS ESTADOS DISTINTOS, um `hardhat_reset` por estado.
         let melhor = null;
-        const limite = Number(process.env.MISTA_COTAR ?? 400);
-        for (const c of candidatas) {
-            if (f.cotacoesTentadas >= limite) break;
-            // O TAMANHO sai da liquidez do pool que empresta, nao de numero meu.
-            const poolBase = c.direcao === 'A' ? c.poolAerodrome : c.poolV3;
-            // eslint-disable-next-line no-await-in-loop
-            const wethNoPool = await saldo(WETH, poolBase);
-            if (wethNoPool === 0n) continue;
-            for (const fr of [1000n, 200n, 50n, 10n]) {
-                if (f.cotacoesTentadas >= limite) break;
-                const q = wethNoPool / fr;
-                if (q === 0n) continue;
-                // PRE-FILTRO primeiro. Ele responde com UMA leitura barata, e
-                // so pode dizer "nao fecha em tamanho nenhum".
-                const tp = agora();
+        let evitadas = 0;
+        let auditadas = 0;
+        // As cotacoes da AUDITORIA medem o mesmo caminho e entram nos TEMPOS,
+        // mas nunca nos contadores do funil: elas sao cotacao de rota que o
+        // filtro recusou, e soma-las a `cotacoesTentadas` faria o funil afirmar
+        // que uma rota descartada foi avaliada economicamente.
+        let expiradasNaAuditoria = 0;
+        const limitePorEstado = Number(process.env.MISTA_COTAR ?? 60);
+        for (let b = primeiro; b <= topo; b += 1) {
+            // Cada estado e um bloco DIFERENTE da corrente. Isto e o que
+            // faltava: antes era um `reset` so, e tudo era cotado no mesmo
+            // estado — "250 blocos observados" que eram UM estado avaliado.
+            if (b > primeiro) {
                 // eslint-disable-next-line no-await-in-loop
-                const [doEmprestimo, sqrt] = await Promise.all([
-                    c.direcao === 'A'
-                        ? ler(c.poolAerodrome, S.getAmountOut
-                            + coder.encode(['uint256', 'address'], [q, WETH]).slice(2))
-                            .then((x) => num(x))
-                        : Promise.resolve(q),
-                    sqrtDe(c.poolV3),
-                ]);
-                // No V3, entrar com o token do meio e entrar pelo token0?
-                // eslint-disable-next-line no-await-in-loop
-                const t0v3 = endDe(await ler(c.poolV3, S.token0));
-                const pre = valeSimular({
-                    entradaBase: q,
-                    tokenDoEmprestimo: doEmprestimo,
-                    sqrtPriceX96: sqrt,
-                    v3ZeroParaUm: t0v3 === c.token,
-                });
-                tempoPrefiltro.push(agora() - tp);
-                if (!pre.vale) {
-                    evitadas += 1;
-                    f.porCausa['pré-filtro: teto abaixo do custo'] =
-                        (f.porCausa['pré-filtro: teto abaixo do custo'] ?? 0) + 1;
-                    continue;
-                }
-                f.cotacoesTentadas += 1;
-                // eslint-disable-next-line no-await-in-loop
-                const r = await cotar(c, q, q);
-                if (!r.ok) {
-                    f.porCausa[r.causa] = (f.porCausa[r.causa] ?? 0) + 1;
-                    continue;
-                }
-                if (r.bruto <= 0n) continue;
-                f.cotacoesComSobra += 1;
-                if (melhor === null || r.bruto > melhor.bruto) {
-                    melhor = { c, quantia: q, pagamento: q, bruto: r.bruto };
-                }
+                await chamar('hardhat_reset', [{ forking: { jsonRpcUrl: url, blockNumber: b } }]);
             }
-        }
-        tempos.sinalAteDecisao.push(agora() - tSinal);
-        console.log(`    COTACOES: ${f.cotacoesTentadas} tentadas, ${f.cotacoesComSobra}`
-            + ` com sobra bruta | ${evitadas} EVITADAS pelo pré-filtro`);
+            // O SINAL: o instante em que este estado passa a estar disponivel
+            // para nos. Tudo que vem depois e atraso nosso.
+            const tSinal = agora();
+            // eslint-disable-next-line no-await-in-loop
+            const contas = await chamar('eth_accounts', []);
+            const [dono, cofre] = contas;
+            // eslint-disable-next-line no-await-in-loop
+            const art = await hre.artifacts.readArtifact('CacadorV3');
+            // eslint-disable-next-line no-await-in-loop
+            const dep = await chamar('eth_sendTransaction', [{
+                from: dono, data: art.bytecode + coder.encode(['address'], [cofre]).slice(2),
+                gas: '0xB71B00',
+            }]);
+            // eslint-disable-next-line no-await-in-loop
+            const arb = (await chamar('eth_getTransactionReceipt', [dep])).contractAddress;
+            // eslint-disable-next-line no-await-in-loop
+            const bloco = await chamar('eth_getBlockByNumber', ['latest', false]);
+            const baseFeeWei = BigInt(bloco.baseFeePerGas ?? '0x0');
 
-        // ===== 6. SIMULACAO ATOMICA COMPLETA. So ela classifica EXECUTAVEL.
+            // A LEITURA DO ESTADO: `slot0` dos V3 e `getAmountOut(epsilon)` dos
+            // Aerodrome. E a mesma informacao que `lerEstadoMisto` le ao vivo.
+            const tLeitura0 = agora();
+            const sqrtPorPoolV3 = new Map();
+            const saidaAerodrome = new Map();
+            const v3s = [...new Set(candidatas.map((c) => c.poolV3))];
+            // eslint-disable-next-line no-await-in-loop
+            await Promise.all(v3s.map(async (pool) => {
+                const r = await ler(pool, S.slot0);
+                sqrtPorPoolV3.set(pool, (r && r.length >= 66) ? BigInt(`0x${r.slice(2, 66)}`) : null);
+            }));
+            const aeros = [...new Set(candidatas.map(
+                (c) => `${c.poolAerodrome}|${c.direcao === 'A' ? WETH.toLowerCase() : c.token}`,
+            ))];
+            // eslint-disable-next-line no-await-in-loop
+            await Promise.all(aeros.map(async (k) => {
+                const [pool, token] = k.split('|');
+                const r = await ler(pool, S.getAmountOut
+                    + coder.encode(['uint256', 'address'], [EPSILON, token]).slice(2));
+                saidaAerodrome.set(k, num(r));
+            }));
+            const tLeitura = agora();
+            T.leituraDoEstado.push(tLeitura - tLeitura0);
+
+            // O PRE-FILTRO: a MESMA funcao do cacador ao vivo.
+            const tPre0 = agora();
+            const tri = triarCandidatas(candidatas, WETH, {
+                sqrtPorPoolV3, token0PorPool: new Map(), saidaAerodrome, epsilon: EPSILON, bloco: b,
+            });
+            T.prefiltro.push(agora() - tPre0);
+            f.estadosAvaliados += 1;
+            f.faltaDeSpread += tri.recusadasPorSpread.length;
+            f.faltaDeDados += tri.semDados;
+
+            console.log(`    ESTADO ${b}: ${tri.valem.length} passaram o filtro,`
+                + ` ${tri.recusadasPorSpread.length} DESCARTADAS com prova,`
+                + ` ${tri.semDados} sem dado | leitura ${(tLeitura - tLeitura0).toFixed(1)}ms,`
+                + ` filtro ${(agora() - tPre0).toFixed(1)}ms`);
+            evitadas += tri.recusadasPorSpread.length;
+
+            // A INVARIANTE DELA, exercitada em estado REAL: *"um filtro de
+            // rejeição nunca pode rejeitar uma rota que o executor comprovou
+            // lucrativa naquele mesmo estado."* Uma amostra das RECUSADAS e
+            // cotada de qualquer jeito, e nenhuma pode devolver sobra bruta.
+            for (const c of tri.recusadasPorSpread.slice(0, 3)) {
+                const poolBase = c.direcao === 'A' ? c.poolAerodrome : c.poolV3;
+                // eslint-disable-next-line no-await-in-loop
+                const wethNoPool = await saldo(WETH, poolBase);
+                if (wethNoPool === 0n) continue;
+                const q = wethNoPool / 200n;
+                if (q === 0n) continue;
+                auditadas += 1;
+                const tAud = agora();
+                // eslint-disable-next-line no-await-in-loop
+                const r = await cotarNo(arb, dono, c, q, q);
+                const idadeAud = agora() - tLeitura;
+                T.idadeDoDadoMs.push(idadeAud);
+                T.totalPorOportunidade.push(agora() - tAud);
+                if (intervaloMs !== null && idadeAud > intervaloMs) expiradasNaAuditoria += 1;
+                assert.ok(!(r.ok && r.bruto > 0n),
+                    `INVARIANTE VIOLADA no estado ${b}: o filtro recusou ${c.chave} e o `
+                    + `executor devolveu sobra bruta ${r.bruto} no MESMO estado`);
+            }
+
+            // ===== 6. COTACAO das que passaram, com o tamanho por fracao da
+            // liquidez do pool que empresta — nao de numero meu.
+            let tentadasNesteEstado = 0;
+            for (const c of tri.valem) {
+                if (tentadasNesteEstado >= limitePorEstado) break;
+                const tOp0 = agora();
+                const poolBase = c.direcao === 'A' ? c.poolAerodrome : c.poolV3;
+                // eslint-disable-next-line no-await-in-loop
+                const wethNoPool = await saldo(WETH, poolBase);
+                if (wethNoPool === 0n) continue;
+                for (const fr of [1000n, 200n, 50n, 10n]) {
+                    if (tentadasNesteEstado >= limitePorEstado) break;
+                    const q = wethNoPool / fr;
+                    if (q === 0n) continue;
+                    f.cotacoesTentadas += 1;
+                    tentadasNesteEstado += 1;
+                    // eslint-disable-next-line no-await-in-loop
+                    const r = await cotarNo(arb, dono, c, q, q);
+                    // A IDADE DO DADO NA DECISAO, e o EXPIRADO que sai dela.
+                    const idade = agora() - tLeitura;
+                    T.idadeDoDadoMs.push(idade);
+                    if (intervaloMs !== null && idade > intervaloMs) {
+                        // EXPIRADO, nao prejuizo e nao falta de spread: passou
+                        // um intervalo de bloco desde a leitura, entao esta
+                        // decisao e sobre um estado que a corrente ja superou.
+                        f.expirado += 1;
+                    }
+                    if (!r.ok) {
+                        f.porCausa[r.causa] = (f.porCausa[r.causa] ?? 0) + 1;
+                        continue;
+                    }
+                    if (r.bruto <= 0n) continue;
+                    f.cotacoesComSobra += 1;
+                    if (melhor === null || r.bruto > melhor.bruto) {
+                        melhor = {
+                            c, quantia: q, pagamento: q, bruto: r.bruto, bloco: b, arb, dono, cofre, baseFeeWei,
+                        };
+                    }
+                }
+                T.totalPorOportunidade.push(agora() - tOp0);
+            }
+            // O instante do sinal existe para ser comparado com a decisao: este
+            // e o atraso do estado INTEIRO, do sinal ao fim da avaliacao dele.
+            console.log(`      sinal -> fim da avaliação deste estado: ${(agora() - tSinal).toFixed(1)}ms`);
+        }
+
+        console.log(`    COTACOES: ${f.cotacoesTentadas} tentadas, ${f.cotacoesComSobra}`
+            + ` com sobra bruta | ${evitadas} DESCARTADAS pelo pré-filtro`
+            + ` | ${auditadas} recusadas AUDITADAS contra a invariante`);
+        console.log('    INVARIANTE DELA, exercitada em estado REAL: nenhuma das'
+            + ` ${auditadas} rotas que o filtro recusou devolveu sobra bruta quando cotada no`
+            + ' MESMO estado. O teste falharia no `assert` se alguma devolvesse.');
+
+        // ===== 7. SIMULACAO ATOMICA COMPLETA. So ela classifica EXECUTAVEL.
+        //
+        // Ela roda no ESTADO em que a sobra foi medida: voltar o fork para la e
+        // o que torna a simulacao uma afirmacao sobre aquele estado, e nao sobre
+        // o estado em que a varredura acabou.
         if (melhor !== null) {
             f.detectadaEmObservacao += 1;
+            await chamar('hardhat_reset', [{
+                forking: { jsonRpcUrl: url, blockNumber: melhor.bloco },
+            }]);
+            const contas = await chamar('eth_accounts', []);
+            const [dono, cofre] = contas;
+            const art = await hre.artifacts.readArtifact('CacadorV3');
+            const dep = await chamar('eth_sendTransaction', [{
+                from: dono, data: art.bytecode + coder.encode(['address'], [cofre]).slice(2),
+                gas: '0xB71B00',
+            }]);
+            const arb = (await chamar('eth_getTransactionReceipt', [dep])).contractAddress;
             const antesArb = await saldo(WETH, arb);
             const antesTok = await saldo(melhor.c.token, arb);
             const antesCofre = await saldo(WETH, cofre);
@@ -337,10 +466,11 @@ describe('o caçador misto em observação', function () {
                 }]);
                 rec = await chamar('eth_getTransactionReceipt', [tx]);
             } catch (e) { erro = String(e.message ?? e); }
-            tempos.simulacao.push(agora() - t0);
+            T.simulacao.push(agora() - t0);
 
             if (rec === null || rec.status !== '0x1') {
                 f.simulacoesRevertidas += 1;
+                f.falhaDeExecucao += 1;
                 const chave = `simulacao revertida: ${String(erro).slice(0, 40)}`;
                 f.porCausa[chave] = (f.porCausa[chave] ?? 0) + 1;
                 console.log(`    SIMULACAO REVERTEU: ${String(erro).slice(0, 140)}`);
@@ -353,13 +483,14 @@ describe('o caçador misto em observação', function () {
                 const bytesReais = (dados.length - 2) / 2;
                 const l1 = num(await ler(ORACULO_DE_GAS_L1, codificarTetoDeL1(bytesReais)));
                 const custo = somarCusto({
-                    gasUsado, gasUsadoVeioDe: 'recibo', baseFeeWei,
+                    gasUsado, gasUsadoVeioDe: 'recibo', baseFeeWei: melhor.baseFeeWei,
                     gorjetaWei: 20_000_000n, custoL1Wei: l1, taxaDoEmprestimoWei: 0n,
                 });
                 const j = julgar(bruto, custo);
                 const depoisArb = await saldo(WETH, arb);
                 const depoisTok = await saldo(melhor.c.token, arb);
                 console.log('\n    SIMULACAO ATOMICA COMPLETA — recibo status=1');
+                console.log(`      no ESTADO do bloco ${melhor.bloco}, o mesmo em que a sobra foi medida`);
                 console.log(`      rota ${melhor.c.direcao}: Aerodrome ${melhor.c.poolAerodrome}`
                     + ` | V3 ${melhor.c.poolV3} | token ${melhor.c.token}`);
                 console.log(`      executor WETH ${antesArb}->${depoisArb}`
@@ -378,17 +509,24 @@ describe('o caçador misto em observação', function () {
             }
         }
 
-        // ===== 7. O FUNIL, e as cinco origens separadas.
-        const med = (a) => (a.length === 0 ? null
-            : a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)]);
+        // ===== 8. O FUNIL, as cinco razoes e a LATENCIA POR OPORTUNIDADE.
         console.log(`\n    ${comoLerOFunilMisto(f)}`);
-        console.log('\n    LATENCIA (ms, mediana):');
-        console.log(`      sinal -> decisão ... ${med(tempos.sinalAteDecisao)?.toFixed(1) ?? 'sem amostra'}`
-            + ` (inclui ${f.cotacoesTentadas} cotações)`);
-        console.log(`      cotação (uma) ...... ${med(tempos.cotacao)?.toFixed(1) ?? 'sem amostra'}`);
-        console.log(`      pré-filtro (um) .... ${med(tempoPrefiltro)?.toFixed(1) ?? 'sem amostra'}`
-            + `  (${evitadas} simulações evitadas)`);
-        console.log(`      simulação atômica .. ${med(tempos.simulacao)?.toFixed(1) ?? 'sem amostra'}`);
+        console.log('\n    LATÊNCIA POR OPORTUNIDADE (ms, mediana) — não é tempo de varredura:');
+        console.log(`      leitura do estado .... ${med(T.leituraDoEstado)?.toFixed(1) ?? 'sem amostra'}`);
+        console.log(`      pré-filtro (um estado) ${med(T.prefiltro)?.toFixed(1) ?? 'sem amostra'}`);
+        console.log(`      cotação (uma) ........ ${med(T.cotacao)?.toFixed(1) ?? 'sem amostra'}`);
+        console.log(`      simulação atômica .... ${med(T.simulacao)?.toFixed(1) ?? 'sem amostra'}`);
+        console.log(`      TOTAL por oportunidade ${med(T.totalPorOportunidade)?.toFixed(1) ?? 'sem amostra'}`);
+        console.log(`      IDADE do dado na decisão ${med(T.idadeDoDadoMs)?.toFixed(1) ?? 'sem amostra'}`
+            + ` (intervalo de bloco medido: ${intervaloMs === null ? 'n/d' : `${intervaloMs.toFixed(0)}ms`})`);
+        console.log(`      ${f.expirado} de ${f.cotacoesTentadas} cotações decidiram sobre estado`
+            + ' JÁ SUPERADO pela corrente — contadas como EXPIRADO, nunca como prejuízo');
+        console.log(`      ${expiradasNaAuditoria} de ${auditadas} cotações da AUDITORIA também`
+            + ' passaram do intervalo de bloco. Elas medem o MESMO caminho e entram nos tempos,'
+            + ' mas não nos contadores do funil: cotação de rota descartada não é avaliação'
+            + ' econômica dela');
+        console.log(`\n    TEMPO DE VARREDURA (não é latência): ${med(T.varredura)?.toFixed(0) ?? 'n/d'}ms`
+            + ` para ${f.blocosVarridosParaDescoberta} bloco(s) de DESCOBERTA`);
         console.log('      DECLARADO: estes tempos são de fork LOCAL. Não medem latência de'
             + ' rede nem inclusão no bloco, e não autorizam conclusão sobre competitividade.');
         console.log(`\n    ${limitacaoDominante(f)}`);
@@ -401,5 +539,7 @@ describe('o caçador misto em observação', function () {
             'validada em fork não pode passar das simulações que completaram');
         assert.equal(f.deslocamentoArtificial, 0,
             'esta corrida não cria deslocamento: o campo tem de ser zero');
+        assert.ok(f.estadosAvaliados >= 1,
+            'sem estado avaliado não há conclusão econômica: blocos varridos não são estados');
     });
 });

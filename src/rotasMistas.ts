@@ -51,6 +51,12 @@ export interface CandidataMista {
     poolV3: string;
     /** 'A' = Aerodrome empresta. 'B' = V3 empresta. */
     direcao: 'A' | 'B';
+    /**
+     * `token0` do pool V3, em minusculo — ele diz de que LADO o token do meio
+     * esta, e e isso que inverte a razao do filtro. Vem da descoberta, nao de
+     * leitura nova. `null` manda cotar: lado desconhecido nao descarta.
+     */
+    token0DoV3: string | null;
     /** A chave que identifica a rota, para nao contar a mesma duas vezes. */
     chave: string;
 }
@@ -75,6 +81,7 @@ export function candidatasMistas(
     };
     const aeroPorToken = new Map<string, string[]>();
     const v3PorToken = new Map<string, string[]>();
+    const token0PorPool = new Map<string, string>();
     for (const q of pools) {
         const t = outro(q);
         if (t === null) continue;
@@ -82,6 +89,7 @@ export function candidatasMistas(
         const l = m.get(t) ?? [];
         l.push(q.endereco.toLowerCase());
         m.set(t, l);
+        token0PorPool.set(q.endereco.toLowerCase(), q.token0.toLowerCase());
     }
     const fora: CandidataMista[] = [];
     const vistas = new Set<string>();
@@ -95,7 +103,12 @@ export function candidatasMistas(
                     if (vistas.has(chave)) continue;
                     vistas.add(chave);
                     fora.push({
-                        token, poolAerodrome: pa, poolV3: pv, direcao, chave,
+                        token,
+                        poolAerodrome: pa,
+                        poolV3: pv,
+                        direcao,
+                        token0DoV3: token0PorPool.get(pv) ?? null,
+                        chave,
                     });
                 }
             }
@@ -141,7 +154,18 @@ export function pernasDaCandidata(
  * somar duas delas e exatamente como se fabrica um resultado.
  */
 export interface FunilMisto {
-    blocosObservados: number;
+    /**
+     * Blocos varridos para DESCOBRIR pools. Nao e estado avaliado.
+     *
+     * DEFEITO MEDIDO e apontado por ela: o relatorio dizia "250 blocos
+     * observados" e cotava tudo em UM estado, porque o `hardhat_reset`
+     * acontecia uma vez no fim da janela. *"250 blocos observados não são 250
+     * estados avaliados."* Os dois numeros agora existem separados, e o que
+     * conta para a economia e `estadosAvaliados`.
+     */
+    blocosVarridosParaDescoberta: number;
+    /** Estados DISTINTOS em que as rotas foram cotadas. */
+    estadosAvaliados: number;
     poolsVistos: { v3: number; aerodrome: number };
     /** Rotas DISTINTAS (par + direcao), nao pools. */
     rotasDistintas: number;
@@ -159,10 +183,25 @@ export interface FunilMisto {
     realizadaNaRede: number;
     /** O melhor liquido MEDIDO em fork, em wei do token base. */
     melhorLiquidoWei: bigint | null;
+    /**
+     * AS CINCO RAZOES DE NAO TER DADO, separadas por pedido dela.
+     *
+     * *"O funil separa falta de spread, limitação de cobertura, falta de dados,
+     * expiração e falha de execução."* Elas pedem acoes opostas: falta de
+     * spread e o mercado; cobertura e varrer mais; falta de dado e o avaliador;
+     * expiracao e latencia; falha de execucao e o contrato. Somar duas e perder
+     * a unica informacao que o funil tem.
+     */
+    faltaDeSpread: number;
+    limitacaoDeCobertura: number;
+    faltaDeDados: number;
+    expirado: number;
+    falhaDeExecucao: number;
 }
 
 export const funilVazio = (): FunilMisto => ({
-    blocosObservados: 0,
+    blocosVarridosParaDescoberta: 0,
+    estadosAvaliados: 0,
     poolsVistos: { v3: 0, aerodrome: 0 },
     rotasDistintas: 0,
     cotacoesTentadas: 0,
@@ -176,6 +215,11 @@ export const funilVazio = (): FunilMisto => ({
     validadaEmFork: 0,
     realizadaNaRede: 0,
     melhorLiquidoWei: null,
+    faltaDeSpread: 0,
+    limitacaoDeCobertura: 0,
+    faltaDeDados: 0,
+    expirado: 0,
+    falhaDeExecucao: 0,
 });
 
 /**
@@ -186,10 +230,27 @@ export const funilVazio = (): FunilMisto => ({
  * e sem sobra bruta nao se fala de latencia.
  */
 export function limitacaoDominante(f: FunilMisto): string {
+    if (f.estadosAvaliados === 0) {
+        return 'NADA AVALIADO: nenhum estado distinto foi cotado. Varrer blocos para descobrir '
+            + 'pool não é avaliar estado, e sem estado avaliado não há conclusão econômica';
+    }
+    if (f.expirado > 0 && f.expirado >= f.cotacoesTentadas) {
+        return 'LATÊNCIA: todo sinal EXPIROU antes da decisão. Isto não é prejuízo e não é '
+            + 'falta de spread — é o avaliador chegando tarde ao próprio estado que leu';
+    }
     if (f.rotasDistintas === 0) {
         return 'COBERTURA: nenhuma rota mista existe no universo observado — não há par '
             + '{Aerodrome, V3} compartilhando token com a base. Nada aqui é sobre custo ou '
             + 'latência';
+    }
+    if (f.cotacoesTentadas === 0 && f.faltaDeSpread > 0) {
+        // ETIQUETA QUE DESCREVE O CONJUNTO. Com zero cotacao tentada, dizer
+        // "nenhuma cotacao devolveu sobra" afirma uma medicao que nao houve —
+        // o defeito que da nome a este projeto. Aqui a recusa veio do FILTRO, e
+        // a prova dele e valida em todo tamanho; nada foi cotado.
+        return 'SEM SPREAD: nenhuma cotação foi tentada porque o filtro descartou TODAS as '
+            + 'rotas com prova válida em qualquer tamanho (o produto das razões máximas não '
+            + 'passa de 1). Isto não é "cotei e não deu": é "não havia o que cotar"';
     }
     if (f.cotacoesComSobra === 0) {
         return 'CUSTO: há rota, e nenhuma cotação devolveu sobra BRUTA. A diferença de preço '
@@ -209,7 +270,8 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         .sort((a, b) => b[1] - a[1])
         .map(([k, n]) => `${n}x ${k}`)
         .join(', ');
-    return `FUNIL MISTO — ${f.blocosObservados} bloco(s) observados | pools `
+    return `FUNIL MISTO — ${f.blocosVarridosParaDescoberta} bloco(s) varridos para DESCOBERTA`
+        + ` e ${f.estadosAvaliados} ESTADO(S) distinto(s) avaliado(s) | pools `
         + `${f.poolsVistos.v3} V3 + ${f.poolsVistos.aerodrome} Aerodrome | `
         + `${f.rotasDistintas} ROTA(S) DISTINTA(S) (par + direção, não pools) | `
         + `${f.cotacoesTentadas} cotação(ões), ${f.cotacoesComSobra} com sobra bruta | `
@@ -221,91 +283,225 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         + `${f.validadaEmFork} VALIDADA em fork, `
         + `${f.realizadaNaRede} realizada na REDE | melhor líquido `
         + `${f.melhorLiquidoWei === null ? 'nenhum' : `${f.melhorLiquidoWei} wei`} | `
+        + `SEM DADO POR: ${f.faltaDeSpread} falta de spread, `
+        + `${f.limitacaoDeCobertura} cobertura, ${f.faltaDeDados} falta de dados, `
+        + `${f.expirado} EXPIRADO, ${f.falhaDeExecucao} falha de execução | `
         + limitacaoDominante(f);
 }
 
 /**
- * O TETO da saida de um pool V3, pelo preco SPOT.
+ * O LIMITE DE SPREAD — uma RAZAO maxima, e nao um teto por tamanho.
  *
- * POR QUE EXISTE. Medido em 2026-10-15, na corrida de observacao de 250
- * blocos: cada `cotar` completo custa **544,5 ms** (mediana de 144), porque e
- * um `eth_call` que executa a cadeia inteira de swaps no fork. Com 36 rotas sao
- * ~20 s por avaliacao, contra blocos de 2 s na Base. E dez vezes lento demais,
- * e ela pediu a alternativa: *"Se esse método for lento demais para operação
- * competitiva, meça a latência e implemente a alternativa mais simples
- * tecnicamente comprovada."*
+ * DOIS DEFEITOS MEUS que isto conserta, os dois apontados por ela em
+ * 2026-10-15, e os dois podiam DESCARTAR ARBITRAGEM LUCRATIVA:
  *
- * A alternativa mais simples que NAO mente: um TETO. O preco spot do V3 sai de
- * `sqrtPriceX96` com uma leitura de `slot0`, e a saida real e SEMPRE menor que
- * o teto — a taxa do pool desconta, e o preco anda contra quem negocia ao
- * cruzar ticks. Entao:
+ * 1. MISTURA DE UNIDADE na direcao B. O avaliador passava
+ *    `tokenDoEmprestimo = q` com `q` em WETH, e `valeSimular` tratava aquilo
+ *    como quantidade do token do MEIO para calcular a saida do V3 — depois
+ *    comparava o resultado (em token) com o custo (em WETH). Comparar grandezas
+ *    de unidades diferentes nao e filtro conservador: e sorteio.
  *
- *   teto < custo  =>  a rota NAO pode fechar, e descartar e seguro
- *   teto >= custo =>  nao se sabe; so a cotacao completa decide
+ * 2. UM TETO POR TAMANHO NAO PROVA NADA SOBRE OS OUTROS TAMANHOS. A frase
+ *    "esta rota nao fecha em tamanho nenhum" era falsa: o teto era calculado
+ *    para UM `q`.
  *
- * O pre-filtro so ECONOMIZA simulacao; ele nunca aprova nada. Um teto usado
- * como estimativa seria o defeito que este projeto persegue — aqui ele e usado
- * apenas para RECUSAR, que e a direcao em que um teto e valido.
+ * O CONSERTO e trocar teto por RAZAO. Em AMM a saida e concava na entrada:
+ * `saida/entrada` e MAXIMA no tamanho infinitesimal e so cai dali. Entao a
+ * razao marginal de cada perna e um teto da razao media de QUALQUER tamanho, e
+ * o produto das duas razoes e um teto do ciclo inteiro:
  *
- * `zeroParaUm` = esta entrando o token0 e saindo o token1.
+ *     razao do ciclo <= razaoMax(perna 1) x razaoMax(perna 2)
+ *
+ * Se esse produto nao passa de 1, o ciclo devolve menos do que entrou em
+ * TAMANHO NENHUM — e a recusa e valida para todos eles. As unidades se cancelam
+ * de propósito: (token por WETH) x (WETH por token) e adimensional.
+ *
+ * As duas razoes vem de FONTES DIFERENTES, e nenhuma de conta minha:
+ *
+ *   V3        o preco spot de `sqrtPriceX96`, que e o limite quando o tamanho
+ *             tende a zero. Taxa e cruzamento de tick so pioram
+ *   AERODROME `getAmountOut(epsilon, tokenEntra)` — a conta do PROPRIO pool num
+ *             tamanho pequeno. `epsilon` tem de ser MENOR que os tamanhos
+ *             avaliados, senao a razao dele nao e teto
  */
-export function tetoDaSaidaV3(
-    sqrtPriceX96: bigint, zeroParaUm: boolean, entrada: bigint,
-): bigint | null {
-    if (sqrtPriceX96 <= 0n || entrada <= 0n) return null;
-    const Q96 = 1n << 96n;
-    const Q192 = Q96 * Q96;
-    // preco = (sqrtP / 2^96)^2 = token1 por token0.
-    if (zeroParaUm) return (entrada * sqrtPriceX96 * sqrtPriceX96) / Q192;
-    return (entrada * Q192) / (sqrtPriceX96 * sqrtPriceX96);
+
+/** Uma razao `saida/entrada` como fracao exata, para nao dividir inteiros. */
+export interface RazaoMaxima {
+    num: bigint;
+    den: bigint;
 }
 
 /**
- * O pre-filtro de uma candidata, antes de gastar uma cotacao completa.
+ * A razao maxima de um pool V3, do preco spot.
  *
- * Devolve `true` quando vale simular — isto e, quando o TETO nao prova
- * impossibilidade. Nunca devolve "lucrativa": isso so sai da execucao.
+ * `entraEhToken0` diz de que lado se entra. `price = (sqrtP/2^96)^2` e token1
+ * por token0, entao o inverso vale quando se entra pelo token1.
  */
-export function valeSimular(e: {
-    /** Quanto do token base entra no ciclo. */
-    entradaBase: bigint;
-    /**
-     * Quanto do token do meio a perna de EMPRESTIMO entrega por `entradaBase`.
-     * No Aerodrome vem de `getAmountOut`, que e a conta do proprio pool.
-     */
-    tokenDoEmprestimo: bigint | null;
-    /** `sqrtPriceX96` do pool V3, de `slot0`. */
+export function razaoMaximaV3(
+    sqrtPriceX96: bigint, entraEhToken0: boolean,
+): RazaoMaxima | null {
+    if (sqrtPriceX96 <= 0n) return null;
+    const Q192 = (1n << 96n) * (1n << 96n);
+    const p2 = sqrtPriceX96 * sqrtPriceX96;
+    return entraEhToken0 ? { num: p2, den: Q192 } : { num: Q192, den: p2 };
+}
+
+/**
+ * A razao maxima de um pool Aerodrome, pela conta DELE num tamanho pequeno.
+ *
+ * `epsilon` tem de ser menor que qualquer tamanho que se va avaliar: a razao
+ * cai com o tamanho, entao um `epsilon` grande devolveria uma razao MENOR que a
+ * verdadeira e o filtro passaria a recusar rota boa.
+ */
+export function razaoMaximaAerodrome(
+    saidaNoEpsilon: bigint | null, epsilon: bigint,
+): RazaoMaxima | null {
+    if (saidaNoEpsilon === null || saidaNoEpsilon <= 0n || epsilon <= 0n) return null;
+    return { num: saidaNoEpsilon, den: epsilon };
+}
+
+/** O produto de duas razoes passa de 1? Por multiplicacao cruzada, sem dividir. */
+export function produtoPassaDeUm(a: RazaoMaxima, b: RazaoMaxima): boolean {
+    return a.num * b.num > a.den * b.den;
+}
+
+export interface VeredictoDoSpread {
+    /** `true` = vale cotar. `false` = NENHUM tamanho fecha. */
+    vale: boolean;
+    porque: string;
+    /** As duas razoes, para o log poder ser auditado. */
+    razoes: { emprestimo: RazaoMaxima | null; venda: RazaoMaxima | null };
+}
+
+/**
+ * O FILTRO, nas DUAS direcoes, com as unidades batendo.
+ *
+ * direcao A: Aerodrome empresta (WETH -> token) e o V3 vende (token -> WETH)
+ *            razao = (token/WETH no Aerodrome) x (WETH/token no V3)
+ *
+ * direcao B: V3 empresta (WETH -> token) e o Aerodrome vende (token -> WETH)
+ *            razao = (token/WETH no V3) x (WETH/token no Aerodrome)
+ *
+ * Nos dois casos o produto e adimensional, e e isso que torna a comparacao com
+ * 1 legitima. `null` em qualquer razao NAO recusa: ausencia manda cotar.
+ */
+export function semSpreadEmTamanhoNenhum(e: {
+    direcao: 'A' | 'B';
+    /** `sqrtPriceX96` do pool V3. */
     sqrtPriceX96: bigint | null;
-    /** No pool V3, entrar com o token do meio e entrar pelo token0? */
-    v3ZeroParaUm: boolean;
-}): { vale: boolean; porque: string; teto: bigint | null } {
-    if (e.tokenDoEmprestimo === null || e.sqrtPriceX96 === null) {
-        // AUSENCIA NAO DESCARTA. Sem um dos dois numeros o teto nao existe, e
-        // "nao sei" nao autoriza recusar — autoriza simular.
+    /** No pool V3, o token do MEIO e o token0? */
+    tokenDoMeioEhToken0NoV3: boolean;
+    /**
+     * `getAmountOut(epsilon, X)` do Aerodrome, onde X e o token que ENTRA na
+     * perna dele: WETH na direcao A, o token do meio na direcao B.
+     */
+    saidaAerodromeNoEpsilon: bigint | null;
+    epsilon: bigint;
+}): VeredictoDoSpread {
+    // No V3 a perna da direcao A vende o token do meio (entra o token do
+    // meio); na direcao B ela compra (entra o WETH, isto e, NAO o token do
+    // meio). E so isso que muda de lado.
+    const entraPeloToken0NoV3 = e.direcao === 'A'
+        ? e.tokenDoMeioEhToken0NoV3
+        : !e.tokenDoMeioEhToken0NoV3;
+    const rV3 = razaoMaximaV3(e.sqrtPriceX96 ?? 0n, entraPeloToken0NoV3);
+    const rAero = razaoMaximaAerodrome(e.saidaAerodromeNoEpsilon, e.epsilon);
+    const razoes = e.direcao === 'A'
+        ? { emprestimo: rAero, venda: rV3 }
+        : { emprestimo: rV3, venda: rAero };
+
+    if (rV3 === null || rAero === null) {
+        // AUSENCIA NAO RECUSA. Sem uma das razoes nao ha produto, e "nao sei"
+        // nunca autoriza descartar — autoriza cotar.
         return {
             vale: true,
-            porque: 'sem cotação do pool de empréstimo ou sem `slot0`: o teto não existe, e '
-                + 'ausência não descarta rota',
-            teto: null,
+            porque: 'falta uma das razões (sem `slot0` ou sem cotação do Aerodrome): sem o '
+                + 'produto não há prova de inviabilidade, e ausência não descarta rota',
+            razoes,
         };
     }
-    const teto = tetoDaSaidaV3(e.sqrtPriceX96, e.v3ZeroParaUm, e.tokenDoEmprestimo);
-    if (teto === null) {
-        return { vale: true, porque: 'o teto não pôde ser calculado', teto: null };
-    }
-    if (teto <= e.entradaBase) {
+    if (produtoPassaDeUm(rAero, rV3)) {
         return {
-            vale: false,
-            porque: `o TETO da saída do V3 (${teto}) não passa do que o ciclo custa `
-                + `(${e.entradaBase}). A saída real é sempre MENOR que o teto — taxa do pool e `
-                + 'preço andando contra —, então esta rota não fecha em tamanho nenhum',
-            teto,
+            vale: true,
+            porque: 'o produto das razões máximas passa de 1: não dá para descartar, e só a '
+                + 'execução decide',
+            razoes,
         };
     }
     return {
-        vale: true,
-        porque: `o teto (${teto}) passa do custo (${e.entradaBase}): não dá para descartar, e `
-            + 'só a execução decide',
-        teto,
+        vale: false,
+        porque: 'o produto das razões MÁXIMAS das duas pernas não passa de 1. Em AMM a razão '
+            + 'saída/entrada é máxima no tamanho infinitesimal e só cai, então nenhum tamanho '
+            + 'fecha — e as unidades se cancelam, (token/WETH) × (WETH/token)',
+        razoes,
     };
+}
+
+/**
+ * O ESTADO LIDO, na forma que o filtro precisa — e nada alem dela.
+ *
+ * Isto existe para o filtro rodar nos DOIS caminhos (cacador ao vivo e
+ * avaliador em fork) sem duas implementacoes: cada caminho le a corrente com o
+ * seu transporte e entrega AQUI o que leu. A triagem em si e a mesma funcao.
+ */
+export interface LeiturasDoEstado {
+    /** `sqrtPriceX96` por pool V3, endereco em minusculo. Ausente = nao li. */
+    sqrtPorPoolV3: Map<string, bigint | null>;
+    /** `token0` por pool, tudo em minusculo. */
+    token0PorPool: Map<string, string>;
+    /** `getAmountOut(epsilon, tokenEntra)`, chave `${pool}|${tokenEntra}`. */
+    saidaAerodrome: Map<string, bigint | null>;
+    /** O `epsilon` usado, que tem de ser menor que todo tamanho avaliado. */
+    epsilon: bigint;
+    /** O bloco do estado. E ele que diz a IDADE do dado na decisao. */
+    bloco: number;
+}
+
+export interface Triagem {
+    /** Vale cotar: o produto passa de 1, ou falta dado (ausencia nao descarta). */
+    valem: CandidataMista[];
+    /** Recusadas com PROVA valida em todo tamanho. */
+    recusadasPorSpread: CandidataMista[];
+    /** Entraram em `valem` por FALTA DE DADO, nao por spread. Contadas a parte. */
+    semDados: number;
+    veredictos: Map<string, VeredictoDoSpread>;
+}
+
+/**
+ * Triagem de um ESTADO: aplica o filtro a cada candidata.
+ *
+ * `faltaDeDados` e contado SEPARADO de `faltaDeSpread` de proposito: as duas
+ * mandam a rota para a cotacao, mas pedem consertos opostos — falta de dado e
+ * defeito do avaliador, falta de spread e propriedade do mercado. Somar as duas
+ * apagaria a unica informacao que o funil tem.
+ */
+export function triarCandidatas(
+    cs: CandidataMista[], tokenBase: string, L: LeiturasDoEstado,
+): Triagem {
+    const base = tokenBase.toLowerCase();
+    const t = {
+        valem: [] as CandidataMista[],
+        recusadasPorSpread: [] as CandidataMista[],
+        semDados: 0,
+        veredictos: new Map<string, VeredictoDoSpread>(),
+    };
+    for (const c of cs) {
+        const t0V3 = L.token0PorPool.get(c.poolV3.toLowerCase()) ?? c.token0DoV3;
+        // Na direcao A o Aerodrome recebe a BASE; na B recebe o token do meio.
+        const entraNoAero = c.direcao === 'A' ? base : c.token.toLowerCase();
+        const v = semSpreadEmTamanhoNenhum({
+            direcao: c.direcao,
+            sqrtPriceX96: L.sqrtPorPoolV3.get(c.poolV3.toLowerCase()) ?? null,
+            tokenDoMeioEhToken0NoV3: t0V3 !== null && t0V3 === c.token.toLowerCase(),
+            saidaAerodromeNoEpsilon: t0V3 === null
+                ? null
+                : L.saidaAerodrome.get(`${c.poolAerodrome.toLowerCase()}|${entraNoAero}`) ?? null,
+            epsilon: L.epsilon,
+        });
+        t.veredictos.set(c.chave, v);
+        if (!v.vale) { t.recusadasPorSpread.push(c); continue; }
+        if (v.razoes.emprestimo === null || v.razoes.venda === null) t.semDados += 1;
+        t.valem.push(c);
+    }
+    return t;
 }

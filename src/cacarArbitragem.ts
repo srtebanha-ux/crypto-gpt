@@ -39,7 +39,20 @@ import {
     type Rota, type PoolParaRota, type Retencao,
 } from './rotas';
 import { Exclusoes, classificar, type EstadoDaOportunidade } from './causaDaFalha';
-import { candidatasMistas, limitacaoDominante, funilVazio, type PoolMisto } from './rotasMistas';
+import {
+    candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
+    type PoolMisto, type CandidataMista, type LeiturasDoEstado,
+} from './rotasMistas';
+
+/**
+ * O `epsilon` das razoes maximas: 1e-6 WETH, em wei.
+ *
+ * Ele tem de ser MENOR que todo tamanho avaliado. A razao `saida/entrada` cai
+ * com o tamanho, entao um epsilon grande devolveria razao menor que a
+ * verdadeira — e o filtro passaria a RECUSAR rota lucrativa, que e o defeito
+ * que ela achou na direcao B.
+ */
+const EPSILON_DA_RAZAO = 10n ** 12n;
 
 const log = createLogger('arb');
 const coder = AbiCoder.defaultAbiCoder();
@@ -124,7 +137,79 @@ const SELETORES = {
     // `factory()` diz de que tipo o pool e. E ele que separa um pool que
     // sabemos emprestar de um de liquidez concentrada, cuja conta nao e esta.
     factory: sel('factory()'),
+    // O ESTADO que o filtro de spread precisa, e so ele: `slot0()` traz o
+    // `sqrtPriceX96` do V3 (a razao maxima no tamanho infinitesimal) e
+    // `getAmountOut` e a conta do PROPRIO pool Aerodrome.
+    slot0: sel('slot0()'),
+    getAmountOut: sel('getAmountOut(uint256,address)'),
 };
+
+/** `getAmountOut(epsilon, tokenEntra)` codificado. */
+const codificarGetAmountOut = (quantia: bigint, token: string): string => (
+    SELETORES.getAmountOut
+    + quantia.toString(16).padStart(64, '0')
+    + token.toLowerCase().replace('0x', '').padStart(64, '0')
+);
+
+/**
+ * O ESTADO DE UM BLOCO para as rotas mistas — `slot0` dos V3 e
+ * `getAmountOut(epsilon, X)` dos Aerodrome, em LOTE.
+ *
+ * Ele existe aqui, e nao em `rotasMistas.ts`, porque e leitura de corrente: a
+ * TRIAGEM mora la e e a mesma nos dois caminhos (`triarCandidatas`). Duplicar a
+ * triagem seria a REGRA 3; duplicar a leitura e inevitavel, porque o transporte
+ * do fork e outro.
+ *
+ * `epsilon` tem de ser menor que todo tamanho avaliado, senao a razao do
+ * Aerodrome deixa de ser teto e o filtro passa a recusar rota boa.
+ */
+export async function lerEstadoMisto(
+    chamar: Transporte,
+    candidatas: CandidataMista[],
+    tokenBase: string,
+    epsilon: bigint,
+    bloco: number,
+): Promise<LeiturasDoEstado> {
+    const base = tokenBase.toLowerCase();
+    const v3 = [...new Set(candidatas.map((c) => c.poolV3.toLowerCase()))];
+    // Chave `${pool}|${tokenEntra}`: na direcao A entra a BASE no Aerodrome, na
+    // B entra o token do meio. Sao leituras DIFERENTES do mesmo pool.
+    const aero = [...new Set(candidatas.map(
+        (c) => `${c.poolAerodrome.toLowerCase()}|${c.direcao === 'A' ? base : c.token.toLowerCase()}`,
+    ))];
+    const pedidos: ChamadaMulti[] = [
+        ...v3.map((p) => ({ alvo: p, dados: SELETORES.slot0 })),
+        ...aero.map((k) => {
+            const [pool, token] = k.split('|');
+            return { alvo: pool!, dados: codificarGetAmountOut(epsilon, token!) };
+        }),
+    ];
+    const r = pedidos.length === 0 ? [] : await lerEmLote(chamar, pedidos);
+    const sqrtPorPoolV3 = new Map<string, bigint | null>();
+    const token0PorPool = new Map<string, string>();
+    const saidaAerodrome = new Map<string, bigint | null>();
+    for (let i = 0; i < v3.length; i += 1) {
+        const resp = r[i];
+        // `slot0` devolve 7 campos; o primeiro e o `sqrtPriceX96`. Resposta
+        // curta ou falha vira `null` — NAO zero: zero recusaria a rota, e
+        // ausencia nao descarta.
+        const bom = resp !== undefined && resp.ok && resp.dados.length >= 66;
+        sqrtPorPoolV3.set(v3[i]!, bom ? BigInt(resp.dados.slice(0, 66)) : null);
+    }
+    for (let i = 0; i < aero.length; i += 1) {
+        const resp = r[v3.length + i];
+        const bom = resp !== undefined && resp.ok && resp.dados.length >= 66;
+        saidaAerodrome.set(aero[i]!, bom ? BigInt(resp.dados.slice(0, 66)) : null);
+    }
+    // `token0` dos V3 ja veio da descoberta: as candidatas conhecem o token do
+    // meio, e quem diz de que lado ele esta e o pool. Sem ele o filtro inverte
+    // o lado da razao, entao `null` manda cotar em vez de recusar.
+    for (const c of candidatas) {
+        const p = c.poolV3.toLowerCase();
+        if (c.token0DoV3 !== null) token0PorPool.set(p, c.token0DoV3.toLowerCase());
+    }
+    return { sqrtPorPoolV3, token0PorPool, saidaAerodrome, epsilon, bloco };
+}
 
 export interface PoolDaFabrica {
     endereco: string;
@@ -914,6 +999,27 @@ async function principal(): Promise<void> {
     }
     log.info(`[ARB] ${exclusoes.comoLer()}`, { caminho: caminhoDasExclusoes });
 
+    // AS ROTAS MISTAS: descobertas UMA vez (a descoberta e a parte caras) e
+    // TRIADAS a cada estado distinto. O funil atravessa os ciclos, senao
+    // `estadosAvaliados` seria sempre 1 — que e exatamente o defeito que ela
+    // apontou no relatorio ("250 blocos observados não são 250 estados
+    // avaliados"), só do outro lado.
+    const MISTAS = candidatasMistas(porAtividade.concentrados, WETH_DA_BASE);
+    const FM = funilVazio();
+    FM.blocosVarridosParaDescoberta = porAtividade.blocosLidos;
+    FM.poolsVistos = {
+        v3: porAtividade.porVenue.v3, aerodrome: porAtividade.porVenue.aerodrome,
+    };
+    FM.rotasDistintas = MISTAS.length;
+    if (MISTAS.length === 0) FM.limitacaoDeCobertura += 1;
+    let blocoDaTriagem = -1;
+    log.info(`[ARB-N] ${comoLerOFunilMisto(FM)}`, {
+        direcoes: `${MISTAS.filter((x) => x.direcao === 'A').length} com o Aerodrome `
+            + `emprestando, ${MISTAS.filter((x) => x.direcao === 'B').length} com o V3`,
+        oQueIssoNaoE: 'estas são as rotas DESCOBERTAS. Nenhuma foi avaliada ainda: a triagem '
+            + 'por estado sai na linha [ARB-N] de cada bloco',
+    });
+
     let ciclo = 0;
     let blocoAnterior: number | null = null;
 
@@ -975,39 +1081,59 @@ async function principal(): Promise<void> {
             teto: tetoDeRotas,
             executor: process.env.ARB_EXECUTOR ?? undefined,
         });
-        // OS POOLS DE LIQUIDEZ CONCENTRADA que negociaram entram no funil como
-        // NAO VALIDADOS — uma vez, no primeiro ciclo. Some-los a "nao ha
-        // oportunidade" seria transformar limitacao do avaliador em ausencia de
-        // mercado, que e o erro que custou um mes a este projeto.
-        if (ciclo === 1) {
-            // DESCOBERTA DE ROTA, nao contagem de pool.
-            //
-            // A versao anterior somava os pools concentrados em NAO_VALIDADA e
-            // publicava "125" — confundindo quantidade de pool com quantidade
-            // de oportunidade, que foi o que ela proibiu por nome. Agora a
-            // mesma `candidatasMistas` que o avaliador em fork usa roda aqui, e
-            // o numero publicado e de ROTAS DISTINTAS (par + direcao).
-            const mistas = candidatasMistas(porAtividade.concentrados, WETH_DA_BASE);
-            const fm = funilVazio();
-            fm.blocosObservados = porAtividade.blocosLidos;
-            fm.poolsVistos = {
-                v3: porAtividade.porVenue.v3, aerodrome: porAtividade.porVenue.aerodrome,
-            };
-            fm.rotasDistintas = mistas.length;
-            FUNIL.estados.NAO_VALIDADA += mistas.length;
-            log.warn('[ARB-N] rotas MISTAS V3+Aerodrome descobertas.', {
-                poolsConcentrados: `${porAtividade.porVenue.v3} V3 + `
-                    + `${porAtividade.porVenue.aerodrome} Aerodrome`,
-                rotasDistintas: mistas.length,
-                direcoes: `${mistas.filter((x) => x.direcao === 'A').length} com o Aerodrome `
-                    + `emprestando, ${mistas.filter((x) => x.direcao === 'B').length} com o V3`,
+        // AS ROTAS MISTAS, TRIADAS NO ESTADO DESTE BLOCO.
+        //
+        // Antes isto rodava UMA vez, no ciclo 1, e despejava todas as rotas em
+        // NAO_VALIDADA. Ela cortou isso: *"O caçador ao vivo ainda monta rotas
+        // mistas e as deixa como NÃO VALIDADAS. Unifique efetivamente a lógica
+        // de seleção e os critérios econômicos."* Agora o MESMO filtro que o
+        // avaliador em fork usa (`triarCandidatas` -> `semSpreadEmTamanhoNenhum`)
+        // roda aqui, a cada estado distinto, e separa DESCARTADA de NAO_VALIDADA
+        // com prova valida em todo tamanho.
+        //
+        // SO AS ROTAS AFETADAS por mudanca de estado, por ordem dela: um pool
+        // cujo estado nao mudou nao precisa de leitura nova no mesmo bloco.
+        if (MISTAS.length > 0 && blocoAgora > 0 && blocoAgora !== blocoDaTriagem) {
+            const fimTri = av.etapa('prefiltro');
+            const L = await lerEstadoMisto(chamar, MISTAS, WETH_DA_BASE, EPSILON_DA_RAZAO, blocoAgora);
+            const tri = triarCandidatas(MISTAS, WETH_DA_BASE, L);
+            // EXPIRADO, nao prejuizo: se o bloco andou entre a leitura do
+            // estado e a decisao, a triagem decidiu sobre um estado que nao
+            // existe mais. Chamar isso de "sem spread" seria publicar latencia
+            // minha como propriedade do mercado.
+            const blocoNaDecisao = Number(numDe(await chamar('eth_blockNumber', [])) ?? 0n);
+            const expirou = blocoNaDecisao > blocoAgora;
+            fimTri();
+            FM.estadosAvaliados += 1;
+            FM.cotacoesTentadas += tri.valem.length;
+            FM.faltaDeDados += tri.semDados;
+            if (expirou) {
+                FM.expirado += tri.valem.length;
+            } else {
+                FM.faltaDeSpread += tri.recusadasPorSpread.length;
+            }
+            FUNIL.estados.DESCARTADA += tri.recusadasPorSpread.length;
+            FUNIL.estados.NAO_VALIDADA += tri.valem.length;
+            log.warn('[ARB-N] rotas MISTAS V3+Aerodrome TRIADAS neste estado.', {
+                bloco: blocoAgora,
+                estadosAvaliados: FM.estadosAvaliados,
+                rotasDistintas: MISTAS.length,
+                passaramNoFiltro: tri.valem.length,
+                descartadasComProva: tri.recusadasPorSpread.length,
+                semDadoParaDecidir: tri.semDados,
+                idadeDoDado: `${blocoNaDecisao - blocoAgora} bloco(s) na hora da decisão`,
+                expirou: expirou
+                    ? 'SIM: o bloco andou antes da decisão — contado como EXPIRADO, não como '
+                        + 'prejuízo e não como falta de spread'
+                    : 'não',
                 oQueFalta: 'cotar e simular exige o `CacadorV3` implantado. Em fork isso roda '
                     + 'com implantação EFÊMERA e zero ETH (`forkTests/aCacaMista.js`); daqui, '
-                    + 'ao vivo, não há contrato na rede, então estas rotas ficam NÃO VALIDADAS',
-                oQueIssoNaoE: 'NÃO é contagem de pools: é rota distinta (par + direção). E NÃO '
-                    + 'é "não há oportunidade": é limitação do avaliador ao vivo',
-                limitacao: limitacaoDominante(fm),
+                    + 'ao vivo, não há contrato na rede — então o que PASSA no filtro fica NÃO '
+                    + 'VALIDADA, e só o que o filtro PROVA inviável vira DESCARTADA',
+                oQueIssoNaoE: 'NÃO é contagem de pools: é rota distinta (par + direção)',
+                limitacao: limitacaoDominante(FM),
             });
+            blocoDaTriagem = blocoAgora;
         }
         FUNIL.rotasEncontradas += aN.rotas;
         FUNIL.espacoDeBusca = paresCruzados;
