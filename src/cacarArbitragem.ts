@@ -39,10 +39,42 @@ import {
     type Rota, type PoolParaRota, type Retencao,
 } from './rotas';
 import { Exclusoes, classificar, type EstadoDaOportunidade } from './causaDaFalha';
+import { pernasDaCandidata } from './rotasMistas';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
     type PoolMisto, type CandidataMista, type LeiturasDoEstado,
 } from './rotasMistas';
+import {
+    QUOTER_V2, SELETORES_DA_COTACAO, quoterServeOPool, codificarQuoteV3, codificarGetAmountOut,
+    primeiraPalavra, escadaDeTamanhos, LivroDeSinais, EstadoDosPools,
+    COTADOR_LOCAL, codificarCotarCiclo, lerRespostaDaCotacao, lerCodigoDoCotador,
+    type SinalDeArbitragem,
+} from './cotarMista';
+import { codificarTetoDeL1, ORACULO_DE_GAS_L1, somarCusto, julgar } from './custoDaBase';
+
+/**
+ * O gas de um ciclo misto VENCEDOR, medido no recibo da execucao atomica em
+ * fork (2026-10-15, `forkTests/aMistaQueFecha.js`): 427.168.
+ *
+ * E estimativa para um sinal ao vivo, e vai marcada como `'estimativa'` em
+ * `somarCusto` — nunca como medicao desta operacao.
+ */
+const GAS_DO_CICLO_MISTO = 427_168n;
+
+/**
+ * O que o cacador aprendeu sobre os pools, e vive entre os ciclos.
+ *
+ * `TAXAS_V3` e `QUOTER_SERVE` sao lidos UMA vez (fee e fabrica nao mudam);
+ * `ESTADOS_DOS_POOLS` e o que diz QUAIS rotas foram afetadas, e `LIVRO_DE_SINAIS`
+ * guarda a latencia de OBSERVACAO — nunca a do fork.
+ */
+const TAXAS_V3 = new Map<string, number>();
+const QUOTER_SERVE = new Set<string>();
+const ESTADOS_DOS_POOLS = new EstadoDosPools();
+const LIVRO_DE_SINAIS = new LivroDeSinais();
+
+/** O bytecode JA COMPILADO do `CacadorV3`, do artefato local. */
+const CODIGO_DO_COTADOR = lerCodigoDoCotador();
 
 
 const log = createLogger('arb');
@@ -134,6 +166,8 @@ const SELETORES = {
     slot0: sel('slot0()'),
     // `stable()` diz QUAL invariante o pool usa. So `false` autoriza descarte.
     estavel: sel('stable()'),
+    /** O `fee` do pool V3, que o QuoterV2 exige. Lido do pool, nunca suposto. */
+    fee: sel('fee()'),
 };
 
 /**
@@ -156,6 +190,7 @@ export async function lerEstadoMisto(
     chamar: Transporte,
     candidatas: CandidataMista[],
     bloco: number,
+    etiqueta: 'latest' | 'pending' = 'latest',
 ): Promise<LeiturasDoEstado> {
     const v3 = [...new Set(candidatas.map((c) => c.poolV3.toLowerCase()))];
     const aero = [...new Set(candidatas.map((c) => c.poolAerodrome.toLowerCase()))];
@@ -163,7 +198,7 @@ export async function lerEstadoMisto(
         ...v3.map((q) => ({ alvo: q, dados: SELETORES.slot0 })),
         ...aero.map((q) => ({ alvo: q, dados: SELETORES.getReserves })),
     ];
-    const r = pedidos.length === 0 ? [] : await lerEmLote(chamar, pedidos);
+    const r = pedidos.length === 0 ? [] : await lerEmLote(chamar, pedidos, etiqueta);
     const sqrtPorPoolV3 = new Map<string, bigint | null>();
     const token0PorPool = new Map<string, string>();
     const reservasAerodrome = new Map<string, { r0: bigint; r1: bigint } | null>();
@@ -192,6 +227,218 @@ export async function lerEstadoMisto(
         if (c.token0DoV3 !== null) token0PorPool.set(q, c.token0DoV3.toLowerCase());
     }
     return { sqrtPorPoolV3, token0PorPool, reservasAerodrome, bloco };
+}
+
+/**
+ * A COTACAO DE UM CICLO MISTO, para todas as rotas afetadas, em DUAS idas e
+ * voltas — e sem fork nenhum.
+ *
+ * As duas pernas sao sequenciais por natureza (a segunda consome o que a
+ * primeira devolveu), mas as ROTAS sao independentes: entao a perna 1 de todas
+ * vai num multicall e a perna 2 de todas no seguinte. O custo de N rotas e
+ * DUAS requisicoes, nao 2N.
+ *
+ * O tamanho e o MENOR da escada, de proposito: a razao `saida/entrada` e maxima
+ * no tamanho infinitesimal e so cai, entao se o menor nao tem sobra bruta
+ * nenhum maior tem. Subir a escada so faz sentido quando o menor mostra sobra —
+ * e e ai que o lucro LIQUIDO passa a precisar de tamanho para cobrir o gas.
+ */
+export type TransporteEmLote = (
+    pedidos: Array<{ metodo: string; params: unknown[] }>,
+) => Promise<Array<{ ok: boolean; dados: string | null }>>;
+
+/**
+ * A COTACAO DO CICLO INTEIRO, para todas as rotas afetadas, numa requisicao.
+ *
+ * Cada rota e UM `eth_call` ao cotador local por override de estado, e as N
+ * chamadas vao num LOTE JSON-RPC: uma ida e volta para todas. Nenhum fork,
+ * nenhuma implantacao, nenhum `hardhat_reset` e nenhum ETH.
+ *
+ * O caminho esta VALIDADO contra o QuoterV2 oficial, ao wei, em duas pernas V3
+ * da fabrica que ele serve — e e por isso que pode ser usado nos pools que
+ * nenhum quoter oficial serve, que medido sao 4 de 4 das rotas reais.
+ *
+ * O tamanho e o MENOR da escada: a razao `saida/entrada` e maxima no tamanho
+ * infinitesimal e so cai, entao se o menor nao tem sobra bruta nenhum maior
+ * tem. A escada sobe depois, e so quando o menor mostra sobra — e ai o lucro
+ * LIQUIDO passa a precisar de tamanho para cobrir o gas.
+ */
+export async function cotarAfetadas(
+    emLote: TransporteEmLote,
+    chamar: Transporte,
+    afetadas: CandidataMista[],
+    L: LeiturasDoEstado,
+    etiqueta: 'latest' | 'pending',
+    blocoObservado: number,
+    observadoEm: number,
+    gasWei: bigint | null,
+    codigoDoCotador: string | null,
+): Promise<SinalDeArbitragem[]> {
+    const base = WETH_DA_BASE.toLowerCase();
+    const fora: SinalDeArbitragem[] = [];
+    const sinal = (
+        c: CandidataMista, quantia: bigint | null, motivo: string,
+        bruto: bigint | null = null, custo: bigint | null = null,
+    ): SinalDeArbitragem => ({
+        rota: c.chave,
+        protocolo: 'V3+Aerodrome',
+        bloco: blocoObservado,
+        etiqueta,
+        observadoEm,
+        msAteADecisao: Date.now() - observadoEm,
+        idadeDoEstadoMs: Date.now() - observadoEm,
+        melhorTamanho: quantia,
+        lucroBrutoEstimado: bruto,
+        custoTotalEstimado: custo,
+        lucroLiquidoEstimado: bruto === null || custo === null ? null : bruto - custo,
+        simulacao: null,
+        motivo,
+    });
+    if (codigoDoCotador === null) {
+        // SEM O CODIGO nao se cota, e isto NAO e "nao ha spread": e falta de
+        // instrumento, e as duas pedem acoes opostas.
+        return afetadas.map((c) => sinal(
+            c, null,
+            'SEM COTADOR: não li o bytecode do CacadorV3 do artefato local, então não há como '
+            + 'cotar por override. Isto é falta de instrumento, não falta de spread',
+        ));
+    }
+
+    // O TAMANHO sai da LIQUIDEZ do pool que empresta, nunca de numero meu.
+    const comTamanho: Array<{ c: CandidataMista; quantia: bigint }> = [];
+    for (const c of afetadas) {
+        const res = L.reservasAerodrome.get(c.poolAerodrome.toLowerCase()) ?? null;
+        const t0Aero = c.token0DoAero;
+        const rBase = res === null || t0Aero === null
+            ? null
+            : (t0Aero === base ? res.r0 : res.r1);
+        const escada = rBase === null ? [] : escadaDeTamanhos(rBase);
+        const quantia = escada[0];
+        if (quantia === undefined) {
+            fora.push(sinal(
+                c, null,
+                'SEM DADO: não sei a liquidez de base do pool que empresta, e o tamanho sai dela '
+                + '— nunca de um número meu',
+            ));
+            continue;
+        }
+        comTamanho.push({ c, quantia });
+    }
+    if (comTamanho.length === 0) return fora;
+
+    const pedidos = comTamanho.map(({ c, quantia }) => ({
+        metodo: 'eth_call',
+        params: [
+            {
+                // `from: 0x0` de proposito: no override o `dono` do contrato
+                // fica zero, e e assim que o portao `soDono` passa.
+                from: '0x0000000000000000000000000000000000000000',
+                to: COTADOR_LOCAL,
+                data: codificarCotarCiclo(pernasDaCandidata(c, WETH_DA_BASE, quantia), quantia),
+                gas: '0xB71B00',
+            },
+            etiqueta,
+            { [COTADOR_LOCAL]: { code: codigoDoCotador } },
+        ] as unknown[],
+    }));
+    const r = await emLote(pedidos);
+
+    // O L1 por TETO, uma vez por rodada: o calldata do `cacar` tem tamanho fixo.
+    const l1 = numDe(await lerComPaciencia(
+        chamar, ORACULO_DE_GAS_L1, codificarTetoDeL1(196),
+    ));
+
+    for (let i = 0; i < comTamanho.length; i += 1) {
+        const { c, quantia } = comTamanho[i]!;
+        const resp = r[i];
+        if (resp === undefined || resp.ok) {
+            // O padrao Quoter EXIGE reversao. Resposta sem reversao nao e
+            // cotacao, e tratar como zero inventaria uma medicao.
+            fora.push(sinal(
+                c, quantia,
+                'SEM COTAÇÃO: a chamada não reverteu, e o padrão Quoter responde revertendo com '
+                + 'o número. Sem a reversão não há número para ler',
+            ));
+            continue;
+        }
+        const lido = lerRespostaDaCotacao(resp.dados);
+        if (lido === null) {
+            fora.push(sinal(
+                c, quantia,
+                'REVERSÃO OPACA: nenhum dos dois seletores com número veio. Reversão sem '
+                + `identificação não é cotação (dado: ${String(resp.dados).slice(0, 10)})`,
+            ));
+            continue;
+        }
+        const custo = somarCusto({
+            gasUsado: GAS_DO_CICLO_MISTO,
+            // ESTIMATIVA, e marcada: o 427.168 e recibo de uma execucao em
+            // FORK, nao desta operacao.
+            gasUsadoVeioDe: 'estimativa',
+            baseFeeWei: gasWei,
+            gorjetaWei: 20_000_000n,
+            custoL1Wei: l1,
+            taxaDoEmprestimoWei: 0n,
+        });
+        const j = julgar(lido.sobra > 0n ? lido.sobra : 0n, custo);
+        fora.push(sinal(
+            c, quantia,
+            lido.sobra <= 0n
+                ? `SEM SPREAD neste estado: o ciclo produziu ${lido.produziu} contra `
+                    + `${quantia} que entraram (sobra ${lido.sobra}). A razão cai com o tamanho, `
+                    + 'então nenhum tamanho maior fecha'
+                : `SOBRA BRUTA ${lido.sobra} wei — ${j.veredicto}`,
+            lido.sobra,
+            custo.totalWei,
+        ));
+    }
+    return fora;
+}
+
+/**
+ * O QUOTER SERVE CADA POOL? Conferido pool por pool, uma vez.
+ *
+ * *"Antes de utilizar qualquer quoter, valide que ele realmente atende à
+ * fábrica do pool... Não invente compatibilidade."* Entao: le
+ * `quoter.factory()` e `pool.factory()` e guarda SO os pools em que os dois
+ * batem. Pool de outra fabrica nao e cotado por este quoter e fica NAO
+ * VALIDADO — nunca cotado por um quoter que nao e dele.
+ */
+export async function conferirQuoter(
+    chamar: Transporte, poolsV3: string[],
+): Promise<{ servem: Set<string>; fabricaDoQuoter: string | null; recusados: number }> {
+    const fabricaDoQuoter = endDe(
+        await lerComPaciencia(chamar, QUOTER_V2, SELETORES_DA_COTACAO.factory),
+    );
+    const servem = new Set<string>();
+    let recusados = 0;
+    if (fabricaDoQuoter === null || poolsV3.length === 0) {
+        return { servem, fabricaDoQuoter, recusados: poolsV3.length };
+    }
+    const r = await lerEmLote(
+        chamar, poolsV3.map((q) => ({ alvo: q, dados: SELETORES.factory })),
+    );
+    for (let i = 0; i < poolsV3.length; i += 1) {
+        const resp = r[i];
+        const fab = resp !== undefined && resp.ok ? endDe(resp.dados) : null;
+        if (quoterServeOPool(fabricaDoQuoter, fab)) servem.add(poolsV3[i]!); else recusados += 1;
+    }
+    return { servem, fabricaDoQuoter, recusados };
+}
+
+/** O `fee` de cada pool V3, lido do PROPRIO pool — nunca suposto. */
+export async function lerTaxasV3(
+    chamar: Transporte, poolsV3: string[],
+): Promise<Map<string, number>> {
+    const fora = new Map<string, number>();
+    if (poolsV3.length === 0) return fora;
+    const r = await lerEmLote(chamar, poolsV3.map((q) => ({ alvo: q, dados: SELETORES.fee })));
+    for (let i = 0; i < poolsV3.length; i += 1) {
+        const resp = r[i];
+        const v = resp !== undefined && resp.ok ? primeiraPalavra(resp.dados) : null;
+        if (v !== null && v > 0n) fora.set(poolsV3[i]!, Number(v));
+    }
+    return fora;
 }
 
 export interface PoolDaFabrica {
@@ -427,7 +674,7 @@ const endDe = (hex: unknown): string | null => (
  * leituras enquanto a RELEITURA ja estava em 100%.
  */
 export async function lerEmLote(
-    chamar: Transporte, chamadas: ChamadaMulti[],
+    chamar: Transporte, chamadas: ChamadaMulti[], etiqueta: 'latest' | 'pending' = 'latest',
 ): Promise<Array<{ ok: boolean; dados: string }>> {
     const fora: Array<{ ok: boolean; dados: string }> = [];
     for (const pedaco of partirEmPedacos(chamadas, CHAMADAS_POR_MULTICALL)) {
@@ -435,7 +682,7 @@ export async function lerEmLote(
         for (let i = 0; i < 3 && crua === null; i += 1) {
             try {
                 crua = await chamar('eth_call', [
-                    { to: MULTICALL3, data: codificarAggregate3(pedaco) }, 'latest',
+                    { to: MULTICALL3, data: codificarAggregate3(pedaco) }, etiqueta,
                 ]);
             } catch {
                 if (i < 2) await new Promise<void>((r) => { setTimeout(r, 200 * (i + 1)); });
@@ -447,8 +694,21 @@ export async function lerEmLote(
             for (let k = 0; k < pedaco.length; k += 1) fora.push({ ok: false, dados: '0x' });
             continue;
         }
+        // UM RESULTADO POR CHAMADA PEDIDA, sempre.
+        //
+        // DEFEITO DE ALINHAMENTO, achado em 2026-10-15: o decodificador devolve
+        // o array no tamanho que a RESPOSTA declara, e numa resposta cortada
+        // esse numero e menor que o pedaco. Com `push` direto, toda leitura
+        // seguinte escorregava uma posicao — e `token0` de um pool passava a
+        // ser lido como se fosse de OUTRO. Isso e pior que leitura faltando:
+        // leitura faltando aparece, par trocado nao.
+        //
+        // Medido no mesmo dia: 219 pools concentrados e so 70 com tokens lidos.
         try {
-            fora.push(...decodificarAggregate3Rapido(crua));
+            const lido = decodificarAggregate3Rapido(crua);
+            for (let k = 0; k < pedaco.length; k += 1) {
+                fora.push(lido[k] ?? { ok: false, dados: '0x' });
+            }
         } catch {
             for (let k = 0; k < pedaco.length; k += 1) fora.push({ ok: false, dados: '0x' });
         }
@@ -851,6 +1111,52 @@ async function principal(): Promise<void> {
         return j.result;
     };
 
+    // O LOTE JSON-RPC: N cotacoes numa requisicao HTTP.
+    //
+    // Conferido neste no em 2026-10-15: uma requisicao com tres pedidos devolve
+    // tres respostas. E por aqui, e nao por Multicall3, porque o cotador local
+    // roda por OVERRIDE e o `dono` dele fica zero — via Multicall3 o
+    // `msg.sender` seria o Multicall3 e o portao `soDono` recusaria.
+    //
+    // ERRO NAO VIRA RESULTADO: a resposta de cada pedido carrega `result` OU
+    // `error`, e o `error.data` e justamente onde o numero da cotacao viaja.
+    const chamarEmLote = async (
+        pedidos: Array<{ metodo: string; params: unknown[] }>,
+    ): Promise<Array<{ ok: boolean; dados: string | null }>> => {
+        if (pedidos.length === 0) return [];
+        const corpo = pedidos.map((q, i) => ({
+            jsonrpc: '2.0', id: i + 1, method: q.metodo, params: q.params,
+        }));
+        const r = await fetch(rpc, {
+            ...(agente ? { dispatcher: agente } : {}),
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(corpo),
+        } as Parameters<typeof fetch>[1]);
+        const j = await r.json() as unknown;
+        const fora: Array<{ ok: boolean; dados: string | null }> = pedidos.map(
+            () => ({ ok: false, dados: null }),
+        );
+        if (!Array.isArray(j)) return fora;
+        for (const resp of j as Array<Record<string, unknown>>) {
+            const i = Number(resp.id) - 1;
+            if (!Number.isInteger(i) || i < 0 || i >= fora.length) continue;
+            if (typeof resp.result === 'string') { fora[i] = { ok: true, dados: resp.result }; continue; }
+            const err = resp.error as Record<string, unknown> | undefined;
+            // O `data` da reversao E a cotacao: perde-lo faria o numero que
+            // estava na resposta virar "sem dado".
+            const d = err === undefined ? undefined : err.data;
+            fora[i] = {
+                ok: false,
+                dados: typeof d === 'string'
+                    ? d
+                    : (typeof (d as Record<string, unknown> | undefined)?.data === 'string'
+                        ? String((d as Record<string, unknown>).data) : null),
+            };
+        }
+        return fora;
+    };
+
     log.info('[ARB] Caçador de arbitragem contínuo. ENVIO INEXISTENTE neste caminho.', {
         rpc: new URL(rpc).host,
         fabricas: FABRICAS_COM_FLASH_SWAP.length,
@@ -996,6 +1302,38 @@ async function principal(): Promise<void> {
     FM.rotasDistintas = MISTAS.length;
     if (MISTAS.length === 0) FM.limitacaoDeCobertura += 1;
     let blocoDaTriagem = -1;
+
+    // O QUOTER E AS TAXAS, uma vez: `fee` e `factory` nao mudam de bloco para
+    // bloco. E a compatibilidade e CONFERIDA pool por pool antes de qualquer
+    // cotacao — ela proibiu supor isso por escrito.
+    if (MISTAS.length > 0) {
+        const poolsV3 = [...new Set(MISTAS.map((c) => c.poolV3.toLowerCase()))];
+        const q = await conferirQuoter(chamar, poolsV3);
+        for (const x of q.servem) QUOTER_SERVE.add(x);
+        const taxas = await lerTaxasV3(chamar, [...q.servem]);
+        for (const [k, v] of taxas) TAXAS_V3.set(k, v);
+        log.info('[ARB-N] QuoterV2 conferido contra a fábrica de CADA pool.', {
+            quoter: QUOTER_V2,
+            fabricaDoQuoter: q.fabricaDoQuoter ?? 'NÃO LI — sem ela não coto nada',
+            poolsQueEleServe: q.servem.size,
+            poolsRecusados: `${q.recusados} (fábrica diferente ou não lida: NÃO são cotados por `
+                + 'ESTE quoter — seria responder sobre outro pool. São cotados pelo COTADOR '
+                + 'LOCAL por override de estado, que é a alternativa validada ao wei contra o '
+                + 'próprio QuoterV2)',
+            paraQueServeOQuoterEntao: 'ele é a CONFERÊNCIA independente: onde ele serve o pool, '
+                + 'a resposta dele e a do cotador local podem ser comparadas, e foi assim que o '
+                + 'cotador local deixou de ser suposição',
+            taxasLidas: `${taxas.size} de ${q.servem.size} (o \`fee\` sai do próprio pool)`,
+            oQueIssoNaoE: 'não é "o quoter funciona": é "o quoter e o pool apontam para a MESMA '
+                + 'fábrica". Sem isso a cotação seria de outro pool',
+            cotadorLocal: CODIGO_DO_COTADOR === null
+                ? 'SEM BYTECODE do CacadorV3 no artefato local: não há como cotar por override, '
+                    + 'e isto é falta de instrumento, não falta de spread'
+                : `${(CODIGO_DO_COTADOR.length - 2) / 2} bytes injetados por override de estado `
+                    + 'em `eth_call` (conferido: este nó aceita override). NADA é implantado e '
+                    + 'nenhum ETH é gasto',
+        });
+    }
     log.info(`[ARB-N] ${comoLerOFunilMisto(FM)}`, {
         direcoes: `${MISTAS.filter((x) => x.direcao === 'A').length} com o Aerodrome `
             + `emprestando, ${MISTAS.filter((x) => x.direcao === 'B').length} com o V3`,
@@ -1006,7 +1344,54 @@ async function principal(): Promise<void> {
     let ciclo = 0;
     let blocoAnterior: number | null = null;
 
+    // O ORCAMENTO DO EXPERIMENTO, por ordem dela: *"observação em tempo real,
+    // sem envios, com orçamento limitado de chamadas RPC e duração máxima de 20
+    // minutos ou 300 atualizações relevantes, o que ocorrer primeiro."*
+    //
+    // ATUALIZACAO RELEVANTE e estado DISTINTO avaliado, nao ciclo: um ciclo que
+    // acorda no mesmo bloco nao traz atualizacao nenhuma, e contar ciclos
+    // mediria a postura em vez do mercado.
+    const minutosDoTeto = Number(process.env.ARB_MINUTOS ?? 0);
+    const tetoDeAtualizacoes = Number(process.env.ARB_ATUALIZACOES ?? 0);
+    const comecouEm = Date.now();
+    const porqueParou = (): string | null => {
+        if (minutosDoTeto > 0 && Date.now() - comecouEm >= minutosDoTeto * 60_000) {
+            return `o teto de ${minutosDoTeto} minuto(s) de observação`;
+        }
+        if (tetoDeAtualizacoes > 0 && FM.estadosAvaliados >= tetoDeAtualizacoes) {
+            return `o teto de ${tetoDeAtualizacoes} atualização(ões) relevante(s)`;
+        }
+        return null;
+    };
+
     for (;;) {
+        const parar = porqueParou();
+        if (parar !== null) {
+            log.warn('[ARB-N] OBSERVAÇÃO ENCERRADA pelo orçamento — e isto não é conclusão.', {
+                porque: parar,
+                duracao: `${((Date.now() - comecouEm) / 60_000).toFixed(1)} min`,
+                atualizacoesRelevantes: FM.estadosAvaliados,
+                livro: LIVRO_DE_SINAIS.comoLer(),
+                funil: comoLerOFunilMisto(FM),
+                porSinal: LIVRO_DE_SINAIS.todos.map((sn) => ({
+                    rota: sn.rota,
+                    protocolo: sn.protocolo,
+                    estado: `bloco ${sn.bloco} (${sn.etiqueta})`,
+                    msAteADecisao: sn.msAteADecisao,
+                    idadeDoEstadoMs: sn.idadeDoEstadoMs,
+                    melhorTamanho: sn.melhorTamanho === null ? null : String(sn.melhorTamanho),
+                    bruto: sn.lucroBrutoEstimado === null ? null : String(sn.lucroBrutoEstimado),
+                    custo: sn.custoTotalEstimado === null ? null : String(sn.custoTotalEstimado),
+                    liquido: sn.lucroLiquidoEstimado === null
+                        ? null : String(sn.lucroLiquidoEstimado),
+                    simulacao: sn.simulacao ?? 'não houve',
+                    motivo: sn.motivo,
+                })).slice(0, 40),
+                oQueIssoNaoE: 'o fim do orçamento NÃO é "não há arbitragem": é o fim da amostra. '
+                    + 'Zero spread positivo nesta amostra é zero NESTA amostra',
+            });
+            break;
+        }
         if (tetoDeCiclos > 0 && ciclo >= tetoDeCiclos) break;
         ciclo += 1;
         PLACAR.ciclos = ciclo;
@@ -1077,52 +1462,87 @@ async function principal(): Promise<void> {
         // SO AS ROTAS AFETADAS por mudanca de estado, por ordem dela: um pool
         // cujo estado nao mudou nao precisa de leitura nova no mesmo bloco.
         if (MISTAS.length > 0 && blocoAgora > 0 && blocoAgora !== blocoDaTriagem) {
+            // O ESTADO E `pending`, e isso foi PROVADO antes de ser usado
+            // (2026-10-15, `mainnet.base.org`): `eth_getBlockByNumber('pending')`
+            // devolve o bloco `latest + 1` com 1 a 182 transacoes JA dentro, e a
+            // cotacao em `pending` difere da de `latest` (24.534776 contra
+            // 24.534699 para 0,01 WETH). E estado pre-confirmado de verdade,
+            // nao um molde vazio. `ARB_ETIQUETA=latest` volta ao confirmado.
+            const etiqueta: 'latest' | 'pending' = process.env.ARB_ETIQUETA === 'latest'
+                ? 'latest' : 'pending';
+            const t0 = Date.now();
             const fimTri = av.etapa('prefiltro');
-            const L = await lerEstadoMisto(chamar, MISTAS, blocoAgora);
+            const L = await lerEstadoMisto(chamar, MISTAS, blocoAgora, etiqueta);
             const tri = triarCandidatas(MISTAS, WETH_DA_BASE, L);
-            // EXPIRADO, nao prejuizo: se o bloco andou entre a leitura do
-            // estado e a decisao, a triagem decidiu sobre um estado que nao
-            // existe mais. Chamar isso de "sem spread" seria publicar latencia
-            // minha como propriedade do mercado.
-            const blocoNaDecisao = Number(numDe(await chamar('eth_blockNumber', [])) ?? 0n);
-            const expirou = blocoNaDecisao > blocoAgora;
             fimTri();
             FM.estadosAvaliados += 1;
-            // TRIADA NAO E COTADA. Ela cortou isto por nome: *"`cotacoesTentadas`
-            // só pode aumentar quando houver uma cotação realmente executada.
-            // Uma rota que passou pela triagem é TRIADA, não COTADA."* Aqui, ao
-            // vivo, nenhuma cotacao acontece — nao ha contrato na rede —, entao
-            // `cotacoesTentadas` tem de ficar em ZERO.
             FM.rotasTriadas += tri.valem.length;
             FM.faltaDeDados += tri.semDados;
             FM.semProvaMatematica += tri.semProvaDoInvariante;
-            if (expirou) {
-                FM.expirado += tri.valem.length;
-            } else {
-                FM.faltaDeSpread += tri.recusadasPorSpread.length;
-            }
+            FM.faltaDeSpread += tri.recusadasPorSpread.length;
             FUNIL.estados.DESCARTADA += tri.recusadasPorSpread.length;
-            FUNIL.estados.NAO_VALIDADA += tri.valem.length;
-            log.warn('[ARB-N] rotas MISTAS V3+Aerodrome TRIADAS neste estado.', {
+
+            // SO AS ROTAS AFETADAS POR MUDANCA DE ESTADO. Um pool cujo `slot0`
+            // ou cujas reservas nao mudaram nao produz rota nova, e recotar o
+            // mesmo estado e gastar RPC para repetir a resposta de antes.
+            const cru = new Map<string, string | null>();
+            for (const [pool, v] of L.sqrtPorPoolV3) cru.set(pool, v === null ? null : `v3:${v}`);
+            for (const [pool, v] of L.reservasAerodrome) {
+                cru.set(pool, v === null ? null : `ae:${v.r0}/${v.r1}`);
+            }
+            const poolsQueMudaram = new Set(ESTADOS_DOS_POOLS.mudaram(cru));
+            const afetadas = tri.valem.filter(
+                (c) => (poolsQueMudaram.has(c.poolV3.toLowerCase())
+                    || poolsQueMudaram.has(c.poolAerodrome.toLowerCase()))
+            );
+
+            // A COTACAO, em DUAS idas e voltas para todas as rotas afetadas: a
+            // perna 1 de todas num multicall, a perna 2 de todas no seguinte.
+            // Nenhum fork, nenhuma implantacao e nenhum `hardhat_reset` no
+            // caminho critico — ela cortou os tres por nome.
+            let cotadasAgora = 0;
+            let brutosPositivos = 0;
+            if (afetadas.length > 0) {
+                const fimCot = av.etapa('cotacao');
+                const tc = Date.now();
+                const sinais = await cotarAfetadas(
+                    chamarEmLote, chamar, afetadas, L, etiqueta, blocoAgora, t0, gasWei,
+                    CODIGO_DO_COTADOR,
+                );
+                LIVRO_DE_SINAIS.registrarCotacao(Date.now() - tc);
+                fimCot();
+                cotadasAgora = sinais.length;
+                FM.cotacoesTentadas += sinais.length;
+                for (const sn of sinais) {
+                    LIVRO_DE_SINAIS.registrar(sn);
+                    if (sn.lucroBrutoEstimado !== null && sn.lucroBrutoEstimado > 0n) {
+                        brutosPositivos += 1;
+                        FM.cotacoesComSobra += 1;
+                    }
+                    if (sn.motivo.startsWith('EXPIRADO')) FM.expirado += 1;
+                }
+            }
+            FUNIL.estados.NAO_VALIDADA += afetadas.length - cotadasAgora;
+
+            log.warn('[ARB-N] rotas MISTAS V3+Aerodrome: estado, triagem e COTAÇÃO AO VIVO.', {
                 bloco: blocoAgora,
+                etiqueta: `${etiqueta} (pré-confirmado: provado com 1–182 txs dentro e cotação `
+                    + 'diferente da de `latest`)',
                 estadosAvaliados: FM.estadosAvaliados,
                 rotasDistintas: MISTAS.length,
-                triadasQuePassaram: `${tri.valem.length} TRIADAS (não cotadas: ao vivo não `
-                    + 'há contrato na rede, e cotação é outra métrica)',
+                triadasQuePassaram: tri.valem.length,
+                afetadasPorMudancaDeEstado: `${afetadas.length} de ${tri.valem.length} — as `
+                    + 'outras têm os dois pools no MESMO estado já avaliado, e recotar repetiria '
+                    + 'a resposta',
+                cotacoesExecutadas: cotadasAgora,
+                comSobraBruta: brutosPositivos,
                 descartadasComProva: tri.recusadasPorSpread.length,
                 semDadoParaDecidir: tri.semDados,
                 semProvaDoInvariante: `${tri.semProvaDoInvariante} (pool stable: o teto só está `
                     + 'demonstrado para `x·y = k`, então não descarto — fica NÃO VALIDADA)',
-                idadeDoDado: `${blocoNaDecisao - blocoAgora} bloco(s) na hora da decisão`,
-                expirou: expirou
-                    ? 'SIM: o bloco andou antes da decisão — contado como EXPIRADO, não como '
-                        + 'prejuízo e não como falta de spread'
-                    : 'não',
-                oQueFalta: 'cotar e simular exige o `CacadorV3` implantado. Em fork isso roda '
-                    + 'com implantação EFÊMERA e zero ETH (`forkTests/aCacaMista.js`); daqui, '
-                    + 'ao vivo, não há contrato na rede — então o que PASSA no filtro fica NÃO '
-                    + 'VALIDADA, e só o que o filtro PROVA inviável vira DESCARTADA',
-                oQueIssoNaoE: 'NÃO é contagem de pools: é rota distinta (par + direção)',
+                quoterConferido: `${QUOTER_SERVE.size} pool(s) V3 com a fábrica do QuoterV2 `
+                    + 'CONFERIDA; pool de outra fábrica não é cotado por ele',
+                latencia: LIVRO_DE_SINAIS.comoLer(),
                 limitacao: limitacaoDominante(FM),
             });
             blocoDaTriagem = blocoAgora;

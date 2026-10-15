@@ -548,7 +548,13 @@ describe('o caçador misto em observação', function () {
         console.log(`      IDADE do dado na decisão ${med(T.idadeDoDadoMs)?.toFixed(1) ?? 'sem amostra'}`
             + ` (intervalo de bloco medido: ${intervaloMs === null ? 'n/d' : `${intervaloMs.toFixed(0)}ms`})`);
         console.log(`      ${f.expirado} de ${f.cotacoesTentadas} cotações decidiram sobre estado`
-            + ' JÁ SUPERADO pela corrente — contadas como EXPIRADO, nunca como prejuízo');
+            + ' já superado NO RELÓGIO DESTE LABORATÓRIO');
+        console.log('      RETRATAÇÃO, por apontamento dela em 2026-10-15: isto NÃO prova que'
+            + ' oportunidades expiraram NO MERCADO. O bloco histórico já estava fechado antes do'
+            + ' experimento começar, e o tempo medido aqui inclui `hardhat_reset`, implantação'
+            + ' efêmera e leitura de fork. É CUSTO DO LABORATÓRIO, não latência do caçador.'
+            + ' A latência real de observação é medida ao vivo, sem fork, em `src/cotarMista.ts`'
+            + ' e publicada na linha [ARB-N] do caçador.');
         console.log(`      ${expiradasNaAuditoria} de ${auditadas} cotações da AUDITORIA também`
             + ' passaram do intervalo de bloco. Elas medem o MESMO caminho e entram nos tempos,'
             + ' mas não nos contadores do funil: cotação de rota descartada não é avaliação'
