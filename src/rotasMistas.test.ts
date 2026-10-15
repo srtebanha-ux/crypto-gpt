@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     candidatasMistas, pernasDaCandidata, funilVazio, limitacaoDominante,
-    comoLerOFunilMisto, type PoolMisto,
+    comoLerOFunilMisto, tetoDaSaidaV3, valeSimular, type PoolMisto,
 } from './rotasMistas';
 
 const WETH = '0x4200000000000000000000000000000000000006';
@@ -110,4 +110,54 @@ test('as cinco ORIGENS saem separadas, e nenhuma soma com a outra', () => {
     f.poolsVistos = { v3: 117, aerodrome: 8 };
     assert.match(comoLerOFunilMisto(f), /0 ROTA\(S\) DISTINTA\(S\)/,
         '125 pools com zero rotas tem de ler como zero rotas');
+});
+
+test('o teto do V3 sai do preço spot, nos dois sentidos', () => {
+    // sqrtP = 2^96 => preco 1:1. O teto e a propria entrada.
+    const Q96 = 1n << 96n;
+    assert.equal(tetoDaSaidaV3(Q96, true, 1000n), 1000n);
+    assert.equal(tetoDaSaidaV3(Q96, false, 1000n), 1000n);
+    // sqrtP = 2*2^96 => preco 4:1 (token1 por token0).
+    assert.equal(tetoDaSaidaV3(2n * Q96, true, 1000n), 4000n);
+    assert.equal(tetoDaSaidaV3(2n * Q96, false, 1000n), 250n);
+    // Entrada zero ou preco zero nao tem teto: `null`, nao zero.
+    assert.equal(tetoDaSaidaV3(Q96, true, 0n), null);
+    assert.equal(tetoDaSaidaV3(0n, true, 1000n), null);
+});
+
+test('o pré-filtro só RECUSA, e ausência nunca descarta', () => {
+    const Q96 = 1n << 96n;
+    // Teto abaixo do custo: recusa, e a frase diz por que e seguro.
+    const ruim = valeSimular({
+        entradaBase: 1000n, tokenDoEmprestimo: 100n, sqrtPriceX96: Q96, v3ZeroParaUm: true,
+    });
+    assert.equal(ruim.vale, false);
+    assert.match(ruim.porque, /não fecha em tamanho nenhum/);
+
+    // Teto acima do custo: NAO aprova, so manda simular.
+    const talvez = valeSimular({
+        entradaBase: 100n, tokenDoEmprestimo: 1000n, sqrtPriceX96: Q96, v3ZeroParaUm: true,
+    });
+    assert.equal(talvez.vale, true);
+    assert.match(talvez.porque, /só a execução decide/);
+
+    // AUSENCIA de dado manda simular — nunca descarta.
+    for (const falta of [
+        { tokenDoEmprestimo: null, sqrtPriceX96: Q96 },
+        { tokenDoEmprestimo: 100n, sqrtPriceX96: null },
+    ]) {
+        const r = valeSimular({ entradaBase: 1000n, v3ZeroParaUm: true, ...falta });
+        assert.equal(r.vale, true, 'ausência de dado descartou rota');
+        assert.equal(r.teto, null);
+    }
+});
+
+test('o teto é um TETO: a saída real nunca pode passar dele', () => {
+    // A regra que torna o pre-filtro valido. Com taxa e impacto de preco, a
+    // saida real e menor; aqui o portao e a desigualdade em si.
+    const Q96 = 1n << 96n;
+    const entrada = 10n ** 18n;
+    const teto = tetoDaSaidaV3(3n * Q96, true, entrada);
+    assert.ok(teto !== null && teto === entrada * 9n,
+        'o teto com preço 9:1 tem de ser 9x a entrada, sem desconto nenhum');
 });

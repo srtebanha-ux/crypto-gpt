@@ -23,6 +23,7 @@ const { AbiCoder, Interface, id } = require('ethers');
 
 const {
     candidatasMistas, pernasDaCandidata, funilVazio, comoLerOFunilMisto, limitacaoDominante,
+    valeSimular,
 } = require('../dist/rotasMistas.js');
 const {
     codificarTetoDeL1, ORACULO_DE_GAS_L1, somarCusto, julgar,
@@ -41,6 +42,7 @@ const S = {
     token1: sel('token1()'),
     fee: sel('fee()'),
     getAmountOut: sel('getAmountOut(uint256,address)'),
+    slot0: sel('slot0()'),
 };
 const iface = new Interface([
     'function executarRota((address pool,address tokenEntra,uint8 tipo,uint256 pagamento)[] rota, uint256 quantia, uint256 lucroMinimo) returns (uint256)',
@@ -242,6 +244,22 @@ describe('o caçador misto em observação', function () {
             }
         };
 
+        // O PRE-FILTRO, medido: cada `cotar` completo custou 544,5 ms na
+        // corrida anterior (mediana de 144), o que da ~20 s para 36 rotas
+        // contra blocos de 2 s. O teto pelo preco spot custa UMA leitura de
+        // `slot0` e so RECUSA — nunca aprova.
+        const slot0Cache = new Map();
+        const sqrtDe = async (pool) => {
+            if (slot0Cache.has(pool)) return slot0Cache.get(pool);
+            const r = await ler(pool, S.slot0);
+            // `slot0` devolve sqrtPriceX96 na PRIMEIRA palavra.
+            const v = (r && r.length >= 66) ? BigInt(`0x${r.slice(2, 66)}`) : null;
+            slot0Cache.set(pool, v);
+            return v;
+        };
+        let evitadas = 0;
+        const tempoPrefiltro = [];
+
         const tSinal = agora();
         let melhor = null;
         const limite = Number(process.env.MISTA_COTAR ?? 400);
@@ -256,6 +274,34 @@ describe('o caçador misto em observação', function () {
                 if (f.cotacoesTentadas >= limite) break;
                 const q = wethNoPool / fr;
                 if (q === 0n) continue;
+                // PRE-FILTRO primeiro. Ele responde com UMA leitura barata, e
+                // so pode dizer "nao fecha em tamanho nenhum".
+                const tp = agora();
+                // eslint-disable-next-line no-await-in-loop
+                const [doEmprestimo, sqrt] = await Promise.all([
+                    c.direcao === 'A'
+                        ? ler(c.poolAerodrome, S.getAmountOut
+                            + coder.encode(['uint256', 'address'], [q, WETH]).slice(2))
+                            .then((x) => num(x))
+                        : Promise.resolve(q),
+                    sqrtDe(c.poolV3),
+                ]);
+                // No V3, entrar com o token do meio e entrar pelo token0?
+                // eslint-disable-next-line no-await-in-loop
+                const t0v3 = endDe(await ler(c.poolV3, S.token0));
+                const pre = valeSimular({
+                    entradaBase: q,
+                    tokenDoEmprestimo: doEmprestimo,
+                    sqrtPriceX96: sqrt,
+                    v3ZeroParaUm: t0v3 === c.token,
+                });
+                tempoPrefiltro.push(agora() - tp);
+                if (!pre.vale) {
+                    evitadas += 1;
+                    f.porCausa['pré-filtro: teto abaixo do custo'] =
+                        (f.porCausa['pré-filtro: teto abaixo do custo'] ?? 0) + 1;
+                    continue;
+                }
                 f.cotacoesTentadas += 1;
                 // eslint-disable-next-line no-await-in-loop
                 const r = await cotar(c, q, q);
@@ -272,7 +318,7 @@ describe('o caçador misto em observação', function () {
         }
         tempos.sinalAteDecisao.push(agora() - tSinal);
         console.log(`    COTACOES: ${f.cotacoesTentadas} tentadas, ${f.cotacoesComSobra}`
-            + ' com sobra bruta');
+            + ` com sobra bruta | ${evitadas} EVITADAS pelo pré-filtro`);
 
         // ===== 6. SIMULACAO ATOMICA COMPLETA. So ela classifica EXECUTAVEL.
         if (melhor !== null) {
@@ -340,6 +386,8 @@ describe('o caçador misto em observação', function () {
         console.log(`      sinal -> decisão ... ${med(tempos.sinalAteDecisao)?.toFixed(1) ?? 'sem amostra'}`
             + ` (inclui ${f.cotacoesTentadas} cotações)`);
         console.log(`      cotação (uma) ...... ${med(tempos.cotacao)?.toFixed(1) ?? 'sem amostra'}`);
+        console.log(`      pré-filtro (um) .... ${med(tempoPrefiltro)?.toFixed(1) ?? 'sem amostra'}`
+            + `  (${evitadas} simulações evitadas)`);
         console.log(`      simulação atômica .. ${med(tempos.simulacao)?.toFixed(1) ?? 'sem amostra'}`);
         console.log('      DECLARADO: estes tempos são de fork LOCAL. Não medem latência de'
             + ' rede nem inclusão no bloco, e não autorizam conclusão sobre competitividade.');

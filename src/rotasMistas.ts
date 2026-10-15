@@ -223,3 +223,89 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         + `${f.melhorLiquidoWei === null ? 'nenhum' : `${f.melhorLiquidoWei} wei`} | `
         + limitacaoDominante(f);
 }
+
+/**
+ * O TETO da saida de um pool V3, pelo preco SPOT.
+ *
+ * POR QUE EXISTE. Medido em 2026-10-15, na corrida de observacao de 250
+ * blocos: cada `cotar` completo custa **544,5 ms** (mediana de 144), porque e
+ * um `eth_call` que executa a cadeia inteira de swaps no fork. Com 36 rotas sao
+ * ~20 s por avaliacao, contra blocos de 2 s na Base. E dez vezes lento demais,
+ * e ela pediu a alternativa: *"Se esse método for lento demais para operação
+ * competitiva, meça a latência e implemente a alternativa mais simples
+ * tecnicamente comprovada."*
+ *
+ * A alternativa mais simples que NAO mente: um TETO. O preco spot do V3 sai de
+ * `sqrtPriceX96` com uma leitura de `slot0`, e a saida real e SEMPRE menor que
+ * o teto — a taxa do pool desconta, e o preco anda contra quem negocia ao
+ * cruzar ticks. Entao:
+ *
+ *   teto < custo  =>  a rota NAO pode fechar, e descartar e seguro
+ *   teto >= custo =>  nao se sabe; so a cotacao completa decide
+ *
+ * O pre-filtro so ECONOMIZA simulacao; ele nunca aprova nada. Um teto usado
+ * como estimativa seria o defeito que este projeto persegue — aqui ele e usado
+ * apenas para RECUSAR, que e a direcao em que um teto e valido.
+ *
+ * `zeroParaUm` = esta entrando o token0 e saindo o token1.
+ */
+export function tetoDaSaidaV3(
+    sqrtPriceX96: bigint, zeroParaUm: boolean, entrada: bigint,
+): bigint | null {
+    if (sqrtPriceX96 <= 0n || entrada <= 0n) return null;
+    const Q96 = 1n << 96n;
+    const Q192 = Q96 * Q96;
+    // preco = (sqrtP / 2^96)^2 = token1 por token0.
+    if (zeroParaUm) return (entrada * sqrtPriceX96 * sqrtPriceX96) / Q192;
+    return (entrada * Q192) / (sqrtPriceX96 * sqrtPriceX96);
+}
+
+/**
+ * O pre-filtro de uma candidata, antes de gastar uma cotacao completa.
+ *
+ * Devolve `true` quando vale simular — isto e, quando o TETO nao prova
+ * impossibilidade. Nunca devolve "lucrativa": isso so sai da execucao.
+ */
+export function valeSimular(e: {
+    /** Quanto do token base entra no ciclo. */
+    entradaBase: bigint;
+    /**
+     * Quanto do token do meio a perna de EMPRESTIMO entrega por `entradaBase`.
+     * No Aerodrome vem de `getAmountOut`, que e a conta do proprio pool.
+     */
+    tokenDoEmprestimo: bigint | null;
+    /** `sqrtPriceX96` do pool V3, de `slot0`. */
+    sqrtPriceX96: bigint | null;
+    /** No pool V3, entrar com o token do meio e entrar pelo token0? */
+    v3ZeroParaUm: boolean;
+}): { vale: boolean; porque: string; teto: bigint | null } {
+    if (e.tokenDoEmprestimo === null || e.sqrtPriceX96 === null) {
+        // AUSENCIA NAO DESCARTA. Sem um dos dois numeros o teto nao existe, e
+        // "nao sei" nao autoriza recusar — autoriza simular.
+        return {
+            vale: true,
+            porque: 'sem cotação do pool de empréstimo ou sem `slot0`: o teto não existe, e '
+                + 'ausência não descarta rota',
+            teto: null,
+        };
+    }
+    const teto = tetoDaSaidaV3(e.sqrtPriceX96, e.v3ZeroParaUm, e.tokenDoEmprestimo);
+    if (teto === null) {
+        return { vale: true, porque: 'o teto não pôde ser calculado', teto: null };
+    }
+    if (teto <= e.entradaBase) {
+        return {
+            vale: false,
+            porque: `o TETO da saída do V3 (${teto}) não passa do que o ciclo custa `
+                + `(${e.entradaBase}). A saída real é sempre MENOR que o teto — taxa do pool e `
+                + 'preço andando contra —, então esta rota não fecha em tamanho nenhum',
+            teto,
+        };
+    }
+    return {
+        vale: true,
+        porque: `o teto (${teto}) passa do custo (${e.entradaBase}): não dá para descartar, e `
+            + 'só a execução decide',
+        teto,
+    };
+}
