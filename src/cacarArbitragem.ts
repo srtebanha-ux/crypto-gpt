@@ -844,6 +844,17 @@ async function principal(): Promise<void> {
         fabricas: [...new Set(universo.porFabrica.values())].length,
         porque: 'índice de criação não diz onde há volume: medido em 2026-10-15, o universo por '
             + 'índice cobria ZERO dos 79 pools que alimentaram 33 arbitragens reais',
+        porVenue: `${porAtividade.porVenue.v2} V2, ${porAtividade.porVenue.v3} V3, `
+            + `${porAtividade.porVenue.aerodrome} Aerodrome negociaram`,
+        oQueOsNaoV2Significam: (porAtividade.porVenue.v3 + porAtividade.porVenue.aerodrome) > 0
+            ? `${porAtividade.porVenue.v3 + porAtividade.porVenue.aerodrome} pool(s) de `
+                + 'liquidez concentrada negociaram e ficam NÃO VALIDADOS neste caminho: '
+                + '`avaliarRotas` só empresta em pool V2. Quem executa rota mista é o '
+                + '`CacadorV3` (provado em fork: execução atômica, status=1, líquido '
+                + '0,0598 WETH), e ele precisa de cotação on-chain por contrato implantado — '
+                + 'que o caçador ao vivo não tem. NÃO é "não há oportunidade ali": é '
+                + 'limitação do avaliador, e está contada como tal'
+            : 'nenhum pool de liquidez concentrada negociou na janela',
         oQueIssoNaoE: porAtividade.metodoIndisponivel
             ? 'o nó NÃO SUPORTA eth_getBlockReceipts: a parte por ATIVIDADE não rodou, e o '
                 + 'universo é só o por índice — o que tem cobertura MEDIDA de ZERO nos pools '
@@ -964,6 +975,26 @@ async function principal(): Promise<void> {
             teto: tetoDeRotas,
             executor: process.env.ARB_EXECUTOR ?? undefined,
         });
+        // OS POOLS DE LIQUIDEZ CONCENTRADA que negociaram entram no funil como
+        // NAO VALIDADOS — uma vez, no primeiro ciclo. Some-los a "nao ha
+        // oportunidade" seria transformar limitacao do avaliador em ausencia de
+        // mercado, que e o erro que custou um mes a este projeto.
+        if (ciclo === 1) {
+            const concentrados = porAtividade.porVenue.v3 + porAtividade.porVenue.aerodrome;
+            FUNIL.estados.NAO_VALIDADA += concentrados;
+            if (concentrados > 0) {
+                log.warn('[ARB-N] pools de liquidez concentrada NÃO VALIDADOS neste caminho.', {
+                    v3: porAtividade.porVenue.v3,
+                    aerodrome: porAtividade.porVenue.aerodrome,
+                    porque: '`avaliarRotas` só sabe emprestar em pool V2. A rota mista é '
+                        + 'executada pelo `CacadorV3` e está PROVADA em fork (execução '
+                        + 'atômica, recibo status=1, empréstimo quitado, líquido 0,0598 WETH '
+                        + 'com deslocamento induzido)',
+                    oQueFalta: 'cotação on-chain das pernas V3 exige contrato implantado; o '
+                        + 'caçador ao vivo não tem um. Por isso NÃO VALIDADA, e não DESCARTADA',
+                });
+            }
+        }
         FUNIL.rotasEncontradas += aN.rotas;
         FUNIL.espacoDeBusca = paresCruzados;
         FUNIL.excluidasComCausa += aN.excluidasComCausa;
@@ -1152,6 +1183,14 @@ export async function universoPorAtividade(
     poolsVistos: number;
     recusadosPorFabrica: number;
     /**
+     * Quantos pools de cada venue NEGOCIARAM, antes de qualquer filtro.
+     *
+     * E o numero que diz onde o dinheiro esta: `avaliarRotas` so sabe emprestar
+     * em pool V2, entao os de V3 e Aerodrome ficam como NAO VALIDADOS — com o
+     * motivo — em vez de desaparecerem do relatorio como se nao existissem.
+     */
+    porVenue: { v2: number; v3: number; aerodrome: number };
+    /**
      * O no NAO SUPORTA `eth_getBlockReceipts`.
      *
      * MEDIDO em 2026-10-15: o fork do Hardhat responde "Method
@@ -1171,13 +1210,22 @@ export async function universoPorAtividade(
         return {
             pools: [], porFabrica: new Map(), falhas: 1, blocosLidos: 0,
             blocosFalhos: 0, poolsVistos: 0, recusadosPorFabrica: 0,
-            metodoIndisponivel: false,
+            metodoIndisponivel: false, porVenue: { v2: 0, v3: 0, aerodrome: 0 },
         };
     }
     // O `topic0` do `Swap` da V2, CALCULADO. Endereco e assinatura de cabeca
     // sao o defeito que a REGRA 0 deste projeto persegue.
     const TOPICO_SWAP_V2 = id('Swap(address,uint256,uint256,uint256,uint256,address)');
+    // OS OUTROS DOIS VENUES, pelo `topic0` CALCULADO.
+    //
+    // MEDIDO em 2026-10-15: das 306 arbitragens reais de ciclo fechado, 99% do
+    // lucro passa por liquidez concentrada, e as unicas verificaveis so por log
+    // sao V3 + Aerodrome. Varrer so o `Swap` da V2 deixava o universo cego
+    // justamente onde o dinheiro esta.
+    const TOPICO_SWAP_V3 = id('Swap(address,address,int256,int256,uint160,uint128,int24)');
+    const TOPICO_SWAP_AERO = id('Swap(address,address,uint256,uint256,uint256,uint256)');
     const quantasVezes = new Map<string, number>();
+    const tipoVisto = new Map<string, 'v2' | 'v3' | 'aerodrome'>();
     let blocosLidos = 0;
     let blocosFalhos = 0;
     let metodoIndisponivel = false;
@@ -1189,9 +1237,14 @@ export async function universoPorAtividade(
             if (r === null) { blocosFalhos += 1; continue; }
             for (const rec of r) {
                 for (const l of rec.logs ?? []) {
-                    if ((l.topics[0] ?? '').toLowerCase() !== TOPICO_SWAP_V2) continue;
+                    const t0 = (l.topics[0] ?? '').toLowerCase();
+                    const tipo = t0 === TOPICO_SWAP_V2 ? 'v2'
+                        : (t0 === TOPICO_SWAP_V3 ? 'v3'
+                            : (t0 === TOPICO_SWAP_AERO ? 'aerodrome' : null));
+                    if (tipo === null) continue;
                     const k = l.address.toLowerCase();
                     quantasVezes.set(k, (quantasVezes.get(k) ?? 0) + 1);
+                    tipoVisto.set(k, tipo);
                 }
             }
             blocosLidos += 1;
@@ -1209,7 +1262,7 @@ export async function universoPorAtividade(
         return {
             pools: [], porFabrica: new Map(), falhas: 0, blocosLidos,
             blocosFalhos, poolsVistos: 0, recusadosPorFabrica: 0,
-            metodoIndisponivel: true,
+            metodoIndisponivel: true, porVenue: { v2: 0, v3: 0, aerodrome: 0 },
         };
     }
     // OS MAIS ATIVOS primeiro: se o teto cortar, corta o que negocia menos.
@@ -1243,5 +1296,10 @@ export async function universoPorAtividade(
         poolsVistos: quantasVezes.size,
         recusadosPorFabrica,
         metodoIndisponivel: false,
+        porVenue: {
+            v2: [...tipoVisto.values()].filter((x) => x === 'v2').length,
+            v3: [...tipoVisto.values()].filter((x) => x === 'v3').length,
+            aerodrome: [...tipoVisto.values()].filter((x) => x === 'aerodrome').length,
+        },
     };
 }

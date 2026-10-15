@@ -324,10 +324,24 @@ contract CacadorV3 {
             return;
         }
         if (pr.tipo == TIPO_AERODROME) {
-            // O pagamento e declarado; a SAIDA e a conta do pool.
-            uint256 paga = pr.pagamento;
+            // `pagamento = 0` numa perna INTERNA quer dizer "gasta tudo o que
+            // esta em maos" — e o caso comum da perna de VENDA, onde o que se
+            // paga e exatamente o que a perna anterior entregou e nao se sabe
+            // o valor de antemao. Na perna 0 nao ha nada em maos ainda, entao
+            // ali o pagamento TEM de ser declarado.
+            uint256 paga = pr.pagamento == 0 ? entra : pr.pagamento;
             if (paga == 0) revert PagamentoNaoDeclarado(i);
             if (paga > entra && i > 0) revert PagamentoCurto(entra, paga);
+            // PERSISTE o valor resolvido: quem paga e o callback, e ele le o
+            // STORAGE.
+            //
+            // DEFEITO MEDIDO em 2026-10-15: `paga` era so uma variavel local,
+            // entao com `pagamento = 0` o callback computava `devido = 0`,
+            // nao transferia nada, e o Aerodrome revertia com
+            // `InsufficientInputAmount()` (0x098fb561) — que eu primeiro li
+            // como "unrecognized custom error" por nao ter os erros do
+            // protocolo na interface do teste.
+            if (pr.pagamento == 0) pernas[i].pagamento = paga;
             uint256 sai = IPoolAerodrome(pr.pool).getAmountOut(paga, pr.tokenEntra);
             if (sai == 0) revert NadaEntrou();
             bool entraEhToken0 = IPoolV3(pr.pool).token0() == pr.tokenEntra;
