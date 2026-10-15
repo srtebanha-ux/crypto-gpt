@@ -38,7 +38,7 @@ import {
     acharRotas, melhorTamanhoDaRota, comoLerARota,
     type Rota, type PoolParaRota, type Retencao,
 } from './rotas';
-import { Exclusoes } from './causaDaFalha';
+import { Exclusoes, classificar, type EstadoDaOportunidade } from './causaDaFalha';
 
 const log = createLogger('arb');
 const coder = AbiCoder.defaultAbiCoder();
@@ -120,6 +120,9 @@ const SELETORES = {
     token0: sel('token0()'),
     token1: sel('token1()'),
     getReserves: sel('getReserves()'),
+    // `factory()` diz de que tipo o pool e. E ele que separa um pool que
+    // sabemos emprestar de um de liquidez concentrada, cuja conta nao e esta.
+    factory: sel('factory()'),
 };
 
 export interface PoolDaFabrica {
@@ -593,6 +596,18 @@ export const FUNIL = {
     reverteram: 0,
     desconhecidas: 0,
     validadasEconomicamente: 0,
+    /**
+     * OS TRES ESTADOS dela, contados separados de proposito.
+     *
+     * `NAO_VALIDADA` nao e recusa: e buraco do avaliador. Junta-la com
+     * `DESCARTADA` transforma limitacao minha em ausencia de mercado, e foi
+     * isso que fez o TITAN publicar "0 oportunidades" por um mes.
+     */
+    estados: {
+        DESCARTADA: 0,
+        NAO_VALIDADA: 0,
+        EXECUTAVEL_EM_SIMULACAO: 0,
+    } as Record<EstadoDaOportunidade, number>,
 };
 
 export function comoLerOFunil(ondeRodou: 'aoVivo' | 'fork'): string {
@@ -608,7 +623,11 @@ export function comoLerOFunil(ondeRodou: 'aoVivo' | 'fork'): string {
         + `inviáveis com a taxa MEDIDA aplicada ${f.inviavelComTaxa} | `
         + `estimadas positivas ${f.estimadasPositivas} | simuladas integralmente `
         + `${f.simuladasIntegralmente} | reverteram ${f.reverteram} | desconhecidas `
-        + `${f.desconhecidas} | VALIDADAS ECONOMICAMENTE ${f.validadasEconomicamente} — ${nota}`;
+        + `${f.desconhecidas} | VALIDADAS ECONOMICAMENTE ${f.validadasEconomicamente} — ${nota}`
+        + ` || ESTADOS: ${f.estados.DESCARTADA} descartada(s) com inviabilidade COMPROVADA, `
+        + `${f.estados.NAO_VALIDADA} NÃO VALIDADA(S) (limitação do avaliador, e isso NÃO é `
+        + `"não há oportunidade"), ${f.estados.EXECUTAVEL_EM_SIMULACAO} executável(is) em `
+        + 'simulação';
 }
 
 /**
@@ -675,8 +694,19 @@ export function avaliarRotas(
         const liquido = m.sobra - custo;
         if (liquido <= 0n) {
             if (temTaxa) inviavelComTaxa += 1; else semSobra += 1;
+            // DESCARTADA: a conta fechada diz que nao paga, com o custo
+            // conhecido. Isto e inviabilidade comprovada, nao limitacao.
+            FUNIL.estados.DESCARTADA += 1;
             continue;
         }
+        // NAO VALIDADA: a conta diz que sobra, e NADA executou. Estimativa nao
+        // e execucao — so `EXECUTAVEL_EM_SIMULACAO`, que vem do fork, conta.
+        FUNIL.estados[classificar({
+            limitacaoDoAvaliador: {
+                porque: 'a estimativa é positiva e nenhuma execução integral rodou neste '
+                    + 'caminho (o caçador ao vivo não executa)',
+            },
+        }).estado] += 1;
         estimadas.push({ rota: r, quantia: m.quantia, sobra: m.sobra, liquido, comTaxa: temTaxa });
     }
     return { rotas: rotas.length, estimadas, excluidasComCausa, inviavelComTaxa, semSobra };
@@ -777,13 +807,47 @@ async function principal(): Promise<void> {
             : 'nenhum: newHeads não gasta CU por bloco',
     });
 
-    const universo = await descobrirUniverso(chamar, tetoPorFabrica);
+    // O UNIVERSO: por ATIVIDADE, com o por INDICE como complemento.
+    //
+    // MEDIDO em 2026-10-15, e e o motivo pelo qual o TITAN nunca capturou nada:
+    // varri 120 blocos da Base, achei 33 arbitragens REAIS de ciclo fechado (79
+    // pools envolvidos), e o universo por indice — `allPairs[0..N]` de cada
+    // fabrica — cobria ZERO deles. O replay em fork confirmou nas seis maiores:
+    // 6 de 6 FORA DO UNIVERSO, inclusive uma de V2 puro cujos DOIS pools sao da
+    // fabrica `0x8909…8ec6`, que o TITAN varre. Ele tinha a fabrica certa e
+    // lia o pedaco errado dela: indice de criacao nao tem relacao com onde ha
+    // volume.
+    //
+    // O por atividade entra PRIMEIRO porque e o que tem evidencia; o por indice
+    // continua, somado, para nao PERDER cobertura que ja existia — trocar um
+    // pelo outro seria apostar tudo numa medicao de 120 blocos.
+    const porAtividade = await universoPorAtividade(chamar, {
+        blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
+        tetoDePools: Number(process.env.ARB_ATIVIDADE_TETO ?? 300),
+    });
+    const porIndice = await descobrirUniverso(chamar, tetoPorFabrica);
+    const universo = {
+        pools: [...new Set([...porAtividade.pools, ...porIndice.pools])],
+        porFabrica: new Map([...porIndice.porFabrica, ...porAtividade.porFabrica]),
+        falhas: porAtividade.falhas + porIndice.falhas,
+    };
     PLACAR.leiturasQueFalharam += universo.falhas;
-    log.info('[ARB] Universo descoberto UMA vez.', {
-        pools: universo.pools.length,
+    log.info('[ARB] Universo descoberto UMA vez, por ATIVIDADE + índice.', {
+        poolsTotal: universo.pools.length,
+        porAtividade: `${porAtividade.pools.length} (de ${porAtividade.poolsVistos} vistos `
+            + `negociando em ${porAtividade.blocosLidos} bloco(s); `
+            + `${porAtividade.recusadosPorFabrica} recusados por fábrica)`,
+        porIndice: `${porIndice.pools.length} (allPairs[0..${tetoPorFabrica}])`,
+        soNoAtividade: porAtividade.pools.filter(
+            (x) => !porIndice.pools.includes(x),
+        ).length,
         fabricas: [...new Set(universo.porFabrica.values())].length,
-        porque: 'enumerar pools é a etapa cara e não repete a cada bloco; o que repete é a '
-            + 'leitura de reserva, que é o que muda',
+        porque: 'índice de criação não diz onde há volume: medido em 2026-10-15, o universo por '
+            + 'índice cobria ZERO dos 79 pools que alimentaram 33 arbitragens reais',
+        oQueIssoNaoE: porAtividade.blocosLidos === 0
+            ? 'a parte por ATIVIDADE não leu bloco nenhum: o universo é só o por índice, e é '
+                + 'o que tem cobertura medida de ZERO. Isto NÃO é "não há pool ativo"'
+            : 'nenhuma ressalva: as duas partes responderam',
     });
     if (universo.pools.length === 0) {
         log.error('[ARB] Nenhum pool: não há o que caçar.', {
@@ -1044,4 +1108,110 @@ if (process.env.ATIVAR_CACARARBITRAGEM === '1') {
         log.error('[ARB] O laço morreu.', { erro: e instanceof Error ? e.message : String(e) });
         process.exitCode = 1;
     });
+}
+
+/**
+ * O UNIVERSO PELA ATIVIDADE — os pools que de fato NEGOCIAM.
+ *
+ * DEFEITO MEDIDO em 2026-10-15, e ele e o segundo motivo pelo qual o TITAN
+ * nunca capturou nada. `descobrirUniverso` enumera `allPairs[0..N]` de cada
+ * fabrica: um PREFIXO POR INDICE DE CRIACAO, que nao tem relacao nenhuma com
+ * onde ha liquidez ou volume. A fabrica V2 da Uniswap na Base tem milhares de
+ * pares; o TITAN lia os primeiros 100 por ordem de nascimento.
+ *
+ * A varredura de `src/varrerQuemGanha.ts` mediu 48 arbitragens REAIS e
+ * lucrativas em 120 blocos, e TRES dos pools que as alimentaram pertencem a
+ * `0x8909…8ec6` — a fabrica V2 da Uniswap, que o TITAN JA varre. Ele tinha a
+ * fabrica certa e estava lendo o pedaco errado dela.
+ *
+ * Aqui o universo nasce do que a corrente mostrou negociando: os pools que
+ * emitiram `Swap` nos ultimos blocos. Nao e heuristica de liquidez minha — e a
+ * atividade medida, e um pool sem troca nenhuma nao oferece arbitragem.
+ *
+ * O TRANSPORTE e `eth_getBlockReceipts`, UM pedido por bloco: medido em
+ * 2026-10-15, `eth_getLogs` no `mainnet.base.org` devolve `request limit
+ * reached` ate com janela de dez blocos, e isso e limite de rajada — nao prova
+ * nada sobre frequencia.
+ *
+ * `fabricasAceitas` decide quem entra. Um pool de fabrica que este contrato nao
+ * sabe emprestar NAO e adicionado: ele viraria rota que reverte, e gastar gas
+ * para descobrir o que o tipo ja diz e desperdicio.
+ */
+export async function universoPorAtividade(
+    chamar: Transporte,
+    opcoes: { blocos?: number; fabricasAceitas?: string[]; tetoDePools?: number } = {},
+): Promise<{
+    pools: string[];
+    porFabrica: Map<string, string>;
+    falhas: number;
+    blocosLidos: number;
+    blocosFalhos: number;
+    poolsVistos: number;
+    recusadosPorFabrica: number;
+}> {
+    const blocos = opcoes.blocos ?? 30;
+    const aceitas = new Set(
+        (opcoes.fabricasAceitas ?? FABRICAS_COM_FLASH_SWAP).map((x) => x.toLowerCase()),
+    );
+    const topo = Number(numDe(await chamar('eth_blockNumber', [])) ?? 0n);
+    if (topo === 0) {
+        return {
+            pools: [], porFabrica: new Map(), falhas: 1, blocosLidos: 0,
+            blocosFalhos: 0, poolsVistos: 0, recusadosPorFabrica: 0,
+        };
+    }
+    // O `topic0` do `Swap` da V2, CALCULADO. Endereco e assinatura de cabeca
+    // sao o defeito que a REGRA 0 deste projeto persegue.
+    const TOPICO_SWAP_V2 = id('Swap(address,uint256,uint256,uint256,uint256,address)');
+    const quantasVezes = new Map<string, number>();
+    let blocosLidos = 0;
+    let blocosFalhos = 0;
+    for (let b = topo - blocos + 1; b <= topo; b += 1) {
+        try {
+            const r = await chamar('eth_getBlockReceipts', [`0x${b.toString(16)}`]) as
+                { logs?: { address: string; topics: string[] }[] }[] | null;
+            if (r === null) { blocosFalhos += 1; continue; }
+            for (const rec of r) {
+                for (const l of rec.logs ?? []) {
+                    if ((l.topics[0] ?? '').toLowerCase() !== TOPICO_SWAP_V2) continue;
+                    const k = l.address.toLowerCase();
+                    quantasVezes.set(k, (quantasVezes.get(k) ?? 0) + 1);
+                }
+            }
+            blocosLidos += 1;
+        } catch {
+            blocosFalhos += 1;
+        }
+    }
+    // OS MAIS ATIVOS primeiro: se o teto cortar, corta o que negocia menos.
+    const candidatos = [...quantasVezes.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([pool]) => pool);
+    const porFabrica = new Map<string, string>();
+    const pools: string[] = [];
+    let recusadosPorFabrica = 0;
+    let falhas = 0;
+    const teto = opcoes.tetoDePools ?? 300;
+    // `factory()` em lote: e ele que diz se o pool e de um tipo que sabemos
+    // emprestar. Sem isso o universo entraria com pool de liquidez concentrada,
+    // cuja conta nao e esta.
+    const fatias = await emLote(candidatos.slice(0, teto * 2), async (pool) => ({
+        pool, fabrica: endDe(await lerComPaciencia(chamar, pool, SELETORES.factory)),
+    }));
+    for (const { pool, fabrica } of fatias) {
+        if (fabrica === null) { falhas += 1; continue; }
+        if (!aceitas.has(fabrica)) { recusadosPorFabrica += 1; continue; }
+        if (pools.length >= teto) break;
+        pools.push(pool);
+        porFabrica.set(pool, fabrica);
+    }
+    return {
+        pools,
+        porFabrica,
+        falhas,
+        blocosLidos,
+        blocosFalhos,
+        poolsVistos: quantasVezes.size,
+        recusadosPorFabrica,
+    };
 }

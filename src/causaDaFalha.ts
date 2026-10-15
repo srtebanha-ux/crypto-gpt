@@ -387,3 +387,93 @@ export function comoLerOVeredicto(v: Veredicto): string {
             ? ' >>> EXCLUI a peça de todas as rotas'
             : ' >>> exclui SÓ esta rota');
 }
+
+/**
+ * OS TRES ESTADOS DE UMA OPORTUNIDADE — pedido dela por nome em 2026-10-15.
+ *
+ *   *"DESCARTADA: inviabilidade economicamente ou tecnicamente comprovada.
+ *   NÃO VALIDADA: há informação insuficiente ou limitação do avaliador.
+ *   EXECUTÁVEL EM SIMULAÇÃO: execução atômica bem-sucedida e resultado líquido
+ *   positivo medido."*
+ *
+ * E as quatro frases que ela escreveu junto, porque cada uma e um erro que este
+ * projeto cometeu:
+ *
+ *   `gasDesconhecido` nao significa prejuizo.
+ *   Token pouco conhecido nao significa token hostil.
+ *   Reversao opaca nao significa arbitragem impossivel.
+ *   Erro do executor nao significa mercado invalido.
+ *
+ * As tres existem porque DESCARTADA e NAO_VALIDADA pedem acoes opostas:
+ * descartar e fechar a hipotese, e nao validar e um buraco no AVALIADOR. Juntar
+ * as duas num "recusado" transforma limitacao minha em ausencia de mercado — e
+ * foi exatamente isso que fez o TITAN publicar "0 oportunidades" por um mes.
+ */
+export type EstadoDaOportunidade = 'DESCARTADA' | 'NAO_VALIDADA' | 'EXECUTAVEL_EM_SIMULACAO';
+
+export interface Classificacao {
+    estado: EstadoDaOportunidade;
+    porque: string;
+    /** Só `EXECUTAVEL_EM_SIMULACAO` tem líquido medido. */
+    liquidoWei: bigint | null;
+}
+
+/**
+ * Classifica a partir do que se SABE, e nunca a partir do que falta.
+ *
+ * `executouComLucro` so pode vir de execucao atomica integral com o liquido
+ * apurado — nao de estimativa. Quem nao tem isso NAO e executavel, e a razao
+ * decide entre descartada e nao validada.
+ */
+export function classificar(e: {
+    /** A execução atômica integral rodou e o líquido foi apurado. */
+    executouComLucro?: { liquidoWei: bigint } | null;
+    /** Inviabilidade COMPROVADA: a conta fechada diz que não paga. */
+    inviavelComprovada?: { porque: string } | null;
+    /** O avaliador não soube: gás sem preço, cotação ausente, sonda que não rodou. */
+    limitacaoDoAvaliador?: { porque: string } | null;
+}): Classificacao {
+    // 1. EXECUTOU com líquido positivo: é o único caminho para executável.
+    const x = e.executouComLucro;
+    if (x !== undefined && x !== null) {
+        if (x.liquidoWei > 0n) {
+            return {
+                estado: 'EXECUTAVEL_EM_SIMULACAO',
+                porque: `execução atômica integral bem-sucedida e líquido MEDIDO de `
+                    + `${x.liquidoWei} wei depois de todos os custos`,
+                liquidoWei: x.liquidoWei,
+            };
+        }
+        // Executou e não pagou: inviabilidade comprovada pela execução, que é a
+        // prova mais forte que existe aqui.
+        return {
+            estado: 'DESCARTADA',
+            porque: `a execução integral rodou e o líquido foi ${x.liquidoWei} wei: `
+                + 'inviabilidade COMPROVADA pela própria execução, não estimada',
+            liquidoWei: x.liquidoWei,
+        };
+    }
+    // 2. LIMITACAO DO AVALIADOR vem ANTES da inviabilidade, e a ordem importa:
+    //    sem saber o custo, "não paga o gás" é uma conclusão que não se tem.
+    //    `gasDesconhecido` NAO significa prejuízo — é a frase dela.
+    const l = e.limitacaoDoAvaliador;
+    if (l !== undefined && l !== null) {
+        return {
+            estado: 'NAO_VALIDADA',
+            porque: `${l.porque}. Isto é limitação do AVALIADOR, não inviabilidade: nada aqui `
+                + 'diz que a oportunidade não existe',
+            liquidoWei: null,
+        };
+    }
+    const i = e.inviavelComprovada;
+    if (i !== undefined && i !== null) {
+        return { estado: 'DESCARTADA', porque: i.porque, liquidoWei: null };
+    }
+    // 3. NADA SE SABE. Não é descartada.
+    return {
+        estado: 'NAO_VALIDADA',
+        porque: 'nenhuma evidência foi apresentada: sem execução, sem inviabilidade comprovada '
+            + 'e sem limitação declarada, o estado honesto é NÃO VALIDADA',
+        liquidoWei: null,
+    };
+}
