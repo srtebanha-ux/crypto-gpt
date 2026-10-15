@@ -169,7 +169,19 @@ describe('a primeira arbitragem V3', function () {
                 }, 'latest']);
             } catch (e) {
                 const m = String(e.message ?? e);
-                temSwapV3 = !m.includes('selector was not recognized');
+                // IDENTIFICACAO POSITIVA, e so ela.
+                //
+                // A versao anterior desta linha era `!m.includes('selector was
+                // not recognized')` — aceitar tudo que nao diz uma frase
+                // especifica. Medido: ela descartou ZERO de 138 pools,
+                // inclusive os proxies de 46 bytes, e 144 cotacoes seguiram
+                // batendo em `swap` inexistente. Negacao de uma frase nao e
+                // prova de nada; e o mesmo defeito do `naoCruzouAinda`, que
+                // autorizava gastar dinheiro por achar "revert" na prosa.
+                //
+                // O pool V3 de verdade recusa `amountSpecified = 0` com a sua
+                // PROPRIA razao, 'AS'. E essa resposta que identifica.
+                temSwapV3 = m.includes("'AS'") || m.includes(' AS ') || /reason string 'AS'/.test(m);
             }
             if (!temSwapV3) {
                 proxiesOuSemSeletor += 1;
