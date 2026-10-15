@@ -844,10 +844,13 @@ async function principal(): Promise<void> {
         fabricas: [...new Set(universo.porFabrica.values())].length,
         porque: 'índice de criação não diz onde há volume: medido em 2026-10-15, o universo por '
             + 'índice cobria ZERO dos 79 pools que alimentaram 33 arbitragens reais',
-        oQueIssoNaoE: porAtividade.blocosLidos === 0
-            ? 'a parte por ATIVIDADE não leu bloco nenhum: o universo é só o por índice, e é '
-                + 'o que tem cobertura medida de ZERO. Isto NÃO é "não há pool ativo"'
-            : 'nenhuma ressalva: as duas partes responderam',
+        oQueIssoNaoE: porAtividade.metodoIndisponivel
+            ? 'o nó NÃO SUPORTA eth_getBlockReceipts: a parte por ATIVIDADE não rodou, e o '
+                + 'universo é só o por índice — o que tem cobertura MEDIDA de ZERO nos pools '
+                + 'dos vencedores. Isto NÃO é "não há pool ativo"'
+            : (porAtividade.blocosLidos === 0
+                ? 'a parte por ATIVIDADE não leu bloco nenhum. Isto NÃO é "não há pool ativo"'
+                : 'nenhuma ressalva: as duas partes responderam'),
     });
     if (universo.pools.length === 0) {
         log.error('[ARB] Nenhum pool: não há o que caçar.', {
@@ -1148,6 +1151,16 @@ export async function universoPorAtividade(
     blocosFalhos: number;
     poolsVistos: number;
     recusadosPorFabrica: number;
+    /**
+     * O no NAO SUPORTA `eth_getBlockReceipts`.
+     *
+     * MEDIDO em 2026-10-15: o fork do Hardhat responde "Method
+     * eth_getBlockReceipts is not supported", e `eth_getLogs` por ele cai no
+     * upstream e volta 429. Sem este campo a funcao devolvia ZERO pools, e
+     * "0 pools ativos" lido como medicao e ausencia com cara de resposta — o
+     * defeito que da nome a este projeto, no codigo que eu acabei de escrever.
+     */
+    metodoIndisponivel: boolean;
 }> {
     const blocos = opcoes.blocos ?? 30;
     const aceitas = new Set(
@@ -1158,6 +1171,7 @@ export async function universoPorAtividade(
         return {
             pools: [], porFabrica: new Map(), falhas: 1, blocosLidos: 0,
             blocosFalhos: 0, poolsVistos: 0, recusadosPorFabrica: 0,
+            metodoIndisponivel: false,
         };
     }
     // O `topic0` do `Swap` da V2, CALCULADO. Endereco e assinatura de cabeca
@@ -1166,7 +1180,9 @@ export async function universoPorAtividade(
     const quantasVezes = new Map<string, number>();
     let blocosLidos = 0;
     let blocosFalhos = 0;
+    let metodoIndisponivel = false;
     for (let b = topo - blocos + 1; b <= topo; b += 1) {
+        if (metodoIndisponivel) break;
         try {
             const r = await chamar('eth_getBlockReceipts', [`0x${b.toString(16)}`]) as
                 { logs?: { address: string; topics: string[] }[] }[] | null;
@@ -1179,9 +1195,22 @@ export async function universoPorAtividade(
                 }
             }
             blocosLidos += 1;
-        } catch {
+        } catch (e) {
             blocosFalhos += 1;
+            // "nao suportado" nao e falha passageira: nao adianta tentar os
+            // outros blocos, e o resultado NAO e uma medicao de zero.
+            const m = String(e).toLowerCase();
+            if (m.includes('not supported') || m.includes('method not found')) {
+                metodoIndisponivel = true;
+            }
         }
+    }
+    if (metodoIndisponivel) {
+        return {
+            pools: [], porFabrica: new Map(), falhas: 0, blocosLidos,
+            blocosFalhos, poolsVistos: 0, recusadosPorFabrica: 0,
+            metodoIndisponivel: true,
+        };
     }
     // OS MAIS ATIVOS primeiro: se o teto cortar, corta o que negocia menos.
     const candidatos = [...quantasVezes.entries()]
@@ -1213,5 +1242,6 @@ export async function universoPorAtividade(
         blocosFalhos,
         poolsVistos: quantasVezes.size,
         recusadosPorFabrica,
+        metodoIndisponivel: false,
     };
 }

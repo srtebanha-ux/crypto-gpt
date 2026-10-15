@@ -92,6 +92,25 @@ describe('o TITAN contra os operadores que ganham', function () {
                 });
             } catch { porAtividade = null; }
 
+            // O FORK NAO SUPORTA `eth_getBlockReceipts` — medido em 2026-10-15,
+            // e `eth_getLogs` por ele cai no upstream e volta 429. Entao a
+            // funcao de verdade nao roda aqui, e publicar o zero dela como
+            // cobertura seria ausencia com cara de resposta.
+            //
+            // O SUBSTITUTO e so com PASSADO: os pools que apareceram em
+            // operacoes do proprio benchmark com bloco MENOR que esta. Nenhuma
+            // informacao do futuro entra — e a pergunta que isso responde e
+            // "um universo por atividade teria estes pools?".
+            //
+            // DECLARADO: e um PISO. O benchmark so viu pools que participaram
+            // de transacoes LUCRATIVAS, e um universo por atividade de verdade
+            // ve todo pool que negociou. Cobertura aqui subestima a dele.
+            const atividadeDoPassado = new Set(
+                b.operacoes
+                    .filter((x) => x.bloco < op.bloco)
+                    .flatMap((x) => x.pools.map((y) => y.toLowerCase())),
+            );
+
             // 1. O TITAN CONHECE OS POOLS DA OPERACAO?
             const conhecidos = new Set(pools.map((q) => q.endereco.toLowerCase()));
             const daOperacao = op.pools.map((x) => x.toLowerCase());
@@ -116,17 +135,20 @@ describe('o TITAN contra os operadores que ganham', function () {
                 }
             }
 
-            const porAtiv = porAtividade === null
-                ? null
-                : new Set(porAtividade.pools.map((x) => x.toLowerCase()));
-            const vistosPorAtiv = porAtiv === null
-                ? [] : daOperacao.filter((x) => porAtiv.has(x));
-            const compara = porAtividade === null
-                ? 'atividade: NÃO MEDIDA neste bloco'
-                : `atividade: ${porAtividade.pools.length} pool(s) ativos`
-                    + ` (${porAtividade.poolsVistos} vistos negociando,`
-                    + ` ${porAtividade.recusadosPorFabrica} recusados por fábrica) ->`
-                    + ` cobre ${vistosPorAtiv.length}/${daOperacao.length}`;
+            const rodouDeVerdade = porAtividade !== null && !porAtividade.metodoIndisponivel
+                && porAtividade.blocosLidos > 0;
+            const porAtiv = rodouDeVerdade
+                ? new Set(porAtividade.pools.map((x) => x.toLowerCase()))
+                : atividadeDoPassado;
+            const vistosPorAtiv = daOperacao.filter((x) => porAtiv.has(x));
+            const compara = rodouDeVerdade
+                ? `atividade (MEDIDA no fork): ${porAtividade.pools.length} pool(s) ativos`
+                    + ` de ${porAtividade.poolsVistos} vistos negociando ->`
+                    + ` cobre ${vistosPorAtiv.length}/${daOperacao.length}`
+                : 'atividade: `eth_getBlockReceipts` INDISPONÍVEL no fork, então usei o PISO do'
+                    + ` passado do benchmark (${atividadeDoPassado.size} pool(s) vistos em`
+                    + ` operações de bloco < ${op.bloco}) -> cobre`
+                    + ` ${vistosPorAtiv.length}/${daOperacao.length}`;
 
             if (vistos.length === 0) {
                 const fs = deFabricaNossa.map((x) => x.fabrica ?? 'sem factory()');
@@ -202,9 +224,13 @@ describe('o TITAN contra os operadores que ganham', function () {
         console.log(`    de fábrica que o TITAN sabe emprestar ... ${somaF}`);
         console.log(`    universo por ÍNDICE (allPairs[0..N]) .... ${somaI}`);
         console.log(`    universo por ATIVIDADE (Swap recente) ... ${somaA}`);
-        console.log('    LEITURA: a diferença entre as duas últimas linhas é capacidade de'
-            + ' detecção que a mudança de universo adiciona, medida nos pools que de fato'
-            + ' produziram lucro. A primeira linha é o teto do mecanismo atual.');
+        console.log('    LEITURA: a primeira linha é o TETO do mecanismo atual — um pool de'
+            + ' fábrica que o contrato não sabe emprestar não é alcançável por ajuste de'
+            + ' filtro nenhum. A diferença entre as duas últimas é a detecção que a mudança'
+            + ' de universo adiciona.');
+        console.log('    DECLARADO: no fork o `eth_getBlockReceipts` não existe, então a linha'
+            + ' de ATIVIDADE usa o piso do passado do benchmark (só pools de transações'
+            + ' lucrativas). Ela subestima o universo por atividade de verdade.');
 
         const totalReal = b.operacoes.reduce((a, o) => a + BigInt(o.liquidoWei), 0n);
         const soV2 = b.operacoes.filter((o) => o.dexes.length === 1 && o.dexes[0] === 'v2');
