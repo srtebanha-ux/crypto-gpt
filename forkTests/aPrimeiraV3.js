@@ -133,7 +133,7 @@ describe('a primeira arbitragem V3', function () {
         // medidos aqui tem 22.143 bytes e o carregam; os proxies nao. Um proxy
         // que esconda a implementacao sai como NAO IDENTIFICADO, e nao como
         // "nao e V3" — a diferenca fica no log.
-        const SELETOR_SWAP_V3 = '128acb08';
+        const arbOuZero = '0x0000000000000000000000000000000000000001';
         const pools = [];
         let proxiesOuSemSeletor = 0;
         for (const [pool] of [...vistos.entries()].sort((a, b) => b[1] - a[1]).slice(0, 160)) {
@@ -145,9 +145,33 @@ describe('a primeira arbitragem V3', function () {
             const taxa = num(f); const liquidez = num(liq);
             if (a === null || b2 === null || taxa === null) continue;
             if (liquidez === null || liquidez === 0n) continue;
-            // eslint-disable-next-line no-await-in-loop
-            const codigo = await chamar('eth_getCode', [pool, 'latest']);
-            if (typeof codigo !== 'string' || !codigo.includes(SELETOR_SWAP_V3)) {
+            // SONDA POSITIVA, e nao substring de bytecode.
+            //
+            // MEDIDO em 2026-10-15: com o filtro por substring, 264 de 720
+            // cotacoes ainda sairam "function selector was not recognized" —
+            // o seletor aparece no bytecode (metadata, constante) sem a funcao
+            // existir. Substring nao e prova.
+            //
+            // A sonda e o proprio protocolo respondendo: um pool V3 de verdade
+            // recusa `amountSpecified = 0` com a razao 'AS'. Quem nao tem a
+            // funcao responde "selector was not recognized". As duas respostas
+            // sao distinguiveis, e nenhuma delas move dinheiro.
+            let temSwapV3 = false;
+            try {
+                // eslint-disable-next-line no-await-in-loop
+                await chamar('eth_call', [{
+                    to: pool,
+                    data: sel('swap(address,bool,int256,uint160,bytes)')
+                        + coder.encode(
+                            ['address', 'bool', 'int256', 'uint160', 'bytes'],
+                            [arbOuZero, true, 0, 4295128740n, '0x'],
+                        ).slice(2),
+                }, 'latest']);
+            } catch (e) {
+                const m = String(e.message ?? e);
+                temSwapV3 = !m.includes('selector was not recognized');
+            }
+            if (!temSwapV3) {
                 proxiesOuSemSeletor += 1;
                 continue;
             }
@@ -155,14 +179,15 @@ describe('a primeira arbitragem V3', function () {
             const fab = endDe(await ler(pool, sel('factory()')));
             pools.push({
                 endereco: pool, token0: a, token1: b2, taxa, liquidez,
-                fabrica: fab, bytes: (codigo.length - 2) / 2,
+                fabrica: fab,
             });
         }
-        console.log(`    ${pools.length} pool(s) com ABI V3 CONFIRMADA (seletor 0x128acb08 no`
-            + ` bytecode), fee tier e liquidez lidos do pool`);
-        console.log(`    ${proxiesOuSemSeletor} descartado(s): proxy ou sem o seletor — responder`
-            + ' token0/token1/fee NÃO prova ABI compatível, e foi isso que gerou 180'
-            + ' "invalid opcode" antes deste filtro');
+        console.log(`    ${pools.length} pool(s) com ABI V3 CONFIRMADA pelo próprio pool,`
+            + ' fee tier e liquidez lidos dele');
+        console.log(`    ${proxiesOuSemSeletor} descartado(s): o próprio pool respondeu que NÃO`
+            + ' tem `swap(address,bool,int256,uint160,bytes)`. Responder token0/token1/fee não'
+            + ' prova ABI compatível, e substring de bytecode também não — as duas versões'
+            + ' anteriores deste filtro deixaram passar 180 e 264 cotações inúteis');
         const porFabrica = new Map();
         for (const q of pools) porFabrica.set(q.fabrica, (porFabrica.get(q.fabrica) ?? 0) + 1);
         console.log('    por fábrica (lida do pool):');
