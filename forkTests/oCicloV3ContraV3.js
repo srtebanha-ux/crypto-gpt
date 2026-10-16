@@ -26,7 +26,12 @@ const { AbiCoder, Interface, id } = require('ethers');
 const {
     candidatasMistas, pernasDaCandidata, triarCandidatas,
 } = require('../dist/rotasMistas.js');
-const { codificarCotarCiclo, lerRespostaDaCotacao, COTADOR_LOCAL } = require('../dist/cotarMista.js');
+// O DIMENSIONAMENTO E A COTACAO VEM DA PRODUCAO. `cotarAfetadas` e a mesma
+// funcao que o cacador ao vivo chama; este arquivo nao tem mais escada nem
+// criterio de melhor proprios. `codificarCotarCiclo`, `COTADOR_LOCAL` e
+// `lerRespostaDaCotacao` sairam dos imports de proposito: eram o que a copia
+// usava, e importa-los daria a impressao de que o teste ainda cota sozinho.
+const { cotarAfetadas } = require('../dist/cacarArbitragem.js');
 const {
     codificarTetoDeL1, ORACULO_DE_GAS_L1, somarCusto, julgar, GORJETA_PADRAO_WEI,
 } = require('../dist/custoDaBase.js');
@@ -190,70 +195,118 @@ describe('o ciclo concentrado contra concentrado', function () {
         console.log(`    FILTRO: ${tri.valem.length} passaram, ${tri.recusadasPorSpread.length}`
             + ' descartadas com prova');
 
-        // 5. COTACAO por override, a escada inteira, escolhendo o melhor
-        //    LIQUIDO — nao o melhor bruto.
+        // 5. PROVA A — A DECISAO ECONOMICA, pela FUNCAO DE PRODUCAO.
         //
-        // ELA CORTOU O CRITERIO ANTERIOR, e com razao: *"Voce recebeu
-        // 108.878.689.617 wei de WETH e gastou 372.944 unidades de gas. O teste
-        // nao verifica o lucro liquido."* O ponto de equilibrio daquele caso e
-        // ~0,000292 gwei, muito abaixo de qualquer baseFee real. Receber WETH
-        // nao e ganhar dinheiro, e escolher o tamanho pelo BRUTO escolhe o
-        // tamanho errado: o gas e quase constante no tamanho, entao quem decide
-        // e a diferenca.
+        // Aqui estava uma COPIA da logica: este arquivo tinha a propria escada
+        // (`[10_000, 2_000, 500, 100, 20]`, os mesmos literais de
+        // `escadaDeTamanhos`), o proprio criterio de melhor e o proprio custo
+        // por gas. Uma copia prova a copia — e a auditoria mostrou que
+        // `cotarAfetadas`, que e o dimensionamento e a cotacao DE VERDADE, nao
+        // era exercitada por nenhum teste em fork.
+        //
+        // Agora quem decide e `cotarAfetadas`. Este arquivo so liga o
+        // transporte ao provedor local e LE o sinal que ela devolve.
         const bloco = await chamar('eth_getBlockByNumber', ['latest', false]);
         const baseFeeWei = BigInt(bloco.baseFeePerGas ?? '0x0');
-        // GAS ESTIMADO para ordenar a escada: o medido vem do recibo depois.
-        const GAS_TIPICO = 400_000n;
-        const custoDe = (gas) => gas * (baseFeeWei + GORJETA_PADRAO_WEI);
-        let melhor = null;
-        let melhorBruto = null;
-        for (const c of tri.valem) {
-            const emprestavel = saldoDaBaseNoV3.get(c.pernas[0].pool) ?? 0n;
-            if (emprestavel === 0n) continue;
-            for (const d of [10_000n, 2_000n, 500n, 100n, 20n]) {
-                const q = emprestavel / d;
-                if (q === 0n) continue;
-                const dados = codificarCotarCiclo(pernasDaCandidata(c, WETH, q), q);
-                let lido = null;
+
+        // O ADAPTADOR DE TRANSPORTE, e so ele.
+        //
+        // O provedor do Hardhat nao aceita lote JSON-RPC, entao os pedidos vao
+        // em sequencia — mesma semantica, uma viagem por pedido. O contrato de
+        // `TransporteEmLote` tem de ser respeitado nos TRES casos, porque
+        // confundi-los e o defeito que este projeto persegue:
+        //
+        //   sucesso            -> { ok: true }  e `cotarAfetadas` recusa, porque
+        //                         o padrao Quoter EXIGE reversao
+        //   reversao com dado  -> { ok: false, dados }  e ela le o seletor
+        //   erro de RPC        -> { ok: false, dados: null }  vira REVERSAO
+        //                         OPACA, isto e NAO-cotacao. Nunca um numero.
+        //
+        // O contador `errosDeRpc` existe para o relatorio poder separar "o
+        // mercado nao tinha spread" de "o no falhou", que pedem acoes opostas.
+        const tamanhosCotados = [];
+        let errosDeRpc = 0;
+        const emLote = async (pedidos) => {
+            const saidas = [];
+            for (const pedido of pedidos) {
+                const data = String(pedido.params[0].data);
+                tamanhosCotados.push(BigInt(`0x${data.slice(74, 138)}`));
                 try {
                     // eslint-disable-next-line no-await-in-loop
-                    await chamar('eth_call', [{
-                        from: '0x0000000000000000000000000000000000000000',
-                        to: COTADOR_LOCAL, data: dados, gas: '0xB71B00',
-                    }, 'latest', { [COTADOR_LOCAL]: { code: art.deployedBytecode } }]);
+                    const ok = await chamar(pedido.metodo, pedido.params);
+                    saidas.push({ ok: true, dados: typeof ok === 'string' ? ok : null });
                 } catch (e) {
                     const dado = (e && (e.data || (e.error && e.error.data))) || null;
-                    lido = lerRespostaDaCotacao(typeof dado === 'string' ? dado : null);
-                }
-                if (lido === null) continue;
-                const liquidoPrevisto = lido.sobra - custoDe(GAS_TIPICO);
-                if (melhorBruto === null || lido.sobra > melhorBruto.sobra) {
-                    melhorBruto = { c, quantia: q, sobra: lido.sobra };
-                }
-                if (melhor === null || liquidoPrevisto > melhor.liquidoPrevisto) {
-                    melhor = { c, quantia: q, sobra: lido.sobra, liquidoPrevisto };
+                    if (typeof dado !== 'string') errosDeRpc += 1;
+                    saidas.push({ ok: false, dados: typeof dado === 'string' ? dado : null });
                 }
             }
+            return saidas;
+        };
+
+        const sinais = await cotarAfetadas(
+            emLote, chamar, tri.valem, estado, 'latest', BLOCO_VENCEDOR - 1, Date.now(),
+            // O baseFee PURO. A gorjeta entra UMA vez, dentro de `somarCusto`.
+            baseFeeWei, art.deployedBytecode,
+        );
+        assert.equal(sinais.length, tri.valem.length,
+            'um sinal por candidata: sinal a menos é rota que saiu da conta sem dizer por quê');
+        console.log(`\n    PROVA A — DECISAO ECONOMICA (cotarAfetadas, produção)`);
+        console.log(`      baseFee ${baseFeeWei} + gorjeta ${GORJETA_PADRAO_WEI} por gás`
+            + ` | ARB_TAMANHOS=${process.env.ARB_TAMANHOS ?? '(padrão 4)'}`);
+        console.log(`      degraus REALMENTE cotados (${tamanhosCotados.length}):`
+            + ` ${tamanhosCotados.map(String).join(', ')}`);
+        if (errosDeRpc > 0) console.log(`      erros de RPC: ${errosDeRpc} (não são cotação)`);
+        for (const s of sinais) {
+            console.log(`      ${s.rota}`);
+            console.log(`        tamanho ${s.melhorTamanho} | bruto ${s.lucroBrutoEstimado}`
+                + ` | custo ${s.custoTotalEstimado} | LÍQUIDO ${s.lucroLiquidoEstimado}`);
+            console.log(`        ${s.motivo}`);
         }
-        assert.ok(melhor !== null,
-            'nenhuma cotação legível: sem número não há o que executar nem o que concluir');
-        console.log(`    COTACAO (override): melhor BRUTO ${melhorBruto.sobra} |`
-            + ` melhor LIQUIDO previsto ${melhor.liquidoPrevisto} na quantia ${melhor.quantia}`);
-        console.log(`    baseFee ${baseFeeWei} + gorjeta ${GORJETA_PADRAO_WEI} por gas`);
+        // A DECISAO: aprovar exige liquido ESTRITAMENTE positivo e custo
+        // conhecido. `null` em qualquer um dos dois e recusa, nao aprovacao.
+        const aprovados = sinais.filter(
+            (s) => s.lucroLiquidoEstimado !== null && s.lucroLiquidoEstimado > 0n,
+        );
+        console.log(`      DECISÃO DO CAÇADOR: ${aprovados.length} de ${sinais.length}`
+            + ` aprovada(s)${aprovados.length === 0
+                ? ' — RECUSA, e recusar operação deficitária é o resultado CERTO' : ''}`);
+        for (const s of sinais) {
+            if (s.custoTotalEstimado !== null) continue;
+            assert.equal(s.lucroLiquidoEstimado, null,
+                'custo desconhecido com líquido numérico seria lucro inventado');
+        }
 
-        // 6. TESTE_DO_MECANISMO — executa e exige recibo, quitação e saldo.
+        // 6. PROVA B — TESTE FORCADO DO MECANISMO.
         //
-        //    Isto NAO afirma rentabilidade. E por isso que os dois testes sao
-        //    separados: o anterior passava com `assert.ok(true)` quando a
-        //    cotacao nao fechava, o que faz um teste identificado como prova
-        //    nunca poder reprovar.
-        assert.ok(melhorBruto.sobra > 0n,
-            'TESTE_DO_MECANISMO: nenhum tamanho produziu sobra bruta neste estado real, então a '
-            + 'execução não pode ser exercitada aqui. Isto é REPROVAÇÃO, não "tudo bem": sem '
-            + 'sobra bruta não há o que quitar e a prova do mecanismo fica sem estado. Rode com '
-            + 'V3V3_TX/V3V3_BLOCO de uma operação em que o ciclo feche no bloco anterior');
-
-        const escolhido = melhor.liquidoPrevisto > 0n ? melhor : melhorBruto;
+        // ISTO NAO E DECISAO OPERACIONAL DO TITAN. A PROVA A acabou de recusar
+        // (ou aprovar) por conta propria; aqui a execucao e FORCADA, com
+        // `lucroMinimo = 1`, para exercitar quitacao, callback, saldos e a
+        // equivalencia cotacao/realizado. Separar as duas e o que impede uma
+        // execucao de diagnostico de ser lida como operacao aprovada.
+        //
+        // O TAMANHO NAO E ESCOLHIDO AQUI: e o `melhorTamanho` que a funcao de
+        // producao escolheu, e o bruto esperado e o `lucroBrutoEstimado` dela.
+        // Recriar a selecao aqui era exatamente a copia que esta rodada apagou.
+        const comBruto = sinais.filter(
+            (s) => s.melhorTamanho !== null && s.lucroBrutoEstimado !== null
+                && s.lucroBrutoEstimado > 0n,
+        );
+        assert.ok(comBruto.length > 0,
+            'TESTE FORÇADO DO MECANISMO: nenhuma rota teve sobra bruta positiva nos degraus que a '
+            + 'produção avaliou, então não há o que quitar e a prova do mecanismo fica sem '
+            + 'estado. Isto é REPROVAÇÃO, não "tudo bem"');
+        // Entre as que fecham, a de maior bruto — e isto NAO e selecao
+        // economica: e escolher qual diagnostico rodar.
+        const alvo = comBruto.reduce(
+            (a, b) => (b.lucroBrutoEstimado > a.lucroBrutoEstimado ? b : a),
+        );
+        const candidata = tri.valem.find((c) => c.chave === alvo.rota);
+        assert.ok(candidata !== undefined,
+            `o sinal ${alvo.rota} não casa com nenhuma candidata: identidade de rota quebrada`);
+        const escolhido = {
+            c: candidata, quantia: alvo.melhorTamanho, sobra: alvo.lucroBrutoEstimado,
+        };
         const antesCofre = await saldo(WETH, cofre);
         const dados = iface.encodeFunctionData('executarRota',
             [pernasDaCandidata(escolhido.c, WETH, escolhido.quantia), escolhido.quantia, 1n]);
@@ -266,8 +319,11 @@ describe('o ciclo concentrado contra concentrado', function () {
             'recibo diferente de 1: o crédito NÃO foi quitado e a rota V3<->V3 não está provada');
         const bruto = (await saldo(WETH, cofre)) - antesCofre;
         const gasMedido = BigInt(r.gasUsed);
-        console.log('\n    TESTE_DO_MECANISMO: recibo status=1');
-        console.log(`      quantia ${escolhido.quantia} | gás MEDIDO ${gasMedido}`);
+        console.log('\n    PROVA B — TESTE FORÇADO DO MECANISMO (não é decisão operacional');
+        console.log('      do TITAN: `lucroMinimo = 1` forçado, para exercitar o executor)');
+        console.log('      recibo status=1');
+        console.log(`      quantia ${escolhido.quantia} (a que a PRODUÇÃO escolheu)`
+            + ` | gás MEDIDO ${gasMedido}`);
         console.log(`      COFRE ${antesCofre} -> ${antesCofre + bruto} | bruto ${bruto}`);
         assert.ok(bruto > 0n, 'o cofre não recebeu nada: sem saldo reconciliado não há prova');
         assert.equal(await saldo(WETH, arb), 0n, 'o executor retiveve WETH');
