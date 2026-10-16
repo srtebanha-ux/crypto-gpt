@@ -80,6 +80,7 @@ describe('TITAN: Aave/Morpho/Uniswap Base FORK REAL (nenhuma tx na mainnet)',fun
    const cobrir=1_000_000_000n; // 1000 USDC, abaixo do teto de cobertura Aave
    const rota=[[pool,WETH,0,fee]];
    const antesCofre=await call(USDC,ercABI,'balanceOf',[COFRE]);
+   const snapshotAntes=await p.send('evm_snapshot',[]);
    const lucroSimulado=await contrato.liquidar.staticCall(ALVO,WETH,USDC,cobrir,1n,rota);
    assert.ok(lucroSimulado>0n,'liquidacao sem lucro no mesmo fork');
    const recibo=await (await contrato.liquidar(ALVO,WETH,USDC,cobrir,1n,rota)).wait();
@@ -90,5 +91,44 @@ describe('TITAN: Aave/Morpho/Uniswap Base FORK REAL (nenhuma tx na mainnet)',fun
    assert.ok(recibo.gasUsed>0n);
    console.log(JSON.stringify({forkBlock:number,uniswapPool:pool,fee,healthFactor: hf.toString(),
        lucroUSDC6:lucroSimulado.toString(),gasL2:recibo.gasUsed.toString(),realMainnetBroadcast:false}));
+   // Segundo ensaio no MESMO estado pre-liquidacao, mas com DOIS swaps reais.
+   // Snapshot pertence apenas ao fork; o alvo volta a ter divida para a segunda rota.
+   assert.equal(await p.send('evm_revert',[snapshotAntes]),true);
+   const intermediarios=[
+     '0xd9aAEc86B65D86f6A7B5aB1b0c42FFA531710', // USDbC
+     '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb', // DAI
+     '0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEC22', // cbETH
+   ];
+   const taxas=[100,500,3000,10000];
+   let conseguiu=null;
+   for (const intermediario of intermediarios){
+     if(conseguiu)break;
+     for(const f1 of taxas){
+       if(conseguiu)break;
+       const pool1=await factory.getPool(WETH,intermediario,f1);
+       if(pool1===ethers.ZeroAddress)continue;
+       for(const f2 of taxas){
+         const pool2=await factory.getPool(intermediario,USDC,f2);
+         if(pool2===ethers.ZeroAddress)continue;
+         const rota2=[[pool1,WETH,0,f1],[pool2,intermediario,0,f2]];
+         try{
+           const prev=await contrato.liquidar.staticCall(ALVO,WETH,USDC,cobrir,1n,rota2);
+           if(prev<=0n)continue;
+           const saldoAnterior=await call(USDC,ercABI,'balanceOf',[COFRE]);
+           const rc=await (await contrato.liquidar(ALVO,WETH,USDC,cobrir,1n,rota2)).wait();
+           assert.equal(rc.status,1);
+           const saldoNovo=await call(USDC,ercABI,'balanceOf',[COFRE]);
+           assert.equal(saldoNovo-saldoAnterior,prev);
+           conseguiu={intermediario,fees:[f1,f2],pool1,pool2,
+             lucroUSDC6:prev.toString(),gasL2:rc.gasUsed.toString()};
+           break;
+         }catch(err){
+           // Uma rota sem retorno economico e simplesmente uma rota recusada.
+         }
+       }
+     }
+   }
+   assert.ok(conseguiu,'nenhuma rota V3 2-hop liquidou o alvo real no fork; revisar pools');
+   console.log('MULTIHOP_2_SWAPS_BASE_FORK '+JSON.stringify(conseguiu));
  });
 });
