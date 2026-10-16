@@ -7,6 +7,10 @@ import { Interface, JsonRpcProvider, Wallet, getAddress, keccak256 } from 'ether
 import fs from 'node:fs';
 import path from 'node:path';
 import { ORACULO_DE_GAS_L1 } from './custoDaBase';
+import {
+    impedimentoTitanContinuo, parametrosTitanContinuo,
+    reservarTitanContinuo, fecharTitanContinuo,
+} from './titanAutorizacaoContinua';
 import type { PernaMista } from './rotasMistas';
 
 export const ABI_TITAN = new Interface([
@@ -61,17 +65,31 @@ export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv):
         || ambiente.TITAN_CONFIRMAR !== 'OPERAR_BASE_REAL') {
         return 'envio real desligado (TITAN_ENVIAR e TITAN_CONFIRMAR)';
     }
-    // Janela autorizada para UMA operacao, nao uma permissao permanente.
-    const validade = ambiente.TITAN_OPERAR_ATE_UTC;
-    const fim = validade ? Date.parse(validade) : NaN;
-    if (!Number.isFinite(fim) || fim <= Date.now() || fim > Date.now() + 24 * 60 * 60 * 1000) {
-        return 'janela de autorizacao expirada ou inexistente';
+    const continuo = ambiente.TITAN_AUTORIZACAO_CONTINUA === '1';
+    if (continuo) {
+        try {
+            parametrosTitanContinuo(ambiente);
+            const bloqueio = impedimentoTitanContinuo(ambiente, 0n);
+            if (bloqueio) return bloqueio;
+        } catch (e) {
+            return 'controle duravel da autorizacao continua indisponivel: '
+                + (e instanceof Error ? e.message.slice(0, 120) : 'falha');
+        }
+    } else {
+        // Compatibilidade com a unica operacao autorizada temporariamente.
+        const validade = ambiente.TITAN_OPERAR_ATE_UTC;
+        const fim = validade ? Date.parse(validade) : NaN;
+        if (!Number.isFinite(fim) || fim <= Date.now()
+            || fim > Date.now() + 24 * 60 * 60 * 1000) {
+            return 'janela de autorizacao expirada ou inexistente';
+        }
+        const marcador = ambiente.TITAN_MARCADOR_ENVIO;
+        if (!marcador || !marcador.startsWith('/app/data/')
+            || marcador.includes('..')) {
+            return 'trava de envio persistente em volume nao configurada';
+        }
+        if (fs.existsSync(marcador)) return 'ja houve tentativa de envio para esta autorizacao';
     }
-    const marcador = ambiente.TITAN_MARCADOR_ENVIO;
-    if (!marcador || !marcador.startsWith('/app/data/') || marcador.includes('..')) {
-        return 'trava de envio persistente em volume nao configurada';
-    }
-    if (fs.existsSync(marcador)) return 'ja houve tentativa de envio para esta autorizacao';
     if (ambiente.TITAN_NONCE_EXCLUSIVO !== '1') {
         return 'sem confirmacao de nonce exclusivo: outro bot pode usar a mesma carteira';
     }
@@ -219,6 +237,12 @@ export async function executarTitan(
         if (custoMaximo > BigInt(ambiente.TITAN_ORCAMENTO_GAS_WEI!)) {
             return { estado: 'recusado', motivo: 'custo maximo excede orcamento por transacao' };
         }
+        if (ambiente.TITAN_AUTORIZACAO_CONTINUA === '1') {
+            // A reserva so ocorre depois do segundo ensaio e de assinar a tx,
+            // mas ja recusamos cedo quando o orcamento de hoje nao suporta.
+            const limite = impedimentoTitanContinuo(ambiente, custoMaximo);
+            if (limite) return { estado: 'recusado', motivo: limite };
+        }
         const politica = calcularPisoTitan(custoMaximo, ambiente);
         const piso = politica.lucroBrutoMinimoWei;
         if (brutoReal < piso) {
@@ -240,11 +264,14 @@ export async function executarTitan(
         if ((await rpc.getTransactionCount(carteira.address, 'pending')) !== nonce) {
             throw new Error('nonce foi usado por outro processo; envio cancelado');
         }
-        // Validade tambem e conferida imediatamente ANTES da assinatura.
-        // Um preflight muito demorado nao amplia a autorizacao.
-        const ateUtc = Date.parse(ambiente.TITAN_OPERAR_ATE_UTC ?? '');
-        if (!Number.isFinite(ateUtc) || Date.now() >= ateUtc) {
-            return { estado: 'recusado', motivo: 'autorizacao expirou durante o preflight' };
+        // No modo temporario o prazo tambem e verificado antes do envio.
+        // No continuo NAO existe expiracao; existe limite de gas DIARIO.
+        const continuo = ambiente.TITAN_AUTORIZACAO_CONTINUA === '1';
+        if (!continuo) {
+            const ateUtc = Date.parse(ambiente.TITAN_OPERAR_ATE_UTC ?? '');
+            if (!Number.isFinite(ateUtc) || Date.now() >= ateUtc) {
+                return { estado: 'recusado', motivo: 'autorizacao expirou durante o preflight' };
+            }
         }
         // Assina UMA transacao concreta e grava seu hash DETERMINISTICO
         // ANTES de transmitir. Se o RPC receber e der timeout/403 depois,
@@ -255,25 +282,33 @@ export async function executarTitan(
             value: 0n,
         });
         const hashAssinado = keccak256(assinadaFinal);
-        const marcador = ambiente.TITAN_MARCADOR_ENVIO!;
-        fs.mkdirSync(path.dirname(marcador), { recursive: true });
-        const fd = fs.openSync(marcador, 'wx', 0o600);
-        try {
-            fs.writeFileSync(fd, JSON.stringify({ estado: 'pronta_para_envio',
-                hash: hashAssinado, autorizacaoAte: ambiente.TITAN_OPERAR_ATE_UTC,
-                carteira: carteira.address, nonce,
-                tetoGasWei: ambiente.TITAN_ORCAMENTO_GAS_WEI,
-                criadoEm: new Date().toISOString() }));
-            fs.fsyncSync(fd);
-        } finally { fs.closeSync(fd); }
+        if (continuo) {
+            // Uma reserva do diario somente por hash, em volume persistente.
+            // Falha/crash antes do recibo bloqueia TODOS os envios seguintes.
+            reservarTitanContinuo(ambiente, hashAssinado, custoMaximo);
+        } else {
+            const marcador = ambiente.TITAN_MARCADOR_ENVIO!;
+            fs.mkdirSync(path.dirname(marcador), { recursive: true });
+            const fd = fs.openSync(marcador, 'wx', 0o600);
+            try {
+                fs.writeFileSync(fd, JSON.stringify({ estado: 'pronta_para_envio',
+                    hash: hashAssinado, autorizacaoAte: ambiente.TITAN_OPERAR_ATE_UTC,
+                    carteira: carteira.address, nonce,
+                    tetoGasWei: ambiente.TITAN_ORCAMENTO_GAS_WEI,
+                    criadoEm: new Date().toISOString() }));
+                fs.fsyncSync(fd);
+            } finally { fs.closeSync(fd); }
+        }
         hash = hashAssinado;
         const tx = await rpc.broadcastTransaction(assinadaFinal);
         if (tx.hash.toLowerCase() !== hash.toLowerCase()) {
             throw new Error('RPC devolveu hash diferente da transacao assinada');
         }
-        fs.writeFileSync(marcador, JSON.stringify({
-            estado: 'enviado', hash, nonce, enviadoEm: new Date().toISOString(),
-        }), { mode: 0o600 });
+        if (!continuo) {
+            fs.writeFileSync(ambiente.TITAN_MARCADOR_ENVIO!, JSON.stringify({
+                estado: 'enviado', hash, nonce, enviadoEm: new Date().toISOString(),
+            }), { mode: 0o600 });
+        }
         const recibo = await tx.wait(1, 60000);
         if (!recibo) return { estado: 'enviado', hash, motivo: 'transacao enviada; recibo nao chegou' };
         const evento = recibo.logs.filter((x) => getAddress(x.address) === contrato)
@@ -281,12 +316,18 @@ export async function executarTitan(
             .find((x) => x?.name === 'Cacou');
         const lucroRealizado = recibo.status === 1 && evento
             ? (evento.args[2] as bigint).toString() : undefined;
-        fs.writeFileSync(ambiente.TITAN_MARCADOR_ENVIO!, JSON.stringify({
-            estado: recibo.status === 1 ? 'confirmado' : 'revertido', hash,
-            gasUsado: recibo.gasUsed.toString(),
-            lucroRealizadoWei: lucroRealizado ?? null,
-            confirmadoEm: new Date().toISOString(),
-        }), { mode: 0o600 });
+        if (continuo) {
+            fecharTitanContinuo(ambiente, hash, recibo.status === 1
+                ? 'confirmado' : 'revertido', recibo.gasUsed * recibo.gasPrice,
+            lucroRealizado === undefined ? undefined : BigInt(lucroRealizado));
+        } else {
+            fs.writeFileSync(ambiente.TITAN_MARCADOR_ENVIO!, JSON.stringify({
+                estado: recibo.status === 1 ? 'confirmado' : 'revertido', hash,
+                gasUsado: recibo.gasUsed.toString(),
+                lucroRealizadoWei: lucroRealizado ?? null,
+                confirmadoEm: new Date().toISOString(),
+            }), { mode: 0o600 });
+        }
         return {
             estado: recibo.status === 1 ? 'confirmado' : 'revertido', hash,
             gasUsado: recibo.gasUsed.toString(),
