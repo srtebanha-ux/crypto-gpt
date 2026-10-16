@@ -8,6 +8,8 @@ import path from 'node:path';
 import { ContractFactory, Interface, JsonRpcProvider, Wallet, getAddress } from 'ethers';
 import { ORACULO_DE_GAS_L1 } from './custoDaBase';
 import { MORPHO_FLASH_BASE, ABI_MULTI } from './titanPonteMultiHop';
+import { COFRE_ESPERADO } from './caca';
+import { REDES } from './liquidacoes';
 const oracle = new Interface(['function getL1Fee(bytes) view returns(uint256)']);
 const artefato = '.tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json';
 const MAX_DEPLOY_WEI=1_000_000_000_000_000n;
@@ -30,7 +32,10 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
     const cofre=getAddress(env.TITAN_COFRE);
     const aave=getAddress(env.TITAN_MULTI_AAVE);
     const fabrica=getAddress(env.TITAN_MULTI_FACTORY);
-    if (cofre===carteira.address) throw new Error('cofre deve ser independente do dono');
+    if (cofre===carteira.address || cofre!==getAddress(COFRE_ESPERADO))
+        throw new Error('cofre nao corresponde ao destino imutavel conhecido');
+    if (aave!==getAddress(REDES.base.pool))
+        throw new Error('pool Aave diverge do pool Base do cacador');
     const artifact=JSON.parse(fs.readFileSync(artefato,'utf8')) as {abi:ConstructorParameters<typeof ContractFactory>[0];bytecode:string};
     if (!artifact.bytecode.startsWith('0x') || artifact.bytecode.length<200)
         throw new Error('artefato multi-hop sem bytecode');
