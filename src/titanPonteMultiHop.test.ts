@@ -79,6 +79,6 @@ test('Multi-Hop usa oraculo de L1 do CACA e margem de segurança',async()=>{
     } as unknown as JsonRpcProvider;
     assert.equal(await tetoL1PeloCaca(rpc),2000n);
     assert.equal(chamado,true);
-    await assert.rejects(()=>tetoL1PeloCaca({call:async()=> '0x'+ '0'.repeat(64)}
-        as unknown as JsonRpcProvider),/nao retornou custo valido/);
+    const zero = {call:async()=> '0x'+ '0'.repeat(64)} as unknown as JsonRpcProvider;
+    await assert.rejects(()=>tetoL1PeloCaca(zero),/nao retornou custo valido/);
 });
