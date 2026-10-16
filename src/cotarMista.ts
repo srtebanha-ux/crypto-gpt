@@ -331,12 +331,35 @@ export const COTADOR_LOCAL = '0x00000000000000000000000000000000c0ad0012';
 
 /** O que o `cotar` devolveu, lido do DADO da reversao — nunca da prosa. */
 export interface RespostaDaCotacao {
-    /** Quanto o ciclo produziu, na moeda da base. */
-    produziu: bigint;
-    /** Quanto era devido para fechar o ciclo. */
-    devido: bigint;
-    /** `produziu - devido`. Negativo e resposta: o ciclo nao fecha. */
+    /**
+     * QUAL dos dois seletores respondeu — e os dois medem coisas diferentes.
+     *
+     * `'nao fechou'` e o `PagamentoCurto`: o ciclo parou no meio do caminho.
+     * `'fechou'` e o `LucroInsuficiente`: todas as pernas foram pagas.
+     */
+    desfecho: 'fechou' | 'nao fechou';
+    /**
+     * O que o ciclo tinha EM MAOS quando a conta reprovou — so em
+     * `'nao fechou'`.
+     *
+     * `null` em `'fechou'`: ali o cotador NAO informa quanto entrou de volta,
+     * so a sobra. Chamar a sobra de "total recebido" foi o rotulo falso que o
+     * auditor achou, e inventar o total seria pior.
+     */
+    emMaos: bigint | null;
+    /** O que faltava PAGAR. `null` em `'fechou'`: o pagamento ja aconteceu. */
+    devido: bigint | null;
+    /**
+     * A SOBRA, na moeda da base — e e o unico numero comparavel entre os dois
+     * desfechos.
+     *
+     * Em `'nao fechou'` e `emMaos - devido`, negativo por definicao. Em
+     * `'fechou'` e o lucro que o contrato mediu contra a foto do saldo antes do
+     * ciclo (`CacadorV3.sol:295`, `lucro = _desteCiclo(tokenBase)`).
+     */
     sobra: bigint;
+    /** O piso exigido, so em `'fechou'`. `cotar` manda `type(uint256).max`. */
+    piso: bigint | null;
 }
 
 /**
@@ -355,10 +378,24 @@ export const SELETOR_PAGAMENTO_CURTO = sel('PagamentoCurto(uint256,uint256)');
 /**
  * Le a reversao do `cotar`.
  *
- * As duas reversoes que trazem numero dizem coisas DIFERENTES:
+ * As duas reversoes que trazem numero dizem coisas DIFERENTES, e a diferenca
+ * esta no contrato, nao na minha leitura:
  *
- *   PagamentoCurto(tem, devido)      o ciclo nao fechou: sobra = tem - devido
- *   LucroInsuficiente(obtido, piso)  o ciclo FECHOU e sobrou `obtido`
+ *   PagamentoCurto(tem, devido)      `CacadorV3.sol:334,457,477`. O ciclo NAO
+ *                                    fechou: `tem` e o que esta em maos,
+ *                                    `devido` e o que a perna cobrava. A sobra
+ *                                    e `tem - devido`, e e negativa.
+ *
+ *   LucroInsuficiente(lucro, piso)   `CacadorV3.sol:295`, logo depois de
+ *                                    `lucro = _desteCiclo(tokenBase)`: todas as
+ *                                    pernas JA foram pagas e `lucro` e o que
+ *                                    SOBROU acima da foto do saldo anterior.
+ *
+ * O QUE ISTO NAO E, e foi o rotulo falso que o auditor achou: em
+ * `LucroInsuficiente` o primeiro numero NAO e "o total que a operacao
+ * produziu". O total recebido e o total pago nao estao na reversao, entao
+ * `emMaos` e `devido` saem `null` — e o campo ausente nunca vira zero, porque
+ * zero seria uma afirmacao sobre um numero que o cotador nao deu.
  *
  * Trata-las como a mesma coisa publicaria prejuizo como lucro. Qualquer outra
  * reversao devolve `null`: reversao opaca nao e cotacao, e foi exatamente
@@ -375,11 +412,16 @@ export function lerRespostaDaCotacao(dados: string | null): RespostaDaCotacao | 
         b = BigInt(`0x${dados.slice(74, 138)}`);
     } catch { return null; }
     if (sl === SELETOR_PAGAMENTO_CURTO.toLowerCase()) {
-        return { produziu: a, devido: b, sobra: a - b };
+        return {
+            desfecho: 'nao fechou', emMaos: a, devido: b, sobra: a - b, piso: null,
+        };
     }
     if (sl === SELETOR_LUCRO_INSUFICIENTE.toLowerCase()) {
-        // Aqui o ciclo FECHOU: `a` e o que sobrou depois de pagar.
-        return { produziu: a, devido: 0n, sobra: a };
+        // Aqui o ciclo FECHOU: `a` e o que sobrou DEPOIS de pagar, e o total
+        // recebido nao esta na reversao. `null` e a resposta honesta para ele.
+        return {
+            desfecho: 'fechou', emMaos: null, devido: null, sobra: a, piso: b,
+        };
     }
     return null;
 }

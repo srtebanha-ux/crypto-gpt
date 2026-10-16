@@ -28,6 +28,28 @@ test('o total soma L2, L1 e a taxa do empréstimo', () => {
     assert.match(c.comoLer, /gasUsado de recibo/);
 });
 
+test('componente NEGATIVO não encolhe o custo: vira DESCONHECIDO', () => {
+    // O portão olhava só `=== null`. Com `baseFeeWei` negativo a multiplicação
+    // ENCOLHIA o total, e subestimar custo é o lado perigoso de errar — era uma
+    // subtração de gorjeta (hoje removida do caçador) que podia produzir esse
+    // negativo. O auditor apontou que o portão continuava ausente.
+    const base = somarCusto(cheio());
+    assert.ok(base.totalWei !== null && base.totalWei > 0n, 'a bancada tem de somar');
+    for (const campo of ['gasUsado', 'baseFeeWei', 'gorjetaWei', 'custoL1Wei',
+        'taxaDoEmprestimoWei'] as const) {
+        const c = somarCusto({ ...cheio(), [campo]: -1n });
+        assert.equal(c.totalWei, null, `${campo} negativo produziu total`);
+        assert.match(c.faltam.join(' '), /NEGATIVO/, `${campo} negativo passou calado`);
+        // E nada pode ser classificado como lucrativo por um custo encolhido.
+        assert.equal(julgar(10n ** 18n, c).veredicto, 'custoDesconhecido');
+        assert.equal(pisoDeLucro(c), null);
+    }
+    // ZERO continua sendo RESPOSTA, não ausência: a taxa do flash swap V2 é
+    // zero de verdade, e tratá-la como negativa seria barrar o caso normal.
+    const comZero = somarCusto({ ...cheio(), taxaDoEmprestimoWei: 0n });
+    assert.ok(comZero.totalWei !== null, 'zero é resposta, não falta');
+});
+
 test('UM componente desconhecido torna o total DESCONHECIDO, nunca zero', () => {
     // A regra dela: *"Se algum componente não for conhecido, não classifique a
     // oportunidade como lucrativa."* Somar zero por um componente ausente é a

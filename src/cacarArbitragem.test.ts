@@ -444,6 +444,12 @@ const bancadaDaEscada = async (over: {
     seletor?: 'lucro' | 'curto';
     sobraDe?: (q: bigint) => bigint;
     produzidoDe?: (q: bigint) => bigint;
+    /** O `devido` do `PagamentoCurto`, para separa-lo da ENTRADA. */
+    devidoDe?: (q: bigint) => bigint;
+    /** Deste lote em diante a chamada NAO reverte: degrau ilegivel. */
+    opacoDoLote?: number;
+    /** Pool A vira Aerodrome STABLE: sem monotonicidade, a escada sobe. */
+    aerodromeEstavel?: boolean;
     l1?: string;
     tamanhos?: string;
 } = {}) => {
@@ -454,16 +460,26 @@ const bancadaDaEscada = async (over: {
     const TOK = '0xfb31f85a8367210b2e4ed2360d2da9dc2d2ccc95';
     const A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     const B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const LIQ = 10n ** 22n;
+    // Pool A como Aerodrome STABLE serve um caso que o V3<->V3 não alcança:
+    // `x³y + y³x = k` não tem monotonicidade demonstrada, então a escada SOBE
+    // mesmo com sobra negativa — e é só assim que o melhor degrau pode ter
+    // sobra <= 0 ao lado de um degrau ilegível.
+    const poolA = over.aerodromeEstavel === true
+        ? {
+            endereco: A, token0: WETH, token1: TOK, venue: 'aerodrome' as const,
+            taxa: null, estavel: true,
+        }
+        : { endereco: A, token0: WETH, token1: TOK, venue: 'v3' as const, taxa: 500 };
     const rotas = candidatasMistas([
-        { endereco: A, token0: WETH, token1: TOK, venue: 'v3', taxa: 500 },
+        poolA,
         { endereco: B, token0: WETH, token1: TOK, venue: 'v3', taxa: 3000 },
     ], WETH).slice(0, 1);
-    const LIQ = 10n ** 22n;
     const estado = {
         sqrtPorPoolV3: new Map([[A, 2n ** 96n], [B, 2n ** 96n]]),
         liquidezDoV3: new Map([[A, 1n], [B, 1n]]),
-        token0PorPool: new Map<string, string>(),
-        reservasAerodrome: new Map(),
+        token0PorPool: new Map<string, string>([[A, WETH], [B, WETH]]),
+        reservasAerodrome: new Map([[A, { r0: LIQ, r1: LIQ }]]),
         saldoDaBaseNoV3: new Map([[A, LIQ], [B, LIQ]]),
         bloco: 1,
     };
@@ -473,13 +489,22 @@ const bancadaDaEscada = async (over: {
         pedidos: Array<{ metodo: string; params: unknown[] }>,
     ): Promise<Array<{ ok: boolean; dados: string | null }>> => {
         lotes += 1;
+        if (over.opacoDoLote !== undefined && lotes >= over.opacoDoLote) {
+            // Chamada que NAO reverte: o padrão Quoter exige reversão, então
+            // isto é degrau ilegível, não cotação zero.
+            return pedidos.map(() => ({ ok: true, dados: '0x' }));
+        }
         return pedidos.map((p) => {
             const dados = String((p.params[0] as { data: string }).data);
             const q = BigInt(`0x${dados.slice(74, 138)}`);
             const sobra = (over.sobraDe ?? ((x: bigint) => x / 1000n))(q);
             if (over.seletor === 'curto') {
-                const prod = (over.produzidoDe ?? ((x: bigint) => x + sobra))(q);
-                return { ok: false, dados: m.SELETOR_PAGAMENTO_CURTO + palavra(prod) + palavra(q) };
+                const devido = (over.devidoDe ?? ((x: bigint) => x))(q);
+                const prod = (over.produzidoDe ?? (() => devido + sobra))(q);
+                return {
+                    ok: false,
+                    dados: m.SELETOR_PAGAMENTO_CURTO + palavra(prod) + palavra(devido),
+                };
             }
             const prod = (over.produzidoDe ?? (() => sobra))(q);
             return { ok: false, dados: m.SELETOR_LUCRO_INSUFICIENTE + palavra(prod) + palavra(0n) };
@@ -517,17 +542,82 @@ test('SEM CUSTO conhecido não existe LÍQUIDO — e a frase não finge que exis
         'nenhum número de líquido pode aparecer quando o custo é desconhecido');
 });
 
-test('"produziu" é o que o cotador DISSE, não aritmética reconstruída', async () => {
-    // `LucroInsuficiente(0, 0)` quer dizer produção ZERO. A versão anterior
-    // imprimia `sobra + quantia`, que para sobra 0 dava a própria quantia — e
-    // afirmava produção igual à entrada quando o cotador reportou zero.
+test('LucroInsuficiente é SOBRA depois de pagar — a frase não afirma total produzido', async () => {
+    // O DEFEITO QUE ESTE TESTE SUBSTITUI, e ele era meu: a versão anterior
+    // afirmava no comentário que "`LucroInsuficiente(0, 0)` quer dizer produção
+    // ZERO" e exigia a frase "o ciclo produziu 0 contra N que entraram". Isso
+    // CONSAGRAVA a leitura errada — o auditor independente apontou. No
+    // `LucroInsuficiente` (`CacadorV3.sol:295`) o ciclo FECHOU: todas as pernas
+    // foram pagas e o primeiro número é o que SOBROU, não o total recebido. O
+    // total recebido e o total pago NÃO estão na reversão.
     const { sinais } = await bancadaDaEscada({
         sobraDe: () => 0n,
         produzidoDe: () => 0n,
     });
     const sn = sinais[0]!;
-    assert.match(sn.motivo, /o ciclo produziu 0 contra/,
-        `a mensagem tem de usar o valor do cotador; saiu: ${sn.motivo.slice(0, 120)}`);
+    assert.match(sn.motivo, /o ciclo FECHOU e sobrou 0 na moeda da base/,
+        `a frase tem de seguir o seletor; saiu: ${sn.motivo.slice(0, 160)}`);
+    assert.doesNotMatch(sn.motivo, /produziu/,
+        'neste seletor não existe "produziu": afirmar total produzido é o rótulo falso');
+    assert.match(sn.motivo, /não informa o total recebido/,
+        'o que o cotador não deu tem de ser declarado como não dado, nunca como zero');
+});
+
+test('PagamentoCurto tem entrada, em mãos, devido e sobra DISTINTOS — e todos vêm do cotador', async () => {
+    // Quatro números diferentes de propósito, para que nenhum possa ser
+    // confundido com outro por coincidência aritmética:
+    //
+    //   entrada     a quantia do degrau, que o encode carrega        q
+    //   em mãos     o 1º número da reversão                   devido + sobra
+    //   devido      o 2º número da reversão                        q / 2
+    //   sobra       em mãos − devido                             −(q / 4)
+    //
+    // A versão anterior do teste usava `devido = entrada`, e aí "o ciclo não
+    // fechou contra N que entraram" ficava verdadeiro por acidente.
+    const { sinais } = await bancadaDaEscada({
+        seletor: 'curto',
+        devidoDe: (q) => q / 2n,
+        sobraDe: (q) => -(q / 4n),
+        tamanhos: '1',
+    });
+    const sn = sinais[0]!;
+    // O degrau vem da função de verdade, não de um literal: `escadaDeTamanhos`
+    // decide a escada e um número meu aqui empataria com a próxima remedição.
+    const { escadaDeTamanhos } = await import('./cotarMista');
+    const q = escadaDeTamanhos(10n ** 22n)[0]!;
+    assert.equal(sn.melhorTamanho, q, 'com um degrau só, o avaliado é o menor');
+    const devido = q / 2n;
+    const emMaos = devido - q / 4n;
+    assert.equal(sn.lucroBrutoEstimado, -(q / 4n), 'a sobra é a do cotador, não reconstruída');
+    assert.match(sn.motivo, new RegExp(`tinha ${emMaos} em mãos contra ${devido} devidos`),
+        `em mãos e devido vêm da reversão; saiu: ${sn.motivo.slice(0, 160)}`);
+    assert.match(sn.motivo, new RegExp(`entraram ${q}`), 'a entrada é a quantia do degrau');
+    assert.notEqual(emMaos, q, 'o teste perde o valor se em mãos empatar com a entrada');
+    assert.notEqual(devido, q, 'o teste perde o valor se devido empatar com a entrada');
+});
+
+test('a nota de degrau ILEGÍVEL aparece também quando a sobra é ≤ 0', async () => {
+    // DEFEITO PRÉ-EXISTENTE, achado pelo auditor na expressão que eu reescrevi
+    // em volta: `+` liga mais forte que `?:`, então
+    // `cond ? a : b + (opaca ? ... )` grudava a nota no ramo `b` e ela NUNCA
+    // saía com sobra ≤ 0 — exatamente o caso em que saber que um degrau ficou
+    // ilegível muda a leitura ("não fecha" contra "não fecha no que eu consegui
+    // ler"). Aerodrome stable para a escada subir; o 2º lote não reverte.
+    const { sinais, lotes } = await bancadaDaEscada({
+        aerodromeEstavel: true,
+        seletor: 'curto',
+        sobraDe: (q) => -(q / 1000n),
+        opacoDoLote: 2,
+        tamanhos: '3',
+    });
+    const sn = sinais[0]!;
+    assert.equal(lotes(), 2, 'sem monotonicidade demonstrada a escada tem de subir');
+    assert.ok(sn.lucroBrutoEstimado !== null && sn.lucroBrutoEstimado <= 0n,
+        'a bancada tem de cair no ramo de sobra ≤ 0, senão o teste não prova nada');
+    assert.match(sn.motivo, /degrau ficou ilegível/,
+        `a nota tem de aparecer no ramo de sobra ≤ 0; saiu: ${sn.motivo.slice(0, 200)}`);
+    assert.match(sn.motivo, /Isto vale para os tamanhos avaliados/,
+        'sem monotonicidade demonstrada a frase não pode afirmar que nenhum tamanho maior fecha');
 });
 
 test('ARB_TAMANHOS torto cai no padrão e DIZ — nunca zera a busca', async () => {

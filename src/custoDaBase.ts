@@ -92,6 +92,22 @@ export function somarCusto(c: ComponentesDoCusto): CustoTotal {
     if (c.gorjetaWei === null) faltam.push('gorjeta');
     if (c.custoL1Wei === null) faltam.push('custo de dados L1');
     if (c.taxaDoEmprestimoWei === null) faltam.push('taxa do empréstimo');
+    // COMPONENTE NEGATIVO NAO ENCOLHE O CUSTO.
+    //
+    // O portao olhava so `=== null`. Um `baseFeeWei` negativo passava e a
+    // multiplicacao ENCOLHIA o total — subestimar custo e o lado perigoso de
+    // errar, e foi uma subtracao de gorjeta (hoje removida) que podia produzir
+    // esse negativo. Nenhum destes numeros tem significado negativo: gas
+    // consumido, preco por gas, taxa. Negativo e defeito de quem chamou, nao
+    // medicao, e vira DESCONHECIDO em vez de desconto.
+    const negativos = ([
+        ['gasUsado', c.gasUsado],
+        ['baseFee L2', c.baseFeeWei],
+        ['gorjeta', c.gorjetaWei],
+        ['custo de dados L1', c.custoL1Wei],
+        ['taxa do empréstimo', c.taxaDoEmprestimoWei],
+    ] as Array<[string, bigint | null]>).filter(([, v]) => v !== null && v < 0n);
+    for (const [nome] of negativos) faltam.push(`${nome} NEGATIVO (não é custo)`);
     if (faltam.length > 0) {
         return {
             totalWei: null,

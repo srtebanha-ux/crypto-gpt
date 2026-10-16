@@ -175,14 +175,28 @@ test('PagamentoCurto e LucroInsuficiente dizem coisas OPOSTAS', () => {
         + b.toString(16).padStart(64, '0');
     // O caso REAL medido na rede: 0,01 WETH num ciclo V3 500 -> 3000.
     const curto = lerRespostaDaCotacao(SELETOR_PAGAMENTO_CURTO + p(9939992138238505n, 10n ** 16n));
-    assert.equal(curto!.produziu, 9939992138238505n);
+    assert.equal(curto!.desfecho, 'nao fechou');
+    assert.equal(curto!.emMaos, 9939992138238505n, 'o 1º número é o que estava EM MÃOS');
+    assert.equal(curto!.devido, 10n ** 16n, 'o 2º é o que a perna COBRAVA');
+    assert.equal(curto!.piso, null, 'não há piso neste seletor');
     assert.equal(curto!.sobra, -60007861761495n,
         'o ciclo NÃO fechou: a sobra é negativa, e publicá-la como lucro seria publicar prejuízo '
         + 'como ganho');
-    // LucroInsuficiente quer dizer que o ciclo FECHOU e sobrou.
+    // LUCROINSUFICIENTE: o ciclo FECHOU e o 1º número é a SOBRA DEPOIS de pagar.
+    //
+    // Quatro valores DISTINTOS de propósito, para que nenhum seja confundido
+    // com outro por coincidência: sobra 500, piso 1.000. O total recebido e o
+    // total pago NÃO estão na reversão — e `null` é a resposta, nunca zero.
+    // Chamar a sobra de "total produzido" foi o rótulo falso que o auditor
+    // achou, e o teste que o consagrava era meu.
     const lucro = lerRespostaDaCotacao(SELETOR_LUCRO_INSUFICIENTE + p(500n, 1_000n));
-    assert.equal(lucro!.sobra, 500n);
-    assert.equal(lucro!.devido, 0n, 'aqui o pagamento já aconteceu: não há devido');
+    assert.equal(lucro!.desfecho, 'fechou');
+    assert.equal(lucro!.sobra, 500n, 'é a SOBRA, não o total recebido');
+    assert.equal(lucro!.piso, 1_000n, 'o 2º número é o piso exigido');
+    assert.equal(lucro!.emMaos, null,
+        'o total recebido não está na reversão: `null`, e zero seria afirmação inventada');
+    assert.equal(lucro!.devido, null, 'aqui o pagamento já aconteceu: não há devido a afirmar');
+    assert.notEqual(lucro!.sobra, lucro!.piso, 'os dois números do seletor são distintos');
     // Reversão opaca NÃO é cotação.
     assert.equal(lerRespostaDaCotacao('0xdeadbeef' + p(1n, 2n)), null);
     assert.equal(lerRespostaDaCotacao(null), null);
