@@ -106,6 +106,63 @@ A escada escolhe o melhor LÍQUIDO (o gás é quase constante no tamanho), e o
    reverteu com seletor que não é `LucroInsuficiente` nem `PagamentoCurto`) e 9
    `SEM SPREAD`. Cotação que não devolve número não decide nada.
 
+## CONCORRENTE 0x7b579d9d… — o que É verificável na corrente (2026-10-16)
+
+    bytecode                 13.091 bytes (o nosso: 6.794)
+    MIN_PROFIT               ENCONTRADA no bytecode
+    POOL_FLASH_FAILED        ENCONTRADA
+    NO_CALLBACK_ADAPTER      ENCONTRADA
+    TAIL_NOT_AFTER_LOOP      ENCONTRADA
+    seletores de callback conhecidos, como substring:  NENHUM
+
+As quatro strings que a fonte dela cita existem de fato. A ausência dos
+seletores de callback como substring é **indício, não prova**: ela é compatível
+com despacho dinâmico — e `NO_CALLBACK_ADAPTER` sugere um REGISTRO de
+adaptadores em vez de nomes fixos, que é a diferença arquitetural observável.
+
+**NÃO verificado por mim:** volume de US$ 9,9M, 17.122 transações, 137 EOAs e
+95,6% de reversões vêm da fonte dela, não da minha medição. **Lucro líquido do
+concorrente: DESCONHECIDO.** Volume não é lucro, e não reconciliei nenhuma
+operação dele.
+
+## QUAL CALLBACK CADA FÁBRICA EXIGE — medido pela própria corrente
+
+Método: uma SONDA de 12 bytes (`6004600060003760206000fd`) injetada por override
+de estado no `recipient` do `swap`. Ela copia os 4 primeiros bytes do calldata
+que recebe e REVERTE com eles — então o pool diz o nome do callback, em vez de
+eu adivinhar.
+
+    0x5e7bb104 / 0xf8f2eb49 / 0x33128a8f / 0x0fd83557 / 0xaa5865dc / 0xc35dadb6
+       51 pools  ->  uniswapV3SwapCallback (0xfa461e33)   TITAN JÁ COBRIA
+    0x6e606cf9   1 pool   ->  algebraSwapCallback (0x2c8958f6)   FALTAVA
+    0x70fe4a44   1 pool   ->  0x3a1c453c (nome NÃO determinado)  continua fora
+
+**PancakeSwap V3 (`pancakeV3SwapCallback`) NÃO apareceu nesta janela.** A
+ressalva dela era prudente, mas não é o bloqueio atual: 51 de 53 pools com par
+WETH usam o callback que já tínhamos.
+
+## A MELHORIA DESTA RODADA — só o callback comprovadamente ausente
+
+`algebraSwapCallback` adicionada ao `CacadorV3` como APELIDO do mesmo corpo
+(`_pernaConcentrada`), com os mesmos portões. Não é lógica nova: o Algebra
+herdou a interface do V3 e trocou o nome. Contrato em 6.794 bytes.
+
+Nada foi adicionado para `0x3a1c453c`: o nome não foi determinado, e declarar
+um callback por adivinhação abriria uma porta cujo chamador não sei
+identificar. Limitação medida: 1 pool de 53.
+
+**O QUE NÃO ESTÁ PROVADO, e é meu:** não consegui produzir um A/B ao vivo
+mostrando a rota do pool Algebra passando a cotar. A minha tentativa de A/B foi
+inválida — os três casos (inclusive o callback que JÁ existia) voltaram sem
+dado, então o harness não discrimina nada e não serve de prova. O que está
+medido é: a incompatibilidade existe (o pool chama um seletor que não existia no
+nosso bytecode, e o contrato não tem `fallback`), o apelido agora está presente
+no bytecode, e a rota V3↔V3 provada continua executando (status=1).
+
+E a matemática local com ticks em memória NÃO foi implementada: a auditoria
+achou primeiro a incompatibilidade de callback, e a ordem dela é corrigir só
+essa.
+
 ## Problema atual
 
 **VANTAGEM ECONÔMICA NÃO COMPROVADA.** O único ciclo fechado histórico é 84x
@@ -114,11 +171,12 @@ pelos dois limites acima. Lucro capturado na rede: ZERO.
 
 ## Próxima ação objetiva
 
-UMA, e é de legibilidade, não de estratégia: diagnosticar a REVERSÃO OPACA do
-`cotar` nas rotas concentrado↔concentrado ao vivo (ler o seletor devolvido) e
-reduzir o conjunto cotado por estado para caber na janela de consistência. Sem
-isso, nenhuma decisão econômica sobre esta expansão é confiável. **NÃO ampliar
-para 3–4 pernas**: não há evidência que a justifique.
+UMA: um A/B válido do pool Algebra (cotar a mesma rota com e sem o apelido, no
+mesmo estado) para medir quantas rotas o conserto desbloqueia de fato — e, no
+mesmo run, reduzir o conjunto cotado por estado para caber na janela de
+consistência (`ESTADO_INCONSISTENTE` em 5.819 de 5.823 com 380 rotas). **NÃO
+ampliar para 3–4 pernas** e **não implementar matemática local com ticks** sem
+antes medir a latência que ela economizaria no caminho real.
 
 ## Limites conhecidos do ambiente
 

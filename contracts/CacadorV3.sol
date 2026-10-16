@@ -387,6 +387,49 @@ contract CacadorV3 {
         int256 amount1Delta,
         bytes calldata data
     ) external {
+        _pernaConcentrada(amount0Delta, amount1Delta, data);
+    }
+
+    /**
+     * O MESMO callback, com o nome que a fabrica Algebra usa.
+     *
+     * MEDIDO na Base em 2026-10-16, fazendo o PROPRIO pool dizer qual callback
+     * chama (uma sonda de 12 bytes injetada por override de estado, que reverte
+     * com os 4 primeiros bytes do calldata que recebe):
+     *
+     *     fabrica                                     pools  callback
+     *     0x5e7bb104…  0xf8f2eb49…  0x33128a8f…         51    uniswapV3SwapCallback
+     *     0x6e606cf94a4ddc01aeed2fce16d1b4f5b33e0a31     1    algebraSwapCallback
+     *     0x70fe4a44ea505cfa3a57b95cf2862d4fd5f0f687     1    0x3a1c453c (nome nao sabido)
+     *
+     * Sem esta funcao o pool da fabrica Algebra chama um metodo que nao existe
+     * aqui, nao ha `fallback`, e a transacao reverte SEM DADO — e foi assim que
+     * a cotacao ao vivo devolveu "reversao opaca" em vez de numero. Um pool
+     * desses aparece em dezenas de rotas (ele faz par com todos os outros do
+     * mesmo token), entao 1 pool bloqueado bloqueia muitas rotas.
+     *
+     * A assinatura e o corpo sao IDENTICOS ao do V3 — e por isso isto e um
+     * apelido, nao logica nova: o Algebra herdou a interface do Uniswap V3,
+     * trocando so o nome. Os portoes continuam sendo os de `_cumprirPerna`.
+     *
+     * NAO adicionei nada para o `0x3a1c453c`: o nome dele nao foi determinado, e
+     * declarar um callback por adivinhacao abriria uma porta cujo chamador eu
+     * nao sei identificar. Fica como limitacao medida: 1 pool de 53.
+     */
+    function algebraSwapCallback(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata data
+    ) external {
+        _pernaConcentrada(amount0Delta, amount1Delta, data);
+    }
+
+    /** O corpo comum aos callbacks de pool concentrado. */
+    function _pernaConcentrada(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata data
+    ) internal {
         // O positivo dos deltas e o que o pool quer receber; o negativo e o que
         // ele ja mandou.
         uint256 devido = amount0Delta > 0 ? uint256(amount0Delta) : uint256(amount1Delta);
