@@ -12,7 +12,7 @@ async function d(n,f,s,...args){
 const Q=10n**18n;
 const ALVO='0x00000000000000000000000000000000000000F1';
 describe('TITAN: liquidacao Morpho Aave multi-hop LOCAL',function(){
- let u,ex,w,b,m,mo,av,fa,v1,v2;
+ let u,ex,w,b,m,mo,av,fa,v1,v2,aero;
  async function setup(){
   u=await rpc.getSigner(0);
   b=await d('TitanTokenTeste','TitanCreditoTeste',u,'USDC');
@@ -23,12 +23,16 @@ describe('TITAN: liquidacao Morpho Aave multi-hop LOCAL',function(){
   fa=await d('TitanV3FactoryTest','TitanAaveTeste',u);
   v1=await d('TitanV3Teste','TitanCreditoTeste',u,w.target,m.target,11,10);
   v2=await d('TitanV3Teste','TitanCreditoTeste',u,m.target,b.target,11,10);
+  aero=await d('TitanAeroMultiTeste','TitanAeroMultiTeste',u,m.target,b.target,11,10);
   ex=await d('CacadorAaveMultiHopMorpho','CacadorAaveMultiHopMorpho',u,
     u.address,av.target,mo.target,fa.target);
   await (await b.mint(mo.target,1000n*Q)).wait();
   await (await w.mint(av.target,1000n*Q)).wait();
   await (await m.mint(v1.target,1000n*Q)).wait();
   await (await b.mint(v2.target,1000n*Q)).wait();
+  await (await m.mint(aero.target,1000n*Q)).wait();
+  await (await b.mint(aero.target,1000n*Q)).wait();
+  await (await aero.iniciar(1000n*Q,1000n*Q)).wait();
   await (await fa.registrar(w.target,m.target,500,v1.target)).wait();
   await (await fa.registrar(m.target,b.target,500,v2.target)).wait();
  }
@@ -44,6 +48,18 @@ describe('TITAN: liquidacao Morpho Aave multi-hop LOCAL',function(){
   assert.equal(await b.balanceOf(ex.target),7n);
   assert.equal(await b.balanceOf(u.address),esperado);
   console.log('multi_hop_gas='+recibo.gasUsed.toString());
+ });
+ it('liquida com V3 + Aerodrome autorizado e devolve Morpho',async()=>{
+  await setup();
+  const rota=[[v1.target,w.target,0,500],[aero.target,m.target,1,0]];
+  const p=params();p[5]=rota;
+  await assert.rejects(()=>ex.liquidar.staticCall(...p));
+  await (await ex.autorizarPoolAero(aero.target,true)).wait();
+  const lucro=await ex.liquidar.staticCall(...p);
+  assert.ok(lucro>0n);
+  await (await ex.liquidar(...p)).wait();
+  assert.equal(await b.balanceOf(mo.target),1000n*Q);
+  assert.equal(await b.balanceOf(u.address),lucro);
  });
  it('nao liquida HF saudavel e nao permite pool V3 nao registrada',async()=>{
   await setup();
