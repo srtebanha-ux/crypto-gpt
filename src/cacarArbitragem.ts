@@ -1834,13 +1834,17 @@ async function principal(): Promise<void> {
     });
     const { chamar, chamarEmLote } = TRANSPORTE;
 
-    log.info('[ARB] Caçador de arbitragem contínuo. ENVIO INEXISTENTE neste caminho.', {
+    log.info('[ARB] TITAN — observador com executor CacadorV3 opcional.', {
         rpc: new URL(rpc).host,
         fabricas: FABRICAS_COM_FLASH_SWAP.length,
         tetoPorFabrica,
         ciclos: tetoDeCiclos > 0 ? tetoDeCiclos : 'sem limite',
-        oQueIssoNaoFaz: 'não existe envio de transação neste arquivo: a ENTREGA 2 é observação '
-            + 'contínua, e um caminho de envio que ninguém pediu seria risco sem autorização',
+        envioReal: process.env.TITAN_ENVIAR === '1'
+            ? 'SOLICITADO — ainda depende de contrato implantado, nonce exclusivo, cofre, '
+                + 'chave, duplo consentimento, simulação e lucro líquido'
+            : 'DESLIGADO — nenhum ETH é enviado; monitoramento e cotações reais',
+        custoRpc: `maximo ${process.env.ARB_HTTP_RPS ?? 'sem limite'} HTTP/s, `
+            + `${process.env.ARB_HTTP_POR_HORA ?? 'sem limite'} HTTP/h`,
     });
 
     // O AVISO DE BLOCO: reusa o ouvinte que já existe, com a mesma política de
@@ -2655,7 +2659,8 @@ async function principal(): Promise<void> {
         placar: comoLerOPlacar(),
         latencia: resumoCurto(livro),
         oQueIssoProva: 'blocos acompanhados, pools relidos, rotas avaliadas e decisões tomadas '
-            + 'com motivo. NÃO prova lucro: nenhuma operação foi enviada',
+            + `com motivo. Tentativas de execução nesta sessão: ${tentativasTitan}. `
+            + 'Lucro realizado depende de recibo e aumento confirmado no cofre.',
     });
     ouvinte?.fechar();
 }
