@@ -6146,7 +6146,7 @@ async function principal(): Promise<'parar' | void> {
                 // Fase 1: medir todos (eth_call custa CU, nao gas).
                 // O terceiro candidato nao altera o cadastro dos contratos antigos.
                 // So participa da escolha quando tem quote atomica comprovada.
-                const medicoes: Array<{
+                let medicoes: Array<{
                     contrato: typeof contratos[number] | {nome:string;endereco:string;tipo:'MH'};
                     lucroCru: bigint;
                     envioMulti?: string;
@@ -7051,7 +7051,7 @@ async function principal(): Promise<'parar' | void> {
                             });
                             continue;
                         }
-                        if (process.env.CACA_MULTIHOP_CANARY_UM_TIRO !== '0') {
+                        if (!COMBINADO_SEGURO && process.env.CACA_MULTIHOP_CANARY_UM_TIRO !== '0') {
                             const reserva = reservarUmEnvioMulti({
                                 carteira:donoCarteira, devedor:alvo.devedor,
                                 contrato:contrato.endereco,bloco:blocoAtual,
@@ -7205,6 +7205,7 @@ async function principal(): Promise<'parar' | void> {
                         let lucroDoTiro = lucroUsd;
                         void (async () => {
                             let desfecho: ReturnType<typeof lerRecibo>;
+                            let comprovacaoEconomicaAusente=false;
                             try {
                                 const reciboFinal = await tx.wait(1, 120_000);
                                 desfecho = lerRecibo(reciboFinal);
@@ -7228,6 +7229,7 @@ async function principal(): Promise<'parar' | void> {
                                     } else {
                                         lucroDoTiro = null;
                                         if (desfecho === 'acertou') {
+                                            comprovacaoEconomicaAusente=true;
                                             log.error('[MULTIHOP SEM PROVA] Recibo status=1, mas pagamento nao verificado.', {
                                                 hash:tx.hash, acao:'conferir logs e saldo do cofre na Base',
                                             });
@@ -7257,7 +7259,8 @@ async function principal(): Promise<'parar' | void> {
                             }
                             if (reservaCompartilhadaId) {
                                 const reconciliado=conciliarGasCompartilhado(
-                                    reservaCompartilhadaId,desfecho,hashDoTiro
+                                    reservaCompartilhadaId,
+                                    comprovacaoEconomicaAusente ? 'sumiu' : desfecho,hashDoTiro
                                 );
                                 if(!reconciliado)
                                     log.error('[DUAS ROTAS] Recibo nao gravado no diario: BLOQUEIO de novos envios.');
