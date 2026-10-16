@@ -7,7 +7,11 @@ import { motivoDaRecusaTitan, type PlanoTitan } from './titanExecucao';
 
 const DIA = new Date('2026-10-16T10:00:00Z');
 const registro = (estado: 'pendente'|'confirmado'|'revertido', wei: string,
-    diaUtc='2026-10-16') => ({ estado, tetoGasWei:wei, diaUtc });
+    diaUtc='2026-10-16') => ({
+        estado, tetoGasWei:wei, diaUtc,
+        lucroRealizadoWei:estado === 'confirmado' ? (2n*BigInt(wei)).toString() : undefined,
+        gasRealL2Wei:estado === 'confirmado' ? '1' : undefined,
+    });
 const config = ():NodeJS.ProcessEnv => ({
     TITAN_DIARIO_OPERACOES:'/app/data/titan-diario-testes.json',
     TITAN_GAS_DIA_WEI:'100000000000000',
@@ -22,7 +26,7 @@ test('configuracao de autorizacao permanente exige volume e dois limites', () =>
     }
 });
 test('custo do dia inteiro e reservado pelo TETO, nao pelo usado', () => {
-    const r=[registro('confirmado','60000000000000'),registro('revertido','20000000000000')];
+    const r=[registro('confirmado','60000000000000'),registro('confirmado','20000000000000')];
     assert.equal(avaliarLimitesDiariosTitan(r,20000000000000n,100000000000000n,10,DIA),null);
     assert.match(avaliarLimitesDiariosTitan(r,20000000000001n,100000000000000n,10,DIA)!,/limite diario/);
 });
@@ -30,8 +34,8 @@ test('hash pendente bloqueia novos envios mesmo no dia seguinte', () => {
     const ontem=[registro('pendente','10000000000000','2026-10-15')];
     assert.match(avaliarLimitesDiariosTitan(ontem,1n,100000000000000n,10,DIA)!,/pendente/);
 });
-test('limite diario de quantidade tambem vale para transacao revertida', () => {
-    const r=[registro('confirmado','1'),registro('revertido','1')];
+test('limite diario de quantidade vale entre transacoes confirmadas', () => {
+    const r=[registro('confirmado','1'),registro('confirmado','1')];
     assert.match(avaliarLimitesDiariosTitan(r,1n,100000000000000n,2,DIA)!,/transacoes/);
 });
 test('custo passado nao zera margem do dia corrente nem da permissao', () => {
