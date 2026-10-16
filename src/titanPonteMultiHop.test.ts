@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Interface } from 'ethers';
 import { Decimal } from 'decimal.js';
-import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte, lucroConfirmadoPorEventoMulti } from './titanPonteMultiHop';
+import { gerarRotasLiquidacao } from './titanRotasLiquidacao';
+import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte, lucroConfirmadoPorEventoMulti, poolsDoCaca, FABRICA_V3_BASE } from './titanPonteMultiHop';
 const a=(n:number)=>'0x'+n.toString(16).padStart(40,'0');
 const pool={endereco:a(11),token0:a(1),token1:a(2),protocolo:'v3' as const,taxa:500,permitida:true};
 test('ABI do contrato implantavel recebe tuple[] e piso nao zero',()=>{
@@ -46,4 +47,22 @@ test('evento assinado do executor comprova pagamento; contrato, alvo ou valor di
     assert.equal(lucroConfirmadoPorEventoMulti(logs,contrato,a(4),1000n),null);
     assert.equal(lucroConfirmadoPorEventoMulti(logs,contrato,usuario,999n),null);
     assert.equal(lucroConfirmadoPorEventoMulti([],contrato,usuario,1000n),null);
+});
+
+test('CACA reaproveita pools V3 da Base sem segundo JSON no Railway',()=>{
+    assert.match(FABRICA_V3_BASE,/^0x[0-9a-fA-F]{40}$/);
+    const pools=poolsDoCaca();
+    assert.equal(pools.length,3);
+    const weth='0x4200000000000000000000000000000000000006';
+    const usdc='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+    const rotas=gerarRotasLiquidacao(pools,weth,usdc,4,20);
+    assert.deepEqual(rotas.map(x=>x.pernas.length),[1,2]);
+    assert.deepEqual(poolsDoCaca(''),poolsDoCaca());
+});
+test('CACA aceita pool extra sem apagar as rotas ja verificadas',()=>{
+    const extra={endereco:a(27),token0:a(1),token1:a(2),
+        protocolo:'v3',taxa:3000,permitida:true};
+    const pools=poolsDoCaca(JSON.stringify([extra]));
+    assert.equal(pools.length,4);
+    assert.ok(pools.some(x=>x.endereco.toLowerCase()===extra.endereco));
 });
