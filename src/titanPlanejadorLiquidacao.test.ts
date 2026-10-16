@@ -40,7 +40,7 @@ test('blocos divergentes entre quotes nao viram mesmo snapshot',()=>{
     let seq=0;
     const r=planejarLiquidacaoTitan(pools,A,B,1000n,10n,
         (_,q)=>({recebidoDividaWei:q+100n,gasEmDividaWei:5n,
-            premioEmprestimoWei:0n,bloco:123+(seq++%2),completa:true}),10,24);
+            premioEmprestimoWei:0n,bloco:123+(seq++===0?0:1),completa:true}),10,24);
     // Toda chamada de quote final deve conferir o mesmo bloco.
     assert.equal(r,null);
 });
