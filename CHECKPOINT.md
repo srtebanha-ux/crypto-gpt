@@ -39,37 +39,58 @@ concluída. Não é histórico de conversa. Atualize em vez de acrescentar.
   mistas reais usam V3 de outra fábrica (medido em 15 blocos: zero rotas mistas
   com pool V3 canônico).
 
-## O QUE OS VENCEDORES USAM — medido de `.tmp/reconciliado.json` (40 ops) e da corrente
+## OS VENCEDORES, classificados POR TRANSAÇÃO (2026-10-16)
 
-| Pergunta | Resposta medida |
-| --- | --- |
-| A) lucrativas comprovadas (líquido reconciliado > 0) | **7** de 40; 5 delas envolvem Aerodrome+V3 |
-| hashes conferidos na corrente | **7 de 7 têm recibo** (nenhum inventado) |
-| pools distintos das 7 lucrativas | 8 — **7 concentrados + 1 Aerodrome** |
-| fábricas concentradas entre eles | **4**: `0x33128a8f`, `0xade65c38`, `0x5e7bb104`, `0x38015d05` |
-| B/C) rotas que `candidatasMistas` forma com os pools DOS vencedores | **2** (ela só pareia Aerodrome com V3) |
-| C) V3+Aerodrome com 2–4 trocas (forma do executor) | 15 de 40 |
-| D) dependência de estado intrabloco | **LACUNA**: `reconciliado.json` não guarda o estado anterior, e o nó público não é arquivo nessa profundidade. Não respondível com o que está armazenado |
-| E) não reproduzíveis | 33 de 40 ficaram sem líquido reconciliável (`liquidoReconciliado: null`) |
+`.tmp/reconciliado.json`: 7 de 40 operações com líquido reconciliado positivo,
+**7/7 com recibo na corrente**. Sequência real de cada uma (C = pool
+concentrado, A = Aerodrome), e se é CICLO FECHADO de 2 pools no mesmo par:
 
-Universo ao vivo, 40 blocos: 48 pools concentrados com WETH em **6 fábricas**,
-8 Aerodrome. Pares no mesmo token: **47 concentrado↔concentrado** (41 cruzando
-fábrica) contra **13 Aerodrome+concentrado**. A ampliação abriria ~94 rotas.
+| tx | forma | ciclo fechado V3↔V3 | líquido (wei) |
+| --- | --- | --- | --- |
+| `0x0aa98647` | CC (2) | **NÃO** — pools WETH/USDC e USDC/TOKEN, não compartilham o par | 27.025.304.662.802.249 |
+| `0x5b1a4ba5` | ACCC (4) | não (multihop) | 20.456.182.645.360.211 |
+| `0x6966a108` | CA (2) | não (misto, já coberto) | 17.462.535.561.583.631 |
+| `0xa72914e1` | AC (2) | não (misto, já coberto) | 1.907.651.085.753.665 |
+| `0x12226f04` | CC (2) | **SIM** — WETH/USDC em duas fábricas (`0x33128a8f` e `0x38015d05`), fees 100/450 | 235.492.231.595.889 |
+| `0x8d6dd352` | ACC (3) | não (multihop) | 225.701.082.603.133 |
+| `0xd87a644b` | CCCA (4) | não (multihop) | 160.606.596.118.558 |
+
+**CORREÇÃO REGISTRADA:** dizer "os vencedores são predominantemente V3↔V3" era
+errado. Por transação: **1 de 7** é ciclo fechado V3↔V3, 2 de 7 são mistos de 2
+pernas (forma já coberta) e 3 de 7 são multihop de 3–4 pernas (fora do
+executor). A maior "CC" não é ciclo fechado — classificar por sequência de
+topics sem conferir o grafo de tokens foi defeito meu.
+
+Potencial ao vivo, 40 blocos, fee tiers LIDOS: 156 pares concentrados no mesmo
+token (131 cruzando fábrica); **156 direções passam sem taxa** (filtro trivial)
+e **21 sobrevivem às duas taxas** — todas em USDC, todas cruzando fábrica. É
+potencial BRUTO no tamanho infinitesimal, não lucro líquido.
+
+## PROVA DE PONTA A PONTA V3↔V3 — estado REAL, sem deslocamento artificial
+
+`forkTests/oCicloV3ContraV3.js`, fork no bloco ANTERIOR ao da operação
+`0x12226f04` (52631813):
+
+    GERADOR 2 rotas (as duas ordens) | FILTRO 1 passou, 1 descartada com prova
+    COTAÇÃO por override: sobra 108.878.689.617 wei em 0,001289 WETH
+    EXECUÇÃO ATÔMICA: recibo status=1, gás 372.944, COFRE 0 -> 108.878.689.617
+
+O líquido não foi asserido neste teste (só o bruto e o gás); a forma, o crédito
+quitado e o saldo reconciliado estão provados.
 
 ## Problema atual
 
-O gerador de rotas é o gargalo, não o mercado: `candidatasMistas` SÓ pareia um
-pool Aerodrome com um pool V3. Os vencedores usam majoritariamente
-concentrado↔concentrado entre fábricas diferentes — forma que o **executor já
-suporta** (duas pernas `tipo 0`, validada ao wei por override:
-9.939.992.138.238.505) e que o gerador nunca emite.
+Não há lucro capturado na rede. A expansão V3↔V3 está integrada e provada em
+fork; o que falta é evidência de que alguma dessas rotas feche com líquido
+positivo em observação ao vivo.
 
 ## Próxima ação objetiva
 
-UMA: emitir pares concentrado↔concentrado em `candidatasMistas` (mesma função,
-mesmo executor, mesmo filtro — a razão das duas pernas já sai de
-`razaoMaximaV3`). Ampliação limitada: ~94 rotas contra ~26 hoje, com evidência
-dos vencedores. Não exige contrato novo.
+UMA: observação curta com a expansão ligada, medindo quantas das rotas
+concentrado↔concentrado produzem sobra bruta e líquida positivas em estado
+atual. As 3 de 7 operações multihop (3–4 pernas) ficam FORA: o executor aceita
+2–4 pernas, mas o gerador só monta 2 — ampliar para 3 pernas é a decisão
+seguinte, e só com evidência.
 
 ## Limites conhecidos do ambiente
 

@@ -208,8 +208,13 @@ export async function lerEstadoMisto(
     bloco: number,
     etiqueta: 'latest' | 'pending' = 'latest',
 ): Promise<LeiturasDoEstado> {
-    const v3 = [...new Set(candidatas.map((c) => c.poolV3.toLowerCase()))];
-    const aero = [...new Set(candidatas.map((c) => c.poolAerodrome.toLowerCase()))];
+    const pernas = candidatas.flatMap((c) => c.pernas);
+    const v3 = [...new Set(
+        pernas.filter((p) => p.protocolo === 'v3').map((p) => p.pool.toLowerCase()),
+    )];
+    const aero = [...new Set(
+        pernas.filter((p) => p.protocolo === 'aerodrome').map((p) => p.pool.toLowerCase()),
+    )];
     // O SALDO DA BASE no pool V3 entra aqui porque e a capacidade de
     // EMPRESTIMO dele — e na direcao B e o V3 que empresta.
     const pedidos: ChamadaMulti[] = [
@@ -245,10 +250,7 @@ export async function lerEstadoMisto(
     // `token0` dos V3 ja veio da descoberta: as candidatas conhecem o token do
     // meio, e quem diz de que lado ele esta e o pool. Sem ele o filtro inverte
     // o lado da razao, entao `null` manda cotar em vez de recusar.
-    for (const c of candidatas) {
-        const q = c.poolV3.toLowerCase();
-        if (c.token0DoV3 !== null) token0PorPool.set(q, c.token0DoV3.toLowerCase());
-    }
+    for (const p of pernas) token0PorPool.set(p.pool.toLowerCase(), p.token0.toLowerCase());
     const saldoDaBaseNoV3 = new Map<string, bigint | null>();
     for (let i = 0; i < v3.length; i += 1) {
         const resp = r[v3.length + aero.length + i];
@@ -355,22 +357,23 @@ export async function cotarAfetadas(
         // isso por nome: *"Nao reutilize a liquidez de um pool como se fosse a
         // capacidade de emprestimo de outro."* Na direcao B isso dimensionava o
         // emprestimo do V3 pela liquidez de um pool que nao empresta nada ali.
+        const empresta = c.pernas[0];
         let rBase: bigint | null = null;
-        if (c.direcao === 'A') {
-            const res = L.reservasAerodrome.get(c.poolAerodrome.toLowerCase()) ?? null;
-            const t0Aero = c.token0DoAero;
-            rBase = res === null || t0Aero === null
-                ? null
-                : (t0Aero === base ? res.r0 : res.r1);
+        if (empresta.protocolo === 'aerodrome') {
+            const res = L.reservasAerodrome.get(empresta.pool.toLowerCase()) ?? null;
+            rBase = res === null ? null : (empresta.token0 === base ? res.r0 : res.r1);
         } else {
-            rBase = L.saldoDaBaseNoV3?.get(c.poolV3.toLowerCase()) ?? null;
+            rBase = L.saldoDaBaseNoV3?.get(empresta.pool.toLowerCase()) ?? null;
         }
         const escada = rBase === null ? [] : escadaDeTamanhos(rBase);
         // QUANTOS TAMANHOS COTAR. Com a monotonicidade demonstrada, o menor
         // decide todos. Sem ela — pool stable, token nao convencional — a
         // escada e cotada tamanho por tamanho, ate o teto de `ARB_TAMANHOS`.
+        // A monotonicidade e das DUAS pernas: basta uma Aerodrome sem
+        // `stable()` comprovadamente falso para o atalho nao valer.
+        const aeroDaRota = c.pernas.find((p) => p.protocolo === 'aerodrome');
         const corte = podeDescartarTamanhosMaiores({
-            aeroEstavel: c.aeroEstavel,
+            aeroEstavel: aeroDaRota === undefined ? false : (aeroDaRota.estavel ?? null),
             tokenNaoConvencional: false,
         });
         const quantosTamanhos = corte.pode
@@ -380,8 +383,9 @@ export async function cotarAfetadas(
         if (quantia === undefined) {
             fora.push(sinal(
                 c, null,
-                `SEM DADO: não sei a liquidez de base do pool que EMPRESTA (${c.direcao === 'A'
-                    ? 'reserva do Aerodrome' : 'saldo de base do pool V3'}), e o tamanho sai dela `
+                `SEM DADO: não sei a liquidez de base do pool que EMPRESTA (${empresta.protocolo
+                    === 'aerodrome' ? 'reserva do Aerodrome' : 'saldo de base do pool V3'}), e o `
+                + 'tamanho sai dela '
                 + '— nunca de um número meu, e nunca da liquidez do outro pool',
             ));
             continue;
@@ -1383,7 +1387,9 @@ async function principal(): Promise<void> {
     // bloco. E a compatibilidade e CONFERIDA pool por pool antes de qualquer
     // cotacao — ela proibiu supor isso por escrito.
     if (MISTAS.length > 0) {
-        const poolsV3 = [...new Set(MISTAS.map((c) => c.poolV3.toLowerCase()))];
+        const poolsV3 = [...new Set(MISTAS.flatMap(
+            (c) => c.pernas.filter((x) => x.protocolo === 'v3').map((x) => x.pool.toLowerCase()),
+        ))];
         const q = await conferirQuoter(chamar, poolsV3);
         for (const x of q.servem) QUOTER_SERVE.add(x);
         const taxas = await lerTaxasV3(chamar, [...q.servem]);
@@ -1615,8 +1621,7 @@ async function principal(): Promise<void> {
             FUNIL.estados.DESCARTADA += tri.recusadasPorSpread.length;
             const poolsQueMudaram = new Set(ESTADOS_DOS_POOLS.mudaram(cru));
             const afetadas = tri.valem.filter(
-                (c) => (poolsQueMudaram.has(c.poolV3.toLowerCase())
-                    || poolsQueMudaram.has(c.poolAerodrome.toLowerCase()))
+                (c) => c.pernas.some((p) => poolsQueMudaram.has(p.pool.toLowerCase())),
             );
 
             // A COTACAO, em DUAS idas e voltas para todas as rotas afetadas: a
@@ -1650,7 +1655,8 @@ async function principal(): Promise<void> {
                 for (const sn of sinais) {
                     const rota = afetadas.find((c) => c.chave === sn.rota);
                     if (rota === undefined) continue;
-                    if (!estadoInconsistente(cru, cruDepois, [rota.poolV3, rota.poolAerodrome])) {
+                    const poolsDaRota = rota.pernas.map((p) => p.pool);
+                    if (!estadoInconsistente(cru, cruDepois, poolsDaRota)) {
                         continue;
                     }
                     FM.estadosInconsistentes += 1;
@@ -2038,9 +2044,19 @@ export async function universoPorAtividade(
     // pode responder gastaria um terco do orcamento para receber falha.
     const pedidosDeToken: ChamadaMulti[] = [];
     const pedeEstavel = new Map<string, number>();
+    const pedeFabrica = new Map<string, number>();
     for (const pool of deConcentrado) {
         pedidosDeToken.push({ alvo: pool, dados: SELETORES.token0 });
         pedidosDeToken.push({ alvo: pool, dados: SELETORES.token1 });
+    }
+    // FABRICA e FEE dos concentrados: a perna tem de carregar os dois, por
+    // ordem dela. E e a FABRICA que diz se o par cruza venue — 131 dos 156
+    // pares medidos cruzam, e e dai que vem a rota dos vencedores.
+    for (const pool of deConcentrado) {
+        if (tipoVisto.get(pool) === 'aerodrome') continue;
+        pedeFabrica.set(pool, pedidosDeToken.length);
+        pedidosDeToken.push({ alvo: pool, dados: SELETORES.factory });
+        pedidosDeToken.push({ alvo: pool, dados: SELETORES.fee });
     }
     for (const pool of deConcentrado) {
         if (tipoVisto.get(pool) !== 'aerodrome') continue;
@@ -2057,6 +2073,9 @@ export async function universoPorAtividade(
         const r1 = lidosEmLote[i * 2 + 1];
         const iEst = pedeEstavel.get(pool);
         const rs = iEst === undefined ? undefined : lidosEmLote[iEst];
+        const iFab = pedeFabrica.get(pool);
+        const rFab = iFab === undefined ? undefined : lidosEmLote[iFab];
+        const rFee = iFab === undefined ? undefined : lidosEmLote[iFab + 1];
         const t0 = r0 !== undefined && r0.ok ? endDe(r0.dados) : null;
         const t1 = r1 !== undefined && r1.ok ? endDe(r1.dados) : null;
         if (t0 === null || t1 === null) { tokensQueFalharam += 1; continue; }
@@ -2067,8 +2086,12 @@ export async function universoPorAtividade(
             token0: t0,
             token1: t1,
             venue: ehAero ? 'aerodrome' : 'v3',
-            taxa: null,
+            taxa: (() => {
+                const v = rFee !== undefined && rFee.ok ? primeiraPalavra(rFee.dados) : null;
+                return v === null || v <= 0n ? null : Number(v);
+            })(),
             estavel: ehAero && est !== null ? est !== 0n : null,
+            fabrica: rFab !== undefined && rFab.ok ? endDe(rFab.dados) : null,
         });
     }
 

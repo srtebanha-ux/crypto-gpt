@@ -37,6 +37,8 @@ export interface PoolMisto {
      * caso existe teto demonstrado. `null` = nao li, e nao li nao descarta.
      */
     estavel?: boolean | null;
+    /** `factory()` do pool. Duas fabricas diferentes e o caso que os vencedores usam. */
+    fabrica?: string | null;
 }
 
 /** Uma perna na forma que o `CacadorV3` recebe. */
@@ -49,25 +51,61 @@ export interface PernaMista {
     pagamento: bigint;
 }
 
+/**
+ * UMA PERNA DESCRITA — pool, token que entra, protocolo, fabrica, fee e curva.
+ *
+ * ORDEM DELA, 2026-10-16: *"NAO reutilize incorretamente os campos
+ * `poolAerodrome` e `poolV3` para representar dois pools V3. Generalize a
+ * candidata para conter duas pernas tipadas, com pool, token de entrada,
+ * protocolo, fabrica, fee tier e direcao."*
+ *
+ * A DIRECAO esta na ORDEM: a perna 0 EMPRESTA (entra a base) e a perna 1 VENDE
+ * (entra o token do meio). Nao existe campo `direcao` nesta forma — a troca das
+ * duas pernas E a outra direcao, e isso elimina a classe de defeito em que o
+ * rotulo e a rota discordam.
+ */
+export interface PernaDescrita {
+    pool: string;
+    /** O token que ENTRA nesta perna. */
+    tokenEntra: string;
+    protocolo: Venue;
+    /** `factory()` do pool. `null` = nao lida; nao lida nao autoriza supor. */
+    fabrica: string | null;
+    /** Fee tier do V3 em centesimos de ponto base. `null` no Aerodrome. */
+    taxa: number | null;
+    /** `stable()` do Aerodrome. `null` no V3 ou nao lido. */
+    estavel: boolean | null;
+    /** `token0` do pool — diz de que lado o token entra. */
+    token0: string;
+}
+
 export interface CandidataMista {
     /** O token do meio — o que nao e a base. */
     token: string;
-    poolAerodrome: string;
-    poolV3: string;
-    /** 'A' = Aerodrome empresta. 'B' = V3 empresta. */
-    direcao: 'A' | 'B';
+    poolAerodrome?: string;
+    poolV3?: string;
+    /**
+     * SO em rota mista (uma perna Aerodrome, uma V3). Ausente em rota
+     * concentrado<->concentrado, onde "A/B" nao descreve nada.
+     */
+    direcao?: 'A' | 'B';
     /**
      * `token0` do pool V3, em minusculo — ele diz de que LADO o token do meio
      * esta, e e isso que inverte a razao do filtro. Vem da descoberta, nao de
      * leitura nova. `null` manda cotar: lado desconhecido nao descarta.
      */
-    token0DoV3: string | null;
+    token0DoV3?: string | null;
     /** `token0` do pool AERODROME, em minusculo — diz qual reserva e a de entrada. */
-    token0DoAero: string | null;
+    token0DoAero?: string | null;
     /** `stable()` do pool Aerodrome. So `false` autoriza descarte. */
-    aeroEstavel: boolean | null;
+    aeroEstavel?: boolean | null;
     /** A chave que identifica a rota, para nao contar a mesma duas vezes. */
     chave: string;
+    /**
+     * AS DUAS PERNAS, tipadas: a 0 empresta, a 1 vende. E esta a forma que o
+     * motor le — filtro, dimensionamento, cotacao e consistencia.
+     */
+    pernas: [PernaDescrita, PernaDescrita];
 }
 
 /**
@@ -88,42 +126,71 @@ export function candidatasMistas(
         if (t1 === base) return t0;
         return null;
     };
-    const aeroPorToken = new Map<string, string[]>();
-    const v3PorToken = new Map<string, string[]>();
-    const token0PorPool = new Map<string, string>();
-    const estavelPorPool = new Map<string, boolean | null>();
+    const descrever = (q: PoolMisto, tokenEntra: string): PernaDescrita => ({
+        pool: q.endereco.toLowerCase(),
+        tokenEntra,
+        protocolo: q.venue,
+        fabrica: q.fabrica === undefined ? null : (q.fabrica?.toLowerCase() ?? null),
+        taxa: q.taxa,
+        estavel: q.estavel ?? null,
+        token0: q.token0.toLowerCase(),
+    });
+
+    // Por TOKEN DO MEIO: todo pool que compartilha o par {base, token}.
+    const porToken = new Map<string, PoolMisto[]>();
     for (const q of pools) {
         const t = outro(q);
         if (t === null) continue;
-        const m = q.venue === 'aerodrome' ? aeroPorToken : v3PorToken;
-        const l = m.get(t) ?? [];
-        l.push(q.endereco.toLowerCase());
-        m.set(t, l);
-        token0PorPool.set(q.endereco.toLowerCase(), q.token0.toLowerCase());
-        estavelPorPool.set(q.endereco.toLowerCase(), q.estavel ?? null);
+        const l = porToken.get(t) ?? [];
+        l.push(q);
+        porToken.set(t, l);
     }
+
     const fora: CandidataMista[] = [];
     const vistas = new Set<string>();
-    for (const [token, aeros] of aeroPorToken) {
-        const v3s = v3PorToken.get(token);
-        if (v3s === undefined) continue;
-        for (const pa of aeros) {
-            for (const pv of v3s) {
-                for (const direcao of ['A', 'B'] as const) {
-                    const chave = `${direcao}|${pa}|${pv}|${token}`;
-                    if (vistas.has(chave)) continue;
-                    vistas.add(chave);
-                    fora.push({
-                        token,
-                        poolAerodrome: pa,
-                        poolV3: pv,
-                        direcao,
-                        token0DoV3: token0PorPool.get(pv) ?? null,
-                        token0DoAero: token0PorPool.get(pa) ?? null,
-                        aeroEstavel: estavelPorPool.get(pa) ?? null,
-                        chave,
-                    });
-                }
+    for (const [token, lista] of porToken) {
+        for (let a = 0; a < lista.length; a += 1) {
+            for (let b = 0; b < lista.length; b += 1) {
+                if (a === b) continue;
+                const empresta = lista[a]!;
+                const vende = lista[b]!;
+                if (empresta.endereco.toLowerCase() === vende.endereco.toLowerCase()) continue;
+                // DOIS POOLS DO MESMO AERODROME nao formam ciclo util aqui: o
+                // executor empresta de um e vende no outro, e dois pools
+                // Velodrome V2 do mesmo par e o caso que a ENTREGA 1 ja cobre.
+                // O que ENTRA agora e concentrado<->concentrado, medido: 2 das
+                // 7 operacoes lucrativas sao exatamente esta forma (`CC`, 2
+                // swaps), e 131 dos 156 pares no mesmo token cruzam fabrica.
+                if (empresta.venue === 'aerodrome' && vende.venue === 'aerodrome') continue;
+                // A chave e a ORDEM das duas pernas: trocar a ordem e a outra
+                // direcao, e as duas contam separado.
+                const chave = `${empresta.endereco.toLowerCase()}>${vende.endereco.toLowerCase()}`
+                    + `|${token}`;
+                if (vistas.has(chave)) continue;
+                vistas.add(chave);
+                const pernas: [PernaDescrita, PernaDescrita] = [
+                    descrever(empresta, base),
+                    descrever(vende, token),
+                ];
+                // Os campos antigos ficam SO quando descrevem a rota de
+                // verdade: uma perna Aerodrome e uma V3. Em rota
+                // concentrado<->concentrado eles ficam ausentes em vez de
+                // mentir sobre qual pool e qual.
+                const misto = (empresta.venue === 'aerodrome') !== (vende.venue === 'aerodrome');
+                const aero = empresta.venue === 'aerodrome' ? empresta : vende;
+                const v3 = empresta.venue === 'aerodrome' ? vende : empresta;
+                fora.push({
+                    token,
+                    chave,
+                    pernas,
+                    ...(misto ? {
+                        direcao: empresta.venue === 'aerodrome' ? 'A' as const : 'B' as const,
+                        poolAerodrome: aero.endereco.toLowerCase(),
+                        poolV3: v3.endereco.toLowerCase(),
+                        token0DoV3: v3.token0.toLowerCase(),
+                        aeroEstavel: aero.estavel ?? null,
+                    } : {}),
+                });
             }
         }
     }
@@ -140,19 +207,18 @@ export function candidatasMistas(
  * zero, levando o Aerodrome a `InsufficientInputAmount()`.
  */
 export function pernasDaCandidata(
-    c: CandidataMista, tokenBase: string, pagamentoAerodrome: bigint,
+    c: CandidataMista, tokenBase: string, pagamentoDaPerna0: bigint,
 ): PernaMista[] {
     const base = tokenBase.toLowerCase();
-    if (c.direcao === 'A') {
-        return [
-            { pool: c.poolAerodrome, tokenEntra: base, tipo: 1, pagamento: pagamentoAerodrome },
-            { pool: c.poolV3, tokenEntra: c.token, tipo: 0, pagamento: 0n },
-        ];
-    }
-    return [
-        { pool: c.poolV3, tokenEntra: base, tipo: 0, pagamento: 0n },
-        { pool: c.poolAerodrome, tokenEntra: c.token, tipo: 1, pagamento: 0n },
-    ];
+    return c.pernas.map((p, i) => ({
+        pool: p.pool,
+        tokenEntra: i === 0 ? base : p.tokenEntra,
+        tipo: (p.protocolo === 'aerodrome' ? 1 : 0) as 0 | 1,
+        // O `pagamento` so e declarado na perna 0 do AERODROME: ali nao ha nada
+        // em maos ainda. No V3 o callback paga pelo que o swap pede, e em perna
+        // interna o `0n` quer dizer "gasta o que a anterior entregou".
+        pagamento: i === 0 && p.protocolo === 'aerodrome' ? pagamentoDaPerna0 : 0n,
+    }));
 }
 
 /**
@@ -633,7 +699,6 @@ export interface Triagem {
 export function triarCandidatas(
     cs: CandidataMista[], tokenBase: string, L: LeiturasDoEstado,
 ): Triagem {
-    const base = tokenBase.toLowerCase();
     const t = {
         valem: [] as CandidataMista[],
         recusadasPorSpread: [] as CandidataMista[],
@@ -642,28 +707,126 @@ export function triarCandidatas(
         veredictos: new Map<string, VeredictoDoSpread>(),
     };
     for (const c of cs) {
-        const t0V3 = L.token0PorPool.get(c.poolV3.toLowerCase()) ?? c.token0DoV3;
-        // Na direcao A o Aerodrome recebe a BASE; na B recebe o token do meio.
-        const entraNoAero = c.direcao === 'A' ? base : c.token.toLowerCase();
-        const res = L.reservasAerodrome.get(c.poolAerodrome.toLowerCase()) ?? null;
-        // Qual reserva e a de ENTRADA depende do `token0` do pool do Aerodrome.
-        // Sem ele a ordem e desconhecida, e trocar as duas inverteria a razao.
-        const entraEhToken0NoAero = c.token0DoAero !== null && c.token0DoAero === entraNoAero;
-        const temOrdem = c.token0DoAero !== null && res !== null;
-        const v = semSpreadEmTamanhoNenhum({
-            direcao: c.direcao,
-            sqrtPriceX96: L.sqrtPorPoolV3.get(c.poolV3.toLowerCase()) ?? null,
-            tokenDoMeioEhToken0NoV3: t0V3 !== null && t0V3 === c.token.toLowerCase(),
-            reservaEntraNoAero: temOrdem ? (entraEhToken0NoAero ? res.r0 : res.r1) : null,
-            reservaSaiNoAero: temOrdem ? (entraEhToken0NoAero ? res.r1 : res.r0) : null,
-            aeroEhVolatile: t0V3 === null ? null : (c.aeroEstavel === null ? null : !c.aeroEstavel),
-        });
+        const v = semSpreadNoCiclo(c, L);
         t.veredictos.set(c.chave, v);
         if (!v.vale) { t.recusadasPorSpread.push(c); continue; }
         if (v.razoes.emprestimo === null || v.razoes.venda === null) {
-            if (c.aeroEstavel === true) t.semProvaDoInvariante += 1; else t.semDados += 1;
+            // STABLE e "nao li" pedem acoes OPOSTAS: a primeira e matematica
+            // que falta fazer, a segunda e o RPC. Somar as duas esconderia qual.
+            const stable = c.pernas.some(
+                (p) => p.protocolo === 'aerodrome' && p.estavel === true,
+            );
+            if (stable) t.semProvaDoInvariante += 1; else t.semDados += 1;
         }
         t.valem.push(c);
     }
     return t;
+}
+
+/**
+ * O LIMITE DE SPREAD — uma RAZAO maxima, e nao um teto por tamanho.
+ *
+ * DOIS DEFEITOS MEUS que isto conserta, os dois apontados por ela em
+ * 2026-10-15, e os dois podiam DESCARTAR ARBITRAGEM LUCRATIVA:
+ *
+ * 1. MISTURA DE UNIDADE na direcao B. O avaliador passava
+ *    `tokenDoEmprestimo = q` com `q` em WETH, e `valeSimular` tratava aquilo
+ *    como quantidade do token do MEIO para calcular a saida do V3 — depois
+ *    comparava o resultado (em token) com o custo (em WETH). Comparar grandezas
+ *    de unidades diferentes nao e filtro conservador: e sorteio.
+ *
+ * 2. UM TETO POR TAMANHO NAO PROVA NADA SOBRE OS OUTROS TAMANHOS. A frase
+ *    "esta rota nao fecha em tamanho nenhum" era falsa: o teto era calculado
+ *    para UM `q`.
+ *
+ * O CONSERTO e trocar teto por RAZAO. Em AMM a saida e concava na entrada:
+ * `saida/entrada` e MAXIMA no tamanho infinitesimal e so cai dali. Entao a
+ * razao marginal de cada perna e um teto da razao media de QUALQUER tamanho, e
+ * o produto das duas razoes e um teto do ciclo inteiro:
+ *
+ *     razao do ciclo <= razaoMax(perna 1) x razaoMax(perna 2)
+ *
+ * Se esse produto nao passa de 1, o ciclo devolve menos do que entrou em
+ * TAMANHO NENHUM — e a recusa e valida para todos eles. As unidades se cancelam
+ * de propósito: (token por WETH) x (WETH por token) e adimensional.
+ *
+ * As duas razoes vem de FONTES DIFERENTES, e nenhuma de conta minha:
+ *
+ *   V3        o preco spot de `sqrtPriceX96`, que e o limite quando o tamanho
+ *             tende a zero. Taxa e cruzamento de tick so pioram
+ *   AERODROME `getAmountOut(epsilon, tokenEntra)` — a conta do PROPRIO pool num
+ *             tamanho pequeno. `epsilon` tem de ser MENOR que os tamanhos
+ *             avaliados, senao a razao dele nao e teto
+ */
+
+/**
+ * A RAZAO MAXIMA DE UMA PERNA, qualquer que seja o protocolo.
+ *
+ * V3        o preco spot de `sqrtPriceX96` — limite quando o tamanho tende a
+ *           zero. Taxa e cruzamento de tick so pioram.
+ * AERODROME `rSai / rEntra`, demonstrado de `x·y = k`, e SO para volatile
+ *           comprovado. Stable devolve `null`, e `null` manda cotar.
+ */
+export function razaoDaPerna(p: PernaDescrita, L: LeiturasDoEstado): RazaoMaxima | null {
+    const pool = p.pool.toLowerCase();
+    if (p.protocolo === 'v3') {
+        const sq = L.sqrtPorPoolV3.get(pool) ?? null;
+        // A LIQUIDEZ tambem tem de estar lida: sem ela nao se pode afirmar que
+        // o estado e conhecido, e o filtro so recusa com estado conhecido.
+        const liq = L.liquidezDoV3?.get(pool);
+        if (liq === null) return null;
+        const entraEhToken0 = p.tokenEntra.toLowerCase() === p.token0;
+        return razaoMaximaV3(sq ?? 0n, entraEhToken0);
+    }
+    const res = L.reservasAerodrome.get(pool) ?? null;
+    if (res === null) return null;
+    const entraEhToken0 = p.tokenEntra.toLowerCase() === p.token0;
+    return razaoMaximaAerodrome(
+        entraEhToken0 ? res.r0 : res.r1,
+        entraEhToken0 ? res.r1 : res.r0,
+        p.estavel === null ? null : !p.estavel,
+    );
+}
+
+/**
+ * O FILTRO DO CICLO, para DUAS pernas de qualquer protocolo.
+ *
+ * O produto das razoes maximas e adimensional por construcao — (token por base)
+ * x (base por token) — e so recusa quando nao passa de 1. Ausencia de qualquer
+ * razao manda cotar: "nao sei" nunca descarta.
+ */
+export function semSpreadNoCiclo(
+    c: CandidataMista, L: LeiturasDoEstado,
+): VeredictoDoSpread {
+    const rEmp = razaoDaPerna(c.pernas[0], L);
+    const rVen = razaoDaPerna(c.pernas[1], L);
+    const razoes = { emprestimo: rEmp, venda: rVen };
+    if (rEmp === null || rVen === null) {
+        const qual = rEmp === null ? c.pernas[0] : c.pernas[1];
+        return {
+            vale: true,
+            porque: qual.protocolo === 'aerodrome' && qual.estavel !== false
+                ? 'perna Aerodrome que não é COMPROVADAMENTE volatile: o teto só está demonstrado '
+                    + 'para `x·y = k`, então esta rota fica NÃO VALIDADA em vez de descartada'
+                : `falta estado da perna ${qual.protocolo} ${qual.pool.slice(0, 10)} (preço, `
+                    + 'liquidez ou reservas): sem o produto não há prova de inviabilidade, e '
+                    + 'ausência não descarta rota',
+            razoes,
+        };
+    }
+    if (produtoPassaDeUm(rEmp, rVen)) {
+        return {
+            vale: true,
+            porque: 'o produto das razões máximas passa de 1: não dá para descartar, e só a '
+                + 'execução decide',
+            razoes,
+        };
+    }
+    return {
+        vale: false,
+        porque: 'o produto das razões MÁXIMAS das duas pernas não passa de 1. Em AMM a razão '
+            + 'saída/entrada é máxima no tamanho infinitesimal e só cai, então nenhum tamanho '
+            + 'fecha — e as unidades se cancelam, (token/base) × (base/token)',
+        razoes,
+    };
 }

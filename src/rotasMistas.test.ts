@@ -43,17 +43,44 @@ test('pool sem a base NÃO entra: o ciclo tem de começar e terminar nela', () =
     assert.deepEqual(c, []);
 });
 
-test('dois pools do MESMO venue não formam rota mista', () => {
-    // Dois Aerodrome, ou dois V3, nao sao candidata mista — e contar isso
-    // inflaria "oportunidades" com pools, que foi o que ela proibiu.
+test('dois AERODROME não formam rota; dois CONCENTRADOS formam, nas duas ordens', () => {
+    // DOIS AERODROME continuam fora: o ciclo entre dois pools Velodrome V2 do
+    // mesmo par é o que a ENTREGA 1 já cobre, e duplicá-lo aqui inflaria a
+    // contagem com rota que outro caminho já avalia.
     assert.deepEqual(candidatasMistas([
         pool(AERO, WETH, TOK, 'aerodrome'),
         pool('0xdd', WETH, TOK, 'aerodrome'),
     ], WETH), []);
-    assert.deepEqual(candidatasMistas([
+
+    // DOIS CONCENTRADOS passam a formar rota, e isto é medido, não preferência:
+    // 2 das 7 operações lucrativas reconciliadas são exatamente esta forma
+    // (`CC`, 2 swaps: 0x0aa98647 com 0,0270 WETH e 0x12226f04 com 0,00024), e
+    // 131 dos 156 pares no mesmo token cruzam fábrica.
+    const duas = candidatasMistas([
         pool(V3, WETH, TOK, 'v3'),
-        pool('0xee', WETH, TOK, 'v3'),
-    ], WETH), []);
+        pool(`0x${'ee'.repeat(20)}`, WETH, TOK, 'v3'),
+    ], WETH);
+    assert.equal(duas.length, 2, 'as duas ORDENS são as duas direções, e contam separado');
+    assert.equal(duas[0]!.pernas.length, 2);
+    // A direção está na ORDEM: a perna 0 empresta. E os campos de rota MISTA
+    // ficam AUSENTES aqui em vez de mentir sobre qual pool é qual — foi isso
+    // que ela proibiu por nome.
+    for (const c of duas) {
+        assert.equal(c.direcao, undefined);
+        assert.equal(c.poolAerodrome, undefined);
+        assert.equal(c.poolV3, undefined,
+            'reutilizar `poolV3` para um dos dois pools V3 faria o campo descrever a rota '
+            + 'errada em metade dos casos');
+        assert.equal(c.pernas[0]!.protocolo, 'v3');
+        assert.equal(c.pernas[1]!.protocolo, 'v3');
+        assert.notEqual(c.pernas[0]!.pool, c.pernas[1]!.pool);
+    }
+    // Trocar a ordem é a outra rota, e a chave distingue as duas.
+    assert.notEqual(duas[0]!.chave, duas[1]!.chave);
+    assert.equal(duas[0]!.pernas[0]!.pool, duas[1]!.pernas[1]!.pool);
+
+    // E o mesmo pool duas vezes NÃO é rota.
+    assert.deepEqual(candidatasMistas([pool(V3, WETH, TOK, 'v3')], WETH), []);
 });
 
 test('rotas DISTINTAS não contam a mesma duas vezes', () => {
@@ -71,7 +98,9 @@ test('a direção decide QUEM empresta, e o pagamento só existe na perna 0', ()
     const [a, b] = candidatasMistas([
         pool(AERO, WETH, TOK, 'aerodrome'),
         pool(V3, WETH, TOK, 'v3'),
-    ], WETH).sort((x, y) => x.direcao.localeCompare(y.direcao));
+    // A DIRECAO esta na ORDEM das pernas: a 0 empresta. Ordeno pela perna 0
+    // para o teste nao depender de um rotulo que a forma nova nao tem.
+    ], WETH).sort((x, y) => x.pernas[0].protocolo.localeCompare(y.pernas[0].protocolo));
 
     const pa = pernasDaCandidata(a, WETH, 777n);
     assert.equal(pa[0]!.pool, AERO, 'na direção A o Aerodrome empresta');
