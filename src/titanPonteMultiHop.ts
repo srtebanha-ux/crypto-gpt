@@ -18,6 +18,7 @@ export const ABI_MULTI = new Interface([
     'function aave() view returns (address)',
     'function morpho() view returns (address)',
     'function fabricaV3() view returns (address)',
+    'event LiquidouComRota(address indexed usuario,address indexed origem,address indexed destino,uint256 quantia,uint256 lucro)',
 ]);
 export interface EntradaPonte {
     usuario: string;
@@ -206,4 +207,27 @@ export async function revalidarOfertaMulti(
         const lucro=ABI_MULTI.decodeFunctionResult('liquidar',saida)[0] as bigint;
         return lucro>=oferta.piso;
     } catch { return false; }
+}
+
+/**
+ * Comprovante economico: um status=1 sem evento do NOSSO executor nao
+ * comprova lucro. A quantia e o alvo do evento devem bater com o envio.
+ * O valor retornado e BRUTO no token da divida (ainda sem gas).
+ */
+export function lucroConfirmadoPorEventoMulti(
+    logs: readonly { address:string;topics:readonly string[];data:string }[],
+    contrato:string,usuario:string,quantia:bigint,
+):bigint|null {
+    for(const l of logs){
+        if(l.address.toLowerCase()!==contrato.toLowerCase())continue;
+        try{
+            const p=ABI_MULTI.parseLog({topics:[...l.topics],data:l.data});
+            if(!p || p.name!=='LiquidouComRota')continue;
+            if((p.args.usuario as string).toLowerCase()!==usuario.toLowerCase())continue;
+            if((p.args.quantia as bigint)!==quantia)continue;
+            const lucro=p.args.lucro as bigint;
+            return lucro>0n?lucro:null;
+        }catch {continue;}
+    }
+    return null;
 }
