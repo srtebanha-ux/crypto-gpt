@@ -7065,7 +7065,7 @@ async function principal(): Promise<'parar' | void> {
                                         log.info('[MULTIHOP NO COFRE] Evento confirma pagamento bruto.', {
                                             hash:tx.hash, lucroBrutoCru:pago.toString(),
                                             lucroBrutoUsdNaCotacao:convertido?.toFixed(2) ?? 'sem preco',
-                                            gasL2Wei:(reciboFinal.gasUsed * reciboFinal.gasPrice).toString(),
+                                            gasL2Wei:reciboFinal ? (reciboFinal.gasUsed * reciboFinal.gasPrice).toString() : 'indisponivel',
                                             observacao:'descontar gas L1 e operacao para calcular lucro liquido real',
                                         });
                                     } else {
