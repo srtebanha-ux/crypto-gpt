@@ -31,7 +31,7 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
     const aave=getAddress(env.TITAN_MULTI_AAVE);
     const fabrica=getAddress(env.TITAN_MULTI_FACTORY);
     if (cofre===carteira.address) throw new Error('cofre deve ser independente do dono');
-    const artifact=JSON.parse(fs.readFileSync(artefato,'utf8')) as {abi:object[];bytecode:string};
+    const artifact=JSON.parse(fs.readFileSync(artefato,'utf8')) as {abi:ConstructorParameters<typeof ContractFactory>[0];bytecode:string};
     if (!artifact.bytecode.startsWith('0x') || artifact.bytecode.length<200)
         throw new Error('artefato multi-hop sem bytecode');
     const rpc=new JsonRpcProvider(env.ARB_RPC_URL,8453,{staticNetwork:true});
