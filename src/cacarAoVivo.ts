@@ -30,6 +30,7 @@ import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './re
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
 import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
+import { reservarGasCompartilhado, conciliarGasCompartilhado, pontuacaoDeLiquidez } from './cacaDuasRotas';
 import {
     prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca,
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
@@ -876,6 +877,8 @@ const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const ENVIAR = process.env.CACA_ENVIAR === '1';
 /** Modo de capital protegido: somente o executor Morpho Multi-Hop ja liquidavel. */
 const SOMENTE_MULTIHOP = process.env.CACA_SOMENTE_MULTIHOP === '1';
+/** Os DOIS caminhos concorrem com o MESMO nonce, somente sobre posicao ja liquidavel. */
+const COMBINADO_SEGURO = process.env.CACA_COMBINADO_SEGURO === '1';
 // A janela do PRIMEIRO boot, quando ainda não existe cache: 30 dias, para o bot
 // começar a caçar em minutos em vez de em duas horas.
 //
@@ -6098,6 +6101,10 @@ async function principal(): Promise<'parar' | void> {
             }
 
             for (const alvo of alvos) {
+                if (COMBINADO_SEGURO && vaoCruzar.has(alvo.devedor.toLowerCase())) {
+                    // Nao gastar com transacoes antes da escrita do oraculo.
+                    continue;
+                }
                 // O CORTE POR FALHA VEM ANTES DE MEDIR.
                 //
                 // MEDIDO no log de 2026-10-07 12:44: `[PULEI] tentativas: 4`
@@ -6143,6 +6150,7 @@ async function principal(): Promise<'parar' | void> {
                     contrato: typeof contratos[number] | {nome:string;endereco:string;tipo:'MH'};
                     lucroCru: bigint;
                     envioMulti?: string;
+                    pontuacaoLiquida?: bigint;
                 }> = [];
                 let ofertaMulti: OfertaMulti | null = null;
                 for (const contrato of contratos) {
@@ -6403,7 +6411,34 @@ async function principal(): Promise<'parar' | void> {
                     });
                     continue;
                 }
-                medicoes.sort((a, b) => (b.lucroCru > a.lucroCru ? 1 : b.lucroCru < a.lucroCru ? -1 : 0));
+                if (COMBINADO_SEGURO && medicoes.length>0) {
+                    const precoEthAgora = precoDoEth();
+                    if (!baseFeeAtual || baseFeeAtual<=0n || !precoEthAgora
+                        || !alvo.dividaCrua || !alvo.dividaUsd) {
+                        log.warn('[DUAS ROTAS] Nao comparo lucro sem preco e unidades verificadas.');
+                        continue;
+                    }
+                    let reservaL1:bigint;
+                    try { reservaL1=await tetoL1PeloCaca(leitor); }
+                    catch { log.warn('[DUAS ROTAS] Oraculo L1 indisponivel.');continue; }
+                    const custoLegadoCru = gasEmTokenDaDivida(
+                        1_500_000n,3n*baseFeeAtual+20_000_000n,reservaL1,
+                        alvo.dividaCrua,alvo.dividaUsd,precoEthAgora
+                    );
+                    // CACA original retorna lucro BRUTO; o Multi-Hop ja retorna
+                    // o LIQUIDO estimado. Comparar brutos privilegiaria o legado.
+                    for (const m of medicoes)
+                        m.pontuacaoLiquida=pontuacaoDeLiquidez(m.contrato.tipo,
+                            m.lucroCru,custoLegadoCru);
+                    medicoes=medicoes.filter(m=>m.pontuacaoLiquida!==undefined
+                        && m.pontuacaoLiquida>0n);
+                    if(medicoes.length===0)continue;
+                    medicoes.sort((a,b)=>(b.pontuacaoLiquida!>a.pontuacaoLiquida! ? 1
+                        : b.pontuacaoLiquida!<a.pontuacaoLiquida! ? -1 : 0));
+                } else {
+                    medicoes.sort((a,b)=>(b.lucroCru>a.lucroCru ? 1
+                        : b.lucroCru<a.lucroCru ? -1 : 0));
+                }
                 const escolhida = medicoes[0];
                 const contrato = escolhida.contrato;
                 // Um segundo portao protege o dinheiro mesmo com configuracao
@@ -6532,6 +6567,7 @@ async function principal(): Promise<'parar' | void> {
                      * sobrevivencia, nao um dado de conveniencia.
                      */
                     const especulativo = vaoCruzar.has(alvo.devedor.toLowerCase());
+                    if(COMBINADO_SEGURO && especulativo)continue;
                     // O SALDO VAI DE CARONA NA ESTIMATIVA, pedido dela em
                     // 2026-10-03: "ler o saldo atual de ETH da carteira do
                     // enviador ANTES de construir o tiro".
@@ -7028,6 +7064,55 @@ async function principal(): Promise<'parar' | void> {
                             }
                         }
                     }
+                    let reservaCompartilhadaId:string|null=null;
+                    if (COMBINADO_SEGURO) {
+                        // Reserva ao VALOR MAXIMO cobravel pelo gas, nao a media.
+                        let l1:bigint;
+                        try { l1=await tetoL1PeloCaca(leitor); }
+                        catch {log.warn('[DUAS ROTAS] Nao consigo certificar custo L1.');continue;}
+                        const adicional=BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI??'0');
+                        if(adicional>l1)l1=adicional;
+                        const maxPorTx=650_000_000_000_000n; // 0.00065 ETH por tentativa
+                        const maxPorDia=1_300_000_000_000_000n; // 0.0013 ETH/dia
+                        const maxCusto=limiteGas*maxFee+l1;
+                        if (!custoMaximoMultiDentroDoTeto(limiteGas,maxFee,l1,maxPorTx)) {
+                            log.warn('[DUAS ROTAS] Custo maximo ultrapassa teto por tentativa.');
+                            continue;
+                        }
+                        if (contrato.tipo !== 'MH') {
+                            if (estimado===null || especulativo || !alvo.dividaCrua
+                                || !alvo.dividaUsd || !precoDoEth()) {
+                                log.warn('[DUAS ROTAS] Legado sem estimativa de gas ou mercado verificado.');
+                                continue;
+                            }
+                            const custoEmDivida=gasEmTokenDaDivida(
+                                limiteGas,maxFee,l1,alvo.dividaCrua,alvo.dividaUsd,precoDoEth()!
+                            );
+                            if (lucroCruValido<=2n*custoEmDivida) {
+                                log.warn('[DUAS ROTAS] Legado nao paga 2x pior custo de gas.');
+                                continue;
+                            }
+                            // Revalidar CALldata final, piso inclusive, antes de gastar nonce.
+                            const checagem=await chamarCruComPaciencia([{
+                                from:donoCarteira,to:contrato.endereco,data:envio
+                            },'latest']);
+                            if(!checagem.ok) {
+                                log.warn('[DUAS ROTAS] Legado reverte na chamada final; nao envio.',{
+                                    contrato:contrato.nome
+                                }); continue;
+                            }
+                        }
+                        const reserva=reservarGasCompartilhado({
+                            tipo:contrato.tipo,alvo:alvo.devedor,maxCostWei:maxCusto,
+                            maxPerTxWei:maxPorTx,maxDailyWei:maxPorDia,maxTxDia:2
+                        });
+                        if(!reserva.id) {
+                            log.warn('[DUAS ROTAS] Disjuntor do orcamento compartilhado.',{
+                                porque:reserva.reason
+                            });continue;
+                        }
+                        reservaCompartilhadaId=reserva.id;
+                    }
                     const nonceAtual = await nonceManager.getNextNonce();
                     const msDoTiro = Date.now() - inicioDoCiclo;
                     enviados += 1;
@@ -7169,6 +7254,13 @@ async function principal(): Promise<'parar' | void> {
                                 } else {
                                     desfecho = erro?.receipt ? lerRecibo(erro.receipt) : 'sumiu';
                                 }
+                            }
+                            if (reservaCompartilhadaId) {
+                                const reconciliado=conciliarGasCompartilhado(
+                                    reservaCompartilhadaId,desfecho,hashDoTiro
+                                );
+                                if(!reconciliado)
+                                    log.error('[DUAS ROTAS] Recibo nao gravado no diario: BLOQUEIO de novos envios.');
                             }
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro, especulativo);
                             // AO DISCO AGORA, e não na próxima coleta.
