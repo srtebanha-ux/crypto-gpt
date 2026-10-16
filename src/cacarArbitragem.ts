@@ -2084,8 +2084,12 @@ async function principal(): Promise<void> {
     const pendentesCotacao = new Set<string>();
     const tetoCotarRotas = Number(process.env.ARB_COTAR_MAX_ROTAS ?? 12);
     const tetoTentativasCru = Number(process.env.TITAN_TX_POR_SESSAO ?? 1);
-    const tetoTentativasTitan = Number.isInteger(tetoTentativasCru) && tetoTentativasCru >= 0
-        ? Math.min(10, tetoTentativasCru) : 0;
+    // O modo continuo nao herda o teto de UMA tentativa por sessao:
+    // a trava persistente do executor ja limita contagem + gas POR DIA.
+    const tetoTentativasTitan = process.env.TITAN_AUTORIZACAO_CONTINUA === '1'
+        ? Number.MAX_SAFE_INTEGER
+        : Number.isInteger(tetoTentativasCru) && tetoTentativasCru >= 0
+            ? Math.min(10, tetoTentativasCru) : 0;
     // O relogio da redescoberta comeca AGORA: a descoberta do boot acabou de
     // rodar, e reler a mesma janela no primeiro ciclo gastaria RPC para receber
     // a resposta que acabou de chegar.
