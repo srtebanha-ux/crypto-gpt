@@ -1,0 +1,229 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Decimal } from 'decimal.js';
+import { AbiCoder } from 'ethers';
+import { simboloDaBinance, lerSymbol, lerCotacoes, quedaDoMercado,
+    cotacoesDeQualquerFonte, ORCAMENTO_DO_MERCADO_MS } from './precoDeMercado';
+
+const D = (n: number | string) => new Decimal(n);
+
+test('só os que valem o MESMO que ETH seguem ETHUSDT', () => {
+    for (const s of ['WETH', 'weth', 'ETH']) {
+        assert.equal(simboloDaBinance(s), 'ETHUSDT', s);
+    }
+});
+
+test('token que rende juros NÃO segue o par, mesmo acompanhando o ETH', () => {
+    // wstETH, cbETH e weETH valem MAIS que um ETH, e a diferença cresce com o
+    // tempo. Comparar o preço deles com ETHUSDT daria uma "queda" permanente
+    // de uns 17%, e o bot ficaria preso em 'dedo no gatilho' para sempre,
+    // lendo a blockchain a 200ms sem motivo nenhum.
+    for (const s of ['cbETH', 'wstETH', 'weETH']) {
+        assert.equal(simboloDaBinance(s), null, s);
+    }
+});
+
+test('só os que valem o MESMO que BTC seguem BTCUSDT', () => {
+    for (const s of ['cbBTC', 'WBTC', 'BTC']) {
+        assert.equal(simboloDaBinance(s), 'BTCUSDT', s);
+    }
+    // tBTC sai pelo mesmo motivo: não é um-para-um o tempo todo.
+    assert.equal(simboloDaBinance('tBTC'), null);
+});
+
+test('stablecoin NÃO é acompanhada, e isso é resposta e não falha', () => {
+    // Ela não derruba ninguém por variação de preço. Inventar um par para ela
+    // adicionaria ruído ao gatilho sem adicionar informação.
+    for (const s of ['USDC', 'USDT', 'DAI', 'EURC']) {
+        assert.equal(simboloDaBinance(s), null, s);
+    }
+});
+
+test('token desconhecido não vira palpite', () => {
+    assert.equal(simboloDaBinance('AERO'), null);
+    assert.equal(simboloDaBinance(''), null);
+});
+
+test('lê o símbolo do jeito que a blockchain responde', () => {
+    const hex = AbiCoder.defaultAbiCoder().encode(['string'], ['cbBTC']);
+    assert.equal(lerSymbol(hex), 'cbBTC');
+    assert.equal(simboloDaBinance(lerSymbol(hex)!), 'BTCUSDT');
+});
+
+test('resposta curta ou vazia devolve null, nunca lixo', () => {
+    assert.equal(lerSymbol('0x'), null);
+    assert.equal(lerSymbol('0x00'), null);
+});
+
+test('cotação ilegível vira ausência, não zero', () => {
+    // Zero seria "o ETH vale nada", e o bot leria isso como todo mundo caído.
+    const m = lerCotacoes([
+        { symbol: 'ETHUSDT', price: '2646.93' },
+        { symbol: 'BTCUSDT', price: 'abc' },
+        { symbol: 'XXX', price: '0' },
+    ]);
+    assert.equal(m.get('ETHUSDT')!.toFixed(2), '2646.93');
+    assert.equal(m.has('BTCUSDT'), false);
+    assert.equal(m.has('XXX'), false);
+});
+
+test('resposta que não é lista não derruba nada', () => {
+    // Binance fora do ar, HTML de erro, rate limit: tudo vira mapa vazio, e o
+    // bot volta ao ritmo normal em vez de morrer. Preço de mercado é
+    // acelerador, não motor.
+    assert.equal(lerCotacoes({ code: -1121, msg: 'Invalid symbol' }).size, 0);
+    assert.equal(lerCotacoes(null).size, 0);
+});
+
+test('a queda mede o quanto a blockchain está atrasada', () => {
+    const oraculo = new Map([['ETHUSDT', D(2646.93)]]);
+    const mercado = new Map([['ETHUSDT', D(2646.93).mul(0.995)]]);
+    assert.equal(quedaDoMercado(mercado, oraculo).toFixed(3), '0.500');
+});
+
+test('mercado SUBINDO não vira queda', () => {
+    const oraculo = new Map([['ETHUSDT', D(2000)]]);
+    assert.equal(quedaDoMercado(new Map([['ETHUSDT', D(2100)]]), oraculo).toNumber(), 0);
+});
+
+test('a maior queda entre os pares é que manda', () => {
+    // Se o BTC despencou e o ETH não, quem tem garantia em BTC cai. O gatilho
+    // tem que acompanhar o pior caso, não a média.
+    const oraculo = new Map([['ETHUSDT', D(2000)], ['BTCUSDT', D(60000)]]);
+    const mercado = new Map([['ETHUSDT', D(1998)], ['BTCUSDT', D(58800)]]);
+    assert.equal(quedaDoMercado(mercado, oraculo).toFixed(1), '2.0');
+});
+
+test('par sem preço no oráculo é ignorado, não assumido', () => {
+    assert.equal(quedaDoMercado(new Map([['ETHUSDT', D(1)]]), new Map()).toNumber(), 0);
+});
+
+// ---------------------------------------------------------------------------
+// Uma fonte só era ponto único de falha para a parte mais valiosa do desenho.
+// ---------------------------------------------------------------------------
+import { lerCoinbase, lerKraken, EQUIVALENTES } from './precoDeMercado';
+
+test('lê a cotação da Coinbase', () => {
+    assert.equal(lerCoinbase({ price: '2646.93' })!.toFixed(2), '2646.93');
+});
+
+test('lê a cotação da Kraken, que vem aninhada', () => {
+    assert.equal(lerKraken({ result: { XETHZUSD: { c: ['2646.93', '1.0'] } } })!.toFixed(2), '2646.93');
+});
+
+test('resposta de erro de qualquer casa vira null, nunca zero', () => {
+    // Zero seria "o ETH vale nada", e o bot leria isso como todo mundo caído.
+    assert.equal(lerCoinbase({ message: 'NotFound' }), null);
+    assert.equal(lerCoinbase(null), null);
+    assert.equal(lerKraken({ error: ['EQuery:Unknown asset pair'], result: {} }), null);
+    assert.equal(lerKraken({ result: { X: { c: ['0'] } } }), null);
+    assert.equal(lerKraken(null), null);
+});
+
+test('cada par da Binance tem equivalente nas duas outras casas', () => {
+    // O BTC na Kraken chama XBTUSD, não BTCUSD — errar isso daria "par
+    // inválido" e o plano B seria tão mudo quanto o plano A.
+    for (const par of ['ETHUSDT', 'BTCUSDT']) {
+        assert.ok(EQUIVALENTES[par], par);
+        assert.ok(EQUIVALENTES[par].coinbase.includes('-'), 'Coinbase usa ETH-USD');
+    }
+    assert.equal(EQUIVALENTES.BTCUSDT.kraken, 'XBTUSD');
+});
+
+// ===================================================================
+// O ORÇAMENTO DO MERCADO — 2026-09-30, e é a causa do ciclo de 11,4s.
+//
+// A versão anterior era sequencial em dois níveis: a Binance inteira,
+// depois cada casa, e dentro de cada casa um `await` por par. Com 3
+// pares e 2s de timeout o teto era
+//     binance 2s + coinbase 3x2s + kraken 3x2s = 14.000 ms
+// e na Railway a Binance bloqueia IP de nuvem, então TODO ciclo pagava
+// a falha dela antes de começar.
+// ===================================================================
+
+test('as três casas e todos os pares saem JUNTOS, não em fila', async () => {
+    // Cada chamada dorme 300ms. Sequencial em dois níveis seriam 7 chamadas
+    // (1 binance + 3 coinbase + 3 kraken) = 2100ms. Em paralelo, ~300ms.
+    const pares = ['ETHUSDT', 'BTCUSDT', 'USDCUSDT'];
+    let chamadas = 0;
+    type Buscar = Parameters<typeof cotacoesDeQualquerFonte>[3];
+    const lento = (async () => {
+        chamadas++;
+        await new Promise((r) => setTimeout(r, 300));
+        return { json: async () => ({ price: '4000.00' }) };
+    }) as unknown as Buscar;
+    const t0 = Date.now();
+    const r = await cotacoesDeQualquerFonte(pares, 2000, 2500, lento);
+    const gasto = Date.now() - t0;
+    assert.equal(chamadas >= pares.length, true, 'pediu ao menos um por par');
+    assert.equal(gasto < 1200, true, `paralelo: ${gasto}ms, e sequencial daria ~2100ms`);
+    assert.equal(r.precos.size > 0, true);
+});
+
+test('o orçamento é um TETO, e uma casa pendurada não segura o ciclo', async () => {
+    // Uma casa que nunca responde. Antes, isso custava um timeout por par.
+    // Respeita o `signal`, como um `fetch` de verdade: é isso que prova que o
+    // podão ABORTA em vez de só desistir de esperar e deixar a promessa viva.
+    const pendurado = ((_u: string, o?: { signal?: AbortSignal }) => new Promise((_ok, falha) => {
+        o?.signal?.addEventListener('abort', () => falha(new Error('abortado')));
+    })) as unknown as Parameters<typeof cotacoesDeQualquerFonte>[3];
+    const t0 = Date.now();
+    const r = await cotacoesDeQualquerFonte(['ETHUSDT', 'BTCUSDT'], 2000, 400, pendurado);
+    const gasto = Date.now() - t0;
+    assert.equal(gasto < 900, true, `o teto tem de valer: gastou ${gasto}ms para um orçamento de 400ms`);
+    // E o motivo tem de aparecer: "nenhuma" e "estourou o orçamento" são
+    // coisas diferentes, e publicar as duas como a mesma é ausência com cara
+    // de resposta.
+    assert.equal(r.fonte, 'estourou o orçamento');
+    assert.equal(r.precos.size, 0);
+});
+
+test('timeout maior que o orçamento não pode tornar o teto letra morta', async () => {
+    const pendurado = ((_u: string, o?: { signal?: AbortSignal }) => new Promise((_ok, falha) => {
+        o?.signal?.addEventListener('abort', () => falha(new Error('abortado')));
+    })) as unknown as Parameters<typeof cotacoesDeQualquerFonte>[3];
+    const t0 = Date.now();
+    await cotacoesDeQualquerFonte(['ETHUSDT'], 30_000, 300, pendurado);
+    assert.equal(Date.now() - t0 < 900, true, 'o orçamento manda, não o timeout por chamada');
+});
+
+test('lista de pares vazia não chama ninguém', async () => {
+    let chamadas = 0;
+    const contar = (async () => { chamadas++; return { json: async () => ({}) }; }) as unknown as Parameters<typeof cotacoesDeQualquerFonte>[3];
+    const r = await cotacoesDeQualquerFonte([], 2000, 2500, contar);
+    assert.equal(chamadas, 0);
+    assert.equal(r.fonte, 'nenhuma');
+});
+
+test('o orçamento corta a perna da BINANCE também — o defeito que fazia o teste piscar', () => {
+    // MEDIDO em 2026-10-09: `cotacoesDaBinance` montava o próprio
+    // `AbortSignal.timeout(timeoutMs)` e nunca via o podão do orçamento. Como
+    // `cotacoesDeQualquerFonte` espera as TRÊS casas com `allSettled`, a perna
+    // da Binance segurava a volta inteira até o timeout DELA: um orçamento de
+    // 400ms voltava em ~2000ms.
+    //
+    // E morde todo ciclo em produção: este arquivo registra que na Railway a
+    // Binance BLOQUEIA IP de nuvem — a casa que nunca responde era exatamente
+    // a que o teto não alcançava.
+    //
+    // Este teste lê a ASSINATURA porque o defeito era um parâmetro ausente,
+    // não um valor errado: nenhum teste de valor o pega, e o teste de
+    // comportamento que devia pegá-lo CANCELAVA em 2 de 3 rodadas com
+    // "Promise resolution is still pending" em vez de reprovar limpo. Foi essa
+    // piscada que deixou um push sair com a suíte vermelha.
+    const fonte = readFileSync(join(__dirname, 'precoDeMercado.ts'), 'utf8');
+    const assinatura = fonte
+        .split('export async function cotacoesDaBinance(')[1]!
+        .split('): Promise<Map<string, Decimal>>')[0]!;
+    assert.match(assinatura, /sinal:\s*\(\)\s*=>\s*AbortSignal/,
+        'cotacoesDaBinance tem de ACEITAR o sinal de fora, senão o orçamento não a corta');
+
+    // E quem chama de dentro do orçamento tem de PASSAR o sinal. Aceitar e não
+    // passar seria o mesmo defeito com a porta aberta — é a REGRA 3 deste
+    // projeto: a regra em dois lugares, implementada em um.
+    const chamada = fonte.split("umaCasa('binance'")[1]!.split('\n),')[0]!;
+    assert.match(chamada, /cotacoesDaBinance\([^)]*pedir,\s*sinal\)/,
+        'a perna da Binance dentro do orçamento tem de receber o `sinal`');
+});
