@@ -165,7 +165,7 @@ export async function prepararOfertaMulti(
             const retorno=await rpc.call(tx);
             const lucro=ABI_MULTI.decodeFunctionResult('liquidar',retorno)[0] as bigint;
             const gas=await rpc.estimateGas(tx);
-            if (lucro<=0n || gas<=0n || gas>e.gasMax) {
+            if (lucro<=0n || gas<=0n || gas+gas/5n>e.gasMax) {
                 cache.set(id,null); continue;
             }
             const custo=gasEmTokenDaDivida(gas+gas/5n,e.maxFeePerGas,
