@@ -83,11 +83,28 @@ function travar<T>(arquivo: string, fn: () => T): T {
 }
 /** Logica pura do orcamento conservador; nunca devolve permissao com hash pendente. */
 export function avaliarLimitesDiariosTitan(
-    registros: ReadonlyArray<Pick<Registro,'diaUtc'|'tetoGasWei'|'estado'>>,
+    registros: ReadonlyArray<Pick<Registro,
+        'diaUtc'|'tetoGasWei'|'estado'|'lucroRealizadoWei'|'gasRealL2Wei'>>,
     custoReservadoWei: bigint, tetoGasDia: bigint, maxTxDia: number, agora = new Date(),
 ): string | null {
     if (registros.some(x=>x.estado === 'pendente')) {
         return 'existe hash pendente, conferir recibo antes de nova operacao';
+    }
+    // Uma transacao revertida perde gas. Um recibo sem evento de lucro,
+    // ou cujo ganho em WETH nao supera nem o custo MAXIMO conservador,
+    // nunca autoriza mais uma aposta automatica. Essa trava persiste
+    // entre dias e reinicios, ate revisao explicita por um humano.
+    if (registros.some(x=>x.estado === 'revertido')) {
+        return 'circuit breaker: transacao revertida; envio interrompido ate revisao';
+    }
+    const algumResultadoNaoComprovado = registros.some(x=>x.estado === 'confirmado'
+        && (x.lucroRealizadoWei === undefined
+            || !DECIMAL.test(x.lucroRealizadoWei)
+            || BigInt(x.lucroRealizadoWei) <= BigInt(x.tetoGasWei)
+            || x.gasRealL2Wei === undefined
+            || !DECIMAL.test(x.gasRealL2Wei)));
+    if (algumResultadoNaoComprovado) {
+        return 'circuit breaker: lucro real nao comprovado acima do gas conservador';
     }
     const hoje = agora.toISOString().slice(0, 10);
     const feitos = registros.filter(x=>x.diaUtc === hoje);
