@@ -36,6 +36,9 @@ export interface ResultadoTitan {
     lucroSimuladoWei?: string;
     lucroRealizadoWei?: string;
     custoGasL2Wei?: string;
+    custoMaximoEstimadoWei?: string;
+    margemMinimaWei?: string;
+    lucroMinimoBrutoWei?: string;
 }
 
 /** Este teste e puro: nao precisa de chave, internet ou contrato. */
@@ -75,13 +78,50 @@ export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv):
     if (!ambiente.TITAN_CONTRATO || !ambiente.TITAN_CHAVE_PRIVADA || !ambiente.TITAN_COFRE) {
         return 'contrato, chave privada ou cofre nao configurado';
     }
-    const piso = ambiente.TITAN_MIN_LUCRO_WEI;
     const orcamento = ambiente.TITAN_ORCAMENTO_GAS_WEI;
-    if (!piso || !/^\d+$/.test(piso) || BigInt(piso) <= 0n) return 'piso de lucro em wei nao configurado';
+    try {
+        // Confere a politica de lucro ainda sem rede e sem chave privada.
+        calcularPisoTitan(10_000n, ambiente);
+    } catch {
+        return 'politica de lucro invalida: TITAN_LUCRO_GAS_BPS ou TITAN_MIN_LUCRO_WEI';
+    }
     if (!orcamento || !/^\d+$/.test(orcamento) || BigInt(orcamento) <= 0n) {
         return 'teto financeiro de gas em wei nao configurado';
     }
     return null;
+}
+
+/**
+ * Margem minima liquida em relacao ao custo TOTAL conservador (gas L2 e L1).
+ * 500 bps = 5% do gas. arredondamento para cima nunca vira zero wei.
+ * Se configurada, a percentagem SUBSTITUI o piso fixo anterior.
+ */
+export function calcularPisoTitan(
+    custoMaximoWei: bigint, ambiente: NodeJS.ProcessEnv,
+): { margemWei: bigint; lucroBrutoMinimoWei: bigint; margemBps: bigint | null } {
+    if (custoMaximoWei <= 0n) throw new Error('custo total de gas invalido');
+    const percentual = ambiente.TITAN_LUCRO_GAS_BPS;
+    if (percentual !== undefined) {
+        if (!/^\d+$/.test(percentual)) throw new Error('lucro percentual invalido');
+        const bps = BigInt(percentual);
+        if (bps < 1n || bps > 10_000n) throw new Error('lucro percentual fora de 1 a 10000 bps');
+        const margemWei = (custoMaximoWei * bps + 9_999n) / 10_000n;
+        return {
+            margemWei,
+            lucroBrutoMinimoWei: custoMaximoWei + margemWei,
+            margemBps: bps,
+        };
+    }
+    // Compatibilidade com servicos antigos que ainda dependem de piso absoluto.
+    const fixo = ambiente.TITAN_MIN_LUCRO_WEI;
+    if (!fixo || !/^\d+$/.test(fixo) || BigInt(fixo) <= 0n) {
+        throw new Error('piso de lucro em wei nao configurado');
+    }
+    return {
+        margemWei: BigInt(fixo),
+        lucroBrutoMinimoWei: custoMaximoWei + BigInt(fixo),
+        margemBps: null,
+    };
 }
 
 function hexDeResultado(data: string, fn: Interface, nome: string): bigint {
@@ -179,10 +219,14 @@ export async function executarTitan(
         if (custoMaximo > BigInt(ambiente.TITAN_ORCAMENTO_GAS_WEI!)) {
             return { estado: 'recusado', motivo: 'custo maximo excede orcamento por transacao' };
         }
-        const piso = custoMaximo + BigInt(ambiente.TITAN_MIN_LUCRO_WEI!);
-        if (brutoReal <= piso) {
-            return { estado: 'recusado', motivo: 'lucro simulado insuficiente depois do custo conservador',
-                lucroSimuladoWei: brutoReal.toString() };
+        const politica = calcularPisoTitan(custoMaximo, ambiente);
+        const piso = politica.lucroBrutoMinimoWei;
+        if (brutoReal < piso) {
+            return { estado: 'recusado', motivo: 'lucro simulado insuficiente depois do custo conservador e margem minima',
+                lucroSimuladoWei: brutoReal.toString(),
+                custoMaximoEstimadoWei: custoMaximo.toString(),
+                margemMinimaWei: politica.margemWei.toString(),
+                lucroMinimoBrutoWei: piso.toString() };
         }
         const dados = ABI_TITAN.encodeFunctionData('executarRota', [
             plano.rota, plano.quantia, piso,
@@ -249,6 +293,9 @@ export async function executarTitan(
             custoGasL2Wei: (recibo.gasUsed * recibo.gasPrice).toString(),
             lucroRealizadoWei: lucroRealizado,
             lucroSimuladoWei: confirmado.toString(),
+            custoMaximoEstimadoWei: custoMaximo.toString(),
+            margemMinimaWei: politica.margemWei.toString(),
+            lucroMinimoBrutoWei: piso.toString(),
             motivo: recibo.status === 1
                 ? 'incluida; lucro observado no evento Cacou, custo L1 verificar no recibo'
                 : 'transacao reverteu; gas real foi consumido',
