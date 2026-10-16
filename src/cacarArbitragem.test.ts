@@ -297,3 +297,143 @@ test('a direção A empresta do Aerodrome e a B do V3, com a liquidez de CADA um
     assert.notEqual(esperadoA, esperadoB,
         'o teste só prova algo porque as duas liquidezes são diferentes');
 });
+
+// --- OS DOIS DEFEITOS ECONÔMICOS QUE ELA MANDOU CORRIGIR --------------------
+
+test('a GORJETA entra UMA vez: `baseFeeDoBlocoWei` não a inclui', async () => {
+    const { baseFeeDoBlocoWei, precoDoGasWei, GORJETA_SUPOSTA_WEI } = await import('./cacarArbitragem');
+    const BASE = 4_523_747n;
+    const chamar = (async () => ({ baseFeePerGas: `0x${BASE.toString(16)}` })) as never;
+    // O leitor de COMPONENTE devolve o baseFee puro.
+    assert.equal(await baseFeeDoBlocoWei(chamar), BASE,
+        'o campo `baseFeeWei` de `somarCusto` recebe ESTE número; se ele já trouxesse gorjeta, '
+        + 'o custo L2 sairia como gas × (baseFee + gorjeta + gorjeta)');
+    // O leitor de PREÇO POR GÁS devolve baseFee + gorjeta, e os dois diferem
+    // exatamente por uma gorjeta — nunca por duas.
+    assert.equal(await precoDoGasWei(chamar), BASE + GORJETA_SUPOSTA_WEI);
+    const { somarCusto } = await import('./custoDaBase');
+    const gas = 372_944n;
+    const certo = somarCusto({
+        gasUsado: gas, gasUsadoVeioDe: 'recibo', baseFeeWei: BASE,
+        gorjetaWei: GORJETA_SUPOSTA_WEI, custoL1Wei: 0n, taxaDoEmprestimoWei: 0n,
+    });
+    const dobrado = somarCusto({
+        gasUsado: gas, gasUsadoVeioDe: 'recibo', baseFeeWei: BASE + GORJETA_SUPOSTA_WEI,
+        gorjetaWei: GORJETA_SUPOSTA_WEI, custoL1Wei: 0n, taxaDoEmprestimoWei: 0n,
+    });
+    assert.equal(certo.totalWei, gas * (BASE + GORJETA_SUPOSTA_WEI));
+    assert.equal(dobrado.totalWei! - certo.totalWei!, gas * GORJETA_SUPOSTA_WEI,
+        'é este o tamanho do erro que a dupla contagem produzia — uma gorjeta inteira por gás');
+});
+
+test('UMA constante de gorjeta: as duas fontes não podem divergir', async () => {
+    const { GORJETA_SUPOSTA_WEI } = await import('./cacarArbitragem');
+    const { GORJETA_PADRAO_WEI } = await import('./custoDaBase');
+    assert.equal(GORJETA_SUPOSTA_WEI, GORJETA_PADRAO_WEI,
+        'havia duas constantes para a mesma coisa, ambas de `ARB_GORJETA_WEI`, com defaults de '
+        + '2.000.000 e 20.000.000 — dez vezes de diferença para o mesmo conceito');
+});
+
+test('com sobra bruta POSITIVA a busca SOBE a escada e fica com o melhor LÍQUIDO', async () => {
+    const { cotarAfetadas } = await import('./cacarArbitragem');
+    const { candidatasMistas } = await import('./rotasMistas');
+    const { SELETOR_PAGAMENTO_CURTO, SELETOR_LUCRO_INSUFICIENTE } = await import('./cotarMista');
+    const WETH = '0x4200000000000000000000000000000000000006';
+    const TOK = '0xfb31f85a8367210b2e4ed2360d2da9dc2d2ccc95';
+    const A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const rotas = candidatasMistas([
+        { endereco: A, token0: WETH, token1: TOK, venue: 'v3', taxa: 500 },
+        { endereco: B, token0: WETH, token1: TOK, venue: 'v3', taxa: 3000 },
+    ], WETH).slice(0, 1);
+    const LIQ = 10n ** 22n;
+    const estado = {
+        sqrtPorPoolV3: new Map([[A, 2n ** 96n], [B, 2n ** 96n]]),
+        liquidezDoV3: new Map([[A, 1n], [B, 1n]]),
+        token0PorPool: new Map<string, string>(),
+        reservasAerodrome: new Map(),
+        saldoDaBaseNoV3: new Map([[A, LIQ], [B, LIQ]]),
+        bloco: 1,
+    };
+    // A sobra CRESCE com o tamanho nesta bancada, então o melhor líquido está
+    // num degrau ADIANTE do primeiro. Se a busca parar no primeiro, ela entrega
+    // o pior dos dois — e era isso que estava acontecendo.
+    const palavra = (v: bigint): string => v.toString(16).padStart(64, '0');
+    const sobraPorQuantia = new Map<string, bigint>();
+    const quantiasVistas: bigint[] = [];
+    const emLote = async (
+        pedidos: Array<{ metodo: string; params: unknown[] }>,
+    ): Promise<Array<{ ok: boolean; dados: string | null }>> => pedidos.map((p) => {
+        const dados = String((p.params[0] as { data: string }).data);
+        const q = BigInt(`0x${dados.slice(74, 138)}`);
+        quantiasVistas.push(q);
+        // sobra = q / 1000: cresce com o tamanho.
+        const sobra = q / 1000n;
+        sobraPorQuantia.set(q.toString(), sobra);
+        return {
+            ok: false,
+            dados: SELETOR_LUCRO_INSUFICIENTE + palavra(sobra) + palavra(0n),
+        };
+    });
+    const chamar = (async () => `0x${palavra(0n)}`) as never;
+    const sinais = await cotarAfetadas(
+        emLote, chamar, rotas, estado as never, 'pending', 1, Date.now(), 1_000_000n,
+        `0x${'60'.repeat(60)}`,
+    );
+    assert.equal(sinais.length, 1);
+    assert.ok(quantiasVistas.length >= 2,
+        `a busca tem de cotar mais de um tamanho quando o primeiro já tem sobra positiva; `
+        + `cotou ${quantiasVistas.length}`);
+    const maior = quantiasVistas.reduce((x, y) => (y > x ? y : x));
+    const sn = sinais[0]!;
+    assert.equal(sn.melhorTamanho, maior,
+        'o tamanho escolhido tem de ser o de melhor LÍQUIDO entre os avaliados — aqui o maior');
+    assert.equal(sn.lucroBrutoEstimado, sobraPorQuantia.get(maior.toString()));
+    assert.match(sn.motivo, /não ótimo global/,
+        'a frase não pode afirmar ótimo global: a escada é discreta e a busca tem teto');
+    // E o SELETOR de pagamento curto continua lido como sobra negativa.
+    assert.ok(SELETOR_PAGAMENTO_CURTO.startsWith('0x'));
+});
+
+test('com sobra NÃO positiva e monotonicidade demonstrada, a busca PARA no primeiro', async () => {
+    const { cotarAfetadas } = await import('./cacarArbitragem');
+    const { candidatasMistas } = await import('./rotasMistas');
+    const { SELETOR_PAGAMENTO_CURTO } = await import('./cotarMista');
+    const WETH = '0x4200000000000000000000000000000000000006';
+    const TOK = '0xfb31f85a8367210b2e4ed2360d2da9dc2d2ccc95';
+    const A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const rotas = candidatasMistas([
+        { endereco: A, token0: WETH, token1: TOK, venue: 'v3', taxa: 500 },
+        { endereco: B, token0: WETH, token1: TOK, venue: 'v3', taxa: 3000 },
+    ], WETH).slice(0, 1);
+    const LIQ = 10n ** 22n;
+    const estado = {
+        sqrtPorPoolV3: new Map([[A, 2n ** 96n], [B, 2n ** 96n]]),
+        liquidezDoV3: new Map([[A, 1n], [B, 1n]]),
+        token0PorPool: new Map<string, string>(),
+        reservasAerodrome: new Map(),
+        saldoDaBaseNoV3: new Map([[A, LIQ], [B, LIQ]]),
+        bloco: 1,
+    };
+    const palavra = (v: bigint): string => v.toString(16).padStart(64, '0');
+    let chamadas = 0;
+    const emLote = async (
+        pedidos: Array<{ metodo: string; params: unknown[] }>,
+    ): Promise<Array<{ ok: boolean; dados: string | null }>> => pedidos.map((p) => {
+        chamadas += 1;
+        const dados = String((p.params[0] as { data: string }).data);
+        const q = BigInt(`0x${dados.slice(74, 138)}`);
+        // Ciclo que não fecha: produziu menos do que entrou.
+        return { ok: false, dados: SELETOR_PAGAMENTO_CURTO + palavra(q - 1n) + palavra(q) };
+    });
+    const chamar = (async () => `0x${palavra(0n)}`) as never;
+    const sinais = await cotarAfetadas(
+        emLote, chamar, rotas, estado as never, 'pending', 1, Date.now(), 1_000_000n,
+        `0x${'60'.repeat(60)}`,
+    );
+    assert.equal(chamadas, 1,
+        'sem sobra bruta e com as duas pernas monótonas, nenhum tamanho maior fecha: gastar RPC '
+        + `subindo a escada seria desperdício. Gastei ${chamadas} cotação(ões)`);
+    assert.match(sinais[0]!.motivo, /Nenhum tamanho maior fecha/);
+});

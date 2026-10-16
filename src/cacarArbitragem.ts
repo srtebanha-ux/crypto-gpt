@@ -52,7 +52,9 @@ import {
     impressaoDoEstado, impressaoDosPools, compararEstados,
     type SinalDeArbitragem,
 } from './cotarMista';
-import { codificarTetoDeL1, ORACULO_DE_GAS_L1, somarCusto, julgar } from './custoDaBase';
+import {
+    codificarTetoDeL1, ORACULO_DE_GAS_L1, somarCusto, julgar, GORJETA_PADRAO_WEI,
+} from './custoDaBase';
 
 /**
  * O gas de um ciclo misto VENCEDOR, medido no recibo da execucao atomica em
@@ -128,7 +130,18 @@ export const GAS_DE_UMA_ARBITRAGEM = 260_000n;
  * gwei e entram. 0,002 gwei e um decimo disso — suficiente para nao ser
  * rejeitada por lance zero, e barata o bastante para nao distorcer o piso.
  */
-export const GORJETA_SUPOSTA_WEI = BigInt(process.env.ARB_GORJETA_WEI ?? 2_000_000);
+/**
+ * A GORJETA, uma so.
+ *
+ * DEFEITO QUE ELA APONTOU: havia DUAS constantes para a mesma coisa, as duas
+ * lidas de `ARB_GORJETA_WEI`, com defaults DIFERENTES — 2.000.000 aqui e
+ * 20.000.000 em `custoDaBase`. Dez vezes de diferenca para o mesmo conceito, e
+ * a REGRA 3 deste projeto diz que uma regra em dois lugares e a mesma regra.
+ *
+ * Fica a de `custoDaBase`, que e a MAIOR: entre duas estimativas de custo, a
+ * conservadora e a que nao subestima.
+ */
+export const GORJETA_SUPOSTA_WEI = GORJETA_PADRAO_WEI;
 
 /**
  * O PRECO DO GAS, do baseFee do bloco mais a gorjeta suposta.
@@ -143,13 +156,36 @@ export const GORJETA_SUPOSTA_WEI = BigInt(process.env.ARB_GORJETA_WEI ?? 2_000_0
  * E a correcao nao vale so para o fork: `eth_gasPrice` de um RPC publico
  * tambem embute uma gorjeta escolhida pelo provedor, que nao e a nossa.
  */
-export async function precoDoGasWei(chamar: Transporte): Promise<bigint | null> {
+export async function baseFeeDoBlocoWei(chamar: Transporte): Promise<bigint | null> {
     try {
         const b = await chamar('eth_getBlockByNumber', ['latest', false]) as
             { baseFeePerGas?: string } | null;
         const base = b?.baseFeePerGas;
         if (typeof base !== 'string' || base === '0x') return null;
-        return BigInt(base) + GORJETA_SUPOSTA_WEI;
+        return BigInt(base);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * O PRECO POR GAS, isto e baseFee MAIS gorjeta.
+ *
+ * ELE NAO E UM `baseFee`, e confundir os dois foi a DUPLA CONTAGEM que ela
+ * achou: este valor ja inclui a gorjeta, e o caminho da cotacao o passava para
+ * `somarCusto` no campo `baseFeeWei`, que soma a gorjeta OUTRA VEZ. O custo L2
+ * saia como `gas × (baseFee + gorjeta + gorjeta)`.
+ *
+ * Quem precisa de preco por gas (o `decidir`, o `avaliarRotas`, o placar) usa
+ * esta funcao; quem monta o custo por componentes usa `baseFeeDoBlocoWei` e
+ * declara a gorjeta no campo dela. Os dois nomes existem para que o campo
+ * errado nao compile por acidente de leitura.
+ */
+export async function precoDoGasWei(chamar: Transporte): Promise<bigint | null> {
+    try {
+        const base = await baseFeeDoBlocoWei(chamar);
+        if (base === null) return null;
+        return base + GORJETA_SUPOSTA_WEI;
     } catch {
         // `null`, nao um padrao: sem o baseFee eu nao sei o custo, e decidir
         // com um numero inventado e fabricar o piso economico.
@@ -310,7 +346,8 @@ export async function cotarAfetadas(
     etiqueta: 'latest' | 'pending',
     blocoObservado: number,
     observadoEm: number,
-    gasWei: bigint | null,
+    /** baseFee PURO do bloco. NAO é preço por gás: a gorjeta é somada à parte. */
+    baseFeeWei: bigint | null,
     codigoDoCotador: string | null,
 ): Promise<SinalDeArbitragem[]> {
     const base = WETH_DA_BASE.toLowerCase();
@@ -344,9 +381,20 @@ export async function cotarAfetadas(
     }
 
     // O TAMANHO sai da LIQUIDEZ do pool que empresta, nunca de numero meu.
-    const comTamanho: Array<{
-        c: CandidataMista; quantia: bigint; porqueEsteTamanho: string;
-    }> = [];
+    interface EmBusca {
+        c: CandidataMista;
+        escada: bigint[];
+        /** Proximo degrau a cotar. */
+        idx: number;
+        /** A monotonicidade das duas pernas esta demonstrada? */
+        podeParar: boolean;
+        porque: string;
+        /** O melhor LIQUIDO entre os tamanhos JA avaliados. */
+        melhor: { quantia: bigint; sobra: bigint; custo: bigint | null; liquido: bigint } | null;
+        /** Quantos degraus foram de fato cotados. */
+        avaliados: number;
+    }
+    const emBusca: EmBusca[] = [];
     for (const c of afetadas) {
         // A CAPACIDADE DE EMPRESTIMO E DO POOL QUE EMPRESTA.
         //
@@ -355,8 +403,7 @@ export async function cotarAfetadas(
         //
         // A versao anterior usava a reserva do Aerodrome nas DUAS, e ela cortou
         // isso por nome: *"Nao reutilize a liquidez de um pool como se fosse a
-        // capacidade de emprestimo de outro."* Na direcao B isso dimensionava o
-        // emprestimo do V3 pela liquidez de um pool que nao empresta nada ali.
+        // capacidade de emprestimo de outro."*
         const empresta = c.pernas[0];
         let rBase: bigint | null = null;
         if (empresta.protocolo === 'aerodrome') {
@@ -366,105 +413,145 @@ export async function cotarAfetadas(
             rBase = L.saldoDaBaseNoV3?.get(empresta.pool.toLowerCase()) ?? null;
         }
         const escada = rBase === null ? [] : escadaDeTamanhos(rBase);
-        // QUANTOS TAMANHOS COTAR. Com a monotonicidade demonstrada, o menor
-        // decide todos. Sem ela — pool stable, token nao convencional — a
-        // escada e cotada tamanho por tamanho, ate o teto de `ARB_TAMANHOS`.
-        // A monotonicidade e das DUAS pernas: basta uma Aerodrome sem
-        // `stable()` comprovadamente falso para o atalho nao valer.
+        if (escada.length === 0) {
+            fora.push(sinal(
+                c, null,
+                `SEM DADO: não sei a liquidez de base do pool que EMPRESTA (${empresta.protocolo
+                    === 'aerodrome' ? 'reserva do Aerodrome' : 'saldo de base do pool V3'}), e o `
+                + 'tamanho sai dela — nunca de um número meu, e nunca da liquidez do outro pool',
+            ));
+            continue;
+        }
         const aeroDaRota = c.pernas.find((p) => p.protocolo === 'aerodrome');
         const corte = podeDescartarTamanhosMaiores({
             aeroEstavel: aeroDaRota === undefined ? false : (aeroDaRota.estavel ?? null),
             tokenNaoConvencional: false,
         });
-        const quantosTamanhos = corte.pode
-            ? 1
-            : Math.min(escada.length, Math.max(1, Number(process.env.ARB_TAMANHOS ?? 3)));
-        const quantia = escada[0];
-        if (quantia === undefined) {
-            fora.push(sinal(
-                c, null,
-                `SEM DADO: não sei a liquidez de base do pool que EMPRESTA (${empresta.protocolo
-                    === 'aerodrome' ? 'reserva do Aerodrome' : 'saldo de base do pool V3'}), e o `
-                + 'tamanho sai dela '
-                + '— nunca de um número meu, e nunca da liquidez do outro pool',
-            ));
-            continue;
-        }
-        for (let k = 0; k < quantosTamanhos; k += 1) {
-            const q = escada[k];
-            if (q === undefined) break;
-            comTamanho.push({ c, quantia: q, porqueEsteTamanho: corte.porque });
-        }
+        emBusca.push({
+            c, escada, idx: 0, podeParar: corte.pode, porque: corte.porque,
+            melhor: null, avaliados: 0,
+        });
     }
-    if (comTamanho.length === 0) return fora;
+    if (emBusca.length === 0) return fora;
 
-    const pedidos = comTamanho.map(({ c, quantia }) => ({
-        metodo: 'eth_call',
-        params: [
-            {
-                // `from: 0x0` de proposito: no override o `dono` do contrato
-                // fica zero, e e assim que o portao `soDono` passa.
-                from: '0x0000000000000000000000000000000000000000',
-                to: COTADOR_LOCAL,
-                data: codificarCotarCiclo(pernasDaCandidata(c, WETH_DA_BASE, quantia), quantia),
-                gas: '0xB71B00',
-            },
-            etiqueta,
-            { [COTADOR_LOCAL]: { code: codigoDoCotador } },
-        ] as unknown[],
-    }));
-    const r = await emLote(pedidos);
-
-    // O L1 por TETO, uma vez por rodada: o calldata do `cacar` tem tamanho fixo.
+    // O L1 por TETO, uma vez: o calldata do `cacar` tem tamanho fixo, e o gas
+    // estimado nao muda com o tamanho — entao o CUSTO e o mesmo em todo degrau.
     const l1 = numDe(await lerComPaciencia(
         chamar, ORACULO_DE_GAS_L1, codificarTetoDeL1(196),
     ));
+    const custo = somarCusto({
+        gasUsado: GAS_DO_CICLO_MISTO,
+        // ESTIMATIVA, e marcada: o 427.168 e recibo de uma execucao em FORK,
+        // nao desta operacao.
+        gasUsadoVeioDe: 'estimativa',
+        baseFeeWei,
+        // UMA vez, e aqui: `baseFeeWei` e o baseFee PURO. Somar gorjeta duas
+        // vezes foi a dupla contagem que ela achou.
+        gorjetaWei: GORJETA_SUPOSTA_WEI,
+        custoL1Wei: l1,
+        taxaDoEmprestimoWei: 0n,
+    });
 
-    for (let i = 0; i < comTamanho.length; i += 1) {
-        const { c, quantia } = comTamanho[i]!;
-        const resp = r[i];
-        if (resp === undefined || resp.ok) {
-            // O padrao Quoter EXIGE reversao. Resposta sem reversao nao e
-            // cotacao, e tratar como zero inventaria uma medicao.
+    // A BUSCA PROGRESSIVA DE TAMANHO.
+    //
+    // DEFEITO QUE ELA APONTOU: quando o PRIMEIRO tamanho tinha sobra bruta
+    // positiva, a busca paraVA ali. O atalho de monotonicidade so autoriza
+    // DESCARTAR (sobra <= 0 no menor tamanho implica <= 0 em todos), e eu o
+    // estava usando para parar com sobra POSITIVA — que e o caso em que subir
+    // a escada e justamente o que pode achar lucro liquido.
+    //
+    // Agora: uma RODADA por degrau, so com as rotas que ainda interessam, todas
+    // num lote JSON-RPC. Economia de RPC: a rota que fecha no negativo com
+    // monotonicidade demonstrada sai da busca no primeiro degrau, e nenhuma
+    // passa de `ARB_TAMANHOS` degraus.
+    //
+    // E O QUE ISTO NAO E: nao e otimo global. E o melhor liquido entre os
+    // tamanhos EFETIVAMENTE AVALIADOS, e a frase do sinal diz isso.
+    const tetoDeDegraus = Math.max(1, Number(process.env.ARB_TAMANHOS ?? 4));
+    const opacas = new Map<string, string>();
+    for (let rodada = 0; rodada < tetoDeDegraus; rodada += 1) {
+        const nesta = emBusca.filter((e) => e.idx < e.escada.length && e.idx <= rodada);
+        if (nesta.length === 0) break;
+        const pedidos = nesta.map((e) => ({
+            metodo: 'eth_call',
+            params: [
+                {
+                    // `from: 0x0` de proposito: no override o `dono` do
+                    // contrato fica zero, e e assim que o portao `soDono` passa.
+                    from: '0x0000000000000000000000000000000000000000',
+                    to: COTADOR_LOCAL,
+                    data: codificarCotarCiclo(
+                        pernasDaCandidata(e.c, WETH_DA_BASE, e.escada[e.idx]!), e.escada[e.idx]!,
+                    ),
+                    gas: '0xB71B00',
+                },
+                etiqueta,
+                { [COTADOR_LOCAL]: { code: codigoDoCotador } },
+            ] as unknown[],
+        }));
+        // eslint-disable-next-line no-await-in-loop
+        const r = await emLote(pedidos);
+        for (let k = 0; k < nesta.length; k += 1) {
+            const e = nesta[k]!;
+            const quantia = e.escada[e.idx]!;
+            const resp = r[k];
+            e.idx += 1;
+            if (resp === undefined || resp.ok) {
+                // O padrao Quoter EXIGE reversao. Resposta sem reversao nao e
+                // cotacao, e tratar como zero inventaria uma medicao.
+                opacas.set(e.c.chave, 'SEM COTAÇÃO: a chamada não reverteu, e o padrão Quoter '
+                    + 'responde revertendo com o número. Sem a reversão não há número para ler');
+                e.idx = e.escada.length;
+                continue;
+            }
+            const lido = lerRespostaDaCotacao(resp.dados);
+            if (lido === null) {
+                opacas.set(e.c.chave, 'REVERSÃO OPACA: nenhum dos dois seletores com número veio. '
+                    + `Reversão sem identificação não é cotação (dado: `
+                    + `${String(resp.dados).slice(0, 10)})`);
+                e.idx = e.escada.length;
+                continue;
+            }
+            e.avaliados += 1;
+            const liquido = custo.totalWei === null ? lido.sobra : lido.sobra - custo.totalWei;
+            if (e.melhor === null || liquido > e.melhor.liquido) {
+                e.melhor = { quantia, sobra: lido.sobra, custo: custo.totalWei, liquido };
+            }
+            // PARA quando a sobra bruta nao e positiva E a monotonicidade das
+            // duas pernas esta demonstrada: ai nenhum tamanho maior fecha.
+            // Com sobra POSITIVA a busca CONTINUA — era exatamente isso que
+            // faltava.
+            if (lido.sobra <= 0n && e.podeParar) e.idx = e.escada.length;
+        }
+    }
+
+    for (const e of emBusca) {
+        const opaca = opacas.get(e.c.chave);
+        if (e.melhor === null) {
             fora.push(sinal(
-                c, quantia,
-                'SEM COTAÇÃO: a chamada não reverteu, e o padrão Quoter responde revertendo com '
-                + 'o número. Sem a reversão não há número para ler',
+                e.c, e.escada[0]!,
+                opaca ?? 'SEM COTAÇÃO legível em nenhum degrau avaliado',
             ));
             continue;
         }
-        const lido = lerRespostaDaCotacao(resp.dados);
-        if (lido === null) {
-            fora.push(sinal(
-                c, quantia,
-                'REVERSÃO OPACA: nenhum dos dois seletores com número veio. Reversão sem '
-                + `identificação não é cotação (dado: ${String(resp.dados).slice(0, 10)})`,
-            ));
-            continue;
-        }
-        const custo = somarCusto({
-            gasUsado: GAS_DO_CICLO_MISTO,
-            // ESTIMATIVA, e marcada: o 427.168 e recibo de uma execucao em
-            // FORK, nao desta operacao.
-            gasUsadoVeioDe: 'estimativa',
-            baseFeeWei: gasWei,
-            gorjetaWei: 20_000_000n,
-            custoL1Wei: l1,
-            taxaDoEmprestimoWei: 0n,
-        });
-        const j = julgar(lido.sobra > 0n ? lido.sobra : 0n, custo);
+        const m = e.melhor;
+        const comoFoi = `${e.avaliados} de ${e.escada.length} tamanho(s) avaliado(s)`;
         fora.push(sinal(
-            c, quantia,
-            lido.sobra <= 0n
-                ? `SEM SPREAD neste estado: o ciclo produziu ${lido.produziu} contra `
-                    + `${quantia} que entraram (sobra ${lido.sobra}). `
-                    + (comTamanho[i]!.porqueEsteTamanho.startsWith('as duas pernas')
-                        ? 'Nenhum tamanho maior fecha: '
-                        : 'Isto vale para ESTE tamanho — ')
-                    + comTamanho[i]!.porqueEsteTamanho
-                : `SOBRA BRUTA ${lido.sobra} wei — ${j.veredicto}`,
-            lido.sobra,
-            custo.totalWei,
+            e.c, m.quantia,
+            m.sobra <= 0n
+                ? `SEM SPREAD neste estado: o ciclo produziu ${m.sobra + m.quantia} contra `
+                    + `${m.quantia} que entraram (sobra ${m.sobra}). `
+                    + (e.podeParar
+                        ? `Nenhum tamanho maior fecha: ${e.porque}`
+                        : `Isto vale para os tamanhos avaliados — ${e.porque}`)
+                    + ` [${comoFoi}]`
+                : `SOBRA BRUTA ${m.sobra} wei, LÍQUIDO ${m.liquido} wei — `
+                    + `${julgar(m.sobra, custo).veredicto}. Melhor líquido entre os tamanhos `
+                    + `AVALIADOS (${comoFoi}), não ótimo global: a escada é discreta e a busca `
+                    + 'para no teto de degraus'
+                + (opaca === undefined ? '' : ` | um degrau ficou ilegível: ${opaca.slice(0, 40)}`),
+            m.sobra,
+            m.custo,
         ));
     }
     return fora;
@@ -1634,7 +1721,10 @@ async function principal(): Promise<void> {
                 const fimCot = av.etapa('cotacao');
                 const tc = Date.now();
                 const sinais = await cotarAfetadas(
-                    chamarEmLote, chamar, afetadas, L, etiqueta, blocoDaAmostra, t0, gasWei,
+                    chamarEmLote, chamar, afetadas, L, etiqueta, blocoDaAmostra, t0,
+                    // O baseFee PURO: a gorjeta entra uma vez, dentro de
+                    // `somarCusto`. Passar `gasWei` aqui era a dupla contagem.
+                    gasWei === null ? null : gasWei - GORJETA_SUPOSTA_WEI,
                     CODIGO_DO_COTADOR,
                 );
                 LIVRO_DE_SINAIS.registrarCotacao(Date.now() - tc);

@@ -194,6 +194,47 @@ E a matemática local com ticks em memória NÃO foi implementada: a auditoria
 achou primeiro a incompatibilidade de callback, e a ordem dela é corrigir só
 essa.
 
+## OS DOIS DEFEITOS ECONÔMICOS (2026-10-16)
+
+**A) DUPLA CONTAGEM DA GORJETA.** `precoDoGasWei` devolvia
+`baseFeePerGas + GORJETA_SUPOSTA_WEI` — um PREÇO POR GÁS — e o caminho da
+cotação o passava para `somarCusto` no campo `baseFeeWei`, que soma a gorjeta
+outra vez. O custo L2 saía como `gás × (baseFee + gorjeta + gorjeta)`.
+
+Provado no código anterior (`ecbe165`): linha 152 `return BigInt(base) +
+GORJETA_SUPOSTA_WEI`, linha 450 `baseFeeWei: gasWei`, linha 451
+`gorjetaWei: 20_000_000n`.
+
+CONSERTO, por componentes separados: `baseFeeDoBlocoWei` devolve o baseFee PURO
+e é o que alimenta `baseFeeWei`; `precoDoGasWei` continua devolvendo
+baseFee+gorjeta para quem quer preço por gás (`decidir`, `avaliarRotas`, placar).
+Os dois nomes existem para o campo errado não passar por acidente de leitura.
+
+E havia DUAS constantes de gorjeta para a mesma coisa, ambas de
+`ARB_GORJETA_WEI`, com defaults de 2.000.000 e 20.000.000 — dez vezes de
+diferença. Ficou a MAIOR: entre duas estimativas de custo, a conservadora é a
+que não subestima.
+
+**B) A BUSCA DE TAMANHO PARAVA COM SOBRA POSITIVA.** O atalho de monotonicidade
+só autoriza DESCARTAR (sobra ≤ 0 no menor tamanho implica ≤ 0 em todos), e eu o
+usava para parar também com sobra POSITIVA — justamente o caso em que subir a
+escada pode achar lucro líquido.
+
+CONSERTO: busca PROGRESSIVA, uma rodada por degrau, só com as rotas que ainda
+interessam, todas num lote JSON-RPC. Para quando a sobra é ≤ 0 **e** a
+monotonicidade está demonstrada; continua quando a sobra é positiva ou quando a
+monotonicidade não está provada. Teto `ARB_TAMANHOS` (4).
+
+**NÃO É ÓTIMO GLOBAL, e a frase do sinal diz isso:** é o melhor líquido entre os
+tamanhos EFETIVAMENTE AVALIADOS, numa escada discreta com teto de degraus.
+
+TESTES (em `src/cacarArbitragem.test.ts`), e eles DISCRIMINAM:
+- a gorjeta entra uma vez; o teste mede o tamanho do erro antigo (gás × gorjeta)
+- uma constante só de gorjeta
+- com sobra positiva a busca sobe e fica com o melhor líquido — **reprova com
+  `ARB_TAMANHOS=1`**, que reproduz o comportamento antigo
+- com sobra ≤ 0 e monotonicidade demonstrada, gasta UMA cotação e para
+
 ## Problema atual
 
 **VANTAGEM ECONÔMICA NÃO COMPROVADA.** O único ciclo fechado histórico é 84x
@@ -202,7 +243,7 @@ pelos dois limites acima. Lucro capturado na rede: ZERO.
 
 ## Próxima ação objetiva
 
-UMA: um A/B válido do pool Algebra (cotar a mesma rota com e sem o apelido, no
+UMA (depois dos dois consertos econômicos): um A/B válido do pool Algebra (cotar a mesma rota com e sem o apelido, no
 mesmo estado) para medir quantas rotas o conserto desbloqueia de fato — e, no
 mesmo run, reduzir o conjunto cotado por estado para caber na janela de
 consistência (`ESTADO_INCONSISTENTE` em 5.819 de 5.823 com 380 rotas). **NÃO
