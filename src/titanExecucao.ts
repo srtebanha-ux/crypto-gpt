@@ -127,7 +127,14 @@ export async function executarTitan(
         if (!ultimo || ultimo.baseFeePerGas === null || ultimo.baseFeePerGas <= 0n) {
             throw new Error('baseFee da rede desconhecido');
         }
-        if (ultimo.number - plano.bloco > 1) throw new Error('cotacao de bloco antigo');
+        // A triagem pode ter custado varios blocos. Isto NAO autoriza enviar
+        // com cotacao velha: as proximas duas eth_call simulam novamente a
+        // rota completa no estado latest do contrato IMPLANTADO.
+        // O limite de 60 blocos impede gatilhos obsoletos de horas atras.
+        const defasagem = ultimo.number - plano.bloco;
+        if (defasagem < 0 || defasagem > 60) {
+            throw new Error('sinal de bloco muito antigo ou no futuro');
+        }
         const gorjeta = BigInt(ambiente.TITAN_GORJETA_WEI ?? '20000000');
         if (gorjeta <= 0n) throw new Error('gorjeta invalida');
         const maxFeePerGas = 2n * ultimo.baseFeePerGas + gorjeta;
