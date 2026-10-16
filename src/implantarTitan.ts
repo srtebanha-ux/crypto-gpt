@@ -4,11 +4,14 @@
  * A operacao GASTA ETH REAL em gas mesmo se o deploy falhar.
  */
 import fs from 'node:fs';
+import path from 'node:path';
 import { ContractFactory, Interface, JsonRpcProvider, Wallet, getAddress } from 'ethers';
 import { ORACULO_DE_GAS_L1 } from './custoDaBase';
 
 const oracle = new Interface(['function getL1Fee(bytes) view returns (uint256)']);
 const caminhoArtefato = '.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json';
+const marcador = process.env.TITAN_DEPLOY_MARCADOR ?? '/app/data/titan-implantacao-tentada.json';
+const LIMITE_AUTORIZADO_WEI = 1_000_000_000_000_000n;
 
 async function principal(): Promise<void> {
     if (process.env.TITAN_IMPLANTAR !== '1'
@@ -24,6 +27,13 @@ async function principal(): Promise<void> {
     const teto = process.env.TITAN_ORCAMENTO_DEPLOY_WEI;
     if (!chave || !rpcUrl || !cofre || !teto || !/^\d+$/.test(teto) || BigInt(teto) <= 0n) {
         throw new Error('faltam chave, RPC, cofre ou teto de gas do deploy');
+    }
+    // Ja houve uma tentativa deste job? NUNCA reenvie automaticamente.
+    if (fs.existsSync(marcador)) {
+        throw new Error('implantacao ja tentada neste volume; consultar o marcador e a Base, NAO repetir');
+    }
+    if (BigInt(teto) > LIMITE_AUTORIZADO_WEI) {
+        throw new Error('orcamento configurado excede 0,001 ETH autorizado');
     }
     const artefato = JSON.parse(fs.readFileSync(caminhoArtefato, 'utf8')) as {
         abi: ConstructorParameters<typeof ContractFactory>[0]; bytecode: string;
@@ -53,6 +63,8 @@ async function principal(): Promise<void> {
             throw new Error('gas do deploy excede o teto de unidades');
         }
         const nonce = await rpc.getTransactionCount(wallet.address, 'pending');
+        const nonceConfirmado = await rpc.getTransactionCount(wallet.address, 'latest');
+        if (nonce !== nonceConfirmado) throw new Error('carteira possui transacoes pendentes; nao disputar nonce');
         const unsigned = { ...deploy, chainId: 8453, type: 2 as const, nonce,
             gasLimit, maxFeePerGas, maxPriorityFeePerGas: gorjeta };
         // O predeploy calcula custo de dados sobre bytes da tx assinada.
@@ -65,8 +77,21 @@ async function principal(): Promise<void> {
         if ((await rpc.getTransactionCount(wallet.address, 'pending')) !== nonce) {
             throw new Error('nonce mudou antes de enviar o deploy');
         }
+        // Marcador criado com exclusividade ANTES da tentativa paga: mesmo se o
+        // processo morrer ou Railway reiniciar, uma segunda remessa e barrada.
+        fs.mkdirSync(path.dirname(marcador), { recursive: true });
+        const fd = fs.openSync(marcador, 'wx', 0o600);
+        try {
+            fs.writeFileSync(fd, JSON.stringify({ estado: 'tentativa_iniciada', nonce,
+                carteira: wallet.address, cofre: cofreFinal, limiteWei: teto,
+                rede: 8453, criadoEm: new Date().toISOString() }));
+            fs.fsyncSync(fd);
+        } finally { fs.closeSync(fd); }
         const resposta = await wallet.connect(rpc).sendTransaction(unsigned);
         hash = resposta.hash;
+        fs.writeFileSync(marcador, JSON.stringify({ estado: 'enviado', nonce, hash,
+            carteira: wallet.address, cofre: cofreFinal,
+            criadoEm: new Date().toISOString() }), { mode: 0o600 });
         console.log('[TITAN/DEPLOY] Hash transmitido:', hash);
         const recibo = await resposta.wait(1, 60000);
         if (!recibo) {
@@ -77,6 +102,10 @@ async function principal(): Promise<void> {
         if (recibo.status !== 1 || !recibo.contractAddress) {
             throw new Error('implantacao revertida. Gasto de gas real; conferir hash, NAO repetir');
         }
+        fs.writeFileSync(marcador, JSON.stringify({ estado: 'confirmado', nonce, hash,
+            contrato: recibo.contractAddress, carteira: wallet.address,
+            cofre: cofreFinal, gasUsado: recibo.gasUsed.toString(),
+            confirmadoEm: new Date().toISOString() }), { mode: 0o600 });
         console.log('[TITAN/DEPLOY] CONTRATO:', recibo.contractAddress);
         console.log('[TITAN/DEPLOY] COFRE:', cofreFinal);
         console.log('[TITAN/DEPLOY] GAS USADO:', recibo.gasUsed.toString());
