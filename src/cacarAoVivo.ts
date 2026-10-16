@@ -6290,7 +6290,7 @@ async function principal(): Promise<'parar' | void> {
                             maxFeePerGas: 3n * baseFeeAtual + 20_000_000n,
                             reservaL1Wei: reserva,
                             gasMax,
-                            maxCotacoes: 16,
+                            maxCotacoes: 32,
                         });
                         if (ofertaMulti) {
                             // Dois consentimentos: o CACA original e a permissao
