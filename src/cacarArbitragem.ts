@@ -43,6 +43,7 @@ import {
     lerMemoria, gravarMemoria, memoriaVazia, juntar, paraRotas, deDescoberta, comoLerAMemoria,
 } from './memoriaDoUniverso';
 import { pernasDaCandidata } from './rotasMistas';
+import { executarTitan } from './titanExecucao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
     type PoolMisto, type CandidataMista, type LeiturasDoEstado,
@@ -2027,6 +2028,11 @@ async function principal(): Promise<void> {
 
     let ciclo = 0;
     let blocoAnterior: number | null = null;
+    // Nunca mais de uma transmissao por sessao sem uma nova autorizacao explicita.
+    let tentativasTitan = 0;
+    const tetoTentativasCru = Number(process.env.TITAN_TX_POR_SESSAO ?? 1);
+    const tetoTentativasTitan = Number.isInteger(tetoTentativasCru) && tetoTentativasCru >= 0
+        ? Math.min(10, tetoTentativasCru) : 0;
     // O relogio da redescoberta comeca AGORA: a descoberta do boot acabou de
     // rodar, e reler a mesma janela no primeiro ciclo gastaria RPC para receber
     // a resposta que acabou de chegar.
@@ -2373,6 +2379,44 @@ async function principal(): Promise<void> {
                     // O numero nao e apagado — ele existiu —, mas deixa de
                     // contar como oportunidade: a conta nao e sobre um estado.
                     sn.lucroLiquidoEstimado = null;
+                }
+                // O executor usa somente SINAL com estado confirmado NA RELEITURA.
+                // Nao reutiliza a estimativa positiva V2: esse contrato aceita V3/Aerodrome,
+                // nao rotas V2. Com TITAN_ENVIAR ausente ou zero nao faz RPC de execucao.
+                const prontas = sinais.filter((sn) => sn.lucroLiquidoEstimado !== null
+                    && sn.lucroLiquidoEstimado > 0n
+                    && sn.lucroBrutoEstimado !== null && sn.lucroBrutoEstimado > 0n
+                    && sn.melhorTamanho !== null && sn.melhorTamanho > 0n
+                    && !sn.motivo.startsWith('ESTADO_'));
+                if (prontas.length > 0 && tentativasTitan < tetoTentativasTitan) {
+                    const vencedora = prontas.reduce((a, b) => (
+                        b.lucroLiquidoEstimado! > a.lucroLiquidoEstimado! ? b : a
+                    ));
+                    const candidata = afetadas.find((c) => c.chave === vencedora.rota);
+                    if (candidata !== undefined) {
+                        const aoVivo = process.env.TITAN_ENVIAR === '1';
+                        // Conta a tentativa ANTES de qualquer await: crash/reentrada nao
+                        // deve causar uma segunda tentativa automatica no mesmo processo.
+                        if (aoVivo) tentativasTitan += 1;
+                        // eslint-disable-next-line no-await-in-loop
+                        const resultado = await executarTitan({
+                            rota: pernasDaCandidata(
+                                candidata, WETH_DA_BASE, vencedora.melhorTamanho!,
+                            ),
+                            quantia: vencedora.melhorTamanho!,
+                            bloco: blocoDaAmostra,
+                            brutoEstimado: vencedora.lucroBrutoEstimado!,
+                            liquidoEstimado: vencedora.lucroLiquidoEstimado!,
+                            estadoConsistente: true,
+                        }, rpc);
+                        log.warn('[TITAN/EXECUTOR] Decisao sobre sinal cotado.', {
+                            bloco: blocoDaAmostra,
+                            rota: vencedora.rota,
+                            resultado,
+                            tentativasNestaSessao: tentativasTitan,
+                            limite: tetoTentativasTitan,
+                        });
+                    }
                 }
                 cotadasAgora = sinais.length;
                 FM.cotacoesTentadas += sinais.length;
