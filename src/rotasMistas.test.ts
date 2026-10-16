@@ -98,7 +98,7 @@ test('a limitação dominante segue a ORDEM da evidência', () => {
     // estado. Defeito que ela apontou por nome: *"250 blocos observados não são
     // 250 estados avaliados."*
     assert.match(limitacaoDominante(f), /^NADA AVALIADO/);
-    f.estadosAvaliados = 1;
+    f.estadosDistintos = 1;
     assert.match(limitacaoDominante(f), /^COBERTURA/);
     f.rotasDistintas = 10;
     assert.match(limitacaoDominante(f), /^CUSTO/);
@@ -451,7 +451,7 @@ test('a INVARIANTE dela: o filtro não pode recusar rota com spread de verdade',
 
 test('EXPIRADO não é falta de spread, e a limitação dominante diz isso', () => {
     const f = funilVazio();
-    f.estadosAvaliados = 3;
+    f.estadosDistintos = 3;
     f.rotasDistintas = 10;
     f.cotacoesTentadas = 8;
     f.expirado = 8;
@@ -467,10 +467,19 @@ test('EXPIRADO não é falta de spread, e a limitação dominante diz isso', () 
 test('o funil separa DESCOBERTA de ESTADO AVALIADO na própria frase', () => {
     const f = funilVazio();
     f.blocosVarridosParaDescoberta = 250;
-    f.estadosAvaliados = 5;
+    f.amostrasLidas = 12;
+    f.estadosDistintos = 5;
+    f.estadosComRotaAfetada = 2;
+    f.sinaisCotados = 1;
     const frase = comoLerOFunilMisto(f);
     assert.match(frase, /250 bloco\(s\) varridos para DESCOBERTA/);
-    assert.match(frase, /5 ESTADO\(S\) distinto\(s\) avaliado\(s\)/,
+    // AS QUATRO PERGUNTAS, separadas: ela apontou que `estadosAvaliados` era
+    // incrementado antes do descarte por impressao repetida, entao contava
+    // amostra como estado distinto.
+    assert.match(frase, /12 amostra\(s\) lida\(s\)/);
+    assert.match(frase, /5 ESTADO\(S\) DISTINTO\(S\)/);
+    assert.match(frase, /2 com pool de rota alterado/);
+    assert.match(frase, /1 sinal\(is\) COTADO\(S\)/,
         '250 blocos observados não são 250 estados avaliados: o `hardhat_reset` acontecia uma '
         + 'vez e tudo era cotado no mesmo estado');
 });
@@ -499,7 +508,7 @@ test('pool STABLE não é descartado, e não é contado como falta de dado', () 
 
 test('o funil separa ESTADO_INCONSISTENTE de expiração e de falta de spread', () => {
     const f = funilVazio();
-    f.estadosAvaliados = 1;
+    f.estadosDistintos = 1;
     f.rotasDistintas = 4;
     f.cotacoesTentadas = 2;
     f.estadosInconsistentes = 2;

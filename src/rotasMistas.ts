@@ -177,7 +177,21 @@ export interface FunilMisto {
      * conta para a economia e `estadosAvaliados`.
      */
     blocosVarridosParaDescoberta: number;
-    /** Estados DISTINTOS em que as rotas foram cotadas. */
+    /**
+     * Amostras de estado LIDAS — inclui as que repetem o estado anterior.
+     *
+     * DEFEITO QUE ELA ACHOU: `estadosAvaliados` era incrementado ANTES do
+     * descarte por impressao repetida, entao ele contava amostra, nao estado
+     * distinto. Quatro perguntas diferentes viravam um numero so.
+     */
+    amostrasLidas: number;
+    /** Estados DISTINTOS (impressao nova). */
+    estadosDistintos: number;
+    /** Estados distintos em que algum pool DE UMA ROTA mudou. */
+    estadosComRotaAfetada: number;
+    /** Sinais que de fato foram cotados (um `eth_call` que foi e voltou). */
+    sinaisCotados: number;
+    /** @deprecated use `estadosDistintos`. Mantido para o funil antigo. */
     estadosAvaliados: number;
     poolsVistos: { v3: number; aerodrome: number };
     /** Rotas DISTINTAS (par + direcao), nao pools. */
@@ -237,6 +251,10 @@ export interface FunilMisto {
 
 export const funilVazio = (): FunilMisto => ({
     blocosVarridosParaDescoberta: 0,
+    amostrasLidas: 0,
+    estadosDistintos: 0,
+    estadosComRotaAfetada: 0,
+    sinaisCotados: 0,
     estadosAvaliados: 0,
     poolsVistos: { v3: 0, aerodrome: 0 },
     rotasDistintas: 0,
@@ -269,7 +287,7 @@ export const funilVazio = (): FunilMisto => ({
  * e sem sobra bruta nao se fala de latencia.
  */
 export function limitacaoDominante(f: FunilMisto): string {
-    if (f.estadosAvaliados === 0) {
+    if (f.estadosDistintos === 0) {
         return 'NADA AVALIADO: nenhum estado distinto foi cotado. Varrer blocos para descobrir '
             + 'pool não é avaliar estado, e sem estado avaliado não há conclusão econômica';
     }
@@ -317,7 +335,9 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         .map(([k, n]) => `${n}x ${k}`)
         .join(', ');
     return `FUNIL MISTO — ${f.blocosVarridosParaDescoberta} bloco(s) varridos para DESCOBERTA`
-        + ` e ${f.estadosAvaliados} ESTADO(S) distinto(s) avaliado(s) | pools `
+        + ` | ${f.amostrasLidas} amostra(s) lida(s), ${f.estadosDistintos} ESTADO(S) DISTINTO(S), `
+        + `${f.estadosComRotaAfetada} com pool de rota alterado, `
+        + `${f.sinaisCotados} sinal(is) COTADO(S) | pools `
         + `${f.poolsVistos.v3} V3 + ${f.poolsVistos.aerodrome} Aerodrome | `
         + `${f.rotasDistintas} ROTA(S) DISTINTA(S) (par + direção, não pools) | `
         + `${f.rotasTriadas} TRIADA(S) (passaram o filtro; triada não é cotada) | `
@@ -571,6 +591,14 @@ export interface LeiturasDoEstado {
      * de outro."* Ausente = nao li, e sem isso nao se dimensiona nada.
      */
     saldoDaBaseNoV3?: Map<string, bigint | null>;
+    /**
+     * A LIQUIDEZ ATIVA de cada pool V3.
+     *
+     * Ela existe porque `sqrtPriceX96` sozinho nao detecta mudanca de liquidez,
+     * e liquidez mudada muda o resultado de um swap no MESMO preco. Ausente =
+     * nao li, e nao li nao autoriza afirmar que o estado e o mesmo.
+     */
+    liquidezDoV3?: Map<string, bigint | null>;
 }
 
 export interface Triagem {

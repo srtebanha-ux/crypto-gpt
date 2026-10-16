@@ -39,17 +39,37 @@ concluída. Não é histórico de conversa. Atualize em vez de acrescentar.
   mistas reais usam V3 de outra fábrica (medido em 15 blocos: zero rotas mistas
   com pool V3 canônico).
 
+## O QUE OS VENCEDORES USAM — medido de `.tmp/reconciliado.json` (40 ops) e da corrente
+
+| Pergunta | Resposta medida |
+| --- | --- |
+| A) lucrativas comprovadas (líquido reconciliado > 0) | **7** de 40; 5 delas envolvem Aerodrome+V3 |
+| hashes conferidos na corrente | **7 de 7 têm recibo** (nenhum inventado) |
+| pools distintos das 7 lucrativas | 8 — **7 concentrados + 1 Aerodrome** |
+| fábricas concentradas entre eles | **4**: `0x33128a8f`, `0xade65c38`, `0x5e7bb104`, `0x38015d05` |
+| B/C) rotas que `candidatasMistas` forma com os pools DOS vencedores | **2** (ela só pareia Aerodrome com V3) |
+| C) V3+Aerodrome com 2–4 trocas (forma do executor) | 15 de 40 |
+| D) dependência de estado intrabloco | **LACUNA**: `reconciliado.json` não guarda o estado anterior, e o nó público não é arquivo nessa profundidade. Não respondível com o que está armazenado |
+| E) não reproduzíveis | 33 de 40 ficaram sem líquido reconciliável (`liquidoReconciliado: null`) |
+
+Universo ao vivo, 40 blocos: 48 pools concentrados com WETH em **6 fábricas**,
+8 Aerodrome. Pares no mesmo token: **47 concentrado↔concentrado** (41 cruzando
+fábrica) contra **13 Aerodrome+concentrado**. A ampliação abriria ~94 rotas.
+
 ## Problema atual
 
-Nenhuma oportunidade com sobra bruta positiva em 300 estados distintos
-(18,1 min, 274 cotações). **VANTAGEM ECONÔMICA NÃO COMPROVADA.**
+O gerador de rotas é o gargalo, não o mercado: `candidatasMistas` SÓ pareia um
+pool Aerodrome com um pool V3. Os vencedores usam majoritariamente
+concentrado↔concentrado entre fábricas diferentes — forma que o **executor já
+suporta** (duas pernas `tipo 0`, validada ao wei por override:
+9.939.992.138.238.505) e que o gerador nunca emite.
 
 ## Próxima ação objetiva
 
-Decidir sobre o universo, não sobre a infraestrutura: as rotas mistas
-V3+Aerodrome observadas (32 distintas) não mostraram spread. Antes de mais
-engenharia, medir se existe spread em alguma janela de mercado agitado — ou
-recomendar abandonar este par de protocolos.
+UMA: emitir pares concentrado↔concentrado em `candidatasMistas` (mesma função,
+mesmo executor, mesmo filtro — a razão das duas pernas já sai de
+`razaoMaximaV3`). Ampliação limitada: ~94 rotas contra ~26 hoje, com evidência
+dos vencedores. Não exige contrato novo.
 
 ## Limites conhecidos do ambiente
 

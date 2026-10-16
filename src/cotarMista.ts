@@ -428,3 +428,60 @@ export function lerCodigoDoCotador(caminho?: string): string | null {
         return b;
     } catch { return null; }
 }
+
+/**
+ * UMA COTACAO NEGATIVA NO MENOR TAMANHO DESCARTA OS MAIORES?
+ *
+ * SO quando as duas pernas tem a monotonicidade DEMONSTRADA. Ela cortou o atalho
+ * por nome: *"Comprove quando uma cotacao negativa nesse tamanho permite
+ * descartar tamanhos superiores. Nao aplique essa conclusao a pools stable,
+ * tokens nao convencionais ou curvas sem prova da propriedade utilizada."*
+ *
+ * A DEMONSTRACAO, e ela vale para as duas pernas que sabemos nomear:
+ *
+ *   Aerodrome VOLATILE (`x·y = k`): `saida(x)/x = rSai·x'/(x·(rEntra+x'))` com
+ *   `x' = x(1−taxa)`. O denominador cresce com x e o numerador e linear em x',
+ *   entao a razao e NAO-CRESCENTE em x. Medido: 0,99700 em 1e12, 0,99601 em
+ *   1e18, 0,90661 em 1e20.
+ *
+ *   V3: um swap anda o preco numa direcao so. O preco marginal de execucao
+ *   piora monotonicamente com o tamanho — cruzar tick com mais liquidez reduz o
+ *   quanto piora, nunca melhora o preco ja atravessado. Entao a razao media
+ *   tambem e nao-crescente.
+ *
+ * Com as duas nao-crescentes, o produto e nao-crescente, e razao <= 1 no menor
+ * tamanho implica <= 1 em todos os maiores. FORA DISSO — pool stable
+ * (`x³y + y³x = k`, sem esta demonstracao aqui), token de comportamento nao
+ * convencional (taxa na transferencia, rebase) ou venue que nao sabemos nomear
+ * — a escada tem de ser cotada tamanho por tamanho.
+ */
+export function podeDescartarTamanhosMaiores(e: {
+    /** `false` = volatile COMPROVADO. `true` ou `null` nao serve. */
+    aeroEstavel: boolean | null;
+    /** Alguma perna tem retencao medida (token nao convencional)? */
+    tokenNaoConvencional: boolean;
+}): { pode: boolean; porque: string } {
+    if (e.tokenNaoConvencional) {
+        return {
+            pode: false,
+            porque: 'alguma perna tem retenção medida (token não convencional): a saída não é '
+                + 'função só da curva, então a monotonicidade não está demonstrada',
+        };
+    }
+    if (e.aeroEstavel !== false) {
+        return {
+            pode: false,
+            porque: e.aeroEstavel === null
+                ? 'não li `stable()` do pool Aerodrome: sem saber a curva não há monotonicidade '
+                    + 'demonstrada, e a escada tem de ser cotada tamanho por tamanho'
+                : 'pool Aerodrome STABLE (`x³y + y³x = k`): a monotonicidade não está demonstrada '
+                    + 'para esta curva aqui, então um tamanho não decide os outros',
+        };
+    }
+    return {
+        pode: true,
+        porque: 'as duas pernas têm razão saída/entrada NÃO-CRESCENTE demonstrada (Aerodrome '
+            + 'volatile por `x·y = k`; V3 porque o preço marginal só piora com o tamanho), então '
+            + 'o produto é não-crescente e razão <= 1 no menor tamanho vale para todos os maiores',
+    };
+}

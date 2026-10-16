@@ -46,7 +46,8 @@ import {
 } from './rotasMistas';
 import {
     QUOTER_V2, SELETORES_DA_COTACAO, quoterServeOPool, codificarQuoteV3, codificarGetAmountOut,
-    primeiraPalavra, escadaDeTamanhos, LivroDeSinais, EstadoDosPools,
+    primeiraPalavra, escadaDeTamanhos, podeDescartarTamanhosMaiores,
+    LivroDeSinais, EstadoDosPools,
     COTADOR_LOCAL, codificarCotarCiclo, lerRespostaDaCotacao, lerCodigoDoCotador,
     impressaoDoEstado, estadoInconsistente,
     type SinalDeArbitragem,
@@ -174,6 +175,15 @@ const SELETORES = {
     estavel: sel('stable()'),
     /** O `fee` do pool V3, que o QuoterV2 exige. Lido do pool, nunca suposto. */
     fee: sel('fee()'),
+    /**
+     * A LIQUIDEZ ATIVA do pool V3.
+     *
+     * Ela entra na impressao do estado porque `sqrtPriceX96` sozinho NAO
+     * detecta mudanca de liquidez — e liquidez mudada muda o resultado de um
+     * swap no mesmo preco. Sem esta leitura nao se pode afirmar que nada
+     * mudou, e a rota fica NAO VALIDADA.
+     */
+    liquidity: sel('liquidity()'),
 };
 
 /**
@@ -209,6 +219,7 @@ export async function lerEstadoMisto(
             alvo: WETH_DA_BASE,
             dados: SELETORES_DA_COTACAO.balanceOf + q.replace('0x', '').padStart(64, '0'),
         })),
+        ...v3.map((q) => ({ alvo: q, dados: SELETORES.liquidity })),
     ];
     const r = pedidos.length === 0 ? [] : await lerEmLote(chamar, pedidos, etiqueta);
     const sqrtPorPoolV3 = new Map<string, bigint | null>();
@@ -244,7 +255,15 @@ export async function lerEstadoMisto(
         const bom = resp !== undefined && resp.ok && resp.dados.length >= 66;
         saldoDaBaseNoV3.set(v3[i]!, bom ? BigInt(resp.dados.slice(0, 66)) : null);
     }
-    return { sqrtPorPoolV3, token0PorPool, reservasAerodrome, bloco, saldoDaBaseNoV3 };
+    const liquidezDoV3 = new Map<string, bigint | null>();
+    for (let i = 0; i < v3.length; i += 1) {
+        const resp = r[v3.length + aero.length + v3.length + i];
+        const bom = resp !== undefined && resp.ok && resp.dados.length >= 66;
+        liquidezDoV3.set(v3[i]!, bom ? BigInt(resp.dados.slice(0, 66)) : null);
+    }
+    return {
+        sqrtPorPoolV3, token0PorPool, reservasAerodrome, bloco, saldoDaBaseNoV3, liquidezDoV3,
+    };
 }
 
 /**
@@ -323,7 +342,9 @@ export async function cotarAfetadas(
     }
 
     // O TAMANHO sai da LIQUIDEZ do pool que empresta, nunca de numero meu.
-    const comTamanho: Array<{ c: CandidataMista; quantia: bigint }> = [];
+    const comTamanho: Array<{
+        c: CandidataMista; quantia: bigint; porqueEsteTamanho: string;
+    }> = [];
     for (const c of afetadas) {
         // A CAPACIDADE DE EMPRESTIMO E DO POOL QUE EMPRESTA.
         //
@@ -345,6 +366,16 @@ export async function cotarAfetadas(
             rBase = L.saldoDaBaseNoV3?.get(c.poolV3.toLowerCase()) ?? null;
         }
         const escada = rBase === null ? [] : escadaDeTamanhos(rBase);
+        // QUANTOS TAMANHOS COTAR. Com a monotonicidade demonstrada, o menor
+        // decide todos. Sem ela — pool stable, token nao convencional — a
+        // escada e cotada tamanho por tamanho, ate o teto de `ARB_TAMANHOS`.
+        const corte = podeDescartarTamanhosMaiores({
+            aeroEstavel: c.aeroEstavel,
+            tokenNaoConvencional: false,
+        });
+        const quantosTamanhos = corte.pode
+            ? 1
+            : Math.min(escada.length, Math.max(1, Number(process.env.ARB_TAMANHOS ?? 3)));
         const quantia = escada[0];
         if (quantia === undefined) {
             fora.push(sinal(
@@ -355,7 +386,11 @@ export async function cotarAfetadas(
             ));
             continue;
         }
-        comTamanho.push({ c, quantia });
+        for (let k = 0; k < quantosTamanhos; k += 1) {
+            const q = escada[k];
+            if (q === undefined) break;
+            comTamanho.push({ c, quantia: q, porqueEsteTamanho: corte.porque });
+        }
     }
     if (comTamanho.length === 0) return fora;
 
@@ -418,8 +453,11 @@ export async function cotarAfetadas(
             c, quantia,
             lido.sobra <= 0n
                 ? `SEM SPREAD neste estado: o ciclo produziu ${lido.produziu} contra `
-                    + `${quantia} que entraram (sobra ${lido.sobra}). A razão cai com o tamanho, `
-                    + 'então nenhum tamanho maior fecha'
+                    + `${quantia} que entraram (sobra ${lido.sobra}). `
+                    + (comTamanho[i]!.porqueEsteTamanho.startsWith('as duas pernas')
+                        ? 'Nenhum tamanho maior fecha: '
+                        : 'Isto vale para ESTE tamanho — ')
+                    + comTamanho[i]!.porqueEsteTamanho
                 : `SOBRA BRUTA ${lido.sobra} wei — ${j.veredicto}`,
             lido.sobra,
             custo.totalWei,
@@ -1539,18 +1577,22 @@ async function principal(): Promise<void> {
             const L = await lerEstadoMisto(chamar, MISTAS, blocoDaAmostra, etiqueta);
             const tri = triarCandidatas(MISTAS, WETH_DA_BASE, L);
             fimTri();
-            FM.estadosAvaliados += 1;
-            FM.rotasTriadas += tri.valem.length;
-            FM.faltaDeDados += tri.semDados;
-            FM.semProvaMatematica += tri.semProvaDoInvariante;
-            FM.faltaDeSpread += tri.recusadasPorSpread.length;
-            FUNIL.estados.DESCARTADA += tri.recusadasPorSpread.length;
+            // AMOSTRA LIDA sempre; o resto so depois de saber se o estado e
+            // novo. Contar triagem de um estado repetido inflaria a amostra.
+            FM.amostrasLidas += 1;
 
             // SO AS ROTAS AFETADAS POR MUDANCA DE ESTADO. Um pool cujo `slot0`
             // ou cujas reservas nao mudaram nao produz rota nova, e recotar o
             // mesmo estado e gastar RPC para repetir a resposta de antes.
             const cru = new Map<string, string | null>();
-            for (const [pool, v] of L.sqrtPorPoolV3) cru.set(pool, v === null ? null : `v3:${v}`);
+            for (const [pool, v] of L.sqrtPorPoolV3) {
+                // PRECO **E** LIQUIDEZ. Com so o preco, uma mudanca de
+                // liquidez no mesmo tick lia como "nada mudou" — e ela muda o
+                // resultado do swap. Liquidez nao lida vira `null`, e `null`
+                // nao afirma que nada mudou: deixa a rota NAO VALIDADA.
+                const liq = L.liquidezDoV3?.get(pool) ?? null;
+                cru.set(pool, v === null || liq === null ? null : `v3:${v}/L${liq}`);
+            }
             for (const [pool, v] of L.reservasAerodrome) {
                 cru.set(pool, v === null ? null : `ae:${v.r0}/${v.r1}`);
             }
@@ -1564,6 +1606,13 @@ async function principal(): Promise<void> {
             }
             if (blocoDaAmostra === blocoDaTriagem) INTRABLOCO.detectadas += 1;
             ULTIMA_IMPRESSAO.valor = impressao;
+            FM.estadosDistintos += 1;
+            FM.estadosAvaliados = FM.estadosDistintos;
+            FM.rotasTriadas += tri.valem.length;
+            FM.faltaDeDados += tri.semDados;
+            FM.semProvaMatematica += tri.semProvaDoInvariante;
+            FM.faltaDeSpread += tri.recusadasPorSpread.length;
+            FUNIL.estados.DESCARTADA += tri.recusadasPorSpread.length;
             const poolsQueMudaram = new Set(ESTADOS_DOS_POOLS.mudaram(cru));
             const afetadas = tri.valem.filter(
                 (c) => (poolsQueMudaram.has(c.poolV3.toLowerCase())
@@ -1577,6 +1626,7 @@ async function principal(): Promise<void> {
             let cotadasAgora = 0;
             let brutosPositivos = 0;
             if (afetadas.length > 0) {
+                FM.estadosComRotaAfetada += 1;
                 const fimCot = av.etapa('cotacao');
                 const tc = Date.now();
                 const sinais = await cotarAfetadas(
@@ -1613,6 +1663,9 @@ async function principal(): Promise<void> {
                 }
                 cotadasAgora = sinais.length;
                 FM.cotacoesTentadas += sinais.length;
+                FM.sinaisCotados += sinais.filter(
+                    (sn) => sn.lucroBrutoEstimado !== null,
+                ).length;
                 for (const sn of sinais) {
                     LIVRO_DE_SINAIS.registrar(sn);
                     if (sn.motivo.startsWith('ESTADO_INCONSISTENTE')) continue;

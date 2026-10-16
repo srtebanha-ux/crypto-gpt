@@ -8,7 +8,7 @@ import {
     escadaDeTamanhos, percentis, LivroDeSinais, EstadoDosPools, type SinalDeArbitragem,
     codificarCotarCiclo, lerRespostaDaCotacao, lerCodigoDoCotador,
     SELETOR_LUCRO_INSUFICIENTE, SELETOR_PAGAMENTO_CURTO, COTADOR_LOCAL,
-    impressaoDoEstado, estadoInconsistente,
+    impressaoDoEstado, estadoInconsistente, podeDescartarTamanhosMaiores,
 } from './cotarMista';
 
 const WETH = '0x4200000000000000000000000000000000000006';
@@ -262,4 +262,44 @@ test('ESTADO_INCONSISTENTE olha só os pools DA ROTA', () => {
     // Pool que não foi relido NÃO afirma mudança.
     assert.equal(estadoInconsistente(antes, new Map(), ['pv3', 'paero']), false,
         'não reli não é "mudou": inventar mudança descartaria oportunidade real');
+});
+
+// --- OS TRÊS PONTOS QUE ELA APONTOU EM 4d2c2b3 ------------------------------
+
+test('o descarte de tamanhos maiores exige monotonicidade DEMONSTRADA', () => {
+    const volatile = podeDescartarTamanhosMaiores({
+        aeroEstavel: false, tokenNaoConvencional: false,
+    });
+    assert.equal(volatile.pode, true);
+    assert.match(volatile.porque, /NÃO-CRESCENTE/);
+
+    // STABLE: `x³y + y³x = k` não tem a demonstração aqui.
+    assert.equal(podeDescartarTamanhosMaiores({
+        aeroEstavel: true, tokenNaoConvencional: false,
+    }).pode, false, 'descartar tamanhos num pool stable aplica uma propriedade não demonstrada '
+        + 'para a curva dele — e descartar por matemática não provada já custou um falso negativo '
+        + 'de +0,0442 WETH neste projeto');
+
+    // `stable()` não lido: ausência não autoriza o atalho.
+    assert.equal(podeDescartarTamanhosMaiores({
+        aeroEstavel: null, tokenNaoConvencional: false,
+    }).pode, false);
+
+    // Token não convencional: a saída não é função só da curva.
+    assert.equal(podeDescartarTamanhosMaiores({
+        aeroEstavel: false, tokenNaoConvencional: true,
+    }).pode, false);
+});
+
+test('o fingerprint do V3 muda quando só a LIQUIDEZ muda', () => {
+    // MESMO preço, liquidez diferente: o resultado de um swap muda, então o
+    // estado é outro. Com só `sqrtPriceX96` na impressão, isto lia como "nada
+    // mudou" — e a cotação velha seria reaproveitada.
+    const soPreco = impressaoDoEstado(new Map([['p', 'v3:1000']]));
+    const comL1 = impressaoDoEstado(new Map([['p', 'v3:1000/L500']]));
+    const comL2 = impressaoDoEstado(new Map([['p', 'v3:1000/L900']]));
+    assert.notEqual(comL1, comL2, 'preço igual e liquidez diferente são estados diferentes');
+    assert.notEqual(soPreco, comL1);
+    // Liquidez não lida vira ausência, e ausência não afirma "não mudou".
+    assert.notEqual(impressaoDoEstado(new Map([['p', null]])), comL1);
 });
