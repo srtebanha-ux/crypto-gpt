@@ -30,7 +30,7 @@ import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './re
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
 import {
-    prepararOfertaMulti, revalidarOfertaMulti, poolsDaConfiguracao,
+    prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE,
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
 } from './titanPonteMultiHop';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
@@ -6270,7 +6270,7 @@ async function principal(): Promise<'parar' | void> {
                     && precoDoEth() && baseFeeAtual && baseFeeAtual > 0n) {
                     try {
                         const contratoMulti = process.env.CACA_MULTIHOP_CONTRATO ?? '';
-                        const fabrica = process.env.CACA_MULTIHOP_FACTORY ?? '';
+                        const fabrica = FABRICA_V3_BASE;
                         const reserva = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
                         const gasMax = BigInt(process.env.CACA_MULTIHOP_GAS_MAX ?? '1500000');
                         ofertaMulti = await prepararOfertaMulti(leitor, {
@@ -6286,7 +6286,7 @@ async function principal(): Promise<'parar' | void> {
                             cofre: COFRE_ESPERADO,
                             aave: REDE.pool,
                             fabricaV3: fabrica,
-                            pools: poolsDaConfiguracao(process.env.CACA_MULTIHOP_POOLS_JSON),
+                            pools: poolsDoCaca(process.env.CACA_MULTIHOP_POOLS_JSON),
                             maxFeePerGas: 3n * baseFeeAtual + 20_000_000n,
                             reservaL1Wei: reserva,
                             gasMax,
@@ -6297,8 +6297,9 @@ async function principal(): Promise<'parar' | void> {
                             // ESPECIFICA da nova ABI, sem autoativacao apos deploy.
                             const liberar = ENVIAR
                                 && process.env.CACA_MULTIHOP_ENVIAR === '1'
-                                && process.env.CACA_MULTIHOP_CONFIRMAR === 'OPERAR_BASE_REAL'
-                                && process.env.CACA_MULTIHOP_NONCE_EXCLUSIVO === '1';
+                                && process.env.CACA_MULTIHOP_CONFIRMAR === 'OPERAR_BASE_REAL';
+                            // Mesma carteira e mesmo LocalNonceManager do CACA.
+                            // NAO criar segundo processo de assinatura ou concorrente de nonce.
                             log.info('[MULTIHOP] Plano simulado contra contrato real.', {
                                 devedor:alvo.devedor, bloco:ofertaMulti.bloco,
                                 saltos:ofertaMulti.rota.pernas.length,
