@@ -24,6 +24,8 @@ const ambiente = (): NodeJS.ProcessEnv => ({
     TITAN_CONTRATO: END_A, TITAN_CHAVE_PRIVADA: 'TEST_KEY_NAO_UTILIZADA_PELA_VALIDACAO',
     TITAN_COFRE: END_B, TITAN_MIN_LUCRO_WEI: '1000000000000',
     TITAN_ORCAMENTO_GAS_WEI: '100000000000000',
+    TITAN_OPERAR_ATE_UTC: new Date(Date.now() + 60_000).toISOString(),
+    TITAN_MARCADOR_ENVIO: '/app/data/titan-teste-puro-sem-envio.json',
 });
 
 test('envio e desligado por padrao', () => {
@@ -57,4 +59,17 @@ test('sem contrato nem chave nem cofre nao opera', () => {
 });
 test('plano corretamente habilitado passa prevalidacao pura', () => {
     assert.equal(motivoDaRecusaTitan(plano(), ambiente()), null);
+});
+
+test('autorizacao expirada nunca envia', () => {
+    const e = ambiente(); e.TITAN_OPERAR_ATE_UTC = '2020-01-01T00:00:00.000Z';
+    assert.match(motivoDaRecusaTitan(plano(), e)!, /expirada/);
+});
+test('sem trava persistente nao envia', () => {
+    const e = ambiente(); delete e.TITAN_MARCADOR_ENVIO;
+    assert.match(motivoDaRecusaTitan(plano(), e)!, /trava/);
+});
+test('janela acima de 24h nao aceita', () => {
+    const e = ambiente(); e.TITAN_OPERAR_ATE_UTC = new Date(Date.now()+30*86400_000).toISOString();
+    assert.match(motivoDaRecusaTitan(plano(), e)!, /expirada/);
 });
