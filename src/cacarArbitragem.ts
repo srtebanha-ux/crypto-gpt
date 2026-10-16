@@ -308,15 +308,16 @@ export async function lerEstadoMisto(
  * A COTACAO DE UM CICLO MISTO, para todas as rotas afetadas, em DUAS idas e
  * voltas — e sem fork nenhum.
  *
- * As duas pernas sao sequenciais por natureza (a segunda consome o que a
- * primeira devolveu), mas as ROTAS sao independentes: entao a perna 1 de todas
- * vai num multicall e a perna 2 de todas no seguinte. O custo de N rotas e
- * DUAS requisicoes, nao 2N.
+ * Uma RODADA por degrau da escada, cada rodada num lote JSON-RPC com as rotas
+ * que ainda interessam. O custo de N rotas e UM lote por degrau avaliado, nao
+ * N requisicoes — e a rota que fecha negativo com monotonicidade demonstrada
+ * sai da busca no primeiro degrau.
  *
- * O tamanho e o MENOR da escada, de proposito: a razao `saida/entrada` e maxima
- * no tamanho infinitesimal e so cai, entao se o menor nao tem sobra bruta
- * nenhum maior tem. Subir a escada so faz sentido quando o menor mostra sobra —
- * e e ai que o lucro LIQUIDO passa a precisar de tamanho para cobrir o gas.
+ * A BUSCA COMECA no menor tamanho porque a razao `saida/entrada` e maxima no
+ * tamanho infinitesimal e so cai: se o menor nao tem sobra bruta, nenhum maior
+ * tem — e SO nesse caso a busca para ali. Com sobra POSITIVA ela SOBE, porque o
+ * lucro LIQUIDO precisa de tamanho para cobrir o gas. Parar com sobra positiva
+ * era o defeito que ela apontou.
  */
 export type TransporteEmLote = (
     pedidos: Array<{ metodo: string; params: unknown[] }>,
@@ -390,7 +391,15 @@ export async function cotarAfetadas(
         podeParar: boolean;
         porque: string;
         /** O melhor LIQUIDO entre os tamanhos JA avaliados. */
-        melhor: { quantia: bigint; sobra: bigint; custo: bigint | null; liquido: bigint } | null;
+        melhor: {
+            quantia: bigint;
+            /** O que o cotador DISSE que o ciclo produziu. Nao reconstruido. */
+            produziu: bigint;
+            sobra: bigint;
+            custo: bigint | null;
+            /** `null` quando o custo e desconhecido: sem custo nao ha liquido. */
+            liquido: bigint | null;
+        } | null;
         /** Quantos degraus foram de fato cotados. */
         avaliados: number;
     }
@@ -426,6 +435,7 @@ export async function cotarAfetadas(
         const corte = podeDescartarTamanhosMaiores({
             aeroEstavel: aeroDaRota === undefined ? false : (aeroDaRota.estavel ?? null),
             tokenNaoConvencional: false,
+            temAerodrome: aeroDaRota !== undefined,
         });
         emBusca.push({
             c, escada, idx: 0, podeParar: corte.pode, porque: corte.porque,
@@ -467,7 +477,26 @@ export async function cotarAfetadas(
     //
     // E O QUE ISTO NAO E: nao e otimo global. E o melhor liquido entre os
     // tamanhos EFETIVAMENTE AVALIADOS, e a frase do sinal diz isso.
-    const tetoDeDegraus = Math.max(1, Number(process.env.ARB_TAMANHOS ?? 4));
+    // `ARB_TAMANHOS` TORTO NAO VIRA ZERO RODADA.
+    //
+    // `Math.max(1, Number('auto'))` e `NaN`, e `0 < NaN` e falso: o laco nao
+    // rodava nenhuma vez e TODA rota saia como "SEM COTAÇÃO legivel", contada
+    // como falta de instrumento — sem uma unica chamada de RPC. Falta de spread
+    // publicada como falta de cotador, que e a assinatura de defeito deste
+    // projeto. Valor torto cai no padrao e DIZ que caiu.
+    const cru = process.env.ARB_TAMANHOS;
+    const pedido = cru === undefined ? 4 : Number(cru);
+    const tetoDeDegraus = Number.isFinite(pedido) && pedido >= 1
+        ? Math.floor(pedido)
+        : 4;
+    if (cru !== undefined && tetoDeDegraus !== Number(cru)) {
+        log.warn('[ARB-N] ARB_TAMANHOS inválido: uso o padrão.', {
+            recebido: cru,
+            usando: tetoDeDegraus,
+            porque: 'um valor não numérico viraria NaN e zeraria a busca — nenhuma cotação '
+                + 'aconteceria e o funil diria "sem cotador" sem ter tentado',
+        });
+    }
     const opacas = new Map<string, string>();
     for (let rodada = 0; rodada < tetoDeDegraus; rodada += 1) {
         const nesta = emBusca.filter((e) => e.idx < e.escada.length && e.idx <= rodada);
@@ -513,9 +542,23 @@ export async function cotarAfetadas(
                 continue;
             }
             e.avaliados += 1;
-            const liquido = custo.totalWei === null ? lido.sobra : lido.sobra - custo.totalWei;
-            if (e.melhor === null || liquido > e.melhor.liquido) {
-                e.melhor = { quantia, sobra: lido.sobra, custo: custo.totalWei, liquido };
+            // SEM CUSTO CONHECIDO NAO EXISTE LIQUIDO.
+            //
+            // A versao anterior fazia `liquido = sobra` quando o custo era
+            // `null` (falha do oraculo L1), e a frase do sinal imprimia
+            // "LIQUIDO <bruto>" — subestimando o custo em 100% na linha que o
+            // operador le. Agora o liquido fica `null` e o ranking cai para a
+            // sobra BRUTA, dizendo que e isso que esta ordenando.
+            const liquido = custo.totalWei === null ? null : lido.sobra - custo.totalWei;
+            const melhorQueOAtual = e.melhor === null
+                || (liquido !== null && e.melhor.liquido !== null
+                    ? liquido > e.melhor.liquido
+                    : lido.sobra > e.melhor.sobra);
+            if (melhorQueOAtual) {
+                e.melhor = {
+                    quantia, produziu: lido.produziu, sobra: lido.sobra,
+                    custo: custo.totalWei, liquido,
+                };
             }
             // PARA quando a sobra bruta nao e positiva E a monotonicidade das
             // duas pernas esta demonstrada: ai nenhum tamanho maior fecha.
@@ -539,16 +582,21 @@ export async function cotarAfetadas(
         fora.push(sinal(
             e.c, m.quantia,
             m.sobra <= 0n
-                ? `SEM SPREAD neste estado: o ciclo produziu ${m.sobra + m.quantia} contra `
+                ? `SEM SPREAD neste estado: o ciclo produziu ${m.produziu} contra `
                     + `${m.quantia} que entraram (sobra ${m.sobra}). `
                     + (e.podeParar
                         ? `Nenhum tamanho maior fecha: ${e.porque}`
                         : `Isto vale para os tamanhos avaliados — ${e.porque}`)
                     + ` [${comoFoi}]`
-                : `SOBRA BRUTA ${m.sobra} wei, LÍQUIDO ${m.liquido} wei — `
-                    + `${julgar(m.sobra, custo).veredicto}. Melhor líquido entre os tamanhos `
-                    + `AVALIADOS (${comoFoi}), não ótimo global: a escada é discreta e a busca `
-                    + 'para no teto de degraus'
+                : `SOBRA BRUTA ${m.sobra} wei, `
+                    + (m.liquido === null
+                        ? 'LÍQUIDO NÃO CALCULÁVEL: o custo total é desconhecido '
+                            + `(falta ${custo.faltam.join(', ')}), então a escolha do tamanho foi `
+                            + 'pela sobra BRUTA e não há líquido para afirmar'
+                        : `LÍQUIDO ${m.liquido} wei — melhor líquido entre os tamanhos `
+                            + `AVALIADOS (${comoFoi}), não ótimo global: a escada é discreta e a `
+                            + 'busca para no teto de degraus')
+                    + ` — ${julgar(m.sobra, custo).veredicto}`
                 + (opaca === undefined ? '' : ` | um degrau ficou ilegível: ${opaca.slice(0, 40)}`),
             m.sobra,
             m.custo,
@@ -1596,8 +1644,16 @@ async function principal(): Promise<void> {
 
         const fimDecisao = av.etapa('decisao');
         const candidatos = montarCandidatos(pools).slice(0, tetoDeRotas);
-        // DO BASEFEE DO BLOCO, nao de `eth_gasPrice`: ver `precoDoGasWei`.
-        const gasWei = await precoDoGasWei(chamar);
+        // O BASEFEE PURO, lido UMA vez, e o preco por gas DERIVADO dele.
+        //
+        // Antes eu lia `precoDoGasWei` (base + gorjeta) e devolvia o baseFee
+        // por subtracao — `gasWei - GORJETA_SUPOSTA_WEI`. O auditor apontou que
+        // isso e ida-e-volta, nao separacao: `baseFeeDoBlocoWei` ficava sem
+        // nenhum chamador de producao, e se a fonte do preco mudar para
+        // `eth_gasPrice` (que embute gorjeta do provedor) a subtracao fica
+        // negativa e o custo ENCOLHE.
+        const baseFeeWei = await baseFeeDoBlocoWei(chamar);
+        const gasWei = baseFeeWei === null ? null : baseFeeWei + GORJETA_SUPOSTA_WEI;
         const agora = Date.now();
         if (gasWei === null) {
             log.warn('[ARB] NÃO decido neste ciclo: o baseFee do bloco não veio.', {
@@ -1722,9 +1778,9 @@ async function principal(): Promise<void> {
                 const tc = Date.now();
                 const sinais = await cotarAfetadas(
                     chamarEmLote, chamar, afetadas, L, etiqueta, blocoDaAmostra, t0,
-                    // O baseFee PURO: a gorjeta entra uma vez, dentro de
-                    // `somarCusto`. Passar `gasWei` aqui era a dupla contagem.
-                    gasWei === null ? null : gasWei - GORJETA_SUPOSTA_WEI,
+                    // O baseFee PURO, como foi lido. A gorjeta entra uma vez,
+                    // dentro de `somarCusto`.
+                    baseFeeWei,
                     CODIGO_DO_COTADOR,
                 );
                 LIVRO_DE_SINAIS.registrarCotacao(Date.now() - tc);

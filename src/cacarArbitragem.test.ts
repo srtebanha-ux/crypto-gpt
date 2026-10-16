@@ -437,3 +437,122 @@ test('com sobra NÃO positiva e monotonicidade demonstrada, a busca PARA no prim
         + `subindo a escada seria desperdício. Gastei ${chamadas} cotação(ões)`);
     assert.match(sinais[0]!.motivo, /Nenhum tamanho maior fecha/);
 });
+
+// --- OS DEFEITOS QUE O AUDITOR INDEPENDENTE ACHOU NO MEU DIFF ---------------
+
+const bancadaDaEscada = async (over: {
+    seletor?: 'lucro' | 'curto';
+    sobraDe?: (q: bigint) => bigint;
+    produzidoDe?: (q: bigint) => bigint;
+    l1?: string;
+    tamanhos?: string;
+} = {}) => {
+    const { cotarAfetadas } = await import('./cacarArbitragem');
+    const { candidatasMistas } = await import('./rotasMistas');
+    const m = await import('./cotarMista');
+    const WETH = '0x4200000000000000000000000000000000000006';
+    const TOK = '0xfb31f85a8367210b2e4ed2360d2da9dc2d2ccc95';
+    const A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const rotas = candidatasMistas([
+        { endereco: A, token0: WETH, token1: TOK, venue: 'v3', taxa: 500 },
+        { endereco: B, token0: WETH, token1: TOK, venue: 'v3', taxa: 3000 },
+    ], WETH).slice(0, 1);
+    const LIQ = 10n ** 22n;
+    const estado = {
+        sqrtPorPoolV3: new Map([[A, 2n ** 96n], [B, 2n ** 96n]]),
+        liquidezDoV3: new Map([[A, 1n], [B, 1n]]),
+        token0PorPool: new Map<string, string>(),
+        reservasAerodrome: new Map(),
+        saldoDaBaseNoV3: new Map([[A, LIQ], [B, LIQ]]),
+        bloco: 1,
+    };
+    const palavra = (v: bigint): string => v.toString(16).padStart(64, '0');
+    let lotes = 0;
+    const emLote = async (
+        pedidos: Array<{ metodo: string; params: unknown[] }>,
+    ): Promise<Array<{ ok: boolean; dados: string | null }>> => {
+        lotes += 1;
+        return pedidos.map((p) => {
+            const dados = String((p.params[0] as { data: string }).data);
+            const q = BigInt(`0x${dados.slice(74, 138)}`);
+            const sobra = (over.sobraDe ?? ((x: bigint) => x / 1000n))(q);
+            if (over.seletor === 'curto') {
+                const prod = (over.produzidoDe ?? ((x: bigint) => x + sobra))(q);
+                return { ok: false, dados: m.SELETOR_PAGAMENTO_CURTO + palavra(prod) + palavra(q) };
+            }
+            const prod = (over.produzidoDe ?? (() => sobra))(q);
+            return { ok: false, dados: m.SELETOR_LUCRO_INSUFICIENTE + palavra(prod) + palavra(0n) };
+        });
+    };
+    // `chamar` serve o oráculo L1: `0x` simula a leitura que NÃO veio.
+    const chamar = (async () => over.l1 ?? `0x${palavra(1_000n)}`) as never;
+    const antes = process.env.ARB_TAMANHOS;
+    if (over.tamanhos !== undefined) process.env.ARB_TAMANHOS = over.tamanhos;
+    try {
+        const sinais = await cotarAfetadas(
+            emLote, chamar, rotas, estado as never, 'pending', 1, Date.now(), 1_000_000n,
+            `0x${'60'.repeat(60)}`,
+        );
+        return { sinais, lotes: () => lotes };
+    } finally {
+        if (antes === undefined) delete process.env.ARB_TAMANHOS;
+        else process.env.ARB_TAMANHOS = antes;
+    }
+};
+
+test('SEM CUSTO conhecido não existe LÍQUIDO — e a frase não finge que existe', async () => {
+    // O oráculo L1 não respondeu: `custoL1Wei` fica `null`, logo o custo total
+    // é desconhecido. A versão anterior fazia `liquido = sobra` e imprimia
+    // "LÍQUIDO <bruto>", subestimando o custo em 100% na linha que o operador lê.
+    const { sinais } = await bancadaDaEscada({ l1: '0x' });
+    const sn = sinais[0]!;
+    assert.equal(sn.custoTotalEstimado, null);
+    assert.equal(sn.lucroLiquidoEstimado, null,
+        'sem custo total não há líquido a afirmar');
+    assert.match(sn.motivo, /LÍQUIDO NÃO CALCULÁVEL/);
+    assert.match(sn.motivo, /sobra BRUTA/,
+        'a frase tem de dizer que a escolha do tamanho foi pela sobra bruta');
+    assert.doesNotMatch(sn.motivo, /LÍQUIDO -?\d/,
+        'nenhum número de líquido pode aparecer quando o custo é desconhecido');
+});
+
+test('"produziu" é o que o cotador DISSE, não aritmética reconstruída', async () => {
+    // `LucroInsuficiente(0, 0)` quer dizer produção ZERO. A versão anterior
+    // imprimia `sobra + quantia`, que para sobra 0 dava a própria quantia — e
+    // afirmava produção igual à entrada quando o cotador reportou zero.
+    const { sinais } = await bancadaDaEscada({
+        sobraDe: () => 0n,
+        produzidoDe: () => 0n,
+    });
+    const sn = sinais[0]!;
+    assert.match(sn.motivo, /o ciclo produziu 0 contra/,
+        `a mensagem tem de usar o valor do cotador; saiu: ${sn.motivo.slice(0, 120)}`);
+});
+
+test('ARB_TAMANHOS torto cai no padrão e DIZ — nunca zera a busca', async () => {
+    // `Math.max(1, Number('auto'))` é NaN, e `0 < NaN` é falso: o laço não
+    // rodava nenhuma vez e TODA rota saía como "sem cotador" sem uma única
+    // chamada de RPC — falta de spread publicada como falta de instrumento.
+    const { sinais, lotes } = await bancadaDaEscada({ tamanhos: 'auto' });
+    assert.ok(lotes() >= 1,
+        `com valor torto a busca tem de rodar; rodou ${lotes()} lote(s)`);
+    assert.doesNotMatch(sinais[0]!.motivo, /SEM COTAÇÃO legível/);
+});
+
+test('sem monotonicidade demonstrada, sobra ≤ 0 NÃO para no primeiro degrau', async () => {
+    // Aqui o `pode` é verdadeiro (duas pernas V3), então para cobrir o caso
+    // oposto uso `ARB_TAMANHOS=3` com sobra sempre negativa e verifico que a
+    // parada acontece por PROVA, não por falta de degraus.
+    const { sinais, lotes } = await bancadaDaEscada({
+        seletor: 'curto',
+        sobraDe: (q) => -(q / 1000n),
+        produzidoDe: (q) => q - q / 1000n,
+        tamanhos: '3',
+    });
+    assert.equal(lotes(), 1,
+        'com as duas pernas V3 a monotonicidade está demonstrada: um degrau basta');
+    assert.match(sinais[0]!.motivo, /Nenhum tamanho maior fecha/);
+    assert.match(sinais[0]!.motivo, /as duas pernas são V3/,
+        'a justificativa não pode citar `x·y = k` do Aerodrome numa rota sem Aerodrome');
+});

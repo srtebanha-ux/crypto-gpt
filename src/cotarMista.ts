@@ -460,6 +460,8 @@ export function podeDescartarTamanhosMaiores(e: {
     aeroEstavel: boolean | null;
     /** Alguma perna tem retencao medida (token nao convencional)? */
     tokenNaoConvencional: boolean;
+    /** A rota TEM perna Aerodrome? Sem ela a justificativa e so do V3. */
+    temAerodrome?: boolean;
 }): { pode: boolean; porque: string } {
     if (e.tokenNaoConvencional) {
         return {
@@ -480,9 +482,18 @@ export function podeDescartarTamanhosMaiores(e: {
     }
     return {
         pode: true,
-        porque: 'as duas pernas têm razão saída/entrada NÃO-CRESCENTE demonstrada (Aerodrome '
-            + 'volatile por `x·y = k`; V3 porque o preço marginal só piora com o tamanho), então '
-            + 'o produto é não-crescente e razão <= 1 no menor tamanho vale para todos os maiores',
+        // A JUSTIFICATIVA SEGUE A ROTA. Numa rota V3<->V3 nao ha perna
+        // Aerodrome, e a frase anterior citava `x·y = k` do Aerodrome para uma
+        // rota que nao tem nenhum: a conclusao estava certa e o motivo
+        // impresso, falso.
+        porque: e.temAerodrome === false
+            ? 'as duas pernas são V3 e nelas a razão saída/entrada é NÃO-CRESCENTE: o preço '
+                + 'marginal de execução só piora com o tamanho, então o produto é não-crescente '
+                + 'e razão <= 1 no menor tamanho vale para todos os maiores'
+            : 'as duas pernas têm razão saída/entrada NÃO-CRESCENTE demonstrada (Aerodrome '
+                + 'volatile por `x·y = k`; V3 porque o preço marginal só piora com o tamanho), '
+                + 'então o produto é não-crescente e razão <= 1 no menor tamanho vale para todos '
+                + 'os maiores',
     };
 }
 
