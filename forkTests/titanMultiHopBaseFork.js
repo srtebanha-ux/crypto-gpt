@@ -116,13 +116,15 @@ describe('TITAN: Aave/Morpho/Uniswap Base FORK REAL (nenhuma tx na mainnet)',fun
          try{
            const prev=await contrato.liquidar.staticCall(ALVO,WETH,USDC,cobrir,1n,rota2);
            if(prev<=0n)continue;
+           const snapshotRota=await p.send('evm_snapshot',[]);
            const saldoAnterior=await call(USDC,ercABI,'balanceOf',[COFRE]);
            const rc=await (await contrato.liquidar(ALVO,WETH,USDC,cobrir,1n,rota2)).wait();
            assert.equal(rc.status,1);
            const saldoNovo=await call(USDC,ercABI,'balanceOf',[COFRE]);
            assert.equal(saldoNovo-saldoAnterior,prev);
            conseguiu={intermediario,fees:[f1,f2],pool1,pool2,
-             lucroUSDC6:prev.toString(),gasL2:rc.gasUsed.toString()};
+             lucroUSDC6:prev.toString(),gasL2:rc.gasUsed.toString(),
+             snapshotRota};
            break;
          }catch(err){
            // Uma rota sem retorno economico e simplesmente uma rota recusada.
@@ -131,6 +133,39 @@ describe('TITAN: Aave/Morpho/Uniswap Base FORK REAL (nenhuma tx na mainnet)',fun
      }
    }
    assert.ok(conseguiu,'nenhuma rota V3 2-hop liquidou o alvo real no fork; revisar pools');
-   console.log('MULTIHOP_2_SWAPS_BASE_FORK '+JSON.stringify(conseguiu));
+   console.log('MULTIHOP_2_SWAPS_BASE_FORK '+JSON.stringify({
+     intermediario:conseguiu.intermediario,fees:conseguiu.fees,
+     pool1:conseguiu.pool1,pool2:conseguiu.pool2,
+     lucroUSDC6:conseguiu.lucroUSDC6,gasL2:conseguiu.gasL2,
+   }));
+   // Integração do PLANEJADOR real com o contrato real do fork:
+   // voltar ao estado antes dos swaps, senão a divida já foi liquidada.
+   assert.equal(await p.send('evm_revert',[conseguiu.snapshotRota]),true);
+   require('ts-node/register');
+   const { Decimal }=require('decimal.js');
+   const { prepararOfertaMulti, revalidarOfertaMulti }=require('../src/titanPonteMultiHop');
+   const pools=[
+     {endereco:pool,token0:WETH,token1:USDC,protocolo:'v3',taxa:fee,permitida:true},
+     {endereco:conseguiu.pool1,token0:WETH,token1:conseguiu.intermediario,
+       protocolo:'v3',taxa:conseguiu.fees[0],permitida:true},
+     {endereco:conseguiu.pool2,token0:conseguiu.intermediario,token1:USDC,
+       protocolo:'v3',taxa:conseguiu.fees[1],permitida:true},
+   ];
+   const oferta=await prepararOfertaMulti(rpc,{
+     usuario:ALVO,garantia:WETH,divida:USDC,dividaCrua:1000n*10n**6n,
+     creditoMaximo:1000n*10n**6n,dividaUsd:new Decimal(1000),
+     ethUsd:new Decimal(2000),dono:await signer.getAddress(),
+     contrato:await contrato.getAddress(),cofre:COFRE,aave:AAVE,
+     fabricaV3:FACTORY,pools,maxFeePerGas:20_000_000n,
+     reservaL1Wei:10_000_000_000_000n,gasMax:2_000_000n,maxCotacoes:32,
+   });
+   assert.ok(oferta,'planejador com simulacao do executor real deve retornar rota valida');
+   assert.ok(oferta.piso>0n && oferta.liquidoCru>0n);
+   assert.equal(await revalidarOfertaMulti(rpc,oferta,await signer.getAddress()),true);
+   console.log('PLANEJADOR_ONCHAIN_FORK '+JSON.stringify({
+     rota:oferta.rota.caminho,pernas:oferta.rota.pernas.length,
+     creditoCru:oferta.cobrir.toString(),lucroBrutoCru:oferta.lucroCru.toString(),
+     liquidoProjetadoCru:oferta.liquidoCru.toString(),semBroadcast:true,
+   }));
  });
 });
