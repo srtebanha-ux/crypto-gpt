@@ -31,7 +31,7 @@ import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PI
 import { POOLS } from './contratos';
 import {
     prepararOfertaMulti, revalidarOfertaMulti, poolsDaConfiguracao,
-    type OfertaMulti,
+    gasEmTokenDaDivida, type OfertaMulti,
 } from './titanPonteMultiHop';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
@@ -6297,7 +6297,8 @@ async function principal(): Promise<'parar' | void> {
                             // ESPECIFICA da nova ABI, sem autoativacao apos deploy.
                             const liberar = ENVIAR
                                 && process.env.CACA_MULTIHOP_ENVIAR === '1'
-                                && process.env.CACA_MULTIHOP_CONFIRMAR === 'OPERAR_BASE_REAL';
+                                && process.env.CACA_MULTIHOP_CONFIRMAR === 'OPERAR_BASE_REAL'
+                                && process.env.CACA_MULTIHOP_NONCE_EXCLUSIVO === '1';
                             log.info('[MULTIHOP] Plano simulado contra contrato real.', {
                                 devedor:alvo.devedor, bloco:ofertaMulti.bloco,
                                 saltos:ofertaMulti.rota.pernas.length,
@@ -6923,6 +6924,28 @@ async function principal(): Promise<'parar' | void> {
                             oQueEuNAOFiz: 'não assinei, não transmiti e não reservei nonce',
                         });
                         continue;
+                    }
+                    // O piso em token da divida cobre o CUSTO MAXIMO do lance REAL,
+                    // nao a fee provisoria da fase de planejamento.
+                    if (contrato.tipo === 'MH' && ofertaMulti) {
+                        const ethAgora = precoDoEth();
+                        if (!ethAgora || !alvo.dividaCrua || !alvo.dividaUsd) {
+                            log.warn('[MULTIHOP] Sem preco de gas/divida para validar o lance real.');
+                            continue;
+                        }
+                        const custoNoLance = gasEmTokenDaDivida(
+                            limiteGas, maxFee,
+                            BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0'),
+                            alvo.dividaCrua, alvo.dividaUsd, ethAgora,
+                        );
+                        if (custoNoLance >= ofertaMulti.piso) {
+                            log.warn('[MULTIHOP] Fee real ultrapassou o lucro minimo garantido.', {
+                                devedor: alvo.devedor,
+                                custoEstimadoCru: custoNoLance.toString(),
+                                pisoDoContrato: ofertaMulti.piso.toString(),
+                            });
+                            continue;
+                        }
                     }
                     // Confirma o MESMO calldata novamente antes de reservar nonce.
                     // A cotacao envelhece em poucos blocos; jamais operar com HF velho.
