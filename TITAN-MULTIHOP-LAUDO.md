@@ -50,3 +50,13 @@ Data: 2026-10-16. Revisao tecnica de engenharia (NAO e auditoria independente).
 - Sem segredo, sem chave e sem dinheiro: `CACA_ENVIAR=0`, `CACA_MULTIHOP_ENVIAR=0`, `TITAN_MULTI_DEPLOY=0`.
 - Verifica a chain, codigo Morpho/Aave/Uniswap, proxies e tres pools V3. Sem comando para enviar.
 - Pending patch isolado nao foi aplicado, por exigir aprovacao expressa de implantacao no Railway; servicos existentes permanecem intactos.
+
+## Atualizacao: monitor somente leitura implantado no Railway
+
+- Aprovado e publicado em 2026-10-16 como servico separado `titan-multihop-readonly`, ID `22e3c691-f539-4a46-aa7e-11d283a8c0b1` no projeto `acceptable-vitality`.
+- Deploy `1c7a7e28-654b-4b7e-9e7f-04f3c596c222`: **SUCCESS**, container iniciado com resposta `online:true`, chainId 8453, bloco 52.701.443.
+- Confirmados Pool Aave, Morpho, Uniswap V3 factory e 3 pools de referencia. Nenhuma carteira/chave privada ou envio de transacao neste servico.
+- Todos os outros cinco servicos do projeto Railway permaneceram em `SUCCESS` na verificacao apos deploy.
+- Corrigido no PR o comando de deploy pago para usar `node dist/implantarTitanMultiHop.js` em vez de `ts-node`; imagem final recebe artefato compilado do Multi-Hop.
+- Imagem de producao compilada e artefato verificado no CI: https://github.com/srtebanha-ux/crypto-gpt/actions/runs/38980130762
+- **Deploy pago do contrato NÃO realizado**. Continua dependente de auditoria independente, aprovacao financeira com limite verificavel e garantia de nonce exclusivo. O monitor rodando nao autoriza transmissao.
