@@ -28,7 +28,7 @@
     "typecheck": "tsc -p . --noEmit",
     "fork": "hardhat test",
     "morpho": "ts-node src/mercadosDoMorpho.ts",
-    "titan:deploy-multihop": "ts-node src/implantarTitanMultiHop.ts",
+    "titan:deploy-multihop": "node dist/implantarTitanMultiHop.js",
     "titan:readiness": "node dist/titanMultiReadiness.js",
     "test": "node --require ts-node/register --test src/*.test.ts",
     "leadlag": "ts-node src/leadLagSniffer.ts",
