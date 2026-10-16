@@ -19,7 +19,12 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
     if (env.TITAN_MULTI_DEPLOY!=='1'
         || env.TITAN_MULTI_CONFIRMAR_DEPLOY!=='IMPLANTAR_MULTIHOP_BASE_REAL')
         throw new Error('deploy desativado: duas confirmacoes exclusivas exigidas');
-    if (env.TITAN_NONCE_EXCLUSIVO!=='1') throw new Error('nonce nao exclusivo');
+    // O deploy usa a MESMA conta do CACA. O CACA emissor deve estar parado
+    // para nao disputar nonce com este comando isolado.
+    if (env.TITAN_NONCE_EXCLUSIVO !== '1')
+        throw new Error('deploy exige confirmacao de nonce exclusivo');
+    if (env.CACA_ENVIAR === '1')
+        throw new Error('interrompa o envio financeiro do CACA antes de implantar: mesmo nonce');
     const marcador=env.TITAN_MULTI_DEPLOY_MARCADOR;
     const tetoTexto=env.TITAN_MULTI_DEPLOY_TETO_WEI;
     if (!marcador || !marcador.startsWith('/app/data/') || marcador.includes('..')
@@ -27,23 +32,23 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
         || BigInt(tetoTexto)<=0n || BigInt(tetoTexto)>MAX_DEPLOY_WEI)
         throw new Error('marcador em volume e orcamento de deploy <= 0.001 ETH exigidos');
     if (fs.existsSync(marcador)) throw new Error('deploy ja tentado; conferir hash antes de qualquer repeticao');
-    if (!env.TITAN_CHAVE_PRIVADA || !env.ARB_RPC_URL || !env.TITAN_COFRE
-        || !env.TITAN_MULTI_AAVE || !env.TITAN_MULTI_FACTORY)
-        throw new Error('faltam chave, RPC e imutaveis');
-    const carteira=new Wallet(env.TITAN_CHAVE_PRIVADA);
-    const cofre=getAddress(env.TITAN_COFRE);
-    const aave=getAddress(env.TITAN_MULTI_AAVE);
-    const fabrica=getAddress(env.TITAN_MULTI_FACTORY);
-    if (cofre===carteira.address || cofre!==getAddress(COFRE_ESPERADO))
-        throw new Error('cofre nao corresponde ao destino imutavel conhecido');
-    if (fabrica!==getAddress(FACTORY_UNISWAP_V3_BASE))
-        throw new Error('factory Uniswap V3 nao e a oficial da Base');
-    if (aave!==getAddress(REDES.base.pool))
-        throw new Error('pool Aave diverge do pool Base do cacador');
+    // Reutilizar EXCLUSIVAMENTE a chave e o RPC do CACA; nao copiar segredos
+    // nem criar segunda carteira no Railway.
+    if (!env.CACA_CHAVE_PRIVADA || !env.CACA_RPC_URL)
+        throw new Error('CACA_CHAVE_PRIVADA e CACA_RPC_URL devem existir no proprio CACA');
+    const carteira = new Wallet(env.CACA_CHAVE_PRIVADA);
+    if (env.CACA_ENDERECO_PUBLICO
+        && getAddress(env.CACA_ENDERECO_PUBLICO) !== carteira.address)
+        throw new Error('assinador e CACA_ENDERECO_PUBLICO divergentes');
+    const cofre = getAddress(COFRE_ESPERADO);
+    const aave = getAddress(REDES.base.pool);
+    const fabrica = getAddress(FACTORY_UNISWAP_V3_BASE);
+    if (cofre === carteira.address)
+        throw new Error('cofre do CACA nao pode coincidir com a carteira que envia');
     const artifact=JSON.parse(fs.readFileSync(artefato,'utf8')) as {abi:ConstructorParameters<typeof ContractFactory>[0];bytecode:string};
     if (!artifact.bytecode.startsWith('0x') || artifact.bytecode.length<200)
         throw new Error('artefato multi-hop sem bytecode');
-    const rpc=new JsonRpcProvider(env.ARB_RPC_URL,8453,{staticNetwork:true});
+    const rpc=new JsonRpcProvider(env.CACA_RPC_URL,8453,{staticNetwork:true});
     let hash:string|undefined;
     try {
         if (BigInt(await rpc.send('eth_chainId',[]))!==8453n)
@@ -73,6 +78,8 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
             throw new Error('deploy excede orcamento total L1+L2');
         if ((await rpc.getTransactionCount(carteira.address,'pending'))!==nonce)
             throw new Error('nonce mudou durante preflight');
+        if (env.CACA_ENVIAR === '1')
+            throw new Error('envio CACA foi habilitado durante preflight; aborto');
         fs.mkdirSync(path.dirname(marcador),{recursive:true});
         const fd=fs.openSync(marcador,'wx',0o600);
         try {
