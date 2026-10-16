@@ -26,7 +26,7 @@ async function principal(): Promise<void> {
         throw new Error('faltam chave, RPC, cofre ou teto de gas do deploy');
     }
     const artefato = JSON.parse(fs.readFileSync(caminhoArtefato, 'utf8')) as {
-        abi: unknown[]; bytecode: string;
+        abi: ConstructorParameters<typeof ContractFactory>[0]; bytecode: string;
     };
     if (!artefato.bytecode.startsWith('0x') || artefato.bytecode.length < 200) {
         throw new Error('bytecode invalido do CacadorV3');
