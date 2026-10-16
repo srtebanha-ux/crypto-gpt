@@ -31,7 +31,7 @@ import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PI
 import { POOLS } from './contratos';
 import {
     prepararOfertaMulti, revalidarOfertaMulti, poolsDaConfiguracao,
-    gasEmTokenDaDivida, type OfertaMulti,
+    gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
 } from './titanPonteMultiHop';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
@@ -7045,11 +7045,38 @@ async function principal(): Promise<'parar' | void> {
                         const hashDoTiro = tx.hash;
                         const chaveDoTiro = chaveAlvo;
                         const devedorDoTiro = alvo.devedor;
-                        const lucroDoTiro = lucroUsd;
+                        let lucroDoTiro = lucroUsd;
                         void (async () => {
                             let desfecho: ReturnType<typeof lerRecibo>;
                             try {
-                                desfecho = lerRecibo(await tx.wait(1, 120_000));
+                                const reciboFinal = await tx.wait(1, 120_000);
+                                desfecho = lerRecibo(reciboFinal);
+                                if (contrato.tipo === 'MH') {
+                                    const pago = reciboFinal && ofertaMulti
+                                        ? lucroConfirmadoPorEventoMulti(
+                                            reciboFinal.logs, contrato.endereco,
+                                            devedorDoTiro, ofertaMulti.cobrir,
+                                        ) : null;
+                                    if (desfecho === 'acertou' && pago !== null) {
+                                        const convertido = emDolar(pago,
+                                            casas.get(alvo.divida.toLowerCase()),
+                                            precos.get(alvo.divida.toLowerCase()));
+                                        lucroDoTiro = convertido;
+                                        log.info('[MULTIHOP NO COFRE] Evento confirma pagamento bruto.', {
+                                            hash:tx.hash, lucroBrutoCru:pago.toString(),
+                                            lucroBrutoUsdNaCotacao:convertido?.toFixed(2) ?? 'sem preco',
+                                            gasL2Wei:(reciboFinal.gasUsed * reciboFinal.gasPrice).toString(),
+                                            observacao:'descontar gas L1 e operacao para calcular lucro liquido real',
+                                        });
+                                    } else {
+                                        lucroDoTiro = null;
+                                        if (desfecho === 'acertou') {
+                                            log.error('[MULTIHOP SEM PROVA] Recibo status=1, mas pagamento nao verificado.', {
+                                                hash:tx.hash, acao:'conferir logs e saldo do cofre na Base',
+                                            });
+                                        }
+                                    }
+                                }
                             } catch (e) {
                                 // O ethers REJEITA quando `status === 0`, e o
                                 // recibo vem dentro do erro. Sem isto, todo
