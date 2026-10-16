@@ -324,6 +324,127 @@ export async function lerEstadoMisto(
 }
 
 /**
+ * A RESPOSTA DE UM PEDIDO DO LOTE, nos TRES desfechos possiveis.
+ *
+ * MEDIDO em 2026-10-16, e e o defeito que este tipo conserta: na observacao ao
+ * vivo, 443 de 1.332 requisicoes voltaram HTTP 429 e o transporte NAO olhava o
+ * status. Corpo JSON que nao fosse array devolvia `{ok:false, dados:null}`
+ * para TODOS os pedidos do lote, e `cotarAfetadas` publicava isso como
+ * "REVERSÃO OPACA" — falha de rede com cara de falha de contrato, em 4.516
+ * cotacoes. O terceiro estado existe para que as duas nunca mais se misturem.
+ *
+ *   ok: true                       o no EXECUTOU e devolveu resultado
+ *   ok: false, dados: '0x…'        o no EXECUTOU e a EVM REVERTEU com dados
+ *   falhaDeTransporte: '…'         o no NAO executou: 429, 5xx, timeout, corpo
+ *                                  nao-JSON, JSON-RPC torto, id sem resposta
+ */
+/** A contabilidade de rede, por desfecho. Sem URL, sem credencial. */
+export interface ContabilidadeRpc {
+    requisicoes: number;
+    operacoes: number;
+    maiorLote: number;
+    http200: number;
+    http429: number;
+    http5xx: number;
+    httpOutro: number;
+    /** Corpo que nao e JSON (HTML de portal, texto de limite). */
+    corpoNaoJson: number;
+    /** JSON valido que nao e resposta JSON-RPC, ou lote que nao e array. */
+    jsonrpcMalformado: number;
+    /** Resposta com `error` do JSON-RPC (o no respondeu, a chamada falhou). */
+    errosJsonRpc: number;
+    /** Reversoes com `data` — e delas que sai a cotacao. */
+    revertesComDados: number;
+    /** Id pedido que nao voltou no lote. */
+    semResposta: number;
+    /** Timeout ou erro de socket. */
+    falhasDeRede: number;
+    tentativasExtras: number;
+    desistencias: number;
+    retryAfterRespeitado: number;
+    recusadasPeloTeto: number;
+    bytesEnviados: number;
+    bytesRecebidos: number;
+    msTotal: number;
+    porMetodo: Record<string, number>;
+}
+
+/** O que `fetch` precisa oferecer. Em teste entra um simulador. */
+export type Fetchador = (url: string, init: unknown) => Promise<{
+    status: number;
+    text: () => Promise<string>;
+    headers?: { get: (nome: string) => string | null };
+}>;
+
+const contabilidadeVazia = (): ContabilidadeRpc => ({
+    requisicoes: 0,
+    operacoes: 0,
+    maiorLote: 0,
+    http200: 0,
+    http429: 0,
+    http5xx: 0,
+    httpOutro: 0,
+    corpoNaoJson: 0,
+    jsonrpcMalformado: 0,
+    errosJsonRpc: 0,
+    revertesComDados: 0,
+    semResposta: 0,
+    falhasDeRede: 0,
+    tentativasExtras: 0,
+    desistencias: 0,
+    retryAfterRespeitado: 0,
+    recusadasPeloTeto: 0,
+    bytesEnviados: 0,
+    bytesRecebidos: 0,
+    msTotal: 0,
+    porMetodo: {},
+});
+
+/**
+ * O `Retry-After`, em ms, quando o no diz quanto esperar.
+ *
+ * Aceita segundos (o formato que os nos de RPC usam) e recusa qualquer coisa
+ * que nao seja numero finito e positivo — cabecalho torto nao vira espera
+ * inventada. O teto existe para o recuo nao virar espera indefinida.
+ */
+export function esperaDoRetryAfter(valor: string | null, tetoMs = 10_000): number | null {
+    if (valor === null) return null;
+    // STRING VAZIA NAO E ZERO: `Number('')` da 0, e aceitar isso trataria
+    // cabecalho ausente como "pode tentar de novo agora". Ausencia nao e valor.
+    if (valor.trim() === '') return null;
+    const seg = Number(valor.trim());
+    if (!Number.isFinite(seg) || seg < 0) return null;
+    return Math.min(seg * 1000, tetoMs);
+}
+
+/**
+ * O QUE ESTE STATUS SIGNIFICA: executou, nao executou, ou nao se sabe.
+ *
+ * 429 e 5xx sao SATURACAO ou falha do provedor — o no nao executou a chamada.
+ * 200 e a unica porta para interpretar o corpo. Qualquer outro status tambem e
+ * falha de transporte: interpretar corpo de 4xx como resposta economica seria
+ * exatamente a confusao que esta rodada conserta.
+ */
+export function desfechoDoStatus(status: number): 'corpo' | 'saturado' | 'provedor' | 'outro' {
+    if (status === 200) return 'corpo';
+    if (status === 429) return 'saturado';
+    if (status >= 500 && status <= 599) return 'provedor';
+    return 'outro';
+}
+
+export interface RespostaDeLote {
+    ok: boolean;
+    dados: string | null;
+    /**
+     * Preenchido SO quando nao houve execucao no no.
+     *
+     * Enquanto este campo estiver preenchido, NADA pode ser classificado como
+     * reversao opaca: reversao opaca exige evidencia de que a chamada rodou.
+     */
+    falhaDeTransporte?: string;
+}
+
+/**
  * O TRANSPORTE EM LOTE: N pedidos JSON-RPC numa ida e volta.
  *
  * Uma RODADA por degrau da escada, cada rodada num lote JSON-RPC com as rotas
@@ -339,7 +460,255 @@ export async function lerEstadoMisto(
  */
 export type TransporteEmLote = (
     pedidos: Array<{ metodo: string; params: unknown[] }>,
-) => Promise<Array<{ ok: boolean; dados: string | null }>>;
+) => Promise<RespostaDeLote[]>;
+
+/**
+ * O TRANSPORTE, com os tres desfechos separados e recuo LIMITADO.
+ *
+ * Ele e montado por uma fabrica, e nao escrito a mao dentro de `principal()`,
+ * por uma razao so: assim da para exercita-lo com respostas HTTP SIMULADAS —
+ * 429 com JSON, 429 com HTML, 503, timeout, JSON torto, lote parcial, id fora
+ * de ordem — sem tocar RPC externo nenhum. O defeito que ele conserta foi
+ * demonstrado por codigo e nao por suposicao: o transporte anterior nunca lia
+ * `r.status`.
+ *
+ * O QUE ELE NAO FAZ: nao tenta para sempre (teto de tentativas), nao inventa
+ * espera (so respeita `Retry-After` legivel), nao transforma lote recusado em N
+ * reversoes de contrato, e nao mexe em nada economico — um pedido que nao foi
+ * executado continua sem cotacao, so passa a dizer POR QUE.
+ */
+export function montarTransporteRpc(opcoes: {
+    rpc: string;
+    fetchar: Fetchador;
+    /** Tentativas TOTAIS por requisicao (1 = sem repetir). */
+    tentativas?: number;
+    /** Espera entre tentativas. Em teste, instantanea. */
+    esperar?: (ms: number) => Promise<void>;
+    recuoBaseMs?: number;
+    /** Maximo de pedidos por requisicao HTTP; acima disso, parte em pedacos. */
+    loteMaximo?: number;
+    /** Teto de requisicoes HTTP na execucao. 0 = sem teto. */
+    tetoDeRequisicoes?: number;
+    timeoutMs?: number;
+    agora?: () => number;
+}): {
+        chamar: Transporte;
+        chamarEmLote: TransporteEmLote;
+        contabilidade: () => ContabilidadeRpc;
+        comoLerAContabilidade: () => string;
+    } {
+    const conta = contabilidadeVazia();
+    const tentativas = Math.max(1, Math.floor(opcoes.tentativas ?? 3));
+    const recuoBase = Math.max(0, opcoes.recuoBaseMs ?? 400);
+    const loteMaximo = Math.max(1, Math.floor(opcoes.loteMaximo ?? 200));
+    const tetoDeRequisicoes = Math.max(0, Math.floor(opcoes.tetoDeRequisicoes ?? 0));
+    const timeoutMs = Math.max(0, Math.floor(opcoes.timeoutMs ?? 8_000));
+    const agora = opcoes.agora ?? (() => Date.now());
+    const esperar = opcoes.esperar
+        ?? ((ms: number) => new Promise<void>((s) => { setTimeout(s, ms); }));
+
+    /** Uma ida e volta, com o status JA classificado. Nunca lanca. */
+    const umaIda = async (corpo: string, metodos: string[]): Promise<
+    { tipo: 'corpo'; texto: string } | { tipo: 'falha'; porque: string; esperarMs: number | null }
+    > => {
+        if (tetoDeRequisicoes > 0 && conta.requisicoes >= tetoDeRequisicoes) {
+            conta.recusadasPeloTeto += 1;
+            return {
+                tipo: 'falha',
+                porque: `teto de ${tetoDeRequisicoes} requisição(ões) HTTP atingido nesta execução`,
+                esperarMs: null,
+            };
+        }
+        conta.requisicoes += 1;
+        conta.bytesEnviados += corpo.length;
+        for (const m of metodos) conta.porMetodo[m] = (conta.porMetodo[m] ?? 0) + 1;
+        const t0 = agora();
+        try {
+            const r = await opcoes.fetchar(opcoes.rpc, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: corpo,
+                ...(timeoutMs > 0 && typeof AbortSignal?.timeout === 'function'
+                    ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+            });
+            const desfecho = desfechoDoStatus(r.status);
+            if (desfecho !== 'corpo') {
+                if (desfecho === 'saturado') conta.http429 += 1;
+                else if (desfecho === 'provedor') conta.http5xx += 1;
+                else conta.httpOutro += 1;
+                conta.msTotal += agora() - t0;
+                const ra = esperaDoRetryAfter(r.headers?.get('retry-after') ?? null);
+                if (ra !== null) conta.retryAfterRespeitado += 1;
+                return {
+                    tipo: 'falha',
+                    porque: `HTTP ${r.status} (${desfecho === 'saturado' ? 'saturação do nó'
+                        : (desfecho === 'provedor' ? 'falha do provedor' : 'status inesperado')})`,
+                    esperarMs: ra,
+                };
+            }
+            conta.http200 += 1;
+            const texto = await r.text();
+            conta.bytesRecebidos += texto.length;
+            conta.msTotal += agora() - t0;
+            return { tipo: 'corpo', texto };
+        } catch (e) {
+            conta.msTotal += agora() - t0;
+            conta.falhasDeRede += 1;
+            const msg = String(e).slice(0, 80);
+            return {
+                tipo: 'falha',
+                porque: `falha de rede ou timeout (${msg})`,
+                esperarMs: null,
+            };
+        }
+    };
+
+    /** Tenta, recua e DESISTE. Nunca lanca, nunca repete sem limite. */
+    const comRecuo = async (corpo: string, metodos: string[]): Promise<
+    { tipo: 'corpo'; texto: string } | { tipo: 'falha'; porque: string }
+    > => {
+        let ultima = 'nenhuma tentativa';
+        for (let t = 0; t < tentativas; t += 1) {
+            // eslint-disable-next-line no-await-in-loop
+            const r = await umaIda(corpo, metodos);
+            if (r.tipo === 'corpo') return r;
+            ultima = r.porque;
+            if (t + 1 >= tentativas) break;
+            conta.tentativasExtras += 1;
+            // eslint-disable-next-line no-await-in-loop
+            await esperar(r.esperarMs ?? recuoBase * 2 ** t);
+        }
+        conta.desistencias += 1;
+        return { tipo: 'falha', porque: `${ultima} — desisti após ${tentativas} tentativa(s)` };
+    };
+
+    /** O corpo veio: e JSON-RPC de verdade? */
+    const lerJson = (texto: string): unknown | null => {
+        try { return JSON.parse(texto) as unknown; } catch { return null; }
+    };
+
+    const chamar: Transporte = async (metodo, params) => {
+        const corpo = JSON.stringify({ jsonrpc: '2.0', id: 1, method: metodo, params });
+        conta.operacoes += 1;
+        conta.maiorLote = Math.max(conta.maiorLote, 1);
+        const r = await comRecuo(corpo, [metodo]);
+        if (r.tipo === 'falha') throw new Error(`TRANSPORTE: ${r.porque}`);
+        const j = lerJson(r.texto);
+        if (j === null) {
+            conta.corpoNaoJson += 1;
+            throw new Error('TRANSPORTE: corpo HTTP 200 que não é JSON');
+        }
+        const o = j as Record<string, unknown>;
+        if (typeof o !== 'object' || Array.isArray(j)
+            || (o.result === undefined && o.error === undefined)) {
+            conta.jsonrpcMalformado += 1;
+            throw new Error('TRANSPORTE: resposta sem `result` nem `error`');
+        }
+        if (o.error !== undefined) {
+            conta.errosJsonRpc += 1;
+            throw new Error(JSON.stringify(o.error).slice(0, 160));
+        }
+        return o.result;
+    };
+
+    /** Um lote, com UMA resposta por id pedido. */
+    const umLote = async (
+        pedidos: Array<{ metodo: string; params: unknown[] }>,
+    ): Promise<RespostaDeLote[]> => {
+        const corpo = JSON.stringify(pedidos.map((q, i) => ({
+            jsonrpc: '2.0', id: i + 1, method: q.metodo, params: q.params,
+        })));
+        conta.operacoes += pedidos.length;
+        conta.maiorLote = Math.max(conta.maiorLote, pedidos.length);
+        const r = await comRecuo(corpo, pedidos.map((q) => q.metodo));
+        if (r.tipo === 'falha') {
+            // UMA FALHA DE LOTE NAO E N REVERSOES. Todo pedido sai marcado como
+            // transporte, e nenhum deles pode ser lido como resposta da EVM.
+            return pedidos.map(() => ({ ok: false, dados: null, falhaDeTransporte: r.porque }));
+        }
+        const j = lerJson(r.texto);
+        if (j === null) {
+            conta.corpoNaoJson += 1;
+            return pedidos.map(() => ({
+                ok: false, dados: null, falhaDeTransporte: 'corpo HTTP 200 que não é JSON',
+            }));
+        }
+        if (!Array.isArray(j)) {
+            conta.jsonrpcMalformado += 1;
+            return pedidos.map(() => ({
+                ok: false,
+                dados: null,
+                falhaDeTransporte: 'resposta de lote que não é array JSON-RPC',
+            }));
+        }
+        // UMA RESPOSTA POR ID PEDIDO: o que nao voltar fica marcado como SEM
+        // RESPOSTA, nao como reversao. Lote parcial era lido como N opacas.
+        const fora: RespostaDeLote[] = pedidos.map(() => ({
+            ok: false, dados: null, falhaDeTransporte: 'o nó não respondeu este id do lote',
+        }));
+        for (const resp of j as Array<Record<string, unknown>>) {
+            // O ID e que casa pedido com resposta — a ORDEM nao, e um lote fora
+            // de ordem desalinharia a leitura de todos.
+            const i = Number(resp.id) - 1;
+            if (!Number.isInteger(i) || i < 0 || i >= fora.length) continue;
+            if (typeof resp.result === 'string') {
+                fora[i] = { ok: true, dados: resp.result };
+                continue;
+            }
+            const err = resp.error as Record<string, unknown> | undefined;
+            // O `data` da reversao E a cotacao: perde-lo faria o numero que
+            // estava na resposta virar "sem dado". O decodificador de seletores
+            // continua o mesmo, e e ele que decide se o dado e legivel.
+            const d = err === undefined ? undefined : err.data;
+            const dados = typeof d === 'string'
+                ? d
+                : (typeof (d as Record<string, unknown> | undefined)?.data === 'string'
+                    ? String((d as Record<string, unknown>).data) : null);
+            if (dados !== null) {
+                conta.revertesComDados += 1;
+                fora[i] = { ok: false, dados };
+                continue;
+            }
+            // O NO EXECUTOU e devolveu erro SEM dados: isto e reversao sem
+            // seletor — a unica coisa que pode ser chamada de opaca.
+            conta.errosJsonRpc += 1;
+            fora[i] = { ok: false, dados: null };
+        }
+        conta.semResposta += fora.filter((x) => x.falhaDeTransporte !== undefined).length;
+        return fora;
+    };
+
+    const chamarEmLote: TransporteEmLote = async (pedidos) => {
+        if (pedidos.length === 0) return [];
+        if (pedidos.length <= loteMaximo) return umLote(pedidos);
+        const fora: RespostaDeLote[] = [];
+        for (let i = 0; i < pedidos.length; i += loteMaximo) {
+            // eslint-disable-next-line no-await-in-loop
+            fora.push(...await umLote(pedidos.slice(i, i + loteMaximo)));
+        }
+        return fora;
+    };
+
+    const comoLerAContabilidade = (): string => {
+        const metodos = Object.entries(conta.porMetodo)
+            .sort((a, b) => b[1] - a[1])
+            .map(([m, n]) => `${m}=${n}`)
+            .join(' ');
+        return `RPC — ${conta.requisicoes} requisição(ões) HTTP, ${conta.operacoes} operação(ões) `
+            + `JSON-RPC (maior lote ${conta.maiorLote}) | HTTP 200=${conta.http200} `
+            + `429=${conta.http429} 5xx=${conta.http5xx} outro=${conta.httpOutro} | `
+            + `corpo não-JSON ${conta.corpoNaoJson}, JSON-RPC torto ${conta.jsonrpcMalformado}, `
+            + `erro JSON-RPC ${conta.errosJsonRpc}, revert COM dados ${conta.revertesComDados}, `
+            + `id sem resposta ${conta.semResposta}, falha de rede/timeout `
+            + `${conta.falhasDeRede} | recuos ${conta.tentativasExtras}, desistências `
+            + `${conta.desistencias}, Retry-After respeitado ${conta.retryAfterRespeitado}, `
+            + `recusadas pelo teto ${conta.recusadasPeloTeto} | enviados `
+            + `${conta.bytesEnviados} B, recebidos ${conta.bytesRecebidos} B, rede `
+            + `${conta.msTotal}ms | métodos: ${metodos === '' ? '—' : metodos}`;
+    };
+
+    return { chamar, chamarEmLote, contabilidade: () => ({ ...conta }), comoLerAContabilidade };
+}
 
 /**
  * A COTACAO DO CICLO INTEIRO, para todas as rotas afetadas — UM LOTE POR
@@ -560,7 +929,22 @@ export async function cotarAfetadas(
             const quantia = e.escada[e.idx]!;
             const resp = r[k];
             e.idx += 1;
-            if (resp === undefined || resp.ok) {
+            // INFRAESTRUTURA PRIMEIRO, e isto e a ordem que importa.
+            //
+            // Sem evidencia de que o no EXECUTOU a chamada, nada pode ser
+            // chamado de reversao — opaca ou nao. `resp === undefined` e id sem
+            // resposta; `falhaDeTransporte` e 429, 5xx, timeout, corpo
+            // nao-JSON ou lote torto. MEDIDO em 2026-10-16: 443 recusas HTTP
+            // apareceram no funil como 4.516 "REVERSÃO OPACA".
+            if (resp === undefined || resp.falhaDeTransporte !== undefined) {
+                opacas.set(e.c.chave, 'NÃO COTADO POR INFRAESTRUTURA: o nó não executou a chamada '
+                    + `(${resp === undefined ? 'nenhuma resposta para este pedido do lote'
+                        : resp.falhaDeTransporte}). Isto NÃO é reversão de contrato e NÃO é falta `
+                    + 'de spread: é ausência de medição');
+                e.idx = e.escada.length;
+                continue;
+            }
+            if (resp.ok) {
                 // O padrao Quoter EXIGE reversao. Resposta sem reversao nao e
                 // cotacao, e tratar como zero inventaria uma medicao.
                 opacas.set(e.c.chave, 'SEM COTAÇÃO: a chamada não reverteu, e o padrão Quoter '
@@ -570,6 +954,8 @@ export async function cotarAfetadas(
             }
             const lido = lerRespostaDaCotacao(resp.dados);
             if (lido === null) {
+                // AQUI SIM e opaca: o no executou (nao ha falha de transporte)
+                // e a EVM reverteu sem seletor reconhecivel.
                 opacas.set(e.c.chave, 'REVERSÃO OPACA: nenhum dos dois seletores com número veio. '
                     + `Reversão sem identificação não é cotação (dado: `
                     + `${String(resp.dados).slice(0, 10)})`);
@@ -1383,63 +1769,24 @@ async function principal(): Promise<void> {
 
     const { ProxyAgent, fetch } = await import('undici');
     const agente = process.env.HTTPS_PROXY ? new ProxyAgent(process.env.HTTPS_PROXY) : undefined;
-    const chamar: Transporte = async (metodo, params) => {
-        const r = await fetch(rpc, {
-            ...(agente ? { dispatcher: agente } : {}),
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: metodo, params }),
-        } as Parameters<typeof fetch>[1]);
-        const j = await r.json() as { result?: unknown; error?: unknown };
-        if (j.error !== undefined) throw new Error(JSON.stringify(j.error).slice(0, 160));
-        return j.result;
-    };
-
-    // O LOTE JSON-RPC: N cotacoes numa requisicao HTTP.
+    // O TRANSPORTE, pela fabrica que separa os TRES desfechos.
     //
-    // Conferido neste no em 2026-10-15: uma requisicao com tres pedidos devolve
-    // tres respostas. E por aqui, e nao por Multicall3, porque o cotador local
-    // roda por OVERRIDE e o `dono` dele fica zero — via Multicall3 o
-    // `msg.sender` seria o Multicall3 e o portao `soDono` recusaria.
-    //
-    // ERRO NAO VIRA RESULTADO: a resposta de cada pedido carrega `result` OU
-    // `error`, e o `error.data` e justamente onde o numero da cotacao viaja.
-    const chamarEmLote = async (
-        pedidos: Array<{ metodo: string; params: unknown[] }>,
-    ): Promise<Array<{ ok: boolean; dados: string | null }>> => {
-        if (pedidos.length === 0) return [];
-        const corpo = pedidos.map((q, i) => ({
-            jsonrpc: '2.0', id: i + 1, method: q.metodo, params: q.params,
-        }));
-        const r = await fetch(rpc, {
+    // Era escrito a mao aqui, e nao lia `r.status`: HTTP 429 virava
+    // `{ok:false, dados:null}` para todo o lote e o funil publicava "REVERSÃO
+    // OPACA". Medido em 2026-10-16: 443 recusas, 4.516 cotacoes rotuladas como
+    // reversao de contrato. A fabrica e testada com respostas SIMULADAS.
+    const TRANSPORTE = montarTransporteRpc({
+        rpc,
+        fetchar: ((url: string, init: unknown) => fetch(url, {
             ...(agente ? { dispatcher: agente } : {}),
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(corpo),
-        } as Parameters<typeof fetch>[1]);
-        const j = await r.json() as unknown;
-        const fora: Array<{ ok: boolean; dados: string | null }> = pedidos.map(
-            () => ({ ok: false, dados: null }),
-        );
-        if (!Array.isArray(j)) return fora;
-        for (const resp of j as Array<Record<string, unknown>>) {
-            const i = Number(resp.id) - 1;
-            if (!Number.isInteger(i) || i < 0 || i >= fora.length) continue;
-            if (typeof resp.result === 'string') { fora[i] = { ok: true, dados: resp.result }; continue; }
-            const err = resp.error as Record<string, unknown> | undefined;
-            // O `data` da reversao E a cotacao: perde-lo faria o numero que
-            // estava na resposta virar "sem dado".
-            const d = err === undefined ? undefined : err.data;
-            fora[i] = {
-                ok: false,
-                dados: typeof d === 'string'
-                    ? d
-                    : (typeof (d as Record<string, unknown> | undefined)?.data === 'string'
-                        ? String((d as Record<string, unknown>).data) : null),
-            };
-        }
-        return fora;
-    };
+            ...(init as Record<string, unknown>),
+        } as Parameters<typeof fetch>[1])) as unknown as Fetchador,
+        tentativas: Number(process.env.ARB_TENTATIVAS ?? 3),
+        loteMaximo: Number(process.env.ARB_LOTE_MAX ?? 200),
+        tetoDeRequisicoes: Number(process.env.ARB_TETO_RPC ?? 0),
+        timeoutMs: Number(process.env.ARB_TIMEOUT_MS ?? 8000),
+    });
+    const { chamar, chamarEmLote } = TRANSPORTE;
 
     log.info('[ARB] Caçador de arbitragem contínuo. ENVIO INEXISTENTE neste caminho.', {
         rpc: new URL(rpc).host,
@@ -1714,6 +2061,9 @@ async function principal(): Promise<void> {
                 atualizacoesRelevantes: FM.estadosAvaliados,
                 livro: LIVRO_DE_SINAIS.comoLer(),
                 funil: comoLerOFunilMisto(FM),
+                // A CONTABILIDADE DE REDE, por desfecho: sem ela, 33% de
+                // recusa HTTP ficava invisível no relatório econômico.
+                rpc: TRANSPORTE.comoLerAContabilidade(),
                 porSinal: LIVRO_DE_SINAIS.todos.map((sn) => ({
                     rota: sn.rota,
                     protocolo: sn.protocolo,
@@ -1989,7 +2339,9 @@ async function principal(): Promise<void> {
                 // `ESTADO_*` nao cai em caixa nenhuma e a soma nao fecha.
                 for (const sn of sinais) {
                     if (sn.motivo.startsWith('SEM DADO')) FM.sinaisSemTamanho += 1;
-                    else if (sn.motivo.startsWith('REVERSÃO OPACA')) FM.cotacoesOpacas += 1;
+                    else if (sn.motivo.startsWith('NÃO COTADO POR INFRAESTRUTURA')) {
+                        FM.cotacoesSemInfra += 1;
+                    } else if (sn.motivo.startsWith('REVERSÃO OPACA')) FM.cotacoesOpacas += 1;
                     else if (sn.motivo.startsWith('SEM COTAÇÃO')) FM.semCotador += 1;
                     else if (sn.lucroBrutoEstimado !== null) FM.cotacoesLegiveis += 1;
                     else FM.sinaisSemTamanho += 1;
@@ -2061,7 +2413,10 @@ async function principal(): Promise<void> {
                     + `${FM.estadosInconsistentes} INCONSISTENTE, `
                     + `${FM.estadoNaoValidado} NÃO VALIDADO`,
                 sinais: `${FM.sinaisSemTamanho} sem tamanho, ${FM.cotacoesLegiveis} cotação `
-                    + `legível, ${FM.cotacoesOpacas} opaca, ${FM.semCotador} sem cotador`,
+                    + `legível, ${FM.cotacoesOpacas} opaca (revert sem seletor), `
+                    + `${FM.cotacoesSemInfra} NÃO COTADA POR INFRAESTRUTURA, `
+                    + `${FM.semCotador} sem cotador`,
+                rpc: TRANSPORTE.comoLerAContabilidade(),
                 comSobraBruta: brutosPositivos,
                 descartadasComProva: tri.recusadasPorSpread.length,
                 semDadoParaDecidir: tri.semDados,

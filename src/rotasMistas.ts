@@ -321,8 +321,23 @@ export interface FunilMisto {
     sinaisSemTamanho: number;
     /** Cotacoes que devolveram NUMERO. */
     cotacoesLegiveis: number;
-    /** Cotacoes que reverteram com seletor nao identificado. */
+    /**
+     * Cotacoes que reverteram com seletor nao identificado — e SO essas.
+     *
+     * MEDIDO em 2026-10-16: antes do conserto do transporte, 443 recusas HTTP
+     * 429 entravam aqui, porque um lote recusado devolvia `dados: null` para
+     * todos os pedidos e o classificador lia isso como reversao. Falha de rede
+     * nao e falha de contrato; ela agora cai em `cotacoesSemInfra`.
+     */
     cotacoesOpacas: number;
+    /**
+     * Cotacoes que NAO ACONTECERAM porque o no nao executou a chamada.
+     *
+     * 429, 5xx, timeout, corpo nao-JSON, lote torto, id sem resposta. Isto nao
+     * e falta de spread nem reversao: e ausencia de medicao, e precisa de
+     * contador proprio para nao virar conclusao economica.
+     */
+    cotacoesSemInfra: number;
     /** Rotas sem cotador disponivel. */
     semCotador: number;
 }
@@ -360,6 +375,7 @@ export const funilVazio = (): FunilMisto => ({
     sinaisSemTamanho: 0,
     cotacoesLegiveis: 0,
     cotacoesOpacas: 0,
+    cotacoesSemInfra: 0,
     semCotador: 0,
 });
 
@@ -400,6 +416,12 @@ export function limitacaoDominante(f: FunilMisto): string {
             + 'rotas com prova válida em qualquer tamanho (o produto das razões máximas não '
             + 'passa de 1). Isto não é "cotei e não deu": é "não havia o que cotar"';
     }
+    if (f.cotacoesSemInfra > f.cotacoesLegiveis) {
+        return `INFRAESTRUTURA: ${f.cotacoesSemInfra} cotação(ões) não aconteceram porque o nó `
+            + `não executou a chamada, contra ${f.cotacoesLegiveis} legível(is). Com a maior `
+            + 'parte da amostra sem medição, nenhuma conclusão econômica é possível — isto NÃO '
+            + 'é "não há arbitragem"';
+    }
     if (f.cotacoesComSobra === 0) {
         return 'CUSTO: há rota, e nenhuma cotação devolveu sobra BRUTA. A diferença de preço '
             + 'entre os dois pools não cobre as taxas somadas — e isso é anterior a gás e a '
@@ -426,7 +448,15 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         + `${f.rotasDistintas} ROTA(S) DISTINTA(S) (par + direção, não pools) | `
         + `${f.rotasTriadas} TRIADA(S) (passaram o filtro; triada não é cotada) | `
         + `${f.cotacoesTentadas} cotação(ões) EXECUTADA(S), `
-        + `${f.cotacoesComSobra} com sobra bruta`
+        // O DENOMINADOR, por ordem dela: `cotacoesComSobra` so conta sinal cujo
+        // ESTADO foi confirmado consistente, e vinha colado ao total de
+        // cotacoes — convidando a ler 3 de 6.240 quando era 3 de 545. O livro
+        // de sinais conta sobra bruta sobre TODOS os sinais, estado validado ou
+        // nao. Os dois contadores sao legitimos e medem escopos diferentes.
+        + `${f.cotacoesComSobra} com sobra bruta E ESTADO CONSISTENTE (de `
+        + `${f.estadosConsistentes} sinal(is) com estado confirmado — o livro conta sobra `
+        + 'bruta sobre TODOS os sinais, inclusive os de estado não validado: escopos '
+        + 'diferentes, nenhum deles errado)'
         // AS CAUSAS sao das COTACOES, e ficavam colados em "simulacoes
         // revertidas" — uma corrida com 36 cotacoes e ZERO simulacoes publicou
         // "0 revertida(s) [33x PagamentoCurto]", etiqueta descrevendo um
@@ -446,7 +476,8 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         + `${f.expirado} EXPIRADO | ESTADO: ${f.estadosConsistentes} consistente, `
         + `${f.estadosInconsistentes} inconsistente, ${f.estadoNaoValidado} não validado | `
         + `SINAIS: ${f.sinaisSemTamanho} sem tamanho, ${f.cotacoesLegiveis} legível, `
-        + `${f.cotacoesOpacas} opaca, ${f.semCotador} sem cotador | `
+        + `${f.cotacoesOpacas} opaca (revert sem seletor), ${f.cotacoesSemInfra} `
+        + `NÃO COTADA POR INFRAESTRUTURA, ${f.semCotador} sem cotador | `
         + `${f.falhaDeExecucao} falha de execução | `
         + limitacaoDominante(f);
 }
