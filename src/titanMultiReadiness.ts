@@ -78,7 +78,6 @@ if(require.main===module){
         }
     };
     void consulta();
-    setInterval(()=>void consulta(),300_000).unref?.();
     // Worker de leitura: NENHUMA referencia a chave, assinatura ou sendTransaction.
-    process.stdin.resume();
+    setInterval(()=>void consulta(),300_000);
 }
