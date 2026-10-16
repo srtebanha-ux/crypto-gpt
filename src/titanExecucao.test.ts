@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { motivoDaRecusaTitan, type PlanoTitan } from './titanExecucao';
+import { calcularPisoTitan, motivoDaRecusaTitan, type PlanoTitan } from './titanExecucao';
 
 const END_A = '0x0000000000000000000000000000000000000011';
 const END_B = '0x0000000000000000000000000000000000000022';
@@ -72,4 +72,37 @@ test('sem trava persistente nao envia', () => {
 test('janela acima de 24h nao aceita', () => {
     const e = ambiente(); e.TITAN_OPERAR_ATE_UTC = new Date(Date.now()+30*86400_000).toISOString();
     assert.match(motivoDaRecusaTitan(plano(), e)!, /expirada/);
+});
+
+test('500 bps exigem precisamente 5% liquido sobre o gas L1+L2', () => {
+    const custo = 40_000_000_000_000n;
+    const r = calcularPisoTitan(custo, { TITAN_LUCRO_GAS_BPS: '500' });
+    assert.equal(r.margemBps, 500n);
+    assert.equal(r.margemWei, 2_000_000_000_000n);
+    assert.equal(r.lucroBrutoMinimoWei, 42_000_000_000_000n);
+});
+test('lucro de 5% substitui o piso fixo de 0.00002 WETH', () => {
+    const r = calcularPisoTitan(40_000_000_000_000n, {
+        TITAN_LUCRO_GAS_BPS: '500', TITAN_MIN_LUCRO_WEI: '20000000000000',
+    });
+    assert.equal(r.margemWei, 2_000_000_000_000n);
+});
+test('arredonda lucro percentual PARA CIMA e nunca o zera', () => {
+    assert.equal(calcularPisoTitan(1n, { TITAN_LUCRO_GAS_BPS: '500' }).margemWei, 1n);
+    assert.equal(calcularPisoTitan(101n, { TITAN_LUCRO_GAS_BPS: '500' }).margemWei, 6n);
+});
+test('percentagem 0, negativa, maior que 100% e malformada sao barradas', () => {
+    for (const bps of ['0','-1','10001','abc','5.0','']) {
+        assert.throws(() => calcularPisoTitan(100n, { TITAN_LUCRO_GAS_BPS: bps }));
+    }
+    const e = ambiente(); e.TITAN_LUCRO_GAS_BPS = '0';
+    assert.match(motivoDaRecusaTitan(plano(), e)!, /politica de lucro invalida/);
+});
+test('gas nulo nunca permite piso dinamico', () => {
+    assert.throws(() => calcularPisoTitan(0n, { TITAN_LUCRO_GAS_BPS: '500' }));
+});
+test('piso fixo historico continua para quem nao configurou percentual', () => {
+    const r = calcularPisoTitan(40_000_000_000_000n, { TITAN_MIN_LUCRO_WEI: '20000000000000' });
+    assert.equal(r.margemBps, null);
+    assert.equal(r.lucroBrutoMinimoWei, 60_000_000_000_000n);
 });
