@@ -13,6 +13,8 @@ import { REDES } from './liquidacoes';
 const oracle = new Interface(['function getL1Fee(bytes) view returns(uint256)']);
 const artefato = '.tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json';
 const MAX_DEPLOY_WEI=1_000_000_000_000_000n;
+// Uniswap V3 factory documentada oficialmente para Base Mainnet.
+const FACTORY_UNISWAP_V3_BASE='0x33128a8fC17869897dcE68Ed026d694621f6FDfD';
 export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Promise<string>{
     if (env.TITAN_MULTI_DEPLOY!=='1'
         || env.TITAN_MULTI_CONFIRMAR_DEPLOY!=='IMPLANTAR_MULTIHOP_BASE_REAL')
@@ -21,7 +23,7 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
     const marcador=env.TITAN_MULTI_DEPLOY_MARCADOR;
     const tetoTexto=env.TITAN_MULTI_DEPLOY_TETO_WEI;
     if (!marcador || !marcador.startsWith('/app/data/') || marcador.includes('..')
-        || !tetoTexto || !/^\\d+$/.test(tetoTexto)
+        || !tetoTexto || !/^[0-9]+$/.test(tetoTexto)
         || BigInt(tetoTexto)<=0n || BigInt(tetoTexto)>MAX_DEPLOY_WEI)
         throw new Error('marcador em volume e orcamento de deploy <= 0.001 ETH exigidos');
     if (fs.existsSync(marcador)) throw new Error('deploy ja tentado; conferir hash antes de qualquer repeticao');
@@ -34,6 +36,8 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
     const fabrica=getAddress(env.TITAN_MULTI_FACTORY);
     if (cofre===carteira.address || cofre!==getAddress(COFRE_ESPERADO))
         throw new Error('cofre nao corresponde ao destino imutavel conhecido');
+    if (fabrica!==getAddress(FACTORY_UNISWAP_V3_BASE))
+        throw new Error('factory Uniswap V3 nao e a oficial da Base');
     if (aave!==getAddress(REDES.base.pool))
         throw new Error('pool Aave diverge do pool Base do cacador');
     const artifact=JSON.parse(fs.readFileSync(artefato,'utf8')) as {abi:ConstructorParameters<typeof ContractFactory>[0];bytecode:string};
