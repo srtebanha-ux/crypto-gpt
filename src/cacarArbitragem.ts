@@ -1841,9 +1841,16 @@ async function principal(): Promise<void> {
         tetoPorFabrica,
         ciclos: tetoDeCiclos > 0 ? tetoDeCiclos : 'sem limite',
         envioReal: process.env.TITAN_ENVIAR === '1'
-            ? 'SOLICITADO — ainda depende de contrato implantado, nonce exclusivo, cofre, '
-                + 'chave, duplo consentimento, simulação e lucro líquido'
+            ? 'SOLICITADO — ainda depende de nonce exclusivo, cofre, chave, '
+                + 'simulação, custo total e lucro líquido'
             : 'DESLIGADO — nenhum ETH é enviado; monitoramento e cotações reais',
+        autorizacao: process.env.TITAN_AUTORIZACAO_CONTINUA === '1'
+            ? 'SEM PRAZO — com diario persistente, teto de gas e transacoes por dia'
+            : 'TEMPORARIA — envio interrompido quando a janela expira',
+        protecaoDiaria: process.env.TITAN_AUTORIZACAO_CONTINUA === '1'
+            ? { maxTxDia: process.env.TITAN_MAX_TX_DIA ?? 'NAO CONFIGURADO',
+                tetoGasWei: process.env.TITAN_GAS_DIA_WEI ?? 'NAO CONFIGURADO' }
+            : null,
         custoRpc: `maximo ${process.env.ARB_HTTP_RPS ?? 'sem limite'} HTTP/s, `
             + `${process.env.ARB_HTTP_POR_HORA ?? 'sem limite'} HTTP/h`,
     });
