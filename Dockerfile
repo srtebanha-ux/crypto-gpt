@@ -8,7 +8,12 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
+COPY contracts ./contracts
+COPY hardhat.config.cjs ./
 RUN npm run build
+# Gera o bytecode necessário ao cotador V3 (state override em eth_call).
+# Hardhat utiliza o solc local definido em hardhat.config.cjs: sem baixar compilador.
+RUN npx hardhat compile
 
 FROM node:22-slim AS runtime
 WORKDIR /app
@@ -16,6 +21,8 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
+# O cotador misto lê este JSON em tempo de execução; nenhum contrato é implantado.
+COPY --from=build /app/.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json ./.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json
 
 # Processo de longa duração (worker 24/7) — sem porta HTTP exposta.
 #
