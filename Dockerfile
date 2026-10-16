@@ -25,6 +25,8 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json ./.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json
 # Executor alternativo Morpho: artefato disponivel apenas para validacao/deploy explicito.
 COPY --from=build /app/.tmp/artifacts/contracts/CacadorArbMorpho.sol/CacadorArbMorpho.json ./.tmp/artifacts/contracts/CacadorArbMorpho.sol/CacadorArbMorpho.json
+# Artefato do executor Multi-Hop disponivel SOMENTE para deploy isolado explicitamente habilitado.
+COPY --from=build /app/.tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json ./.tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json
 
 # Processo de longa duração (worker 24/7) — sem porta HTTP exposta.
 #
