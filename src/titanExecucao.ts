@@ -210,18 +210,19 @@ export async function executarTitan(
             data: dados, gasLimit: limite, maxFeePerGas, maxPriorityFeePerGas: gorjeta,
             value: 0n,
         });
-        hash = keccak256(assinadaFinal);
+        const hashAssinado = keccak256(assinadaFinal);
         const marcador = ambiente.TITAN_MARCADOR_ENVIO!;
         fs.mkdirSync(path.dirname(marcador), { recursive: true });
         const fd = fs.openSync(marcador, 'wx', 0o600);
         try {
             fs.writeFileSync(fd, JSON.stringify({ estado: 'pronta_para_envio',
-                hash, autorizacaoAte: ambiente.TITAN_OPERAR_ATE_UTC,
+                hash: hashAssinado, autorizacaoAte: ambiente.TITAN_OPERAR_ATE_UTC,
                 carteira: carteira.address, nonce,
                 tetoGasWei: ambiente.TITAN_ORCAMENTO_GAS_WEI,
                 criadoEm: new Date().toISOString() }));
             fs.fsyncSync(fd);
         } finally { fs.closeSync(fd); }
+        hash = hashAssinado;
         const tx = await rpc.broadcastTransaction(assinadaFinal);
         if (tx.hash.toLowerCase() !== hash.toLowerCase()) {
             throw new Error('RPC devolveu hash diferente da transacao assinada');
