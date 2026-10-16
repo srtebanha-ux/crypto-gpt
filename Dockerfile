@@ -23,6 +23,8 @@ RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 # O cotador misto lê este JSON em tempo de execução; nenhum contrato é implantado.
 COPY --from=build /app/.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json ./.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json
+# Executor alternativo Morpho: artefato disponivel apenas para validacao/deploy explicito.
+COPY --from=build /app/.tmp/artifacts/contracts/CacadorArbMorpho.sol/CacadorArbMorpho.json ./.tmp/artifacts/contracts/CacadorArbMorpho.sol/CacadorArbMorpho.json
 
 # Processo de longa duração (worker 24/7) — sem porta HTTP exposta.
 #
