@@ -873,6 +873,8 @@ const SELETOR_BLOCO_DO_MULTICALL = '0x42cbb15c';
 const REDE_ESCOLHIDA = (process.env.CACA_REDE ?? 'base').toLowerCase();
 const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const ENVIAR = process.env.CACA_ENVIAR === '1';
+/** Modo de capital protegido: somente o executor Morpho Multi-Hop ja liquidavel. */
+const SOMENTE_MULTIHOP = process.env.CACA_SOMENTE_MULTIHOP === '1';
 // A janela do PRIMEIRO boot, quando ainda não existe cache: 30 dias, para o bot
 // começar a caçar em minutos em vez de em duas horas.
 //
@@ -6143,6 +6145,9 @@ async function principal(): Promise<'parar' | void> {
                 }> = [];
                 let ofertaMulti: OfertaMulti | null = null;
                 for (const contrato of contratos) {
+                    // Modo live seguro: nunca incluir candidatos V1/V2 ou tiros
+                    // na escrita do oraculo, mesmo que CACA_ENVIAR=1.
+                    if (SOMENTE_MULTIHOP) break;
                     const dados = contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
@@ -6297,9 +6302,12 @@ async function principal(): Promise<'parar' | void> {
                         if (ofertaMulti) {
                             // Dois consentimentos: o CACA original e a permissao
                             // ESPECIFICA da nova ABI, sem autoativacao apos deploy.
-                            const liberar = ENVIAR
-                                && process.env.CACA_MULTIHOP_ENVIAR === '1'
+                            const liberar = process.env.CACA_MULTIHOP_ENVIAR === '1'
                                 && process.env.CACA_MULTIHOP_CONFIRMAR === 'OPERAR_BASE_REAL';
+                            const candidatoObservavel = SOMENTE_MULTIHOP && !ENVIAR;
+                            // O mesmo caminho de decisao e montado no ensaio.
+                            // A assinatura so ocorre no degrau final se ENVIAR.
+                            const incluirCandidato = liberar || candidatoObservavel;
                             // Mesma carteira e mesmo LocalNonceManager do CACA.
                             // NAO criar segundo processo de assinatura ou concorrente de nonce.
                             log.info('[MULTIHOP] Plano simulado contra contrato real.', {
@@ -6308,9 +6316,9 @@ async function principal(): Promise<'parar' | void> {
                                 credito:ofertaMulti.cobrir.toString(),
                                 lucroCru:ofertaMulti.lucroCru.toString(),
                                 lucroLiquidoEstimadoCru:ofertaMulti.liquidoCru.toString(),
-                                situacao: liberar ? 'pode competir com V1/V2' : 'somente observacao',
+                                situacao: liberar && ENVIAR ? 'execucao liberada' : 'somente observacao',
                             });
-                            if (liberar) {
+                            if (incluirCandidato) {
                                 medicoes.push({
                                     contrato:{nome:'Multi-Hop Morpho',endereco:ofertaMulti.contrato,tipo:'MH'},
                                     lucroCru:ofertaMulti.liquidoCru,
@@ -6397,6 +6405,12 @@ async function principal(): Promise<'parar' | void> {
                 medicoes.sort((a, b) => (b.lucroCru > a.lucroCru ? 1 : b.lucroCru < a.lucroCru ? -1 : 0));
                 const escolhida = medicoes[0];
                 const contrato = escolhida.contrato;
+                // Um segundo portao protege o dinheiro mesmo com configuracao
+                // acidental das flags historicas do CACA.
+                if (SOMENTE_MULTIHOP && contrato.tipo !== 'MH') {
+                    log.error('[MULTIHOP-ONLY] Impedi contrato legado em modo protegido.');
+                    continue;
+                }
                 const lucroCruValido = contrato.tipo === 'MH' && ofertaMulti
                     ? ofertaMulti.lucroCru : escolhida.lucroCru;
                 if (medicoes.length > 1) {
@@ -6590,6 +6604,20 @@ async function principal(): Promise<'parar' | void> {
                         continue;
                     }
                     const limiteGas = doGas.limite;
+                    // Multi-Hop ja precisa ter simulado estimateGas no ABI novo.
+                    // Nunca usar fallback alto sem estimativa ou limite abaixo
+                    // da operacao observada, nem arriscar GAS insuficiente.
+                    if (contrato.tipo === 'MH' && (
+                        !ofertaMulti || estimado === null ||
+                        limiteGas < ofertaMulti.gasEstimado + ofertaMulti.gasEstimado/5n
+                    )) {
+                        log.warn('[MULTIHOP] Gas estimado nao cabe com 20% de folga; sem envio.', {
+                            estimado:estimado?.toString() ?? 'ausente',
+                            limite:limiteGas.toString(),
+                            custoDaRota:ofertaMulti?.gasEstimado.toString() ?? 'sem quote',
+                        });
+                        continue;
+                    }
                     const medido = emDolar(
                         lucroCruValido,
                         casas.get(alvo.divida.toLowerCase()),
@@ -6926,6 +6954,13 @@ async function principal(): Promise<'parar' | void> {
                             porque: oQueFazer.porque,
                             oQueEuNAOFiz: 'não assinei, não transmiti e não reservei nonce',
                         });
+                        continue;
+                    }
+                    if (SOMENTE_MULTIHOP
+                        && (contrato.tipo !== 'MH'
+                            || process.env.CACA_MULTIHOP_ENVIAR !== '1'
+                            || process.env.CACA_MULTIHOP_CONFIRMAR !== 'OPERAR_BASE_REAL')) {
+                        log.error('[MULTIHOP-ONLY] A assinatura foi bloqueada por flag ou executor incorreto.');
                         continue;
                     }
                     // O piso em token da divida cobre o CUSTO MAXIMO do lance REAL,
