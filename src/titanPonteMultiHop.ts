@@ -8,6 +8,7 @@ import { Decimal } from 'decimal.js';
 import { planejarLiquidacaoTitan, type SimulacaoLiquidacao } from './titanPlanejadorLiquidacao';
 import type { PoolLiquidacao, RotaLiquidacao } from './titanRotasLiquidacao';
 import { pisoNoContrato } from './caca';
+import { codificarTetoDeL1, ORACULO_DE_GAS_L1 } from './custoDaBase';
 
 const ENDERECO = /^0x[0-9a-fA-F]{40}$/;
 /**
@@ -28,6 +29,20 @@ export const POOLS_V3_BASE_CACA: readonly PoolLiquidacao[] = Object.freeze([
     {endereco:'0x06959273E9A65433De71F5A452D529544E07dDD0',
         token0:USDBC_BASE,token1:USDC_BASE,protocolo:'v3',taxa:100,permitida:true},
 ]);
+/**
+ * Reusa o proprio calculo de gas L1 da Base ja existente no CACA.
+ * O calldata do contrato novo possui ate 4 saltos: 740 bytes maximos.
+ * Nao aceita ausencia/resposta zero como custo gratuito; usa 2x o teto.
+ */
+export async function tetoL1PeloCaca(rpc:JsonRpcProvider):Promise<bigint>{
+    const retorno=await rpc.call({
+        to:ORACULO_DE_GAS_L1,
+        data:codificarTetoDeL1(740),
+    });
+    const teto=BigInt(retorno);
+    if(teto<=0n)throw new Error('oraculo L1 do CACA nao retornou custo valido');
+    return teto*2n;
+}
 /** O CACA pode operar sem copiar novamente para Railway seu banco de pools. */
 export function poolsDoCaca(valor?: string): PoolLiquidacao[] {
     if (!valor || !valor.trim()) return POOLS_V3_BASE_CACA.map(p => ({...p}));
