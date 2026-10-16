@@ -33,6 +33,7 @@ CACA_ENVIAR=1
 CACA_MULTIHOP_AVALIAR=1
 CACA_MULTIHOP_ENVIAR=1
 CACA_MULTIHOP_CONFIRMAR=OPERAR_BASE_REAL
+CACA_MULTIHOP_NONCE_EXCLUSIVO=1
 ```
 
 O executor novo nao cria carteira e nao substitui `CACA_CHAVE_PRIVADA`. A mesma carteira exige **nonce exclusivo**: NAO manter outro emissor independente com a mesma chave. Para operacao com arbitragem simultanea, preferir contas distintas. Lucros estimados nao podem ser registrados como realizados: conferir o evento `LiquidouComRota`, recibo `status=1`, saldo do cofre e custo de gas L1+L2.
