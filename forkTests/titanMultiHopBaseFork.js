@@ -52,7 +52,8 @@ describe('TITAN: Aave/Morpho/Uniswap Base FORK REAL (nenhuma tx na mainnet)',fun
    const sourceWeth=await call(oracle,oracleABI,'getSourceOfAsset',[WETH]);
    const price=await call(oracle,oracleABI,'getAssetPrice',[WETH]);
    assert.ok(price>0n);
-   const before=await call(AAVE,poolABI,'getUserAccountData',[ALVO]);
+   const before=poolABI.decodeFunctionResult('getUserAccountData',
+     await p.send('eth_call',[{to:AAVE,data:poolABI.encodeFunctionData('getUserAccountData',[ALVO])},'latest']));
    assert.ok(before[5]>0n,'alvo inexistente no snapshot');
    const artOracle=await hre.artifacts.readArtifact('OraculoFalso');
    const [admin]=await p.send('eth_accounts',[]);
