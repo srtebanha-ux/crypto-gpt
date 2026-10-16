@@ -24,6 +24,8 @@ jobs:
       - run: npx hardhat compile
       - name: Morpho flash loan local (sem fork e sem transacao real)
         run: npx hardhat test --config hardhat.morpho-local.cjs forkTests/morphoCreditoLocal.js
+      - name: Aave Morpho multi-hop completo, somente mocks locais
+        run: npx hardhat test --config hardhat.morpho-local.cjs forkTests/titanMultiHopLocal.js
       - name: Aave FlashSwap direto em EVM local (sem envio na Base)
         run: npx hardhat test --config hardhat.morpho-local.cjs forkTests/aaveDirectFlashSwapLocal.js
       - name: Compilar variacao TSTORE TLOAD Cancun isolada
