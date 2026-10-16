@@ -7,6 +7,10 @@ on:
     paths:
       - 'forkTests/titanMultiHopBaseFork.js'
       - 'contracts/CacadorAaveMultiHopMorpho.sol'
+      - 'src/titanPonteMultiHop.ts'
+      - 'src/titanPlanejadorLiquidacao.ts'
+      - 'src/cacarAoVivo.ts'
+      - 'src/implantarTitanMultiHop.ts'
       - '.github/workflows/titan-base-fork.yml'
   workflow_dispatch:
 
