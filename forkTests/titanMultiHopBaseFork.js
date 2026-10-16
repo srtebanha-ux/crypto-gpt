@@ -95,13 +95,15 @@ describe('TITAN: Aave/Morpho/Uniswap Base FORK REAL (nenhuma tx na mainnet)',fun
    // Snapshot pertence apenas ao fork; o alvo volta a ter divida para a segunda rota.
    assert.equal(await p.send('evm_revert',[snapshotAntes]),true);
    const intermediarios=[
-     '0xd9aAEc86B65D86f6A7B5aB1b0c42FFA531710', // USDbC
+     '0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA', // USDbC
      '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb', // DAI
      '0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEC22', // cbETH
    ];
    const taxas=[100,500,3000,10000];
    let conseguiu=null;
-   for (const intermediario of intermediarios){
+   for (const token of intermediarios){
+     const intermediario=token.toLowerCase();
+     assert.match(intermediario,/^0x[0-9a-f]{40}$/);
      if(conseguiu)break;
      for(const f1 of taxas){
        if(conseguiu)break;
