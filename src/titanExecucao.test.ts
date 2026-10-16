@@ -124,3 +124,20 @@ test('confirmacao comprovadamente lucrativa permite proxima avaliacao', () => {
     const r = [{ estado:'confirmado' as const, tetoGasWei:'100', diaUtc:'2026-10-16', gasRealL2Wei:'20', lucroRealizadoWei:'110' }];
     assert.equal(avaliarLimitesDiariosTitan(r,10n,10000n,10,new Date('2026-10-16T12:00:00Z')),null);
 });
+
+test('fonte Morpho nunca e habilitada sem contrato de arbitragem especifico', () => {
+    const e=ambiente(); e.TITAN_FONTE_CREDITO='morpho';
+    assert.match(motivoDaRecusaTitan(plano(),e)!, /contrato Morpho da arbitragem nao implantado/);
+});
+test('nao admite fonte de credito desconhecida', () => {
+    const e=ambiente(); e.TITAN_FONTE_CREDITO='aave-gratuito-imaginario';
+    assert.match(motivoDaRecusaTitan(plano(),e)!, /fonte de credito nao reconhecida/);
+});
+test('fonte Morpho so calcula gas em WETH e segue os mesmos portoes', () => {
+    const e=ambiente(); e.TITAN_FONTE_CREDITO='morpho'; e.TITAN_CONTRATO_MORPHO=END_A;
+    assert.equal(motivoDaRecusaTitan(plano(),e),null);
+    const p=plano(); p.rota[0]!.tokenEntra=USDC;
+    assert.match(motivoDaRecusaTitan(p,e)!, /base WETH/);
+    e.TITAN_ENVIAR='0';
+    assert.match(motivoDaRecusaTitan(plano(),e)!, /desligado/);
+});
