@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Interface } from 'ethers';
 import { Decimal } from 'decimal.js';
-import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte } from './titanPonteMultiHop';
+import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte, lucroConfirmadoPorEventoMulti } from './titanPonteMultiHop';
 const a=(n:number)=>'0x'+n.toString(16).padStart(40,'0');
 const pool={endereco:a(11),token0:a(1),token1:a(2),protocolo:'v3' as const,taxa:500,permitida:true};
 test('ABI do contrato implantavel recebe tuple[] e piso nao zero',()=>{
@@ -33,4 +33,17 @@ test('validacao financeira barra referencia a gas/preco sem fundamento',()=>{
         maxFeePerGas:1_000_000_000n,reservaL1Wei:0n,gasMax:1_000_000n};
     assert.throws(()=>validarPonte(e),/invalidos/);
     e.reservaL1Wei=1000n;assert.doesNotThrow(()=>validarPonte(e));
+});
+
+test('evento assinado do executor comprova pagamento; contrato, alvo ou valor divergentes nao',()=>{
+    const frag=ABI_MULTI.getEvent('LiquidouComRota');
+    assert.ok(frag);
+    const usuario=a(3),contrato=a(9),p1=a(11),p2=a(12);
+    const ev=ABI_MULTI.encodeEventLog(frag,[usuario,p1,p2,1000n,130n]);
+    const logs=[{address:contrato,topics:ev.topics,data:ev.data}];
+    assert.equal(lucroConfirmadoPorEventoMulti(logs,contrato,usuario,1000n),130n);
+    assert.equal(lucroConfirmadoPorEventoMulti(logs,a(5),usuario,1000n),null);
+    assert.equal(lucroConfirmadoPorEventoMulti(logs,contrato,a(4),1000n),null);
+    assert.equal(lucroConfirmadoPorEventoMulti(logs,contrato,usuario,999n),null);
+    assert.equal(lucroConfirmadoPorEventoMulti([],contrato,usuario,1000n),null);
 });
