@@ -16,11 +16,17 @@ import type { PernaMista } from './rotasMistas';
 export const ABI_TITAN = new Interface([
     'function dono() view returns (address)',
     'function cofre() view returns (address)',
+    'function morpho() view returns (address)',
     'event Cacou(address indexed poolA,address indexed poolB,uint256 lucro)',
+    'event CacouMorpho(address indexed poolA,address indexed poolB,uint256 lucro)',
     'function executarRota((address pool,address tokenEntra,uint8 tipo,uint256 pagamento)[] rota,uint256 quantia,uint256 lucroMinimo) returns (uint256 lucro)',
 ]);
 const ABI_ORACULO = new Interface(['function getL1Fee(bytes) view returns (uint256)']);
 const REDE_BASE = 8453n;
+// Endereco confirmado pela governanca Morpho para Base.
+// Um contrato com outro endereco NAO fica habilitado automaticamente.
+export const MORPHO_BASE_OFICIAL = '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb';
+export const WETH_BASE_TITAN = '0x4200000000000000000000000000000000000006';
 
 export interface PlanoTitan {
     rota: PernaMista[];
@@ -93,6 +99,16 @@ export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv):
     if (ambiente.TITAN_NONCE_EXCLUSIVO !== '1') {
         return 'sem confirmacao de nonce exclusivo: outro bot pode usar a mesma carteira';
     }
+    const fonte = ambiente.TITAN_FONTE_CREDITO ?? 'flashswap';
+    if (fonte !== 'flashswap' && fonte !== 'morpho') {
+        return 'fonte de credito nao reconhecida';
+    }
+    if (fonte === 'morpho') {
+        if (!ambiente.TITAN_CONTRATO_MORPHO) return 'contrato Morpho da arbitragem nao implantado';
+        if (p.rota[0]?.tokenEntra.toLowerCase() !== WETH_BASE_TITAN.toLowerCase()) {
+            return 'emprestimo Morpho requer base WETH para contabilizar gas';
+        }
+    }
     if (!ambiente.TITAN_CONTRATO || !ambiente.TITAN_CHAVE_PRIVADA || !ambiente.TITAN_COFRE) {
         return 'contrato, chave privada ou cofre nao configurado';
     }
@@ -162,7 +178,9 @@ export async function executarTitan(
     let cofre: string;
     let carteira: Wallet;
     try {
-        contrato = getAddress(ambiente.TITAN_CONTRATO!);
+        contrato = getAddress(ambiente.TITAN_FONTE_CREDITO === 'morpho'
+            ? ambiente.TITAN_CONTRATO_MORPHO!
+            : ambiente.TITAN_CONTRATO!);
         cofre = getAddress(ambiente.TITAN_COFRE!);
         carteira = new Wallet(ambiente.TITAN_CHAVE_PRIVADA!);
     } catch {
@@ -180,6 +198,13 @@ export async function executarTitan(
             await rpc.call({ to: contrato, data: ABI_TITAN.encodeFunctionData('cofre') }))[0] as string;
         if (getAddress(donoHex) !== carteira.address) throw new Error('carteira nao e dona do executor');
         if (getAddress(cofreHex) !== cofre) throw new Error('cofre imutavel do contrato diverge');
+        if (ambiente.TITAN_FONTE_CREDITO === 'morpho') {
+            const morpho = ABI_TITAN.decodeFunctionResult('morpho',
+                await rpc.call({ to: contrato, data: ABI_TITAN.encodeFunctionData('morpho') }))[0] as string;
+            if (getAddress(morpho) !== getAddress(MORPHO_BASE_OFICIAL)) {
+                throw new Error('fonte Morpho nao corresponde ao singleton Base verificado');
+            }
+        }
 
         const ultimo = await rpc.getBlock('latest');
         if (!ultimo || ultimo.baseFeePerGas === null || ultimo.baseFeePerGas <= 0n) {
@@ -323,7 +348,8 @@ export async function executarTitan(
         if (!recibo) return { estado: 'enviado', hash, motivo: 'transacao enviada; recibo nao chegou' };
         const evento = recibo.logs.filter((x) => getAddress(x.address) === contrato)
             .map((x) => { try { return ABI_TITAN.parseLog(x); } catch { return null; } })
-            .find((x) => x?.name === 'Cacou');
+            .find((x) => x?.name === (ambiente.TITAN_FONTE_CREDITO === 'morpho'
+                ? 'CacouMorpho' : 'Cacou'));
         const lucroRealizado = recibo.status === 1 && evento
             ? (evento.args[2] as bigint).toString() : undefined;
         if (continuo) {
