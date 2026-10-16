@@ -255,11 +255,21 @@ export async function executarTitan(
         const dados = ABI_TITAN.encodeFunctionData('executarRota', [
             plano.rota, plano.quantia, piso,
         ]);
-        // Segundo ensaio, agora com o piso REAL no contrato. Sem sucesso, nao envia.
+        // Ultima janela de mercado: se um bloco novo aparecer DURANTE
+        // o ensaio final, o sinal pode ter mudado. Nao arrisca gastar gas.
+        const instanteFinal = Date.now();
+        const blocoDoEnsaio = await rpc.getBlockNumber();
         const confirmado = hexDeResultado(await rpc.call({
             from: carteira.address, to: contrato, data: dados,
         }), ABI_TITAN, 'executarRota');
         if (confirmado < piso) throw new Error('o ensaio final nao alcancou o piso');
+        const blocoDepoisDoEnsaio = await rpc.getBlockNumber();
+        if (blocoDepoisDoEnsaio !== blocoDoEnsaio
+            || Date.now() - instanteFinal > 1_800) {
+            return { estado: 'recusado',
+                motivo: 'ensaio final envelheceu: bloco mudou ou consulta demorou demais',
+                lucroSimuladoWei: confirmado.toString() };
+        }
         // Verificacao uma ultima vez do nonce antes de assinar: nao e lock entre bots.
         if ((await rpc.getTransactionCount(carteira.address, 'pending')) !== nonce) {
             throw new Error('nonce foi usado por outro processo; envio cancelado');
