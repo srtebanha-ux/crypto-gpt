@@ -57,11 +57,13 @@ export function planejarLiquidacaoTitan(
             return liquido>=minimo?liquido:null;
         };
         const tamanho=otimizarTamanhoTitan(maxCredito,granularidade,consultar,
-            Math.min(restantes,16));
+            Math.min(restantes-3,10));
         if(tamanho===null)continue;
         // Revalidacao discreta local: resultados NAO comprovados jamais
         // sao fabricados. Testar +/- 1 unidade perto do tamanho vencedor.
-        for(const v of variacoesDePrecisao(tamanho.quantia,maxCredito,granularidade)){
+        for(const v of variacoesDePrecisao(tamanho.quantia,maxCredito,granularidade)
+            .filter(v=>v===tamanho.quantia-granularidade
+                ||v===tamanho.quantia+granularidade)){
             if(restantes<=0)break;
             consultar(v);
         }
