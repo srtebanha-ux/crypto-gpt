@@ -10,6 +10,34 @@ import type { PoolLiquidacao, RotaLiquidacao } from './titanRotasLiquidacao';
 import { pisoNoContrato } from './caca';
 
 const ENDERECO = /^0x[0-9a-fA-F]{40}$/;
+/**
+ * Pools Uniswap V3 constatadas on-chain pela propria verificacao do CACA
+ * na Base, em 2026-10-16. Sao CANDIDATAS, nao garantia de cotacao:
+ * o contrato ainda exige fabrica V3 correspondente e lucro minimo positivo.
+ * O alvo, a divida, os precos e o saldo continuam vindo do CACA em tempo real.
+ */
+export const FABRICA_V3_BASE = '0x33128a8fC17869897dcE68Ed026d694621f6FDfD';
+const WETH_BASE = '0x4200000000000000000000000000000000000006';
+const USDC_BASE = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+const USDBC_BASE = '0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA';
+export const POOLS_V3_BASE_CACA: readonly PoolLiquidacao[] = Object.freeze([
+    {endereco:'0xd0b53D9277642d899DF5C87A3966A349A798F224',
+        token0:WETH_BASE,token1:USDC_BASE,protocolo:'v3',taxa:500,permitida:true},
+    {endereco:'0x4C36388bE6F416A29C8d8Eee81C771cE6bE14B18',
+        token0:WETH_BASE,token1:USDBC_BASE,protocolo:'v3',taxa:500,permitida:true},
+    {endereco:'0x06959273E9A65433De71F5A452D529544E07dDD0',
+        token0:USDBC_BASE,token1:USDC_BASE,protocolo:'v3',taxa:100,permitida:true},
+]);
+/** O CACA pode operar sem copiar novamente para Railway seu banco de pools. */
+export function poolsDoCaca(valor?: string): PoolLiquidacao[] {
+    if (!valor || !valor.trim()) return POOLS_V3_BASE_CACA.map(p => ({...p}));
+    const extras = poolsDaConfiguracao(valor);
+    const unicos = new Map<string,PoolLiquidacao>();
+    for (const pool of [...POOLS_V3_BASE_CACA,...extras])
+        unicos.set(pool.endereco.toLowerCase(),pool);
+    return [...unicos.values()];
+}
+
 export const MORPHO_FLASH_BASE = '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb';
 export const ABI_MULTI = new Interface([
     'function liquidar(address usuario,address garantia,address divida,uint256 cobrir,uint256 lucroMinimo,(address pool,address tokenEntra,uint8 tipo,uint24 fee)[] rota) returns (uint256 lucro)',
