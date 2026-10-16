@@ -6936,9 +6936,11 @@ async function principal(): Promise<'parar' | void> {
                             log.warn('[MULTIHOP] Sem preco de gas/divida para validar o lance real.');
                             continue;
                         }
+                        const l1Atual = await tetoL1PeloCaca(leitor);
+                        const l1Opcional = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const reservaNoEnvio = l1Opcional > l1Atual ? l1Opcional : l1Atual;
                         const custoNoLance = gasEmTokenDaDivida(
-                            limiteGas, maxFee,
-                            await tetoL1PeloCaca(leitor),
+                            limiteGas, maxFee, reservaNoEnvio,
                             alvo.dividaCrua, alvo.dividaUsd, ethAgora,
                         );
                         if (custoNoLance >= ofertaMulti.piso) {
