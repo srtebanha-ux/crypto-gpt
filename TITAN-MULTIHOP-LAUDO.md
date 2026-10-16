@@ -41,3 +41,12 @@ Data: 2026-10-16. Revisao tecnica de engenharia (NAO e auditoria independente).
 - Primeiro habilitar somente observacao no novo servico. Ativar envio apenas apos um canary restrito e reconciliacao do cofre em USDC e gas L1/L2. Desabilitar imediata e explicitamente quando houver divergencia.
 
 **Estado:** implementacao e testes historicos aprovados; NAO implantado na mainnet; nenhuma transferencia ou tx paga efetuada por esta integracao.
+
+## Ambiente preparado no Railway (somente staged)
+
+- Projeto `acceptable-vitality`, ambiente `production`.
+- Novo servico `titan-multihop-readonly`, **state=staged-create**; nao foi implantado nem iniciado.
+- Codigo pinado em `476ee034c46c6671c1c3534c1c98657cc91d7f05`; start: `node dist/titanMultiReadiness.js`.
+- Sem segredo, sem chave e sem dinheiro: `CACA_ENVIAR=0`, `CACA_MULTIHOP_ENVIAR=0`, `TITAN_MULTI_DEPLOY=0`.
+- Verifica a chain, codigo Morpho/Aave/Uniswap, proxies e tres pools V3. Sem comando para enviar.
+- Pending patch isolado nao foi aplicado, por exigir aprovacao expressa de implantacao no Railway; servicos existentes permanecem intactos.
