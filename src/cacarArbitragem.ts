@@ -491,6 +491,10 @@ export function montarTransporteRpc(opcoes: {
     /** Teto de requisicoes HTTP na execucao. 0 = sem teto. */
     tetoDeRequisicoes?: number;
     timeoutMs?: number;
+    /** Teto fisico de inicio de requisicoes HTTP por segundo (0 desliga). */
+    requisicoesPorSegundo?: number;
+    /** Quota dura de HTTP por janela de 1h; ao esgotar dorme ate renovar. */
+    requisicoesPorHora?: number;
     agora?: () => number;
 }): {
         chamar: Transporte;
@@ -504,14 +508,53 @@ export function montarTransporteRpc(opcoes: {
     const loteMaximo = Math.max(1, Math.floor(opcoes.loteMaximo ?? 200));
     const tetoDeRequisicoes = Math.max(0, Math.floor(opcoes.tetoDeRequisicoes ?? 0));
     const timeoutMs = Math.max(0, Math.floor(opcoes.timeoutMs ?? 8_000));
+    const rps = opcoes.requisicoesPorSegundo ?? 0;
+    const porHora = opcoes.requisicoesPorHora ?? 0;
+    if (!Number.isFinite(rps) || rps < 0 || !Number.isFinite(porHora) || porHora < 0) {
+        throw new Error('Limites de vazao RPC invalidos');
+    }
+    const intervaloMinimoMs = rps > 0 ? Math.ceil(1000 / rps) : 0;
+    const tetoHora = Math.floor(porHora);
     const agora = opcoes.agora ?? (() => Date.now());
     const esperar = opcoes.esperar
         ?? ((ms: number) => new Promise<void>((s) => { setTimeout(s, ms); }));
+
+    // Um unico agendador PARA TODAS as chamadas concorrentes. Contar depois
+    // do fetch deixaria N concorrentes passar pelo mesmo limite. Aqui a vaga
+    // e reservada antes da chamada de rede e nao existe corrida.
+    let fila: Promise<void> = Promise.resolve();
+    let proximaEm = 0;
+    let janelaEm = 0;
+    let usadasNaHora = 0;
+    const reservarVaga = (): Promise<void> => {
+        const passo = fila.then(async () => {
+            let t = agora();
+            if (janelaEm === 0) janelaEm = t;
+            if (tetoHora > 0 && t - janelaEm >= 3_600_000) {
+                janelaEm = t;
+                usadasNaHora = 0;
+            }
+            if (tetoHora > 0 && usadasNaHora >= tetoHora) {
+                await esperar(Math.max(1, 3_600_000 - (t - janelaEm)));
+                t = agora();
+                janelaEm = t;
+                usadasNaHora = 0;
+            }
+            const pausa = Math.max(0, proximaEm - t);
+            if (pausa > 0) await esperar(pausa);
+            t = agora();
+            proximaEm = Math.max(t, proximaEm) + intervaloMinimoMs;
+            usadasNaHora += 1;
+        });
+        fila = passo.catch(() => {});
+        return passo;
+    };
 
     /** Uma ida e volta, com o status JA classificado. Nunca lanca. */
     const umaIda = async (corpo: string, metodos: string[]): Promise<
     { tipo: 'corpo'; texto: string } | { tipo: 'falha'; porque: string; esperarMs: number | null }
     > => {
+        await reservarVaga();
         if (tetoDeRequisicoes > 0 && conta.requisicoes >= tetoDeRequisicoes) {
             conta.recusadasPeloTeto += 1;
             return {
@@ -1786,6 +1829,8 @@ async function principal(): Promise<void> {
         loteMaximo: Number(process.env.ARB_LOTE_MAX ?? 200),
         tetoDeRequisicoes: Number(process.env.ARB_TETO_RPC ?? 0),
         timeoutMs: Number(process.env.ARB_TIMEOUT_MS ?? 8000),
+        requisicoesPorSegundo: Number(process.env.ARB_HTTP_RPS ?? 0),
+        requisicoesPorHora: Number(process.env.ARB_HTTP_POR_HORA ?? 0),
     });
     const { chamar, chamarEmLote } = TRANSPORTE;
 
