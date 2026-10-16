@@ -29,6 +29,10 @@ import { naoCruzouAinda, codificarUserReserveData, decodificarUserReserveData, C
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
+import {
+    prepararOfertaMulti, revalidarOfertaMulti, poolsDaConfiguracao,
+    type OfertaMulti,
+} from './titanPonteMultiHop';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
@@ -6130,7 +6134,14 @@ async function principal(): Promise<'parar' | void> {
                 // ganhado.
                 //
                 // Fase 1: medir todos (eth_call custa CU, nao gas).
-                const medicoes: Array<{ contrato: typeof contratos[number]; lucroCru: bigint }> = [];
+                // O terceiro candidato nao altera o cadastro dos contratos antigos.
+                // So participa da escolha quando tem quote atomica comprovada.
+                const medicoes: Array<{
+                    contrato: typeof contratos[number] | {nome:string;endereco:string;tipo:'MH'};
+                    lucroCru: bigint;
+                    envioMulti?: string;
+                }> = [];
+                let ofertaMulti: OfertaMulti | null = null;
                 for (const contrato of contratos) {
                     const dados = contrato.tipo === 'V1'
                         ? codificarCacaV1({
@@ -6248,6 +6259,68 @@ async function principal(): Promise<'parar' | void> {
                     }
                 }
 
+                // TITAN MULTI-HOP: plano REAL -> eth_call do contrato IMPLANTADO.
+                // Nao entra em tiros especulativos: o contrato exige HF < 1.
+                // Na ausencia de endereco, pool, preço ou credito: o V1/V2 segue intocado.
+                if (process.env.CACA_MULTIHOP_AVALIAR === '1'
+                    && REDE_ESCOLHIDA === 'base'
+                    && !vaoCruzar.has(alvo.devedor.toLowerCase())
+                    && donoCarteira && alvo.dividaCrua && alvo.dividaCrua > 0n
+                    && alvo.dividaUsd && alvo.dividaUsd.greaterThan(0)
+                    && precoDoEth() && baseFeeAtual && baseFeeAtual > 0n) {
+                    try {
+                        const contratoMulti = process.env.CACA_MULTIHOP_CONTRATO ?? '';
+                        const fabrica = process.env.CACA_MULTIHOP_FACTORY ?? '';
+                        const reserva = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const gasMax = BigInt(process.env.CACA_MULTIHOP_GAS_MAX ?? '1500000');
+                        ofertaMulti = await prepararOfertaMulti(leitor, {
+                            usuario: alvo.devedor,
+                            garantia: alvo.garantia,
+                            divida: alvo.divida,
+                            dividaCrua: alvo.dividaCrua,
+                            dividaUsd: alvo.dividaUsd,
+                            creditoMaximo: cobrir(alvo),
+                            ethUsd: precoDoEth()!,
+                            dono: donoCarteira,
+                            contrato: contratoMulti,
+                            cofre: COFRE_ESPERADO,
+                            aave: REDE.pool,
+                            fabricaV3: fabrica,
+                            pools: poolsDaConfiguracao(process.env.CACA_MULTIHOP_POOLS_JSON),
+                            maxFeePerGas: 3n * baseFeeAtual + 20_000_000n,
+                            reservaL1Wei: reserva,
+                            gasMax,
+                            maxCotacoes: 16,
+                        });
+                        if (ofertaMulti) {
+                            // Dois consentimentos: o CACA original e a permissao
+                            // ESPECIFICA da nova ABI, sem autoativacao apos deploy.
+                            const liberar = ENVIAR
+                                && process.env.CACA_MULTIHOP_ENVIAR === '1'
+                                && process.env.CACA_MULTIHOP_CONFIRMAR === 'OPERAR_BASE_REAL';
+                            log.info('[MULTIHOP] Plano simulado contra contrato real.', {
+                                devedor:alvo.devedor, bloco:ofertaMulti.bloco,
+                                saltos:ofertaMulti.rota.pernas.length,
+                                credito:ofertaMulti.cobrir.toString(),
+                                lucroCru:ofertaMulti.lucroCru.toString(),
+                                lucroLiquidoEstimadoCru:ofertaMulti.liquidoCru.toString(),
+                                situacao: liberar ? 'pode competir com V1/V2' : 'somente observacao',
+                            });
+                            if (liberar) {
+                                medicoes.push({
+                                    contrato:{nome:'Multi-Hop Morpho',endereco:ofertaMulti.contrato,tipo:'MH'},
+                                    lucroCru:ofertaMulti.liquidoCru,
+                                    envioMulti:ofertaMulti.envio,
+                                });
+                            }
+                        }
+                    } catch(e) {
+                        log.warn('[MULTIHOP] Nao elegivel; mantenho V1/V2.', {
+                            motivo:e instanceof Error?e.message:'erro inesperado',
+                        });
+                    }
+                }
+
                 // Fase 2: UM tiro, no contrato que mediu o maior lucro.
                 // OS DOIS PORTOES QUE ERAM MUDOS, e e o defeito que este
                 // projeto mais persegue: um `continue` seco no caminho do
@@ -6320,7 +6393,8 @@ async function principal(): Promise<'parar' | void> {
                 medicoes.sort((a, b) => (b.lucroCru > a.lucroCru ? 1 : b.lucroCru < a.lucroCru ? -1 : 0));
                 const escolhida = medicoes[0];
                 const contrato = escolhida.contrato;
-                const lucroCruValido = escolhida.lucroCru;
+                const lucroCruValido = contrato.tipo === 'MH' && ofertaMulti
+                    ? ofertaMulti.lucroCru : escolhida.lucroCru;
                 if (medicoes.length > 1) {
                     log.info('[ESCOLHA] Dois contratos mediram; atiro só no melhor.', {
                         devedor: alvo.devedor,
@@ -6365,9 +6439,13 @@ async function principal(): Promise<'parar' | void> {
                     //
                     // `pisoNoContrato` nunca devolve zero com cobertura
                     // positiva: sem medicao, o piso sai da divida coberta.
-                    const piso = pisoNoContrato(cobrir(alvo), lucroCruValido > 0n ? lucroCruValido : null);
+                    const piso = contrato.tipo === 'MH' && ofertaMulti
+                        ? ofertaMulti.piso
+                        : pisoNoContrato(cobrir(alvo), lucroCruValido > 0n ? lucroCruValido : null);
 
-                    const envio = contrato.tipo === 'V1'
+                    const envio = contrato.tipo === 'MH'
+                        ? (escolhida.envioMulti ?? '')
+                        : contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
                             divida: alvo.divida,
@@ -6843,6 +6921,15 @@ async function principal(): Promise<'parar' | void> {
                             devedor: alvo.devedor,
                             porque: oQueFazer.porque,
                             oQueEuNAOFiz: 'não assinei, não transmiti e não reservei nonce',
+                        });
+                        continue;
+                    }
+                    // Confirma o MESMO calldata novamente antes de reservar nonce.
+                    // A cotacao envelhece em poucos blocos; jamais operar com HF velho.
+                    if (contrato.tipo === 'MH'
+                        && (!ofertaMulti || !await revalidarOfertaMulti(leitor, ofertaMulti, donoCarteira))) {
+                        log.warn('[MULTIHOP] Quote expirou/reverteu antes de assinar. Sem envio.', {
+                            devedor:alvo.devedor,
                         });
                         continue;
                     }
