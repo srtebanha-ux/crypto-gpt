@@ -30,7 +30,7 @@ import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './re
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
 import {
-    prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE,
+    prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca,
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
 } from './titanPonteMultiHop';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
@@ -6271,7 +6271,9 @@ async function principal(): Promise<'parar' | void> {
                     try {
                         const contratoMulti = process.env.CACA_MULTIHOP_CONTRATO ?? '';
                         const fabrica = FABRICA_V3_BASE;
-                        const reserva = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const reservaBase = await tetoL1PeloCaca(leitor);
+                        const reservaOpcional = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const reserva = reservaOpcional > reservaBase ? reservaOpcional : reservaBase;
                         const gasMax = BigInt(process.env.CACA_MULTIHOP_GAS_MAX ?? '1500000');
                         ofertaMulti = await prepararOfertaMulti(leitor, {
                             usuario: alvo.devedor,
@@ -6936,7 +6938,7 @@ async function principal(): Promise<'parar' | void> {
                         }
                         const custoNoLance = gasEmTokenDaDivida(
                             limiteGas, maxFee,
-                            BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0'),
+                            await tetoL1PeloCaca(leitor),
                             alvo.dividaCrua, alvo.dividaUsd, ethAgora,
                         );
                         if (custoNoLance >= ofertaMulti.piso) {
