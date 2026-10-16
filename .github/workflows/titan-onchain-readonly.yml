@@ -1,0 +1,30 @@
+name: Titan onchain readiness (somente leitura)
+
+on:
+  push:
+    branches:
+      - feat/titan-multihop-execution-bridge
+    paths:
+      - 'src/titanMultiReadiness.ts'
+      - 'src/titanPonteMultiHop.ts'
+      - '.github/workflows/titan-onchain-readonly.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  read-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Conferir Base atual sem carteira, sem transacao e sem gas
+        run: |
+          node --require ts-node/register -e "require('./src/titanMultiReadiness').diagnosticarMultiReadOnly('https://mainnet.base.org').then(x=>{console.log(JSON.stringify(x));if(!x.online)process.exitCode=1}).catch(e=>{console.error(String(e));process.exitCode=1})"
