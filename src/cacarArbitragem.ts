@@ -49,7 +49,7 @@ import {
     primeiraPalavra, escadaDeTamanhos, podeDescartarTamanhosMaiores,
     LivroDeSinais, EstadoDosPools,
     COTADOR_LOCAL, codificarCotarCiclo, lerRespostaDaCotacao, lerCodigoDoCotador,
-    impressaoDoEstado, estadoInconsistente,
+    impressaoDoEstado, impressaoDosPools, compararEstados,
     type SinalDeArbitragem,
 } from './cotarMista';
 import { codificarTetoDeL1, ORACULO_DE_GAS_L1, somarCusto, julgar } from './custoDaBase';
@@ -1590,21 +1590,20 @@ async function principal(): Promise<void> {
             // SO AS ROTAS AFETADAS POR MUDANCA DE ESTADO. Um pool cujo `slot0`
             // ou cujas reservas nao mudaram nao produz rota nova, e recotar o
             // mesmo estado e gastar RPC para repetir a resposta de antes.
-            const cru = new Map<string, string | null>();
-            for (const [pool, v] of L.sqrtPorPoolV3) {
-                // PRECO **E** LIQUIDEZ. Com so o preco, uma mudanca de
-                // liquidez no mesmo tick lia como "nada mudou" — e ela muda o
-                // resultado do swap. Liquidez nao lida vira `null`, e `null`
-                // nao afirma que nada mudou: deixa a rota NAO VALIDADA.
-                const liq = L.liquidezDoV3?.get(pool) ?? null;
-                cru.set(pool, v === null || liq === null ? null : `v3:${v}/L${liq}`);
-            }
-            for (const [pool, v] of L.reservasAerodrome) {
-                cru.set(pool, v === null ? null : `ae:${v.r0}/${v.r1}`);
-            }
+            // UMA funcao para os dois lados. Ver `impressaoDosPools`: duas
+            // serializacoes escritas a mao divergiram e produziram
+            // `ESTADO_INCONSISTENTE` em 5.819 de 5.823 sinais.
+            const cru = impressaoDosPools(L);
             // A IMPRESSAO decide se ha o que avaliar. Estado identico ao
-            // anterior nao e avaliado de novo, MESMO no mesmo bloco — e estado
+            // anterior nao e reavaliado, MESMO no mesmo bloco; e estado
             // diferente E avaliado, mesmo com o bloco confirmado igual.
+            //
+            // ESTE BLOCO FOI APAGADO POR MIM ao trocar a serializacao a mao
+            // pela funcao pura, e o funil denunciou na mesma corrida: "0
+            // ESTADO(S) DISTINTO(S)" ao lado de "136 com pool de rota
+            // alterado" — dois numeros do mesmo log discordando sobre o mesmo
+            // estado. Sem ele nao havia deduplicacao e a corrida gastou 4.598
+            // cotacoes em 5 minutos.
             const impressao = impressaoDoEstado(cru);
             if (impressao === ULTIMA_IMPRESSAO.valor) {
                 ULTIMA_IMPRESSAO.repetidas += 1;
@@ -1640,23 +1639,35 @@ async function principal(): Promise<void> {
                 );
                 LIVRO_DE_SINAIS.registrarCotacao(Date.now() - tc);
                 fimCot();
+                // A RECONCILIACAO que ela pediu: sinal nao e cotacao. Cada
+                // sinal cai em exatamente uma destas caixas, e a contagem roda
+                // ANTES da reclassificacao por estado — senao o sinal que vira
+                // `ESTADO_*` nao cai em caixa nenhuma e a soma nao fecha.
+                for (const sn of sinais) {
+                    if (sn.motivo.startsWith('SEM DADO')) FM.sinaisSemTamanho += 1;
+                    else if (sn.motivo.startsWith('REVERSÃO OPACA')) FM.cotacoesOpacas += 1;
+                    else if (sn.motivo.startsWith('SEM COTAÇÃO')) FM.semCotador += 1;
+                    else if (sn.lucroBrutoEstimado !== null) FM.cotacoesLegiveis += 1;
+                    else FM.sinaisSemTamanho += 1;
+                }
                 // O ESTADO AINDA E O MESMO? Releitura dos pools das rotas
                 // cotadas. Se mudou, a cotacao combinou leitura de um snapshot
                 // com preco de outro, e isso NAO vira lucro: vira
                 // ESTADO_INCONSISTENTE.
                 const Ldepois = await lerEstadoMisto(chamar, afetadas, blocoDaAmostra, etiqueta);
-                const cruDepois = new Map<string, string | null>();
-                for (const [pool, v] of Ldepois.sqrtPorPoolV3) {
-                    cruDepois.set(pool, v === null ? null : `v3:${v}`);
-                }
-                for (const [pool, v] of Ldepois.reservasAerodrome) {
-                    cruDepois.set(pool, v === null ? null : `ae:${v.r0}/${v.r1}`);
-                }
+                const cruDepois = impressaoDosPools(Ldepois);
                 for (const sn of sinais) {
                     const rota = afetadas.find((c) => c.chave === sn.rota);
                     if (rota === undefined) continue;
                     const poolsDaRota = rota.pernas.map((p) => p.pool);
-                    if (!estadoInconsistente(cru, cruDepois, poolsDaRota)) {
+                    const v = compararEstados(cru, cruDepois, poolsDaRota);
+                    if (v === 'CONSISTENTE') { FM.estadosConsistentes += 1; continue; }
+                    if (v === 'NAO_VALIDADA') {
+                        FM.estadoNaoValidado += 1;
+                        sn.motivo = 'ESTADO_NAO_VALIDADO: não li algum pool desta rota na '
+                            + 'releitura, então não posso afirmar que mudou NEM que ficou igual '
+                            + `(era: ${sn.motivo.slice(0, 60)})`;
+                        sn.lucroLiquidoEstimado = null;
                         continue;
                     }
                     FM.estadosInconsistentes += 1;
@@ -1674,7 +1685,7 @@ async function principal(): Promise<void> {
                 ).length;
                 for (const sn of sinais) {
                     LIVRO_DE_SINAIS.registrar(sn);
-                    if (sn.motivo.startsWith('ESTADO_INCONSISTENTE')) continue;
+                    if (sn.motivo.startsWith('ESTADO_')) continue;
                     if (sn.lucroBrutoEstimado !== null && sn.lucroBrutoEstimado > 0n) {
                         brutosPositivos += 1;
                         FM.cotacoesComSobra += 1;
@@ -1702,7 +1713,11 @@ async function principal(): Promise<void> {
                     + 'o MESMO bloco confirmado — é o que o gatilho por número de bloco não via',
                 estadosRepetidosIgnorados: `${ULTIMA_IMPRESSAO.repetidas} ciclo(s) com estado `
                     + 'IDÊNTICO não foram reavaliados (recotar repetiria a resposta)',
-                estadosInconsistentes: FM.estadosInconsistentes,
+                estados: `${FM.estadosConsistentes} CONSISTENTE, `
+                    + `${FM.estadosInconsistentes} INCONSISTENTE, `
+                    + `${FM.estadoNaoValidado} NÃO VALIDADO`,
+                sinais: `${FM.sinaisSemTamanho} sem tamanho, ${FM.cotacoesLegiveis} cotação `
+                    + `legível, ${FM.cotacoesOpacas} opaca, ${FM.semCotador} sem cotador`,
                 comSobraBruta: brutosPositivos,
                 descartadasComProva: tri.recusadasPorSpread.length,
                 semDadoParaDecidir: tri.semDados,

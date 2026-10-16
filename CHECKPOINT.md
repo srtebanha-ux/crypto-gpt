@@ -87,24 +87,46 @@ o teste agora mede o líquido com gás do recibo, L1 por teto, gorjeta e margem.
 A escada escolhe o melhor LÍQUIDO (o gás é quase constante no tamanho), e o
 `assert.ok(true)` que fazia a prova nunca poder reprovar foi removido.
 
-## OBSERVAÇÃO AO VIVO COM A EXPANSÃO LIGADA — 9 min, teto de 100 estados
+## O COMPARADOR DE ESTADO ESTAVA QUEBRADO — e a conclusão de latência caiu
 
-    380 ROTAS distintas monitoradas (186 pools V3 + 16 Aerodrome)
-    5.823 sinais | 101 cotações executadas
-    74 sinais com lucro BRUTO positivo registrado
-    0 com lucro LÍQUIDO positivo | 0 expirados
-    23 mudanças INTRABLOCO detectadas
-    latência de observação p50 577ms p95 749ms p99 982ms; cotação p50 380ms
+**DEFEITO (achado por ela em `9f08261`):** havia DUAS serializações do snapshot,
+escritas à mão, e discordavam por construção:
 
-**DOIS LIMITES QUE TORNAM ESSA ECONOMIA ILEGÍVEL, e ficam declarados:**
+    antes da cotação:   `v3:${sqrt}/L${liq}`
+    depois da cotação:  `v3:${sqrt}`
 
-1. `ESTADO_INCONSISTENTE` em **5.819 de 5.823** sinais: com 380 rotas, a janela
-   entre ler o estado e cotar (~0,4–0,6s) é maior que o intervalo em que os
-   pools mudam. Nenhum líquido deste run é confiável — a trava fez o certo, e o
-   conserto é cotar um subconjunto pequeno por estado, não 380.
-2. Na amostra de 40 sinais detalhados, **31 eram REVERSÃO OPACA** (o `cotar`
-   reverteu com seletor que não é `LucroInsuficiente` nem `PagamentoCurto`) e 9
-   `SEM SPREAD`. Cotação que não devolve número não decide nada.
+Todo pool V3 comparava DIFERENTE mesmo parado. Daí os "5.819 de 5.823
+ESTADO_INCONSISTENTE" — número do meu comparador, não do mercado. **A conclusão
+de que a latência era o impedimento principal está RETIRADA.**
+
+CONSERTO: `impressaoDosPools` é UMA função pura, chamada pelos dois lados, e
+`compararEstados` tem TRÊS respostas — CONSISTENTE, INCONSISTENTE e
+NAO_VALIDADA. Leitura incompleta tem classificação própria: não é mudança
+confirmada nem estado validado. Sete testes de regressão, um deles lendo o
+CÓDIGO para proibir uma segunda serialização à mão.
+
+E consertando eu APAGUEI o bloco de deduplicação por impressão. O próprio funil
+denunciou na mesma corrida — "0 ESTADO(S) DISTINTO(S)" ao lado de "136 com pool
+de rota alterado" — e está restaurado.
+
+## OBSERVAÇÃO COM O COMPARADOR CORRIGIDO — 5 min, teto de 60 estados
+
+    64 amostras lidas -> 62 ESTADOS DISTINTOS (2 repetidos descartados)
+    19 mudanças INTRABLOCO | 298 rotas | 223 pools V3 + 25 Aerodrome
+
+    ESTADO:  116 CONSISTENTE | 114 INCONSISTENTE | 2.683 NÃO VALIDADO
+    SINAIS:  2.913 = 1.287 cotação LEGÍVEL + 1.626 OPACA  (a soma fecha)
+    42 sinais com lucro BRUTO positivo | 0 com lucro LÍQUIDO positivo
+
+**Das inconsistências que o comparador pode julgar, 114 de 230 (49,6%) são
+reais** — não 99,9%. As 2.683 NÃO VALIDADO são releitura incompleta (RPC
+público com 298 rotas), antes contadas como "inconsistente" por comparar nulo
+com nulo: eram falsas. **Lucro líquido: ZERO.**
+
+E a reconciliação que ela pediu: SINAL ≠ COTAÇÃO. Cada sinal é uma rota avaliada
+num estado; cada um gerou um `eth_call` de cotação, enviados em LOTE JSON-RPC
+(um lote por estado, N pedidos). Na corrida anterior os "101" eram lotes
+contados errado contra 5.823 sinais; agora as duas contas fecham.
 
 ## CONCORRENTE 0x7b579d9d… — o que É verificável na corrente (2026-10-16)
 
@@ -151,13 +173,22 @@ Nada foi adicionado para `0x3a1c453c`: o nome não foi determinado, e declarar
 um callback por adivinhação abriria uma porta cujo chamador não sei
 identificar. Limitação medida: 1 pool de 53.
 
-**O QUE NÃO ESTÁ PROVADO, e é meu:** não consegui produzir um A/B ao vivo
-mostrando a rota do pool Algebra passando a cotar. A minha tentativa de A/B foi
-inválida — os três casos (inclusive o callback que JÁ existia) voltaram sem
-dado, então o harness não discrimina nada e não serve de prova. O que está
-medido é: a incompatibilidade existe (o pool chama um seletor que não existia no
-nosso bytecode, e o contrato não tem `fallback`), o apelido agora está presente
-no bytecode, e a rota V3↔V3 provada continua executando (status=1).
+**A/B VÁLIDO, com controle positivo (2026-10-16).** O A/B anterior era inválido
+e está substituído. Método: o MESMO bytecode, com o seletor `0x2c8958f6`
+trocado por `0x2c8958f7` — ablação que torna a função inalcançável e deixa todo
+o resto idêntico. Mesmo pool, mesmo estado, mesmo tamanho:
+
+    pool Algebra WETH/USDC 0x256f3997… (de `poolByPair`, não de memória)
+
+    rota COM o pool Algebra   COM alias -> LEGÍVEL (LucroInsuficiente)
+                              SEM alias -> SEM DADO (opaca)
+    rota COM o pool Algebra   COM alias -> LEGÍVEL (PagamentoCurto)
+                              SEM alias -> SEM DADO (opaca)
+    CONTROLE só Uniswap       COM alias -> LEGÍVEL | SEM alias -> LEGÍVEL
+
+O controle legível nas duas versões é o que torna o teste válido: a ablação não
+quebrou nada além do que devia. Um `LucroInsuficiente` quer dizer que o ciclo
+FECHOU e sobrou — **e isso não é lucro**: o líquido continua negativo.
 
 E a matemática local com ticks em memória NÃO foi implementada: a auditoria
 achou primeiro a incompatibilidade de callback, e a ordem dela é corrigir só

@@ -313,6 +313,18 @@ export interface FunilMisto {
      * utilizando dados incompativeis."*
      */
     estadosInconsistentes: number;
+    /** Cotacoes cujo estado foi CONFERIDO igual antes e depois. */
+    estadosConsistentes: number;
+    /** Releitura incompleta: nao da para afirmar que mudou NEM que ficou igual. */
+    estadoNaoValidado: number;
+    /** Sinais que nem chegaram a cotacao por falta de tamanho. */
+    sinaisSemTamanho: number;
+    /** Cotacoes que devolveram NUMERO. */
+    cotacoesLegiveis: number;
+    /** Cotacoes que reverteram com seletor nao identificado. */
+    cotacoesOpacas: number;
+    /** Rotas sem cotador disponivel. */
+    semCotador: number;
 }
 
 export const funilVazio = (): FunilMisto => ({
@@ -343,6 +355,12 @@ export const funilVazio = (): FunilMisto => ({
     expirado: 0,
     falhaDeExecucao: 0,
     estadosInconsistentes: 0,
+    estadosConsistentes: 0,
+    estadoNaoValidado: 0,
+    sinaisSemTamanho: 0,
+    cotacoesLegiveis: 0,
+    cotacoesOpacas: 0,
+    semCotador: 0,
 });
 
 /**
@@ -425,7 +443,10 @@ export function comoLerOFunilMisto(f: FunilMisto): string {
         + `SEM DADO POR: ${f.faltaDeSpread} falta de spread, `
         + `${f.limitacaoDeCobertura} cobertura, ${f.faltaDeDados} falta de dados, `
         + `${f.semProvaMatematica} SEM PROVA do invariante (pool stable: não descartado), `
-        + `${f.expirado} EXPIRADO, ${f.estadosInconsistentes} ESTADO_INCONSISTENTE, `
+        + `${f.expirado} EXPIRADO | ESTADO: ${f.estadosConsistentes} consistente, `
+        + `${f.estadosInconsistentes} inconsistente, ${f.estadoNaoValidado} não validado | `
+        + `SINAIS: ${f.sinaisSemTamanho} sem tamanho, ${f.cotacoesLegiveis} legível, `
+        + `${f.cotacoesOpacas} opaca, ${f.semCotador} sem cotador | `
         + `${f.falhaDeExecucao} falha de execução | `
         + limitacaoDominante(f);
 }

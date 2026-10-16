@@ -485,3 +485,82 @@ export function podeDescartarTamanhosMaiores(e: {
             + 'o produto é não-crescente e razão <= 1 no menor tamanho vale para todos os maiores',
     };
 }
+
+/**
+ * A IMPRESSAO DE CADA POOL — UMA funcao, usada ANTES e DEPOIS da cotacao.
+ *
+ * DEFEITO QUE ELA ACHOU no `9f08261`, e era fatal para a conclusao: havia DUAS
+ * serializacoes escritas a mao, e elas discordavam por construcao —
+ *
+ *     antes da cotacao:   `v3:${sqrt}/L${liquidez}`
+ *     depois da cotacao:  `v3:${sqrt}`
+ *
+ * Com isso TODO pool V3 comparava diferente mesmo parado, e
+ * `ESTADO_INCONSISTENTE` saiu em 5.819 de 5.823 sinais. A conclusao de que a
+ * latencia era o impedimento principal veio do meu comparador, nao do mercado,
+ * e esta RETIRADA.
+ *
+ * E a licao e a REGRA 3 deste projeto: uma regra em dois lugares e a mesma
+ * regra. Serializar em dois lugares era sincronizar na mao duas copias que
+ * ninguem conferia uma contra a outra. Agora ha uma funcao, e os dois lados a
+ * chamam — por isso nao da mais para divergirem.
+ *
+ * `null` quer dizer NAO LIDO, e nao e zero nem "mudou": quem decide o que fazer
+ * com ausencia e `compararEstados`.
+ */
+export function impressaoDosPools(L: {
+    sqrtPorPoolV3: Map<string, bigint | null>;
+    liquidezDoV3?: Map<string, bigint | null>;
+    reservasAerodrome: Map<string, { r0: bigint; r1: bigint } | null>;
+}): Map<string, string | null> {
+    const fora = new Map<string, string | null>();
+    for (const [pool, sqrt] of L.sqrtPorPoolV3) {
+        // PRECO **E** LIQUIDEZ: liquidez mudada no mesmo preco muda o resultado
+        // de um swap, entao um snapshot so com preco nao detecta a mudanca.
+        const liq = L.liquidezDoV3?.get(pool) ?? null;
+        fora.set(
+            pool.toLowerCase(),
+            sqrt === null || liq === null ? null : `v3:${sqrt}/L${liq}`,
+        );
+    }
+    for (const [pool, r] of L.reservasAerodrome) {
+        fora.set(pool.toLowerCase(), r === null ? null : `ae:${r.r0}/${r.r1}`);
+    }
+    return fora;
+}
+
+/** O veredicto de consistencia, com TRES respostas e nenhuma inventada. */
+export type VeredictoDoEstado = 'CONSISTENTE' | 'INCONSISTENTE' | 'NAO_VALIDADA';
+
+/**
+ * O estado dos pools DA ROTA e o mesmo antes e depois da cotacao?
+ *
+ * Tres respostas, porque sao tres situacoes com acoes diferentes:
+ *
+ *   CONSISTENTE    os dois lados leram, e os valores batem
+ *   INCONSISTENTE  os dois lados leram, e algum valor mudou
+ *   NAO_VALIDADA   algum lado NAO LEU aquele pool
+ *
+ * *"Dados ausentes devem receber classificacao propria. Nao podem ser
+ * apresentados como mudanca confirmada nem como estado validado."* A versao
+ * anterior tinha duas respostas e empurrava ausencia para "consistente", o que
+ * e afirmar estado validado sem ter lido.
+ *
+ * Pool FORA da rota nao entra: um pool alheio ter mudado nao torna esta cotacao
+ * inconsistente, e tratar como se tornasse jogaria fora cotacao boa.
+ */
+export function compararEstados(
+    antes: Map<string, string | null>,
+    depois: Map<string, string | null>,
+    poolsDaRota: string[],
+): VeredictoDoEstado {
+    let mudou = false;
+    for (const p of poolsDaRota) {
+        const k = p.toLowerCase();
+        const a = antes.get(k) ?? null;
+        const b = depois.get(k) ?? null;
+        if (a === null || b === null) return 'NAO_VALIDADA';
+        if (a !== b) mudou = true;
+    }
+    return mudou ? 'INCONSISTENTE' : 'CONSISTENTE';
+}

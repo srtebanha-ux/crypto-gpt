@@ -9,6 +9,7 @@ import {
     codificarCotarCiclo, lerRespostaDaCotacao, lerCodigoDoCotador,
     SELETOR_LUCRO_INSUFICIENTE, SELETOR_PAGAMENTO_CURTO, COTADOR_LOCAL,
     impressaoDoEstado, estadoInconsistente, podeDescartarTamanhosMaiores,
+    impressaoDosPools, compararEstados,
 } from './cotarMista';
 
 const WETH = '0x4200000000000000000000000000000000000006';
@@ -302,4 +303,106 @@ test('o fingerprint do V3 muda quando só a LIQUIDEZ muda', () => {
     assert.notEqual(soPreco, comL1);
     // Liquidez não lida vira ausência, e ausência não afirma "não mudou".
     assert.notEqual(impressaoDoEstado(new Map([['p', null]])), comL1);
+});
+
+// --- O COMPARADOR DE ESTADO, que ela encontrou quebrado em `9f08261` --------
+//
+// O defeito: havia DUAS serializacoes escritas a mao, `v3:${sqrt}/L${liq}`
+// antes da cotacao e `v3:${sqrt}` depois. Elas discordavam por construcao, e
+// `ESTADO_INCONSISTENTE` saiu em 5.819 de 5.823 sinais — conclusao que veio do
+// comparador, nao do mercado.
+
+const estadoDe = (sqrt: bigint | null, liq: bigint | null, pool = 'pv3') => ({
+    sqrtPorPoolV3: new Map([[pool, sqrt]]),
+    liquidezDoV3: new Map([[pool, liq]]),
+    reservasAerodrome: new Map<string, { r0: bigint; r1: bigint } | null>(),
+});
+
+test('REGRESSÃO: mesmo preço e mesma liquidez dá CONSISTENTE', () => {
+    const antes = impressaoDosPools(estadoDe(1000n, 500n));
+    const depois = impressaoDosPools(estadoDe(1000n, 500n));
+    assert.equal(compararEstados(antes, depois, ['pv3']), 'CONSISTENTE');
+    // E a prova do defeito ANTIGO: a serialização de "depois" sem a liquidez
+    // divergia por construção, mesmo com o pool parado.
+    const comoEraAntes = new Map<string, string | null>([['pv3', 'v3:1000']]);
+    assert.notEqual(antes.get('pv3'), comoEraAntes.get('pv3'),
+        'é exatamente esta divergência que marcava TODO pool V3 como mudado');
+    assert.equal(compararEstados(antes, comoEraAntes, ['pv3']), 'INCONSISTENTE',
+        'com as duas serializações antigas, um pool parado lia como mudado — o falso positivo');
+});
+
+test('REGRESSÃO: mesmo preço e liquidez DIFERENTE dá INCONSISTENTE', () => {
+    const antes = impressaoDosPools(estadoDe(1000n, 500n));
+    const depois = impressaoDosPools(estadoDe(1000n, 900n));
+    assert.equal(compararEstados(antes, depois, ['pv3']), 'INCONSISTENTE',
+        'liquidez mudada no mesmo preço muda o resultado do swap: é estado outro');
+});
+
+test('REGRESSÃO: preço diferente dá INCONSISTENTE', () => {
+    assert.equal(compararEstados(
+        impressaoDosPools(estadoDe(1000n, 500n)),
+        impressaoDosPools(estadoDe(1001n, 500n)),
+        ['pv3'],
+    ), 'INCONSISTENTE');
+});
+
+test('REGRESSÃO: mudança só em pool FORA da rota é CONSISTENTE para a rota', () => {
+    const antes = new Map<string, string | null>([
+        ['pv3', 'v3:1000/L500'], ['alheio', 'v3:7/L7'],
+    ]);
+    const depois = new Map<string, string | null>([
+        ['pv3', 'v3:1000/L500'], ['alheio', 'v3:999/L999'],
+    ]);
+    assert.equal(compararEstados(antes, depois, ['pv3']), 'CONSISTENTE',
+        'pool alheio ter mudado não invalida esta rota — invalidar jogaria fora cotação boa');
+});
+
+test('REGRESSÃO: leitura incompleta é NÃO VALIDADA, nem mudou nem igual', () => {
+    const cheio = impressaoDosPools(estadoDe(1000n, 500n));
+    // Liquidez não lida: a impressão vira ausência, não zero.
+    assert.equal(impressaoDosPools(estadoDe(1000n, null)).get('pv3'), null);
+    assert.equal(compararEstados(cheio, impressaoDosPools(estadoDe(1000n, null)), ['pv3']),
+        'NAO_VALIDADA');
+    assert.equal(compararEstados(impressaoDosPools(estadoDe(null, 500n)), cheio, ['pv3']),
+        'NAO_VALIDADA');
+    // Pool ausente do mapa também é não validada: antes isto passava como
+    // CONSISTENTE, que é afirmar estado validado sem ter lido.
+    assert.equal(compararEstados(cheio, new Map(), ['pv3']), 'NAO_VALIDADA');
+});
+
+test('o Aerodrome entra na MESMA impressão, pelas reservas', () => {
+    const base = {
+        sqrtPorPoolV3: new Map<string, bigint | null>(),
+        liquidezDoV3: new Map<string, bigint | null>(),
+        reservasAerodrome: new Map([['pa', { r0: 10n, r1: 20n }]]),
+    };
+    const outro = {
+        ...base,
+        reservasAerodrome: new Map([['pa', { r0: 10n, r1: 21n }]]),
+    };
+    assert.equal(compararEstados(
+        impressaoDosPools(base), impressaoDosPools(base), ['pa'],
+    ), 'CONSISTENTE');
+    assert.equal(compararEstados(
+        impressaoDosPools(base), impressaoDosPools(outro), ['pa'],
+    ), 'INCONSISTENTE');
+});
+
+test('UMA função serializa os dois lados — e o código não tem uma segunda', () => {
+    // O defeito era ESTRUTURAL: duas serializações à mão. Nenhum teste de valor
+    // o pegaria, então este lê o CÓDIGO e exige que o caçador não volte a
+    // montar a impressão na mão.
+    // eslint-disable-next-line global-require, @typescript-eslint/no-var-requires
+    const fs = require('node:fs') as typeof import('node:fs');
+    // eslint-disable-next-line global-require, @typescript-eslint/no-var-requires
+    const path = require('node:path') as typeof import('node:path');
+    const fonte = fs.readFileSync(path.join(__dirname, 'cacarArbitragem.ts'), 'utf8');
+    const aMao = fonte.match(/`v3:\$\{[^`]*`/g) ?? [];
+    assert.deepEqual(aMao, [],
+        `o caçador voltou a serializar estado de pool V3 à mão (${aMao.join(', ')}): foram duas `
+        + 'cópias divergentes que produziram 5.819 inconsistências falsas');
+    const chamadas = (fonte.match(/impressaoDosPools\(/g) ?? []).length;
+    assert.ok(chamadas >= 2,
+        `os dois lados (antes e depois da cotação) têm de chamar \`impressaoDosPools\`; achei `
+        + `${chamadas} chamada(s)`);
 });

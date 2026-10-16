@@ -542,7 +542,10 @@ test('o funil separa ESTADO_INCONSISTENTE de expiração e de falta de spread', 
     f.cotacoesTentadas = 2;
     f.estadosInconsistentes = 2;
     const frase = comoLerOFunilMisto(f);
-    assert.match(frase, /2 ESTADO_INCONSISTENTE/);
+    // A frase passou a separar as TRÊS respostas do comparador: consistente,
+    // inconsistente e não validado. Antes eram duas, e ausência de leitura
+    // caía em "consistente" — afirmar estado validado sem ter lido.
+    assert.match(frase, /ESTADO: 0 consistente, 2 inconsistente, 0 não validado/);
     assert.match(frase, /0 EXPIRADO/,
         'expiração e inconsistência são causas diferentes: uma é chegar tarde, a outra é somar '
         + 'dois instantes. Pedem consertos opostos');
