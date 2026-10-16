@@ -1,0 +1,35 @@
+name: Titan Base Fork (somente simulação)
+
+on:
+  push:
+    branches:
+      - feat/titan-multihop-execution-bridge
+    paths:
+      - 'forkTests/titanMultiHopBaseFork.js'
+      - 'contracts/CacadorAaveMultiHopMorpho.sol'
+      - 'src/titanPonteMultiHop.ts'
+      - 'src/titanPlanejadorLiquidacao.ts'
+      - 'src/cacarAoVivo.ts'
+      - 'src/implantarTitanMultiHop.ts'
+      - '.github/workflows/titan-base-fork.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fork-base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx hardhat compile
+      - name: Testar no fork da Base com Aave/Morpho/Uniswap reais (sem assinatura na Base)
+        env:
+          ARB_BLOCO: "52418045"
+        run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanMultiHopBaseFork.js

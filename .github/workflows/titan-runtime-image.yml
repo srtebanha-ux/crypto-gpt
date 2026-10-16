@@ -1,0 +1,32 @@
+name: TITAN Runtime Image Validation
+
+on:
+  push:
+    branches:
+      - feat/titan-multihop-execution-bridge
+    paths:
+      - 'Dockerfile'
+      - 'package.json'
+      - 'src/implantarTitanMultiHop.ts'
+      - '.github/workflows/titan-runtime-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image with production dependencies only
+        run: docker build -t titan-multihop-runtime:check .
+      - name: Verify runtime artifact without key and without transactions
+        run: |
+          docker run --rm --entrypoint sh titan-multihop-runtime:check -ec '
+            test -s dist/implantarTitanMultiHop.js
+            test -s dist/titanMultiReadiness.js
+            test -s .tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json
+            node -e "const a = require(\"./.tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json\"); if (!a.bytecode || a.bytecode.length < 200) process.exit(1); console.log(\"Multi-Hop bytecode available without private keys\")"
+          '
