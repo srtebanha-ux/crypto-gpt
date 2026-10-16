@@ -29,7 +29,7 @@ export function otimizarTamanhoTitan(
     };
     // Grade inteira e refinamento AO REDOR de varios picos discretos.
     // Busca ternaria pressupoe unimodalidade, que ticks/fees NAO garantem.
-    const n=BigInt(maxCotacoes/2);
+    const n=BigInt(Math.floor(maxCotacoes/2));
     const candidatos:bigint[]=[];
     for(let i=1n;i<=n;i++){
         const x=(maximo*i/n)/granularidade*granularidade;
