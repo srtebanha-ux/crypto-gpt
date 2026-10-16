@@ -31,3 +31,9 @@ test('evita overflow Number: trabalha somente com bigint',()=>{
     assert.ok(r);
     assert.ok(r.quantia>BigInt(Number.MAX_SAFE_INTEGER));
 });
+
+test('aceita orcamento impar de cotacoes sem RangeError',()=>{
+    const v=otimizarTamanhoTitan(1000n,1n,(x)=>x,9);
+    assert.ok(v);
+    assert.ok(v.cotacoes<=9);
+});
