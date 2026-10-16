@@ -39,6 +39,9 @@ import {
     type Rota, type PoolParaRota, type Retencao,
 } from './rotas';
 import { Exclusoes, classificar, type EstadoDaOportunidade } from './causaDaFalha';
+import {
+    lerMemoria, gravarMemoria, memoriaVazia, juntar, paraRotas, deDescoberta, comoLerAMemoria,
+} from './memoriaDoUniverso';
 import { pernasDaCandidata } from './rotasMistas';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
@@ -1579,7 +1582,53 @@ async function principal(): Promise<void> {
     // `estadosAvaliados` seria sempre 1 — que e exatamente o defeito que ela
     // apontou no relatorio ("250 blocos observados não são 250 estados
     // avaliados"), só do outro lado.
-    const MISTAS = candidatasMistas(porAtividade.concentrados, WETH_DA_BASE);
+    // A MEMORIA DO UNIVERSO: o que a descoberta de hoje achou, UNIDO ao que
+    // ciclos e execucoes anteriores ja tinham visto negociar.
+    //
+    // MEDIDO em 2026-10-16, e e por isso que isto existe: dos dois pools da
+    // vencedora `0x6966a108…`, NENHUM emitiu `Swap` nos 60 blocos anteriores
+    // (cobertura 100%, 0 blocos falhos) — e os dois NASCERAM 14,5 milhoes de
+    // blocos antes. Janela maior nao os acha e evento de fabrica em janela
+    // curta nao os acha; o que os acha e lembrar de quando negociaram.
+    //
+    // A memoria guarda IDENTIDADE e METADADO. Preco nenhum: `lerEstadoMisto` e
+    // `cotarAfetadas` leem o bloco, sempre.
+    const redeDaCorrente = Number(numDe(await chamar('eth_chainId', [])) ?? 0n);
+    const caminhoDaMemoria = process.env.ARB_MEMORIA ?? '.tmp/universoConhecido.json';
+    const doDisco = redeDaCorrente === 0
+        ? null : lerMemoria(caminhoDaMemoria, redeDaCorrente);
+    if (redeDaCorrente === 0) {
+        log.warn('[UNIVERSO] NÃO li o `chainId`: sigo sem memória nesta execução.', {
+            oQueIssoNaoE: 'não é "a memória está vazia": é "não sei em que rede estou", e '
+                + 'lembrar pool da rede errada seria mirar endereço que não existe aqui',
+        });
+    }
+    let memoria = doDisco ?? memoriaVazia(redeDaCorrente);
+    const primeiraJuncao = juntar(
+        memoria,
+        deDescoberta(porAtividade.concentrados, redeDaCorrente, porAtividade.blocosLidos > 0
+            ? Number(numDe(await chamar('eth_blockNumber', [])) ?? 0n) : 0),
+        { teto: Number(process.env.ARB_MEMORIA_TETO ?? 5_000) },
+    );
+    memoria = primeiraJuncao.memoria;
+    log.info('[UNIVERSO] A memória dos pools conhecidos.', {
+        doDisco: doDisco === null
+            ? `NÃO havia memória em ${caminhoDaMemoria} (ou estava torta/de outra rede) — isto `
+                + 'NÃO é "não há pool": é "não li"'
+            : comoLerAMemoria(doDisco),
+        depoisDeJuntar: comoLerAMemoria(memoria),
+        novosNestaDescoberta: primeiraJuncao.novas.length,
+        descartadosPorTeto: primeiraJuncao.descartadosPorTeto,
+        porque: 'pool que ficou quieto na janela de atividade continua conhecido — era isso que '
+            + 'faltava, e está medido nas duas vencedoras compatíveis',
+    });
+    if (doDisco !== null || primeiraJuncao.novas.length > 0) {
+        // GRAVA NO INSTANTE EM QUE APRENDE, nao num temporizador: o processo
+        // reinicia varias vezes por dia e a coleta de 37 em 37 minutos ja fez
+        // este projeto perder tudo o que havia aprendido.
+        await gravarMemoria(caminhoDaMemoria, memoria);
+    }
+    let MISTAS = candidatasMistas(paraRotas(memoria), WETH_DA_BASE);
     const FM = funilVazio();
     FM.blocosVarridosParaDescoberta = porAtividade.blocosLidos;
     FM.poolsVistos = {
@@ -1631,6 +1680,10 @@ async function principal(): Promise<void> {
 
     let ciclo = 0;
     let blocoAnterior: number | null = null;
+    // O relogio da redescoberta comeca AGORA: a descoberta do boot acabou de
+    // rodar, e reler a mesma janela no primeiro ciclo gastaria RPC para receber
+    // a resposta que acabou de chegar.
+    let ultimaRedescoberta = Date.now();
 
     // O ORCAMENTO DO EXPERIMENTO, por ordem dela: *"observação em tempo real,
     // sem envios, com orçamento limitado de chamadas RPC e duração máxima de 20
@@ -1683,7 +1736,77 @@ async function principal(): Promise<void> {
         if (tetoDeCiclos > 0 && ciclo >= tetoDeCiclos) break;
         ciclo += 1;
         PLACAR.ciclos = ciclo;
+
         const av = cronometrar(idDeAvaliacao(), 'real', null, null);
+
+        // A REDESCOBERTA INCREMENTAL, sem reiniciar o processo.
+        //
+        // O universo era descoberto UMA vez, no boot: um pool que comecasse a
+        // negociar depois disso ficava invisivel ate o proximo deploy. Agora a
+        // janela de atividade e relida de tempo em tempo, o que ela achar e
+        // UNIDO a memoria, e as rotas sao refeitas SO quando entra endereco
+        // novo — refazer a cada ciclo seria gastar CPU para repetir a resposta
+        // de antes.
+        //
+        // O ORCAMENTO E DECLARADO e e por tempo, nao por ciclo: no 'dedo no
+        // gatilho' o ciclo dura 200ms, e redescobrir a cada N ciclos faria o
+        // custo seguir a postura em vez do mercado. Custo de cada rodada: 1
+        // `eth_blockNumber` + N `eth_getBlockReceipts` (N = ARB_ATIVIDADE_BLOCOS)
+        // + ~3 multicalls de token/taxa. `ARB_REDESCOBRIR_MIN=0` desliga.
+        const minutosDaRedescoberta = Number(process.env.ARB_REDESCOBRIR_MIN ?? 5);
+        if (minutosDaRedescoberta > 0
+            && Date.now() - ultimaRedescoberta >= minutosDaRedescoberta * 60_000) {
+            ultimaRedescoberta = Date.now();
+            const fimRe = av.etapa('leitura');
+            try {
+                // eslint-disable-next-line no-await-in-loop
+                const nova = await universoPorAtividade(chamar, {
+                    blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
+                    tetoDePools: Number(process.env.ARB_ATIVIDADE_TETO ?? 300),
+                });
+                fimRe();
+                if (nova.metodoIndisponivel) {
+                    log.warn('[UNIVERSO] Redescoberta NÃO rodou: o nó não tem '
+                        + '`eth_getBlockReceipts`.', {
+                        oQueIssoNaoE: 'não é "nenhum pool novo": é "não consegui olhar". O '
+                            + 'universo continua o de antes, e isso está dito em vez de '
+                            + 'publicado como ausência',
+                    });
+                } else {
+                    const antesDeRotas = MISTAS.length;
+                    const j = juntar(
+                        memoria,
+                        deDescoberta(nova.concentrados, redeDaCorrente, blocoAnterior ?? 0),
+                        { teto: Number(process.env.ARB_MEMORIA_TETO ?? 5_000) },
+                    );
+                    memoria = j.memoria;
+                    if (j.novas.length > 0) {
+                        // ROTAS REFEITAS, e SO as afetadas importam: o gerador
+                        // de producao roda sobre o universo inteiro, e a
+                        // triagem e a cotacao do ciclo seguinte ja leem o
+                        // estado NOVO — nenhum preco velho atravessa.
+                        MISTAS = candidatasMistas(paraRotas(memoria), WETH_DA_BASE);
+                        FM.rotasDistintas = MISTAS.length;
+                        // eslint-disable-next-line no-await-in-loop
+                        await gravarMemoria(caminhoDaMemoria, memoria);
+                        log.info('[UNIVERSO] Pool NOVO entrou — rotas refeitas sem reiniciar.', {
+                            novos: j.novas.length,
+                            jaConhecidosRevistos: j.atualizadas,
+                            descartadosPorTeto: j.descartadosPorTeto,
+                            rotas: `${antesDeRotas} -> ${MISTAS.length}`,
+                            memoria: comoLerAMemoria(memoria),
+                        });
+                    }
+                }
+            } catch (e) {
+                fimRe({ comoCorreu: 'falhou' });
+                log.warn('[UNIVERSO] A redescoberta FALHOU neste ciclo.', {
+                    erro: String(e).slice(0, 120),
+                    oQueIssoNaoE: 'não é "não há pool novo": é leitura que não voltou. O '
+                        + 'universo segue o de antes e a próxima rodada tenta de novo',
+                });
+            }
+        }
 
         const fimSinal = av.etapa('sinal');
         const blocoAgora = Number(numDe(await chamar('eth_blockNumber', [])) ?? 0n);
