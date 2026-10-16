@@ -2474,7 +2474,7 @@ async function principal(): Promise<void> {
                             brutoEstimado: vencedora.lucroBrutoEstimado!,
                             liquidoEstimado: vencedora.lucroLiquidoEstimado!,
                             estadoConsistente: true,
-                        }, rpc);
+                        }, process.env.TITAN_EXECUTOR_RPC_URL ?? rpc);
                         if (resultado.estado === 'enviado' || resultado.estado === 'confirmado'
                             || resultado.estado === 'revertido' || resultado.estado === 'desconhecido') {
                             tentativasTitan += 1;
