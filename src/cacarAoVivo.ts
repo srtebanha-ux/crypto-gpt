@@ -29,6 +29,7 @@ import { naoCruzouAinda, codificarUserReserveData, decodificarUserReserveData, C
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
+import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
 import {
     prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca,
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
@@ -6995,6 +6996,37 @@ async function principal(): Promise<'parar' | void> {
                             devedor:alvo.devedor,
                         });
                         continue;
+                    }
+                    if (contrato.tipo === 'MH') {
+                        const custoL1Wei = await tetoL1PeloCaca(leitor);
+                        const extraL1 = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const custoL1Usado = extraL1 > custoL1Wei ? extraL1 : custoL1Wei;
+                        // 0.00065 ETH: teto conservador do canary por tentativa.
+                        // Limite ajustavel para BAIXO em Railway, nunca para cima sem deploy novo.
+                        const tetoPadrao = 650_000_000_000_000n;
+                        const variavel = BigInt(process.env.CACA_MULTIHOP_GASTO_MAX_WEI ?? tetoPadrao.toString());
+                        const teto = variavel < tetoPadrao ? variavel : tetoPadrao;
+                        if (!custoMaximoMultiDentroDoTeto(limiteGas,maxFee,custoL1Usado,teto)) {
+                            log.error('[MULTIHOP/CANARY] Lance acima do teto de perda por tentativa. Sem envio.', {
+                                limiteGas:limiteGas.toString(),
+                                maxFeeWei:maxFee.toString(),
+                                l1:custoL1Usado.toString(),
+                                tetoWei:teto.toString(),
+                            });
+                            continue;
+                        }
+                        if (process.env.CACA_MULTIHOP_CANARY_UM_TIRO !== '0') {
+                            const reserva = reservarUmEnvioMulti({
+                                carteira:donoCarteira, devedor:alvo.devedor,
+                                contrato:contrato.endereco,bloco:blocoAtual,
+                            });
+                            if (!reserva.liberado) {
+                                log.error('[MULTIHOP/CANARY] Primeiro envio ja reservado ou volume indisponivel.', {
+                                    porque:reserva.motivo,
+                                });
+                                continue;
+                            }
+                        }
                     }
                     const nonceAtual = await nonceManager.getNextNonce();
                     const msDoTiro = Date.now() - inicioDoCiclo;
