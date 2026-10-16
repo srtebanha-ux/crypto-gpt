@@ -32,3 +32,13 @@ Data: 16/10/2026. Esta nota registra **FATOS da blockchain** vs configuracao de 
 Deploy contrato status1 **nao e** liquidacao. Habilitar a primeira tentativa **nao e** ter encontrado oportunidade nem ter lucro. Uma operacao de liquidacao so deve ser registrada como realizada apos recibo status1, evento `LiquidouComRota` com usuario/quantia e contrato corretos, reconciliacao do cofre, gasto L1/L2 e diferenca de saldo.
 
 O contrato foi revisado em engenharia e testado em fork real de Base, mas **nao houve auditoria independente**. Por isso a configuracao de producao limita a primeira tentativa, sem liberacao ilimitada.
+
+## Confirmacao do primeiro boot com envio autorizado
+
+- Railway `renewed-sparkle`, deploy `afd5b31b-3f43-4f62-8ac4-5aaffde9a591` = **SUCCESS** (2026-10-16).
+- Log `[CONTA]` confirmou carteira original via chave existente, `assinador: CARREGADO: pode assinar e transmitir`.
+- Log `[BLOCO 52702715]` confirmou `v 6251886 · ... envio AUTORIZADO`.
+- Monitor independente `titan-multihop-readonly` = **SUCCESS**, getters do contrato validados.
+- `titan-arbitragem` continua monitorando com todas as flags de envio desabilitadas para nao disputar nonce.
+- Na ultima observacao, **nenhum `TIRO SAIU` ou `MULTIHOP NO COFRE` confirmado**. O envio esta **habilitado e limitado**, mas ainda nao existe prova de liquidacao lucrativa.
+- Risco do contrato nao foi objeto de auditoria independente. A trava de 1 unico envio nao libera transacoes continuas ate reconciliar resultado real.
