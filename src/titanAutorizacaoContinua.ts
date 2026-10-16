@@ -81,22 +81,31 @@ function travar<T>(arquivo: string, fn: () => T): T {
     const fd = fs.openSync(lock, 'wx', 0o600);
     try { return fn(); } finally { fs.closeSync(fd); fs.unlinkSync(lock); }
 }
-export function impedimentoTitanContinuo(
-    env: NodeJS.ProcessEnv, custoReservadoWei: bigint, agora = new Date(),
+/** Logica pura do orcamento conservador; nunca devolve permissao com hash pendente. */
+export function avaliarLimitesDiariosTitan(
+    registros: ReadonlyArray<Pick<Registro,'diaUtc'|'tetoGasWei'|'estado'>>,
+    custoReservadoWei: bigint, tetoGasDia: bigint, maxTxDia: number, agora = new Date(),
 ): string | null {
-    const { arquivo, tetoGasDia, maxTxDia } = parametrosTitanContinuo(env);
-    const livro = lerDiario(arquivo);
-    if (livro.registros.some(x=>x.estado === 'pendente')) {
+    if (registros.some(x=>x.estado === 'pendente')) {
         return 'existe hash pendente, conferir recibo antes de nova operacao';
     }
     const hoje = agora.toISOString().slice(0, 10);
-    const feitos = livro.registros.filter(x=>x.diaUtc === hoje);
+    const feitos = registros.filter(x=>x.diaUtc === hoje);
     if (feitos.length >= maxTxDia) return 'limite de transacoes por dia atingido';
     const gastoReservado = feitos.reduce((t,x)=>t+BigInt(x.tetoGasWei),0n);
     if (custoReservadoWei < 0n || gastoReservado+custoReservadoWei > tetoGasDia) {
         return 'limite diario conservador de gas atingido';
     }
     return null;
+}
+export function impedimentoTitanContinuo(
+    env: NodeJS.ProcessEnv, custoReservadoWei: bigint, agora = new Date(),
+): string | null {
+    const { arquivo, tetoGasDia, maxTxDia } = parametrosTitanContinuo(env);
+    const livro = lerDiario(arquivo);
+    return avaliarLimitesDiariosTitan(
+        livro.registros, custoReservadoWei, tetoGasDia, maxTxDia, agora,
+    );
 }
 /** Reserva ENQUANTO o lock exclusivo esta mantido, ANTES do broadcast. */
 export function reservarTitanContinuo(
