@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { calcularPisoTitan, motivoDaRecusaTitan, type PlanoTitan } from './titanExecucao';
+import { avaliarLimitesDiariosTitan } from './titanAutorizacaoContinua';
 
 const END_A = '0x0000000000000000000000000000000000000011';
 const END_B = '0x0000000000000000000000000000000000000022';
@@ -105,4 +106,21 @@ test('piso fixo historico continua para quem nao configurou percentual', () => {
     const r = calcularPisoTitan(40_000_000_000_000n, { TITAN_MIN_LUCRO_WEI: '20000000000000' });
     assert.equal(r.margemBps, null);
     assert.equal(r.lucroBrutoMinimoWei, 60_000_000_000_000n);
+});
+
+test('circuit breaker: qualquer reversao proibe novas tentativas inclusive outro dia', () => {
+    const r = [{ estado:'revertido' as const, tetoGasWei:'100', diaUtc:'2026-10-15' }];
+    assert.match(avaliarLimitesDiariosTitan(r,10n,10000n,10,new Date('2026-10-16T12:00:00Z'))!, /circuit breaker/);
+});
+test('circuit breaker: sem evento de lucro verificavel nao tenta novamente', () => {
+    const r = [{ estado:'confirmado' as const, tetoGasWei:'100', diaUtc:'2026-10-16', gasRealL2Wei:'20' }];
+    assert.match(avaliarLimitesDiariosTitan(r,10n,10000n,10)!, /lucro real nao comprovado/);
+});
+test('circuit breaker: sucesso que nao paga teto conservador proibe insistencia', () => {
+    const r = [{ estado:'confirmado' as const, tetoGasWei:'100', diaUtc:'2026-10-16', gasRealL2Wei:'20', lucroRealizadoWei:'90' }];
+    assert.match(avaliarLimitesDiariosTitan(r,10n,10000n,10)!, /lucro real nao comprovado/);
+});
+test('confirmacao comprovadamente lucrativa permite proxima avaliacao', () => {
+    const r = [{ estado:'confirmado' as const, tetoGasWei:'100', diaUtc:'2026-10-16', gasRealL2Wei:'20', lucroRealizadoWei:'110' }];
+    assert.equal(avaliarLimitesDiariosTitan(r,10n,10000n,10,new Date('2026-10-16T12:00:00Z')),null);
 });
