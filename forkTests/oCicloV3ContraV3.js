@@ -27,6 +27,9 @@ const {
     candidatasMistas, pernasDaCandidata, triarCandidatas,
 } = require('../dist/rotasMistas.js');
 const { codificarCotarCiclo, lerRespostaDaCotacao, COTADOR_LOCAL } = require('../dist/cotarMista.js');
+const {
+    codificarTetoDeL1, ORACULO_DE_GAS_L1, somarCusto, julgar, GORJETA_PADRAO_WEI,
+} = require('../dist/custoDaBase.js');
 
 const coder = AbiCoder.defaultAbiCoder();
 const sel = (a) => id(a).slice(0, 10);
@@ -36,9 +39,17 @@ const TOP_V3 = id('Swap(address,address,int256,int256,uint160,uint128,int24)').t
 // O hash VEM DO ARQUIVO, nao da minha cabeca: `.tmp/reconciliado.json`, a
 // operacao `CC` de maior liquido reconciliado. Hash escrito a mao e o defeito
 // do `0x80d1e0f4…` em 32 bytes, e este projeto ja o cometeu uma vez.
+// A UNICA das 7 que e CICLO FECHADO de dois pools no MESMO par: WETH/USDC em
+// duas fabricas (`0x33128a8f` fee 100 e `0x38015d05` fee 450).
+//
+// A `0x0aa98647`, de liquido muito maior (0,027 WETH), NAO serve: os pools dela
+// sao WETH/USDC e USDC/TOKEN, que nao compartilham o par — ela e duas trocas em
+// sequencia, nao um ciclo de dois pools. Usa-la como padrao fazia este arquivo
+// afirmar que o gerador esta quebrado quando ele estava certo em nao emitir
+// rota. Conferido pelo grafo de tokens, nao pela sequencia de topics.
 const TX_VENCEDORA = process.env.V3V3_TX
-    ?? '0x0aa98647e00c24f5eec0ea5ffc2a5f5b937f47f272aaec7417a201b22c00d1fc';
-const BLOCO_VENCEDOR = Number(process.env.V3V3_BLOCO ?? 52632036);
+    ?? '0x12226f04d99c911a118b6f63edd8d74300ad63bc641afdf3c2b5496c7fc2ed40';
+const BLOCO_VENCEDOR = Number(process.env.V3V3_BLOCO ?? 52631814);
 
 const iface = new Interface([
     'function executarRota((address pool,address tokenEntra,uint8 tipo,uint256 pagamento)[] rota, uint256 quantia, uint256 lucroMinimo) returns (uint256)',
@@ -94,7 +105,7 @@ async function upstream(metodo, params) {
 describe('o ciclo concentrado contra concentrado', function () {
     this.timeout(3_600_000);
 
-    it('gera, filtra, cota e EXECUTA a rota V3<->V3 no estado real do vencedor', async function () {
+    it('MECANISMO: gera, filtra, cota, EXECUTA e MEDE o líquido no estado real', async function () {
         p = hre.network.provider;
         const url = hre.config.networks.hardhat.forking.url;
 
@@ -179,8 +190,23 @@ describe('o ciclo concentrado contra concentrado', function () {
         console.log(`    FILTRO: ${tri.valem.length} passaram, ${tri.recusadasPorSpread.length}`
             + ' descartadas com prova');
 
-        // 5. COTACAO por override e EXECUCAO, tamanho por tamanho.
+        // 5. COTACAO por override, a escada inteira, escolhendo o melhor
+        //    LIQUIDO — nao o melhor bruto.
+        //
+        // ELA CORTOU O CRITERIO ANTERIOR, e com razao: *"Voce recebeu
+        // 108.878.689.617 wei de WETH e gastou 372.944 unidades de gas. O teste
+        // nao verifica o lucro liquido."* O ponto de equilibrio daquele caso e
+        // ~0,000292 gwei, muito abaixo de qualquer baseFee real. Receber WETH
+        // nao e ganhar dinheiro, e escolher o tamanho pelo BRUTO escolhe o
+        // tamanho errado: o gas e quase constante no tamanho, entao quem decide
+        // e a diferenca.
+        const bloco = await chamar('eth_getBlockByNumber', ['latest', false]);
+        const baseFeeWei = BigInt(bloco.baseFeePerGas ?? '0x0');
+        // GAS ESTIMADO para ordenar a escada: o medido vem do recibo depois.
+        const GAS_TIPICO = 400_000n;
+        const custoDe = (gas) => gas * (baseFeeWei + GORJETA_PADRAO_WEI);
         let melhor = null;
+        let melhorBruto = null;
         for (const c of tri.valem) {
             const emprestavel = saldoDaBaseNoV3.get(c.pernas[0].pool) ?? 0n;
             if (emprestavel === 0n) continue;
@@ -188,7 +214,6 @@ describe('o ciclo concentrado contra concentrado', function () {
                 const q = emprestavel / d;
                 if (q === 0n) continue;
                 const dados = codificarCotarCiclo(pernasDaCandidata(c, WETH, q), q);
-                // eslint-disable-next-line no-await-in-loop
                 let lido = null;
                 try {
                     // eslint-disable-next-line no-await-in-loop
@@ -201,31 +226,37 @@ describe('o ciclo concentrado contra concentrado', function () {
                     lido = lerRespostaDaCotacao(typeof dado === 'string' ? dado : null);
                 }
                 if (lido === null) continue;
-                if (melhor === null || lido.sobra > melhor.sobra) {
-                    melhor = { c, quantia: q, sobra: lido.sobra };
+                const liquidoPrevisto = lido.sobra - custoDe(GAS_TIPICO);
+                if (melhorBruto === null || lido.sobra > melhorBruto.sobra) {
+                    melhorBruto = { c, quantia: q, sobra: lido.sobra };
+                }
+                if (melhor === null || liquidoPrevisto > melhor.liquidoPrevisto) {
+                    melhor = { c, quantia: q, sobra: lido.sobra, liquidoPrevisto };
                 }
             }
         }
         assert.ok(melhor !== null,
             'nenhuma cotação legível: sem número não há o que executar nem o que concluir');
-        console.log(`    COTACAO (override): melhor sobra ${melhor.sobra} na quantia`
-            + ` ${melhor.quantia}`);
+        console.log(`    COTACAO (override): melhor BRUTO ${melhorBruto.sobra} |`
+            + ` melhor LIQUIDO previsto ${melhor.liquidoPrevisto} na quantia ${melhor.quantia}`);
+        console.log(`    baseFee ${baseFeeWei} + gorjeta ${GORJETA_PADRAO_WEI} por gas`);
 
-        if (melhor.sobra <= 0n) {
-            // RESULTADO, nao falha: a oportunidade do vencedor NAO existia no
-            // comeco do bloco dele. Para ESTA operacao, ela dependia de estado
-            // intrabloco — e o caminho de ler-e-reagir nao a alcança.
-            console.log('\n    MEDIDO: no estado do bloco ANTERIOR a rota NÃO fecha (sobra'
-                + ` ${melhor.sobra}). Então a oportunidade de ${TX_VENCEDORA.slice(0, 12)}`
-                + ' foi criada DENTRO do bloco — é dependência INTRABLOCO medida, não falha do'
-                + ' executor. A forma V3<->V3 continua sem prova de execução em estado real.');
-            assert.ok(true);
-            return;
-        }
+        // 6. TESTE_DO_MECANISMO — executa e exige recibo, quitação e saldo.
+        //
+        //    Isto NAO afirma rentabilidade. E por isso que os dois testes sao
+        //    separados: o anterior passava com `assert.ok(true)` quando a
+        //    cotacao nao fechava, o que faz um teste identificado como prova
+        //    nunca poder reprovar.
+        assert.ok(melhorBruto.sobra > 0n,
+            'TESTE_DO_MECANISMO: nenhum tamanho produziu sobra bruta neste estado real, então a '
+            + 'execução não pode ser exercitada aqui. Isto é REPROVAÇÃO, não "tudo bem": sem '
+            + 'sobra bruta não há o que quitar e a prova do mecanismo fica sem estado. Rode com '
+            + 'V3V3_TX/V3V3_BLOCO de uma operação em que o ciclo feche no bloco anterior');
 
+        const escolhido = melhor.liquidoPrevisto > 0n ? melhor : melhorBruto;
         const antesCofre = await saldo(WETH, cofre);
         const dados = iface.encodeFunctionData('executarRota',
-            [pernasDaCandidata(melhor.c, WETH, melhor.quantia), melhor.quantia, 1n]);
+            [pernasDaCandidata(escolhido.c, WETH, escolhido.quantia), escolhido.quantia, 1n]);
         const tx = await chamar('eth_sendTransaction', [{
             from: dono, to: arb, data: dados, gas: '0xB71B00',
         }]);
@@ -234,10 +265,49 @@ describe('o ciclo concentrado contra concentrado', function () {
         assert.equal(r.status, '0x1',
             'recibo diferente de 1: o crédito NÃO foi quitado e a rota V3<->V3 não está provada');
         const bruto = (await saldo(WETH, cofre)) - antesCofre;
-        console.log('\n    EXECUCAO ATOMICA V3<->V3 CONCLUIDA — recibo status=1');
-        console.log(`      quantia ${melhor.quantia} | gás ${BigInt(r.gasUsed)}`);
+        const gasMedido = BigInt(r.gasUsed);
+        console.log('\n    TESTE_DO_MECANISMO: recibo status=1');
+        console.log(`      quantia ${escolhido.quantia} | gás MEDIDO ${gasMedido}`);
         console.log(`      COFRE ${antesCofre} -> ${antesCofre + bruto} | bruto ${bruto}`);
         assert.ok(bruto > 0n, 'o cofre não recebeu nada: sem saldo reconciliado não há prova');
         assert.equal(await saldo(WETH, arb), 0n, 'o executor retiveve WETH');
+        assert.equal(await saldo(escolhido.c.token, arb), 0n, 'o executor retiveve o token');
+        // A COTACAO tem de bater com o REALIZADO: se divergir, a cotação não
+        // serve para decidir dinheiro.
+        assert.equal(bruto, escolhido.sobra,
+            `a cotação disse ${escolhido.sobra} e o realizado foi ${bruto}: cotação que não bate `
+            + 'com a execução não pode autorizar envio');
+
+        // 7. TESTE_DE_RENTABILIDADE — o custo COMPLETO, e líquido > 0.
+        const bytesReais = (dados.length - 2) / 2;
+        const l1 = num(await ler(ORACULO_DE_GAS_L1, codificarTetoDeL1(bytesReais)));
+        const custo = somarCusto({
+            gasUsado: gasMedido,
+            gasUsadoVeioDe: 'recibo',
+            baseFeeWei,
+            gorjetaWei: GORJETA_PADRAO_WEI,
+            // L1 por TETO; se o oráculo não responder, fica `null` e o total
+            // fica DESCONHECIDO — nunca zero.
+            custoL1Wei: l1,
+            taxaDoEmprestimoWei: 0n,
+        });
+        const j = julgar(bruto, custo);
+        console.log('\n    TESTE_DE_RENTABILIDADE');
+        console.log(`      ${custo.comoLer}`);
+        console.log(`      VEREDICTO: ${j.veredicto.toUpperCase()} | líquido ${j.liquidoWei}`);
+        const equilibrioPorGas = bruto / gasMedido;
+        console.log(`      ponto de equilíbrio: ${equilibrioPorGas} wei por gás`
+            + ` (${(Number(equilibrioPorGas) / 1e9).toFixed(9)} gwei) contra baseFee+gorjeta`
+            + ` ${baseFeeWei + GORJETA_PADRAO_WEI}`);
+
+        if (process.env.V3V3_EXIGIR_LUCRO === '1') {
+            assert.equal(j.veredicto, 'lucrativa',
+                `TESTE_DE_RENTABILIDADE: líquido ${j.liquidoWei} não é estritamente positivo com `
+                + `o custo completo (${custo.comoLer}). A execução é FUNCIONAL, não lucrativa`);
+        } else {
+            console.log('      DECLARADO: este arquivo prova o MECANISMO. A rentabilidade é'
+                + ' medida e publicada acima, e só é EXIGIDA com V3V3_EXIGIR_LUCRO=1 — porque'
+                + ' exigi-la sempre faria a prova do executor depender do mercado daquele bloco.');
+        }
     });
 });

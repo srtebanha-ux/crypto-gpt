@@ -66,31 +66,59 @@ token (131 cruzando fábrica); **156 direções passam sem taxa** (filtro trivia
 e **21 sobrevivem às duas taxas** — todas em USDC, todas cruzando fábrica. É
 potencial BRUTO no tamanho infinitesimal, não lucro líquido.
 
-## PROVA DE PONTA A PONTA V3↔V3 — estado REAL, sem deslocamento artificial
+## MECANISMO vs RENTABILIDADE — separados (2026-10-16)
 
 `forkTests/oCicloV3ContraV3.js`, fork no bloco ANTERIOR ao da operação
-`0x12226f04` (52631813):
+`0x12226f04` (a ÚNICA das 7 que é ciclo fechado de dois pools no mesmo par):
 
-    GERADOR 2 rotas (as duas ordens) | FILTRO 1 passou, 1 descartada com prova
-    COTAÇÃO por override: sobra 108.878.689.617 wei em 0,001289 WETH
-    EXECUÇÃO ATÔMICA: recibo status=1, gás 372.944, COFRE 0 -> 108.878.689.617
+    GERADOR 2 rotas | FILTRO 1 passou, 1 descartada com prova
+    COTAÇÃO por override: melhor BRUTO 108.878.689.617 wei
+    EXECUÇÃO: recibo status=1 | gás MEDIDO 372.944 | cofre reconciliado
+    cotação == realizado (asserido): 108.878.689.617
 
-O líquido não foi asserido neste teste (só o bruto e o gás); a forma, o crédito
-quitado e o saldo reconciliado estão provados.
+    TESTE_DE_RENTABILIDADE, custo COMPLETO:
+      L2 9.145.984.301.168 (372.944 × 4.523.747+20.000.000) + L1 4.348.819.154 (teto)
+      LÍQUIDO -9.041.454.430.705 wei   >>> DEFICITÁRIA
+      ponto de equilíbrio 0,000291943 gwei contra baseFee+gorjeta 0,0245 gwei
+      = 84x acima do que a operação suporta
+
+**O executor é FUNCIONAL, não lucrativo.** Receber WETH não é ganhar dinheiro, e
+o teste agora mede o líquido com gás do recibo, L1 por teto, gorjeta e margem.
+A escada escolhe o melhor LÍQUIDO (o gás é quase constante no tamanho), e o
+`assert.ok(true)` que fazia a prova nunca poder reprovar foi removido.
+
+## OBSERVAÇÃO AO VIVO COM A EXPANSÃO LIGADA — 9 min, teto de 100 estados
+
+    380 ROTAS distintas monitoradas (186 pools V3 + 16 Aerodrome)
+    5.823 sinais | 101 cotações executadas
+    74 sinais com lucro BRUTO positivo registrado
+    0 com lucro LÍQUIDO positivo | 0 expirados
+    23 mudanças INTRABLOCO detectadas
+    latência de observação p50 577ms p95 749ms p99 982ms; cotação p50 380ms
+
+**DOIS LIMITES QUE TORNAM ESSA ECONOMIA ILEGÍVEL, e ficam declarados:**
+
+1. `ESTADO_INCONSISTENTE` em **5.819 de 5.823** sinais: com 380 rotas, a janela
+   entre ler o estado e cotar (~0,4–0,6s) é maior que o intervalo em que os
+   pools mudam. Nenhum líquido deste run é confiável — a trava fez o certo, e o
+   conserto é cotar um subconjunto pequeno por estado, não 380.
+2. Na amostra de 40 sinais detalhados, **31 eram REVERSÃO OPACA** (o `cotar`
+   reverteu com seletor que não é `LucroInsuficiente` nem `PagamentoCurto`) e 9
+   `SEM SPREAD`. Cotação que não devolve número não decide nada.
 
 ## Problema atual
 
-Não há lucro capturado na rede. A expansão V3↔V3 está integrada e provada em
-fork; o que falta é evidência de que alguma dessas rotas feche com líquido
-positivo em observação ao vivo.
+**VANTAGEM ECONÔMICA NÃO COMPROVADA.** O único ciclo fechado histórico é 84x
+abaixo do ponto de equilíbrio no nosso gás, e a medição ao vivo está ilegível
+pelos dois limites acima. Lucro capturado na rede: ZERO.
 
 ## Próxima ação objetiva
 
-UMA: observação curta com a expansão ligada, medindo quantas das rotas
-concentrado↔concentrado produzem sobra bruta e líquida positivas em estado
-atual. As 3 de 7 operações multihop (3–4 pernas) ficam FORA: o executor aceita
-2–4 pernas, mas o gerador só monta 2 — ampliar para 3 pernas é a decisão
-seguinte, e só com evidência.
+UMA, e é de legibilidade, não de estratégia: diagnosticar a REVERSÃO OPACA do
+`cotar` nas rotas concentrado↔concentrado ao vivo (ler o seletor devolvido) e
+reduzir o conjunto cotado por estado para caber na janela de consistência. Sem
+isso, nenhuma decisão econômica sobre esta expansão é confiável. **NÃO ampliar
+para 3–4 pernas**: não há evidência que a justifique.
 
 ## Limites conhecidos do ambiente
 
