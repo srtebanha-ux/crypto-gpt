@@ -3,7 +3,7 @@
  * Sem efeitos ao importar. Nenhuma transacao sem TODOS os portoes explicitos.
  * ETH real pode ser perdido em gas mesmo com a reversao atomica.
  */
-import { Interface, JsonRpcProvider, Wallet, getAddress } from 'ethers';
+import { Interface, JsonRpcProvider, Wallet, getAddress, keccak256 } from 'ethers';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ORACULO_DE_GAS_L1 } from './custoDaBase';
@@ -196,26 +196,37 @@ export async function executarTitan(
         if ((await rpc.getTransactionCount(carteira.address, 'pending')) !== nonce) {
             throw new Error('nonce foi usado por outro processo; envio cancelado');
         }
-        // Trava persistente criada com exclusividade ANTES do broadcast.
-        // Mesmo que o processo caia ou ocorra outro deploy Railway, nao repete.
-        const marcador = ambiente.TITAN_MARCADOR_ENVIO!;
-        fs.mkdirSync(path.dirname(marcador), { recursive: true });
-        const fd = fs.openSync(marcador, 'wx', 0o600);
-        try {
-            fs.writeFileSync(fd, JSON.stringify({ estado: 'tentativa_iniciada',
-                autorizacaoAte: ambiente.TITAN_OPERAR_ATE_UTC, carteira: carteira.address,
-                nonce, tetoGasWei: ambiente.TITAN_ORCAMENTO_GAS_WEI,
-                criadoEm: new Date().toISOString() }));
-            fs.fsyncSync(fd);
-        } finally { fs.closeSync(fd); }
-        const assinante = carteira.connect(rpc);
-        const tx = await assinante.sendTransaction({
+        // Validade tambem e conferida imediatamente ANTES da assinatura.
+        // Um preflight muito demorado nao amplia a autorizacao.
+        const ateUtc = Date.parse(ambiente.TITAN_OPERAR_ATE_UTC ?? '');
+        if (!Number.isFinite(ateUtc) || Date.now() >= ateUtc) {
+            return { estado: 'recusado', motivo: 'autorizacao expirou durante o preflight' };
+        }
+        // Assina UMA transacao concreta e grava seu hash DETERMINISTICO
+        // ANTES de transmitir. Se o RPC receber e der timeout/403 depois,
+        // o hash continua recuperavel sem reenviar e sem adivinhar nonce.
+        const assinadaFinal = await carteira.signTransaction({
             chainId: Number(REDE_BASE), type: 2, nonce, to: contrato,
             data: dados, gasLimit: limite, maxFeePerGas, maxPriorityFeePerGas: gorjeta,
             value: 0n,
         });
-        hash = tx.hash;
-        fs.writeFileSync(ambiente.TITAN_MARCADOR_ENVIO!, JSON.stringify({
+        hash = keccak256(assinadaFinal);
+        const marcador = ambiente.TITAN_MARCADOR_ENVIO!;
+        fs.mkdirSync(path.dirname(marcador), { recursive: true });
+        const fd = fs.openSync(marcador, 'wx', 0o600);
+        try {
+            fs.writeFileSync(fd, JSON.stringify({ estado: 'pronta_para_envio',
+                hash, autorizacaoAte: ambiente.TITAN_OPERAR_ATE_UTC,
+                carteira: carteira.address, nonce,
+                tetoGasWei: ambiente.TITAN_ORCAMENTO_GAS_WEI,
+                criadoEm: new Date().toISOString() }));
+            fs.fsyncSync(fd);
+        } finally { fs.closeSync(fd); }
+        const tx = await rpc.broadcastTransaction(assinadaFinal);
+        if (tx.hash.toLowerCase() !== hash.toLowerCase()) {
+            throw new Error('RPC devolveu hash diferente da transacao assinada');
+        }
+        fs.writeFileSync(marcador, JSON.stringify({
             estado: 'enviado', hash, nonce, enviadoEm: new Date().toISOString(),
         }), { mode: 0o600 });
         const recibo = await tx.wait(1, 60000);
