@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Interface } from 'ethers';
+import { Interface, type JsonRpcProvider } from 'ethers';
 import { Decimal } from 'decimal.js';
 import { gerarRotasLiquidacao } from './titanRotasLiquidacao';
-import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte, lucroConfirmadoPorEventoMulti, poolsDoCaca, FABRICA_V3_BASE } from './titanPonteMultiHop';
+import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte, lucroConfirmadoPorEventoMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca } from './titanPonteMultiHop';
 const a=(n:number)=>'0x'+n.toString(16).padStart(40,'0');
 const pool={endereco:a(11),token0:a(1),token1:a(2),protocolo:'v3' as const,taxa:500,permitida:true};
 test('ABI do contrato implantavel recebe tuple[] e piso nao zero',()=>{
@@ -65,4 +65,20 @@ test('CACA aceita pool extra sem apagar as rotas ja verificadas',()=>{
     const pools=poolsDoCaca(JSON.stringify([extra]));
     assert.equal(pools.length,4);
     assert.ok(pools.some(x=>x.endereco.toLowerCase()===extra.endereco));
+});
+
+test('Multi-Hop usa oraculo de L1 do CACA e margem de segurança',async()=>{
+    let chamado=false;
+    const rpc={
+        call:async(t:{to:string;data:string})=>{
+            assert.equal(t.to.toLowerCase(),'0x420000000000000000000000000000000000000f');
+            assert.ok(t.data.startsWith('0x'));
+            chamado=true;
+            return '0x'+(1000n).toString(16).padStart(64,'0');
+        }
+    } as unknown as JsonRpcProvider;
+    assert.equal(await tetoL1PeloCaca(rpc),2000n);
+    assert.equal(chamado,true);
+    await assert.rejects(()=>tetoL1PeloCaca({call:async()=> '0x'+ '0'.repeat(64)}
+        as unknown as JsonRpcProvider),/nao retornou custo valido/);
 });
