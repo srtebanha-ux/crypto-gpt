@@ -60,6 +60,7 @@ contract CacadorAaveFlashSwap {
         uint256 lucroMinimo;
         uint256 garantiaAntes;
         uint256 dividaAntes;
+        uint256 garantiaPaga;
         bool viva;
         bool callbackFeito;
     }
@@ -138,7 +139,7 @@ contract CacadorAaveFlashSwap {
             dividaParaCobrir:cobrir,garantiaMaximaAPagar:maxGarantia,
             lucroMinimo:lucroMinimoGarantia,
             garantiaAntes:anteriorGarantia,dividaAntes:anteriorDivida,
-            viva:true,callbackFeito:false
+            garantiaPaga:0,viva:true,callbackFeito:false
         });
 
         // Direcao eh sempre GARANTIA -> DIVIDA. Queremos divida como
@@ -150,25 +151,29 @@ contract CacadorAaveFlashSwap {
         );
         if(!caca.callbackFeito) revert CallbackInesperado();
 
+        return _fechar();
+    }
+    function _fechar() internal returns(uint256 lucro) {
+        Caca memory c=caca;
         // A Aave pode liquidar menos por close factor; o saldo de divida
         // nao utilizado e devolvido ao cofre, nunca contado como WETH ganho.
-        uint256 finalGarantia=_saldo(garantia);
-        if(finalGarantia < anteriorGarantia+lucroMinimoGarantia)
+        uint256 finalGarantia=_saldo(c.garantia);
+        if(finalGarantia < c.garantiaAntes+c.lucroMinimo)
             revert LucroInsuficiente(
-                finalGarantia>anteriorGarantia?finalGarantia-anteriorGarantia:0,
-                lucroMinimoGarantia
+                finalGarantia>c.garantiaAntes?finalGarantia-c.garantiaAntes:0,
+                c.lucroMinimo
             );
-        lucro=finalGarantia-anteriorGarantia;
-        uint256 finalDivida=_saldo(divida);
-        if(finalDivida<anteriorDivida) revert EntradaInvalida();
-        uint256 restoDivida=finalDivida-anteriorDivida;
+        lucro=finalGarantia-c.garantiaAntes;
+        uint256 finalDivida=_saldo(c.divida);
+        if(finalDivida<c.dividaAntes) revert EntradaInvalida();
+        uint256 restoDivida=finalDivida-c.dividaAntes;
 
         delete caca;
-        _transferir(garantia,cofre,lucro);
-        _transferir(divida,cofre,restoDivida);
+        _transferir(c.garantia,cofre,lucro);
+        _transferir(c.divida,cofre,restoDivida);
         emit LiquidacaoDireta(
-            usuario,pool,garantia,divida,cobrir,
-            maxGarantia,lucro,restoDivida
+            c.usuario,c.pool,c.garantia,c.divida,c.dividaParaCobrir,
+            c.garantiaPaga,lucro,restoDivida
         );
     }
     function uniswapV3SwapCallback(int256 d0,int256 d1,bytes calldata) external {
@@ -200,6 +205,7 @@ contract CacadorAaveFlashSwap {
                 col>c.garantiaAntes?col-c.garantiaAntes:0,
                 devido+c.lucroMinimo
             );
+        c.garantiaPaga=devido;
         _transferir(c.garantia,msg.sender,devido);
     }
     // Fundos legados nunca sao contados como lucro de outra pessoa.
