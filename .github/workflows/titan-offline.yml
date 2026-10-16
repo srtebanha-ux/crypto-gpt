@@ -1,0 +1,25 @@
+name: Titan offline checks
+
+on:
+  push:
+    branches:
+      - claude/morpho-auditoria-rest
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck-and-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Gate e limitadores sem RPC externo
+        run: node --require ts-node/register --test src/titanExecucao.test.ts src/titanVazao.test.ts
