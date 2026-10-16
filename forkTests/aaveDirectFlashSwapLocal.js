@@ -67,8 +67,14 @@ describe('TITAN Aave direct flash swap V3 — LOCAL, nao mainnet',function(){
     });
     it('bloqueia spoof de callback e executores que nao sao owner',async()=>{
         await setup();
-        await assert.rejects(()=>liq.uniswapV3SwapCallback(1n,-1n,'0x'),/CallbackInesperado/);
-        await assert.rejects(()=>liq.connect(other).liquidar.staticCall(...args()),/NaoDono/);
+        await assert.rejects(
+            ()=>liq.uniswapV3SwapCallback.staticCall(1n,-1n,'0x'),
+            (e)=>liq.interface.parseError(e.data)?.name==='CallbackInesperado',
+        );
+        await assert.rejects(
+            ()=>liq.connect(other).liquidar.staticCall(...args()),
+            (e)=>liq.interface.parseError(e.data)?.name==='NaoDono',
+        );
     });
     it('nao aceita slippage superior ao max de garantia',async()=>{
         await setup();
