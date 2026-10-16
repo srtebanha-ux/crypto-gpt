@@ -44,6 +44,7 @@ import {
 } from './memoriaDoUniverso';
 import { pernasDaCandidata } from './rotasMistas';
 import { executarTitan } from './titanExecucao';
+import { priorizarCotacoes } from './titanPriorizacao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
     type PoolMisto, type CandidataMista, type LeiturasDoEstado,
@@ -2079,6 +2080,9 @@ async function principal(): Promise<void> {
     let blocoAnterior: number | null = null;
     // Nunca mais de uma transmissao por sessao sem uma nova autorizacao explicita.
     let tentativasTitan = 0;
+    let ultimoEnsaioTitanEm = 0;
+    const pendentesCotacao = new Set<string>();
+    const tetoCotarRotas = Number(process.env.ARB_COTAR_MAX_ROTAS ?? 12);
     const tetoTentativasCru = Number(process.env.TITAN_TX_POR_SESSAO ?? 1);
     const tetoTentativasTitan = Number.isInteger(tetoTentativasCru) && tetoTentativasCru >= 0
         ? Math.min(10, tetoTentativasCru) : 0;
@@ -2363,9 +2367,21 @@ async function principal(): Promise<void> {
             FM.faltaDeSpread += tri.recusadasPorSpread.length;
             FUNIL.estados.DESCARTADA += tri.recusadasPorSpread.length;
             const poolsQueMudaram = new Set(ESTADOS_DOS_POOLS.mudaram(cru));
-            const afetadas = tri.valem.filter(
-                (c) => c.pernas.some((p) => poolsQueMudaram.has(p.pool.toLowerCase())),
+            // Carrega a pequena fila adiada do ciclo anterior: sem isso, uma rota
+            // nao selecionada desaparece se os pools nao mudarem novamente.
+            const afetadasPotenciais = tri.valem.filter(
+                (c) => pendentesCotacao.has(c.chave)
+                    || c.pernas.some((p) => poolsQueMudaram.has(p.pool.toLowerCase())),
             );
+            const escolha = priorizarCotacoes(
+                afetadasPotenciais, tri, tetoCotarRotas, FM.estadosAvaliados,
+            );
+            const afetadas = escolha.selecionadas;
+            const escolhidas = new Set(afetadas.map((c) => c.chave));
+            pendentesCotacao.clear();
+            for (const c of afetadasPotenciais) {
+                if (!escolhidas.has(c.chave)) pendentesCotacao.add(c.chave);
+            }
 
             // A COTACAO: UM LOTE JSON-RPC POR DEGRAU da escada, com as rotas
             // afetadas que ainda interessam naquele degrau — no maximo
@@ -2437,16 +2453,17 @@ async function principal(): Promise<void> {
                     && sn.lucroBrutoEstimado !== null && sn.lucroBrutoEstimado > 0n
                     && sn.melhorTamanho !== null && sn.melhorTamanho > 0n
                     && !sn.motivo.startsWith('ESTADO_'));
-                if (prontas.length > 0 && tentativasTitan < tetoTentativasTitan) {
+                if (process.env.TITAN_ENVIAR === '1' && prontas.length > 0
+                    && tentativasTitan < tetoTentativasTitan
+                    && Date.now() - ultimoEnsaioTitanEm >= 60_000) {
                     const vencedora = prontas.reduce((a, b) => (
                         b.lucroLiquidoEstimado! > a.lucroLiquidoEstimado! ? b : a
                     ));
                     const candidata = afetadas.find((c) => c.chave === vencedora.rota);
                     if (candidata !== undefined) {
-                        const aoVivo = process.env.TITAN_ENVIAR === '1';
-                        // Conta a tentativa ANTES de qualquer await: crash/reentrada nao
-                        // deve causar uma segunda tentativa automatica no mesmo processo.
-                        if (aoVivo) tentativasTitan += 1;
+                        // Reserva uma janela de preflight por minuto. Uma recusa
+                        // sem broadcast nao consome a unica tentativa de transacao.
+                        ultimoEnsaioTitanEm = Date.now();
                         // eslint-disable-next-line no-await-in-loop
                         const resultado = await executarTitan({
                             rota: pernasDaCandidata(
@@ -2458,6 +2475,10 @@ async function principal(): Promise<void> {
                             liquidoEstimado: vencedora.lucroLiquidoEstimado!,
                             estadoConsistente: true,
                         }, rpc);
+                        if (resultado.estado === 'enviado' || resultado.estado === 'confirmado'
+                            || resultado.estado === 'revertido' || resultado.estado === 'desconhecido') {
+                            tentativasTitan += 1;
+                        }
                         log.warn('[TITAN/EXECUTOR] Decisao sobre sinal cotado.', {
                             bloco: blocoDaAmostra,
                             rota: vencedora.rota,
@@ -2494,10 +2515,12 @@ async function principal(): Promise<void> {
                 estadosAvaliados: FM.estadosAvaliados,
                 rotasDistintas: MISTAS.length,
                 triadasQuePassaram: tri.valem.length,
-                afetadasPorMudancaDeEstado: `${afetadas.length} de ${tri.valem.length} — as `
+                afetadasPorMudancaDeEstado: `${afetadasPotenciais.length} de ${tri.valem.length} — as `
                     + 'outras têm os dois pools no MESMO estado já avaliado, e recotar repetiria '
                     + 'a resposta',
                 cotacoesExecutadas: cotadasAgora,
+                cotacoesAdiadasPorCapacidade: escolha.adiadas,
+                pendentesCotacao: pendentesCotacao.size,
                 mudancasIntrabloco: `${INTRABLOCO.detectadas} estado(s) novo(s) detectado(s) com `
                     + 'o MESMO bloco confirmado — é o que o gatilho por número de bloco não via',
                 estadosRepetidosIgnorados: `${ULTIMA_IMPRESSAO.repetidas} ciclo(s) com estado `
