@@ -23,7 +23,7 @@ jobs:
       - name: Compile production executor and observer
         run: npm run build
       - name: Offline atomic economic checks - no wallet or broadcast
-        run: node --require ts-node/register --test src/titanExecucao.test.ts
+        run: node --require ts-node/register --test src/titanExecucao.test.ts src/janelaDeNonce.test.ts
       - name: No second signer enabled by the validation flag
         run: |
           node -e "const fs=require('fs');let s=fs.readFileSync('src/cacarArbitragem.ts','utf8');if(!s.includes('TITAN_VALIDAR_AO_VIVO')||!s.includes('simularTitanAoVivo'))process.exit(1)"
