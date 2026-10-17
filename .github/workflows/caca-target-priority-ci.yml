@@ -1,0 +1,24 @@
+name: CACA Target Watch Priority CI
+on:
+  push:
+    branches:
+      - feat/caca-dois-alvos-fila-prearm-20261017
+  pull_request:
+    branches:
+      - feat/caca-integracao-multihop-ativa
+permissions:
+  contents: read
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: node --require ts-node/register --test src/cacaPrioridadeBrasa.test.ts src/cacaFechamentoPequenos.test.ts src/residuo.test.ts
+      - run: npm run build
