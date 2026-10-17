@@ -45,6 +45,8 @@ import { coberturaPrioritariaPequena, enderecosPrioritarios } from './cacaFecham
 import { reservarAlvosNaBrasa, acordarPorBlocoSeAlvoCritico } from './cacaPrioridadeBrasa';
 import { ordenarCaidosPorPremio } from './cacaOrdenarCaidos';
 import { dadosDaFonteNoAaveOracle, lerFonteDoAaveOracle } from './cacaFeedDaAave';
+import { calldataDaConta, lerEModeUsuario, lerPalavraDeConta, resumirReservas,
+    SELETOR_CONFIG_USUARIO, SELETOR_EMODE_USUARIO } from './cacaRaioXConta';
 import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type AvaliacaoEmCurso } from './cronometro';
 import { esperarOProximoCiclo } from './despertar';
 import {
@@ -3913,6 +3915,80 @@ async function principal(): Promise<'parar' | void> {
         somenteNaLiquidacao:true,
         confirmacao:'eth_call e decisao de lucro + gas antes do envio real',
     });
+    // Raio-X uma vez por ciclo completo (normalmente 15 min), mas fora
+    // do caminho de disparo. Nunca altera elegibilidade do Pool nem nonce.
+    let raioXDisparadoEm = 0;
+    let raioXEmAndamento = false;
+    async function raioXAlvosPrioritarios():Promise<void>{
+        if(raioXEmAndamento || !dataProvider || enderecosFechamento.size===0) return;
+        if(Date.now()-raioXDisparadoEm<10*60_000)return;
+        raioXEmAndamento=true;
+        raioXDisparadoEm=Date.now();
+        const devedores=[...enderecosFechamento];
+        try{
+            const contas=devedores.flatMap(d=>[
+                {alvo:REDE.pool,dados:calldataDaConta(SELETOR_EMODE_USUARIO,d)},
+                {alvo:REDE.pool,dados:calldataDaConta(SELETOR_CONFIG_USUARIO,d)},
+            ]);
+            const contaResp=(await lerEmLote(contas,'pares')).dados;
+            const reservas=devedores.flatMap(d=>
+                moedas.map(m=>({alvo:dataProvider!,dados:codificarUserReserveData(m,d)})));
+            const saldos=(await lerEmLote(reservas,'pares')).dados;
+            const tokensVistos=new Set<string>();
+            for(let i=0;i<devedores.length;i++){
+                const eMode=lerEModeUsuario(contaResp[2*i]??null);
+                const mapaCru=lerPalavraDeConta(contaResp[2*i+1]??null);
+                const r=[];
+                let lidas=0;
+                for(let j=0;j<moedas.length;j++){
+                    const bruto=saldos[i*moedas.length+j];
+                    if(!bruto)continue;
+                    try{
+                        const saldo=decodificarUserReserveData(bruto);
+                        lidas++;
+                        r.push({
+                            token:moedas[j]!,
+                            saldoDeAToken:saldo.garantiaCrua,
+                            dividaVariavel:saldo.dividaCrua,
+                            garantiaHabilitada:saldo.usadaComoGarantia,
+                        });
+                    }catch{}
+                }
+                const resumo=resumirReservas(r);
+                for(const token of [...resumo.garantias,...resumo.devedores])tokensVistos.add(token);
+                log.info('[CACA/RAIO-X-EMODE] Diagnostico exato do Pool e DataProvider.',{
+                    devedor:devedores[i],eMode,
+                    eModeLido:eMode!==null,
+                    bitmapLido:mapaCru!==null,
+                    bitmap:mapaCru?.toString()??null,
+                    tokensConsultados:moedas.length,tokensLidos:lidas,
+                    garantiasHabilitadas:resumo.garantias,
+                    dividasVariaveis:resumo.devedores,
+                    depositosSemUsoComoGarantia:resumo.depositadosSemGarantia,
+                    observacao:'nao deduzi reserve ID pela ordem compactada da lista; saldo/deposito vem do DataProvider',
+                });
+            }
+            // Feed de preco realmente CONSUMIDO pelo AaveOracle, sem
+            // pressupor proxy Chainlink. Este raio-X tambem detecta se uma
+            // fonte foi alterada desde o ciclo anterior.
+            if(oraculo && tokensVistos.size>0){
+                const listaTokens=[...tokensVistos].slice(0,25);
+                const origens=(await lerEmLote(listaTokens.map(token=>({
+                    alvo:oraculo!,dados:dadosDaFonteNoAaveOracle(token),
+                })),'pares')).dados;
+                for(let j=0;j<listaTokens.length;j++)
+                    log.info('[CACA/RAIO-X-FONTE] Feed configurado na Aave.',{
+                        token:listaTokens[j],
+                        fonte:origens[j]?lerFonteDoAaveOracle(origens[j]!)??'nao identificada':'sem leitura',
+                        nota:'informativo; transacao precisa passar no oraculo onchain e simular lucro',
+                    });
+            }
+        }catch(e){
+            log.warn('[CACA/RAIO-X-EMODE] Leitura incompleta. Nao inferi reservas nem E-Mode.',{
+                motivo:e instanceof Error?e.message:String(e),
+            });
+        }finally{raioXEmAndamento=false;}
+    }
     function cobrir(alvo: Alvo): bigint {
         const padrao=quantoPedirEmprestado(alvo.dividaCrua!, alvo.dividaUsd, coberturaOtima());
         return coberturaPrioritariaPequena({
@@ -6007,6 +6083,9 @@ async function principal(): Promise<'parar' | void> {
                                 criterio:'nao burla o Health Factor, o eth_call nem o lucro liquido',
                             });
                         }
+                        // Agendado apos reservar as vagas, sem segurar
+                        // as leituras da BRASA nem a decisao de envio.
+                        void raioXAlvosPrioritarios();
                         // EM QUE CAMADA O ALVO PROCURADO ESTA, AGORA.
                         //
                         // A primeira versao do `[PROCURA]` respondia "esta na
