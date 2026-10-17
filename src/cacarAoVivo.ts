@@ -43,6 +43,7 @@ import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
 import { coberturaPrioritariaPequena, enderecosPrioritarios } from './cacaFechamentoPequenos';
 import { reservarAlvosNaBrasa, acordarPorBlocoSeAlvoCritico } from './cacaPrioridadeBrasa';
+import { ordenarCaidosPorPremio } from './cacaOrdenarCaidos';
 import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type AvaliacaoEmCurso } from './cronometro';
 import { esperarOProximoCiclo } from './despertar';
 import {
@@ -6186,6 +6187,33 @@ async function principal(): Promise<'parar' | void> {
             }
 
             if (caidos.length === 0) continue;
+            // A escolha de nonce acontece adiante. Se dois alvos ficam
+            // liquidaveis JUNTOS, o pequeno nao deve ocupar o nonce na frente
+            // do de maior premio. A ordem de observacao da BRASA nao muda;
+            // somente os candidatos ja caidos sao reordenados, pelo valor
+            // estimado de quem a dona explicitamente priorizou.
+            //
+            // Esta pontuacao nao autoriza envio: a simulacao, custo real,
+            // reserva de gas e margem continuam sendo os mesmos portoes.
+            if (caidos.length > 1 && enderecosFechamento.size > 0) {
+                const premioPorConta = new Map<string,Decimal>(
+                    medidosDaBrasa
+                        .filter(m=>enderecosFechamento.has(m.devedor.toLowerCase())
+                            && m.dividaUsd !== null)
+                        .map(m=>[m.devedor.toLowerCase(),lucroEstimado(m.dividaUsd!)]),
+                );
+                const ordenados = ordenarCaidosPorPremio({
+                    caidos,prioritarios:enderecosFechamento,premiosUsd:premioPorConta,
+                });
+                if (ordenados.some((d,i)=>d!==caidos[i])) {
+                    log.info('[CACA/ALVOS-PRIORITARIOS] Ordem de execucao das posicoes caidas.',{
+                        bloco:blocoAtual,
+                        ordem:ordenados,
+                        nota:'valor do radar so ordena; simulacao integral e margem continuam obrigatorias',
+                    });
+                }
+                caidos.splice(0,caidos.length,...ordenados);
+            }
 
             // Quem ja estava armado nao precisa de ida a rede nenhuma agora.
             // Alvo armado tem PRAZO, e a validade so era conferida na hora de
