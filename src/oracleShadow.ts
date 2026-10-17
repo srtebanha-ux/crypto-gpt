@@ -146,12 +146,14 @@ export class OracleShadow {
             this.avisar(origem+' websocket conectado');
         });
         ws.on('message',data=>{
+            // Nao interpretar frames enormes nem cotacao de socket fechado.
+            if(!this.ativo || ws.readyState!==WebSocket.OPEN || data.length>16_384)return;
             let parsed:unknown;
             try{parsed=JSON.parse(data.toString());}catch{return}
             const c=decodificarCotacaoShadow(origem,parsed,this.pares,Date.now());
             if(c)this.recentes.set(c.par+':'+origem,c);
         });
-        ws.on('ping',data=>{try{ws.pong(data)}catch{}});
+        // ws responde ping automaticamente; pong duplicado atrasa o fluxo.
         ws.on('error',err=>{this.avisar(origem+' WS indisponivel: '+err.message.slice(0,100));});
         ws.on('close',()=>matar());
     }
