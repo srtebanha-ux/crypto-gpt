@@ -42,6 +42,7 @@ import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
 import { coberturaPrioritariaPequena, enderecosPrioritarios } from './cacaFechamentoPequenos';
+import { reservarAlvosNaBrasa } from './cacaPrioridadeBrasa';
 import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type AvaliacaoEmCurso } from './cronometro';
 import { esperarOProximoCiclo } from './despertar';
 import {
@@ -5886,8 +5887,28 @@ async function principal(): Promise<'parar' | void> {
                         const camadas = repartirPorFragilidade(
                             medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida, 0,
                         );
-                        brasa = camadas.brasa;
-                        quentes = camadas.quentes;
+                        // Os dois enderecos escolhidos nao perdem o lugar no multicall
+                        // nem nos primeiros QUANTOS_ARMAR quando outros candidatos
+                        // sobem no ranking. Sem eth_call novo, sem aumentar vagas.
+                        // So vale para posicoes com MEDICAO valida, divida que
+                        // cobre gas e risco real de liquidacao (<= 5%).
+                        const prioridade = reservarAlvosNaBrasa({
+                            brasa:camadas.brasa,quentes:camadas.quentes,medidos,
+                            prioritarios:enderecosFechamento,vagas:vagasNaBrasa,
+                            pisoUsd:pisoDeDivida,limiteQuedaPct:5,
+                        });
+                        brasa = prioridade.brasa;
+                        quentes = prioridade.quentes;
+                        if (enderecosFechamento.size > 0) {
+                            log.info('[CACA/ALVOS-PRIORITARIOS] Reserva confirmada no multicall.', {
+                                alvos: prioridade.incluidos,
+                                movidosDeOutraCamada: prioridade.movidos,
+                                semMedicaoElegivel: prioridade.semMedicao,
+                                vagasUsadas: brasa.length, teto:vagasNaBrasa,
+                                primeirosDoPreArmamento:brasa.slice(0,QUANTOS_ARMAR),
+                                criterio:'nao burla o Health Factor, o eth_call nem o lucro liquido',
+                            });
+                        }
                         // EM QUE CAMADA O ALVO PROCURADO ESTA, AGORA.
                         //
                         // A primeira versao do `[PROCURA]` respondia "esta na
