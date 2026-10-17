@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calcularPisoTitan, motivoDaRecusaTitan, type PlanoTitan } from './titanExecucao';
+import { calcularPisoTitan, motivoDaRecusaTitan, avaliarEnsaioTitan, type PlanoTitan } from './titanExecucao';
 import { avaliarLimitesDiariosTitan } from './titanAutorizacaoContinua';
 
 const END_A = '0x0000000000000000000000000000000000000011';
@@ -140,4 +140,23 @@ test('fonte Morpho so calcula gas em WETH e segue os mesmos portoes', () => {
     assert.match(motivoDaRecusaTitan(p,e)!, /base WETH/);
     e.TITAN_ENVIAR='0';
     assert.match(motivoDaRecusaTitan(plano(),e)!, /desligado/);
+});
+
+test('cotacao atomica de arbitragem considera gas L2, L1 em dobro e margem',()=>{
+    const r=avaliarEnsaioTitan(1_000_000_000_000_000n,350_000n,
+        30_000_000n,20_000_000n,100_000_000_000n,
+        650_000n,1_000_000_000_000_000n,
+        {TITAN_LUCRO_GAS_BPS:'500'});
+    assert.equal(r.situacao,'executavel');
+    assert.ok(BigInt(r.liquidoConservadorWei!)>0n);
+    assert.equal(r.gasLimite,'420000');
+});
+test('gas, orcamento, retorno ou oracle L1 insuficientes nao autorizam envio',()=>{
+    const env={TITAN_LUCRO_GAS_BPS:'500'};
+    assert.equal(avaliarEnsaioTitan(1000n,350_000n,30_000_000n,
+        20_000_000n,100_000_000_000n,650_000n,1_000_000n,env).situacao,'inviavel');
+    assert.equal(avaliarEnsaioTitan(10_000_000_000_000n,600_000n,30_000_000n,
+        20_000_000n,100_000_000_000n,650_000n,1_000_000_000_000_000n,env).situacao,'inviavel');
+    assert.equal(avaliarEnsaioTitan(10_000_000_000_000n,350_000n,30_000_000n,
+        20_000_000n,0n,650_000n,1_000_000_000_000_000n,env).situacao,'desconhecido');
 });
