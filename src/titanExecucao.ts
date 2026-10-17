@@ -7,6 +7,7 @@ import { Interface, JsonRpcProvider, Wallet, getAddress, keccak256 } from 'ether
 import fs from 'node:fs';
 import path from 'node:path';
 import { ORACULO_DE_GAS_L1, codificarTetoDeL1 } from './custoDaBase';
+import { conferirJanelaDeNonce } from './janelaDeNonce';
 import {
     impedimentoTitanContinuo, parametrosTitanContinuo,
     reservarTitanContinuo, fecharTitanContinuo,
@@ -95,6 +96,9 @@ export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv):
             return 'trava de envio persistente em volume nao configurada';
         }
         if (fs.existsSync(marcador)) return 'ja houve tentativa de envio para esta autorizacao';
+    }
+    if (ambiente.TITAN_JANELAS_EXCLUSIVAS !== '1') {
+        return 'TITAN exige janela exclusiva Base compartilhada com CACA';
     }
     if (ambiente.TITAN_NONCE_EXCLUSIVO !== '1') {
         return 'sem confirmacao de nonce exclusivo: outro bot pode usar a mesma carteira';
@@ -221,6 +225,9 @@ export async function executarTitan(
         const gorjeta = BigInt(ambiente.TITAN_GORJETA_WEI ?? '20000000');
         if (gorjeta <= 0n) throw new Error('gorjeta invalida');
         const maxFeePerGas = 2n * ultimo.baseFeePerGas + gorjeta;
+        const janelaPreflight=await conferirJanelaDeNonce(rpc,carteira.address,'TITAN');
+        if(!janelaPreflight.pode)
+            return{estado:'recusado',motivo:'janela TITAN fechada: '+janelaPreflight.motivo};
         const nonce = await rpc.getTransactionCount(carteira.address, 'pending');
         const nonceConfirmado = await rpc.getTransactionCount(carteira.address, 'latest');
         if (nonce !== nonceConfirmado) throw new Error('existe transacao pendente nesta carteira');
@@ -308,6 +315,12 @@ export async function executarTitan(
                 return { estado: 'recusado', motivo: 'autorizacao expirou durante o preflight' };
             }
         }
+        // A simulacao pode atravessar a janela; conferir de novo ANTES da
+        // reserva duravel/assinatura para nunca concorrer com o CACA.
+        const janelaNoEnvio=await conferirJanelaDeNonce(rpc,carteira.address,'TITAN');
+        if(!janelaNoEnvio.pode || janelaNoEnvio.nonce!==nonce)
+            return{estado:'recusado',motivo:'exclusividade/nonce mudou no pre-broadcast: '+
+                janelaNoEnvio.motivo};
         // Assina UMA transacao concreta e grava seu hash DETERMINISTICO
         // ANTES de transmitir. Se o RPC receber e der timeout/403 depois,
         // o hash continua recuperavel sem reenviar e sem adivinhar nonce.
