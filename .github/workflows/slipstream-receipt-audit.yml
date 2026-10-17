@@ -10,6 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
       - name: Check Base transaction across public providers, no key or broadcast
         shell: bash
         run: |
@@ -42,5 +47,44 @@ jobs:
               console.log('RECEIPT '+JSON.stringify(clean(receipt)));
               console.log('TX '+JSON.stringify(clean(tx)));
             }
+          })().catch(e=>{console.error(e);process.exitCode=1});
+          JS
+      - name: Verify deployed executor immutable addresses (no wallet)
+        shell: bash
+        run: |
+          node <<'JS'
+          const {Interface}=require('ethers');
+          const url='https://mainnet.base.org';
+          const contract='0x086a7421d644ce40570711b52a11b005337e30c7';
+          const expect={
+            dono:'0x3d310384d674532f5d41cf2d43b03001f3515ae8',
+            cofre:'0x3dffA934170bdD491724747Be2c4F56E3f1512A7',
+            aave:'0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
+            morpho:'0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb',
+            fabricaV3:'0x33128a8fC17869897dcE68Ed026d694621f6FDfD',
+            slipstreamFactory:'0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A',
+            slipstreamEurcUsdc:'0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7'
+          };
+          async function rpc(method,params){
+            const res=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},
+              body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});
+            const json=await res.json();
+            if(json.error)throw Error(JSON.stringify(json.error));
+            return json.result;
+          }
+          (async()=>{
+            const code=await rpc('eth_getCode',[contract,'latest']);
+            if(!code||code.length<200)throw Error('No onchain deployed code');
+            console.log('EXECUTOR_CODE_BYTES '+((code.length-2)/2));
+            const abi=new Interface(Object.keys(expect).map(k=>'function '+k+'() view returns (address)'));
+            for(const [k,expected] of Object.entries(expect)){
+              const data=abi.encodeFunctionData(k);
+              const result=await rpc('eth_call',[{to:contract,data},'latest']);
+              const observed=abi.decodeFunctionResult(k,result)[0];
+              console.log('IMMUTABLE '+k+'='+observed);
+              if(observed.toLowerCase()!==expected.toLowerCase())
+                throw Error('Mismatch '+k+' expected '+expected+' got '+observed);
+            }
+            console.log('EXECUTOR_ALL_IMMUTABLES_OK');
           })().catch(e=>{console.error(e);process.exitCode=1});
           JS
