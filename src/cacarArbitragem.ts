@@ -44,6 +44,7 @@ import {
 } from './memoriaDoUniverso';
 import { pernasDaCandidata } from './rotasMistas';
 import { executarTitan, simularTitanAoVivo } from './titanExecucao';
+import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
 import { priorizarCotacoes } from './titanPriorizacao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
@@ -2037,6 +2038,7 @@ async function principal(): Promise<void> {
     let atomicasExecutaveis=0;
     let atomicasInviaveis=0;
     let atomicasDesconhecidas=0;
+    const exploradorTitan = new ExploradorDeRotasTitan();
     let MISTAS = candidatasMistas(paraRotas(memoria), WETH_DA_BASE);
     const FM = funilVazio();
     FM.blocosVarridosParaDescoberta = porAtividade.blocosLidos;
@@ -2460,84 +2462,87 @@ async function principal(): Promise<void> {
                     // contar como oportunidade: a conta nao e sobre um estado.
                     sn.lucroLiquidoEstimado = null;
                 }
-                // O executor usa somente SINAL com estado confirmado NA RELEITURA.
-                // Nao reutiliza a estimativa positiva V2: esse contrato aceita V3/Aerodrome,
-                // nao rotas V2. Com TITAN_ENVIAR ausente ou zero nao faz RPC de execucao.
-                const prontas = sinais.filter((sn) => sn.lucroLiquidoEstimado !== null
-                    && sn.lucroLiquidoEstimado > 0n
-                    && sn.lucroBrutoEstimado !== null && sn.lucroBrutoEstimado > 0n
-                    && sn.melhorTamanho !== null && sn.melhorTamanho > 0n
-                    && !sn.motivo.startsWith('ESTADO_'));
-                // Diagnostico financeiro REAL, sem enviar: simular o contrato
-                // implantado (flash, callbacks, swaps e retorno) sobre o estado
-                // corrente. Sinal estimado NUNCA e receita nem oportunidade
-                // validada por si so. Este ensaio e leitura onchain.
-                if (process.env.TITAN_VALIDAR_AO_VIVO === '1'
-                    && Date.now()-ultimoEnsaioAtomicoEm>=60_000) {
-                    const comBruto=sinais.filter(sn=>sn.lucroBrutoEstimado!==null
-                        && sn.lucroBrutoEstimado>0n
-                        && sn.melhorTamanho!==null && sn.melhorTamanho>0n
-                        && !sn.motivo.startsWith('ESTADO_'));
-                    const candidatasComRota=comBruto.map(sn=>({
-                        sinal:sn,rota:afetadas.find(c=>c.chave===sn.rota)
-                    })).filter((x)=>x.rota!==undefined);
-                    if(candidatasComRota.length>0) {
+                // O executor nunca deve receber apenas o melhor valor da
+                // ESTIMATIVA. Esse foi o funil que gerou falsas oportunidades:
+                // 11 de 11 chamadas atomicas recentes eram inviaveis.
+                // Explorar os 2 melhores por lucro LIQUIDO estimado, com
+                // memoria de recusa e rotas alternativas em lugar de insistir
+                // sempre na mesma rota aparentemente positiva.
+                const validar = process.env.TITAN_VALIDAR_AO_VIVO === '1';
+                const chanceDeNovoEnsaio = Date.now()-ultimoEnsaioAtomicoEm>=60_000;
+                if (validar && chanceDeNovoEnsaio) {
+                    const candidatos = exploradorTitan.selecionar(
+                        sinais,afetadas,
+                        limiteAtomicoSeguro(process.env.TITAN_ATOMICA_MAX_CANDIDATAS),
+                    );
+                    if(candidatos.length>0) {
                         ultimoEnsaioAtomicoEm=Date.now();
-                        const top=candidatasComRota.reduce((a,b)=>
-                            b.sinal.lucroBrutoEstimado!>a.sinal.lucroBrutoEstimado!?b:a);
-                        const sn=top.sinal;
-                        const resultado=await simularTitanAoVivo({
-                            rota:pernasDaCandidata(top.rota!,WETH_DA_BASE,sn.melhorTamanho!),
-                            quantia:sn.melhorTamanho!,bloco:blocoDaAmostra,
-                            brutoEstimado:sn.lucroBrutoEstimado!,
-                            liquidoEstimado:sn.lucroLiquidoEstimado??0n,
-                            estadoConsistente:true,
-                        },process.env.TITAN_EXECUTOR_RPC_URL??rpc);
-                        if(resultado.situacao==='executavel')atomicasExecutaveis+=1;
-                        else if(resultado.situacao==='inviavel')atomicasInviaveis+=1;
-                        else atomicasDesconhecidas+=1;
-                        log.warn('[TITAN/ATOMICA] Execucao de leitura integral no contrato real.',{
-                            rota:sn.rota,bloco:blocoDaAmostra,resultado,
-                            nota:'NAO transmitido: eth_call/estimateGas e nao lucro realizado',
-                            contadores:{executaveis:atomicasExecutaveis,
-                                inviaveis:atomicasInviaveis,
-                                desconhecidas:atomicasDesconhecidas},
-                        });
-                    }
-                }
-                if (process.env.TITAN_ENVIAR === '1' && prontas.length > 0
-                    && tentativasTitan < tetoTentativasTitan
-                    && Date.now() - ultimoEnsaioTitanEm >= 60_000) {
-                    const vencedora = prontas.reduce((a, b) => (
-                        b.lucroLiquidoEstimado! > a.lucroLiquidoEstimado! ? b : a
-                    ));
-                    const candidata = afetadas.find((c) => c.chave === vencedora.rota);
-                    if (candidata !== undefined) {
-                        // Reserva uma janela de preflight por minuto. Uma recusa
-                        // sem broadcast nao consome a unica tentativa de transacao.
-                        ultimoEnsaioTitanEm = Date.now();
-                        // eslint-disable-next-line no-await-in-loop
-                        const resultado = await executarTitan({
-                            rota: pernasDaCandidata(
-                                candidata, WETH_DA_BASE, vencedora.melhorTamanho!,
-                            ),
-                            quantia: vencedora.melhorTamanho!,
-                            bloco: blocoDaAmostra,
-                            brutoEstimado: vencedora.lucroBrutoEstimado!,
-                            liquidoEstimado: vencedora.lucroLiquidoEstimado!,
-                            estadoConsistente: true,
-                        }, process.env.TITAN_EXECUTOR_RPC_URL ?? rpc);
-                        if (resultado.estado === 'enviado' || resultado.estado === 'confirmado'
-                            || resultado.estado === 'revertido' || resultado.estado === 'desconhecido') {
-                            tentativasTitan += 1;
+                        let melhorExecutavel:(typeof candidatos)[number]|null=null;
+                        let melhorGanhoReal:bigint=0n;
+                        for(const c of candidatos){
+                            const sn=c.sinal;
+                            // Simular separadamente cada rota no executor real,
+                            // SEM transmitir; o RPC pode recusar a chamada, o
+                            // que tambem conta como desconhecido, nao como lucro.
+                            const resultado=await simularTitanAoVivo({
+                                rota:pernasDaCandidata(c.rota,WETH_DA_BASE,sn.melhorTamanho!),
+                                quantia:sn.melhorTamanho!,bloco:blocoDaAmostra,
+                                brutoEstimado:sn.lucroBrutoEstimado!,
+                                liquidoEstimado:sn.lucroLiquidoEstimado!,
+                                estadoConsistente:true,
+                            },process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                            exploradorTitan.registrar(sn.rota,resultado.situacao);
+                            if(resultado.situacao==='executavel'){
+                                atomicasExecutaveis++;
+                                const ganho=BigInt(resultado.liquidoConservadorWei??'0');
+                                if(ganho>melhorGanhoReal) {
+                                    melhorGanhoReal=ganho;melhorExecutavel=c;
+                                }
+                            }else if(resultado.situacao==='inviavel')atomicasInviaveis++;
+                            else atomicasDesconhecidas++;
+                            log.warn('[TITAN/ATOMICA] Resultado por candidato no executor real.',{
+                                rota:sn.rota,bloco:blocoDaAmostra,resultado,
+                                indiceCandidato:candidatos.indexOf(c)+1,
+                                totalCandidatos:candidatos.length,
+                                nota:'simulacao eth_call; nao e lucro realizado',
+                                contadores:{executaveis:atomicasExecutaveis,
+                                    inviaveis:atomicasInviaveis,
+                                    desconhecidas:atomicasDesconhecidas},
+                            });
                         }
-                        log.warn('[TITAN/EXECUTOR] Decisao sobre sinal cotado.', {
-                            bloco: blocoDaAmostra,
-                            rota: vencedora.rota,
-                            resultado,
-                            tentativasNestaSessao: tentativasTitan,
-                            limite: tetoTentativasTitan,
-                        });
+                        // Transmitir somente um candidato JA executavel no
+                        // contrato, e REVALIDAR tudo dentro de executarTitan:
+                        // nonce, liquidez, gas, imposto L1, piso e recibo.
+                        // Nunca transmite so por spread ou cotacao de quoter.
+                        if (process.env.TITAN_ENVIAR === '1' && melhorExecutavel
+                            && tentativasTitan<tetoTentativasTitan
+                            && Date.now()-ultimoEnsaioTitanEm>=60_000) {
+                            ultimoEnsaioTitanEm=Date.now();
+                            const sn=melhorExecutavel.sinal;
+                            const resultado=await executarTitan({
+                                rota:pernasDaCandidata(melhorExecutavel.rota,
+                                    WETH_DA_BASE,sn.melhorTamanho!),
+                                quantia:sn.melhorTamanho!,bloco:blocoDaAmostra,
+                                brutoEstimado:sn.lucroBrutoEstimado!,
+                                liquidoEstimado:sn.lucroLiquidoEstimado!,
+                                estadoConsistente:true,
+                            },process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                            if(['enviado','confirmado','revertido','desconhecido']
+                                .includes(resultado.estado))tentativasTitan++;
+                            log.warn('[TITAN/EXECUTOR] So enviou candidata atomica validada.',{
+                                bloco:blocoDaAmostra,rota:sn.rota,resultado,
+                                candidatosExplorados:candidatos.length,
+                                tentativasNestaSessao:tentativasTitan,
+                                limite:tetoTentativasTitan,
+                            });
+                        }
+                    }
+                } else if (process.env.TITAN_ENVIAR === '1' && !validar) {
+                    // Falha fechada: ligar TITAN_ENVIAR sem a certificacao
+                    // integral nunca autoriza uma arbitragem.
+                    if(Date.now()-ultimoEnsaioTitanEm>=60_000){
+                        ultimoEnsaioTitanEm=Date.now();
+                        log.error('[TITAN/EXECUTOR] Envio bloqueado: TITAN_VALIDAR_AO_VIVO nao habilitado.');
                     }
                 }
                 cotadasAgora = sinais.length;
