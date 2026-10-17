@@ -16,6 +16,7 @@ function fracao(r: { emprestimo: RazaoMaxima; venda: RazaoMaxima }) {
 }
 export function priorizarCotacoes(
     afetadas: CandidataMista[], tri: Triagem, teto: number, rodada: number,
+    rotacionarComProva=false,
 ): SelecaoDeCotacao {
     if (!Number.isSafeInteger(teto) || teto < 1 || teto > 256) {
         throw new Error('ARB_COTAR_MAX_ROTAS deve estar entre 1 e 256');
@@ -44,17 +45,29 @@ export function priorizarCotacoes(
         return a.c.chave.localeCompare(b.c.chave);
     });
     const vagasSemProva = semRazao.length > 0 ? Math.max(1, Math.floor(teto / 4)) : 0;
-    const principais = comRazao.slice(0, teto - vagasSemProva).map(x => x.c);
-    const remanescentes = comRazao.slice(teto - vagasSemProva).map(x => x.c);
-    const disponiveis = teto - principais.length;
+    const conhecidasDisponiveis=teto-vagasSemProva;
+    // Metade das vagas para maiores spreads comprovados; metade rota
+    // entre candidatos menores que ficariam eternamente atras da fila.
+    // O filtro economico nao muda: todas estas rotas passaram pela triagem.
+    const fixas=rotacionarComProva
+        ? Math.max(1,Math.ceil(conhecidasDisponiveis/2)) : conhecidasDisponiveis;
+    const principais=comRazao.slice(0,fixas).map(x=>x.c);
+    const fundo=comRazao.slice(fixas).map(x=>x.c);
+    const vagasRotativas=Math.max(0,conhecidasDisponiveis-principais.length);
+    const rotativas=fundo.length===0 ? [] : Array.from({
+        length:Math.min(vagasRotativas,fundo.length),
+    },(_,i)=>fundo[(rodada*Math.max(1,vagasRotativas)+i)%fundo.length]!);
+    const remanescentes=rotacionarComProva?rotativas
+        :comRazao.slice(conhecidasDisponiveis).map(x=>x.c);
+    const disponiveis = teto - principais.length-(rotacionarComProva?rotativas.length:0);
     const desconhecidas = semRazao.length > 0 ? Array.from(
         { length: Math.min(disponiveis, semRazao.length) },
         (_, i) => semRazao[(rodada * Math.max(1, disponiveis) + i) % semRazao.length]!,
     ) : [];
-    const sobra = remanescentes.slice(0, Math.max(0, disponiveis - desconhecidas.length));
-    const selecionadas = [...principais, ...desconhecidas, ...sobra];
+    const sobra = rotacionarComProva?[]:remanescentes.slice(0, Math.max(0, disponiveis - desconhecidas.length));
+    const selecionadas = [...principais, ...rotacionarComProva?rotativas:[], ...desconhecidas, ...sobra];
     return {
         selecionadas, adiadas: afetadas.length - selecionadas.length,
-        conhecidas: principais.length + sobra.length, semProva: desconhecidas.length,
+        conhecidas: principais.length + rotativas.length + sobra.length, semProva: desconhecidas.length,
     };
 }
