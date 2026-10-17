@@ -32,6 +32,10 @@ import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PI
 import { POOLS, AERODROME } from './contratos';
 import { dadosGetPoolAerodrome, lerPoolAerodrome, classificarRota } from './cacaRotaAerodrome';
 import { quantiaParaCotacaoUsd, encodeQuoteAerodrome, decodeQuoteAerodrome, usdDoToken } from './cacaQuoteAerodrome';
+import { EURC_BASE, USDC_BASE, POOL_CANDIDATO, FABRICA_SLIPSTREAM, QUOTER_SLIPSTREAM,
+    dadoPool, dadoFabricar, dadoQuoteSlipstream, decodificarMeta,
+    decodificarPoolConfirmado, validaPoolSlipstream, decodificarQuoteSlipstream
+} from './cacaSlipstream';
 import { modosV2ParaSimular, type PoolsAerodromeConfirmados } from './cacaModosV2';
 import { permiteV1NaPoolPadrao } from './cacaV1Pool';
 import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
@@ -3440,6 +3444,81 @@ async function principal(): Promise<'parar' | void> {
             }
         }finally{rotasEmLeitura.delete(chave);}
     }
+    // Descoberta separada do executor: o quoter CL e uma CONTRAPROVA de
+    // profundidade, mas V1/V2 nao sabem trocar numa piscina Slipstream.
+    // Contrato de envio, nonce e gorjeta ficam INTACTOS.
+    let slipstreamConsultada=false;
+    async function avaliarSlipstream(g:string,d:string):Promise<void>{
+        if(slipstreamConsultada||g.toLowerCase()!==EURC_BASE.toLowerCase()
+          ||d.toLowerCase()!==USDC_BASE.toLowerCase())return;
+        slipstreamConsultada=true;
+        try{
+            const campos:['token0','token1','factory','tickSpacing']=
+                ['token0','token1','factory','tickSpacing'];
+            const metadados=(await lerEmLote(campos.map(c=>({
+                alvo:POOL_CANDIDATO,dados:dadoPool(c),
+            })),'pares')).dados;
+            const meta=campos.map((nome,i)=>decodificarMeta(nome,metadados[i]??null));
+            const espaco=typeof meta[3]==='number'?meta[3]:null;
+            const fabr=meta[2]===null?null:String(meta[2]);
+            let confirmado:string|null=null;
+            let fabricaDoQuoter:string|null=null;
+            if(espaco!==null&&fabr?.toLowerCase()===FABRICA_SLIPSTREAM.toLowerCase()){
+                const consulta=await chamar<string>('eth_call',[{
+                    to:FABRICA_SLIPSTREAM,data:dadoFabricar(espaco),
+                },'latest']);
+                confirmado=decodificarPoolConfirmado(consulta);
+                const rawQuoterFactory=await chamar<string>('eth_call',[{
+                    to:QUOTER_SLIPSTREAM,data:dadoPool('factory'),
+                },'latest']);
+                fabricaDoQuoter=decodificarMeta('factory',rawQuoterFactory) as string|null;
+            }
+            const valido=validaPoolSlipstream({
+                token0:typeof meta[0]==='string'?meta[0]:null,
+                token1:typeof meta[1]==='string'?meta[1]:null,
+                fabrica:fabr,espaco,confirmado,
+            })&&fabricaDoQuoter?.toLowerCase()===FABRICA_SLIPSTREAM.toLowerCase();
+            log.info('[CACA/SLIPSTREAM] Pool concentrado candidato validado na Base.',{
+                par:'EURC/USDC',pool:POOL_CANDIDATO,
+                tokens:[meta[0],meta[1]],espaco,fabrica:fabr,
+                confirmadoPelaFactory:confirmado,
+                fabricaDoQuoter,verificado:valido,
+                soDiagnostico:true,novoExecutor:'NAO IMPLANTADO',
+            });
+            if(!valido)return;
+            const faixas=[1000,10000,40000].map(usd=>({
+                usd,cru:quantiaParaCotacaoUsd(new Decimal(usd),
+                    precos.get(EURC_BASE.toLowerCase()),casas.get(EURC_BASE.toLowerCase())),
+            })).filter((x):x is {usd:number;cru:bigint}=>x.cru!==null);
+            for(const f of faixas){
+                try{
+                    const ret=await chamar<string>('eth_call',[{
+                        to:QUOTER_SLIPSTREAM,
+                        data:dadoQuoteSlipstream(f.cru,espaco!),
+                    },'latest']);
+                    const q=decodificarQuoteSlipstream(ret);
+                    const usd=q?usdDoToken(q.saida,
+                        precos.get(USDC_BASE.toLowerCase()),casas.get(USDC_BASE.toLowerCase())):null;
+                    log.info('[CACA/SLIPSTREAM-QUOTE] Preco onchain EURC/USDC do quoter concentrado.',{
+                        entradaUsdReferencia:f.usd,entradaCrua:f.cru.toString(),
+                        saidaCrua:q?.saida.toString()??null,saidaUsd:usd?.toFixed(2)??null,
+                        gasEstimadoDaTroca:q?.gasEstimate.toString()??null,
+                        pool:POOL_CANDIDATO,verificado:true,
+                        nota:'cota so a troca: sem bonus Aave, custo do flash, L1/L2 e gas total; V2 NAO executa nesta pool',
+                    });
+                }catch(e){
+                    log.warn('[CACA/SLIPSTREAM-QUOTE] Sem cotacao validada; nao inferir lucro.',{
+                        entradaUsdReferencia:f.usd,
+                        motivo:e instanceof Error?e.message:String(e),
+                    });
+                }
+            }
+        }catch(e){
+            log.warn('[CACA/SLIPSTREAM] Nao consegui confirmar candidato onchain; sem usar no envio.',{
+                motivo:e instanceof Error?e.message:String(e),
+            });
+        }
+    }
     // Base faz um bloco a cada 2 segundos. E daqui que sai "em quantos blocos".
     const MS_POR_BLOCO = numeroDoAmbiente('CACA_MS_POR_BLOCO', process.env.CACA_MS_POR_BLOCO, 2000);
     // Com quantos blocos de antecedencia mandar. Dois blocos sao 4 segundos: o
@@ -3481,6 +3560,7 @@ async function principal(): Promise<'parar' | void> {
                 // esperar por um diagnostico do feed.
                 // Preaquecer pools sem esperar as consultas no caminho critico.
                 void descobrirRota(a.garantia,a.divida);
+                void avaliarSlipstream(a.garantia,a.divida);
                 const aaveOracle=oraculo;
                 if(aaveOracle){
                     for(const token of [a.garantia,a.divida]){
