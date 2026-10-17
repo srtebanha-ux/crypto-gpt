@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {Interface} from 'ethers';
-import {diagnosticarReversaoTitan,tamanhosDePrecisaoTitan} from './titanTaticas';
+import {diagnosticarReversaoTitan,tamanhosDePrecisaoTitan,retentarTamanhoPorErroTitan} from './titanTaticas';
 
 const abi=new Interface([
   'error PagamentoCurto(uint256 tem,uint256 devido)',
@@ -36,4 +36,11 @@ test('nenhum dado/erro conhecido nao vira sinal economico',()=>{
   assert.equal(diagnosticarReversaoTitan({data:'0x12345678'}),null);
   assert.equal(diagnosticarReversaoTitan(new Error('connection reset')),null);
   assert.deepEqual(tamanhosDePrecisaoTitan(500n,null),[]);
+});
+
+test('resultado de revert near-breakeven autoriza APENAS segunda cotacao offchain',()=>{
+  assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,'pagamento-curto','55'),[500_000n]);
+  assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,'lucro-insuficiente','55'),[]);
+  assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,undefined,'55'),[]);
+  assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,'pagamento-curto','ruim'),[]);
 });
