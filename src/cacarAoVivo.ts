@@ -31,6 +31,7 @@ import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './re
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS, AERODROME } from './contratos';
 import { dadosGetPoolAerodrome, lerPoolAerodrome, classificarRota } from './cacaRotaAerodrome';
+import { modosV2ParaSimular, type PoolsAerodromeConfirmados } from './cacaModosV2';
 import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
 import { reservarGasCompartilhado, conciliarGasCompartilhado, pontuacaoDeLiquidez } from './cacaDuasRotas';
 import { conferirJanelaDeNonce } from './janelaDeNonce';
@@ -3351,7 +3352,38 @@ async function principal(): Promise<'parar' | void> {
     // so na PRIMEIRA descoberta do par de um alvo priorizado por este boot.
     const paresAnunciados = new Set<string>();
     const fontesConsultadas = new Set<string>();
-    const rotasConsultadas = new Set<string>();
+    const rotasEmLeitura = new Set<string>();
+    const rotasConfirmadas = new Map<string,PoolsAerodromeConfirmados>();
+    const chaveDeRota=(g:string,d:string)=>g.toLowerCase()+'/'+d.toLowerCase();
+    async function descobrirRota(g:string,d:string):Promise<void>{
+        if(g.toLowerCase()===d.toLowerCase())return;
+        const chave=chaveDeRota(g,d);
+        if(rotasEmLeitura.has(chave)||rotasConfirmadas.has(chave))return;
+        rotasEmLeitura.add(chave);
+        try{
+            const fabrica=AERODROME.factory.endereco;
+            const ler=async(stable:boolean):Promise<{ok:boolean;pool:string|null}>=>{
+                try{
+                    const raw=await chamar<string>('eth_call',[{
+                        to:fabrica,data:dadosGetPoolAerodrome(g,d,stable),
+                    },'latest']);
+                    if(!/^0x[0-9a-fA-F]{64}$/.test(raw))return {ok:false,pool:null};
+                    return {ok:true,pool:lerPoolAerodrome(raw)};
+                }catch{return {ok:false,pool:null};}
+            };
+            const [estavel,volatil]=await Promise.all([ler(true),ler(false)]);
+            if(estavel.ok&&volatil.ok){
+                rotasConfirmadas.set(chave,{estavel:estavel.pool,volatil:volatil.pool});
+            }
+            log.info('[CACA/ROTA-REAL] Pools Aerodrome verificadas on-chain.',{
+                garantia:g,divida:d,estavel:estavel.pool,volatil:volatil.pool,
+                respostaCompleta:estavel.ok&&volatil.ok,
+                diagnostico:estavel.ok&&volatil.ok
+                  ? classificarRota(estavel.pool,volatil.pool):'inconclusivo',
+                criterio:'cada candidato passa no eth_call integral antes de reservar nonce',
+            });
+        }finally{rotasEmLeitura.delete(chave);}
+    }
     // Base faz um bloco a cada 2 segundos. E daqui que sai "em quantos blocos".
     const MS_POR_BLOCO = numeroDoAmbiente('CACA_MS_POR_BLOCO', process.env.CACA_MS_POR_BLOCO, 2000);
     // Com quantos blocos de antecedencia mandar. Dois blocos sao 4 segundos: o
@@ -3391,36 +3423,8 @@ async function principal(): Promise<'parar' | void> {
                 // Fonte onchain e independente da heuristica Binance/Coinbase.
                 // Nao aguardamos este RPC: prearmamento e envio nunca podem
                 // esperar por um diagnostico do feed.
-                // Verifica se a rota Aerodrome que o V2 emprega realmente
-                // possui pool para o par descoberto na Aave.
-                //
-                // O CacadorV2 legado recebe 'isStablePool=false' em todos os
-                // envios. Uma garantia EURC/USDC pode requerer rota estavel
-                // e nao devemos descobrir esse defeito so depois do crash.
-                // Diagnostico paralelo, UMA VEZ por par, sem bloquear o envio.
-                const chaveRota=[a.garantia.toLowerCase(),a.divida.toLowerCase()].join('/');
-                if(!rotasConsultadas.has(chaveRota)&&a.garantia.toLowerCase()!==a.divida.toLowerCase()){
-                    rotasConsultadas.add(chaveRota);
-                    void (async()=>{
-                        const fabrica=AERODROME.factory.endereco;
-                        const ler=async(stable:boolean):Promise<string|null>=>{
-                            try{
-                                const raw=await chamar<string>('eth_call',[{
-                                    to:fabrica,
-                                    data:dadosGetPoolAerodrome(a.garantia,a.divida,stable),
-                                },'latest']);
-                                return lerPoolAerodrome(raw);
-                            }catch{return null;}
-                        };
-                        const [estavel,volatil]=await Promise.all([ler(true),ler(false)]);
-                        log.info('[CACA/ROTA-REAL] Pools Aerodrome para par de liquidacao.',{
-                            garantia:a.garantia,divida:a.divida,estavel,volatil,
-                            diagnostico:classificarRota(estavel,volatil),
-                            rotaDoExecutorAtual:'volatil (isStablePool=false)',
-                            observacao:'existencia de pool NAO prova quote, profundidade ou lucro; sem troca automatica de rota',
-                        });
-                    })();
-                }
+                // Preaquecer pools sem esperar as consultas no caminho critico.
+                void descobrirRota(a.garantia,a.divida);
                 const aaveOracle=oraculo;
                 if(aaveOracle){
                     for(const token of [a.garantia,a.divida]){
@@ -3966,6 +3970,12 @@ async function principal(): Promise<'parar' | void> {
             const reservas=devedores.flatMap(d=>
                 moedas.map(m=>({alvo:dataProvider!,dados:codificarUserReserveData(m,d)})));
             const saldos=(await lerEmLote(reservas,'pares')).dados;
+            // Reutiliza as respostas ja lidas: diagnostico dos pares reais
+            // nao adiciona um unico RPC de reserva ao prearmamento.
+            const paresReais=await montarAlvos(
+                devedores,moedas,dataProvider!,precos,casas,async()=>saldos,
+            );
+            for(const par of paresReais)void descobrirRota(par.garantia,par.divida);
             const tokensVistos=new Set<string>();
             for(let i=0;i<devedores.length;i++){
                 const eMode=lerEModeUsuario(contaResp[2*i]??null);
@@ -6451,12 +6461,26 @@ async function principal(): Promise<'parar' | void> {
                     lucroCru: bigint;
                     envioMulti?: string;
                     pontuacaoLiquida?: bigint;
+                    modoEstavelV2?: boolean;
                 }> = [];
                 let ofertaMulti: OfertaMulti | null = null;
                 for (const contrato of contratos) {
                     // Modo live seguro: nunca incluir candidatos V1/V2 ou tiros
                     // na escrita do oraculo, mesmo que CACA_ENVIAR=1.
                     if (SOMENTE_MULTIHOP) break;
+                    const chaveRota=chaveDeRota(alvo.garantia,alvo.divida);
+                    const modos=contrato.tipo==='V2'
+                        ? modosV2ParaSimular(
+                            rotasConfirmadas.get(chaveRota)??null,
+                            alvo.garantia.toLowerCase()===alvo.divida.toLowerCase(),
+                          )
+                        : [false];
+                    if(contrato.tipo==='V2'&&modos.length===0){
+                        log.info('[CACA/ROTA-REAL] V2 sem pool para o par; evito revert.',{
+                            garantia:alvo.garantia,divida:alvo.divida,
+                        });
+                    }
+                    for(const modoEstavel of modos){
                     const dados = contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
@@ -6471,7 +6495,7 @@ async function principal(): Promise<'parar' | void> {
                             divida: alvo.divida,
                             devedor: alvo.devedor,
                             quantoCobrir: cobrir(alvo),
-                            isStablePool: false,
+                            isStablePool: modoEstavel,
                             // O V2 NAO pode ser medido com piso impossivel.
                             // Medido em 2026-09-28 com o oraculo forcado: ele
                             // empurra `aDevolver + minProfit` como
@@ -6528,7 +6552,8 @@ async function principal(): Promise<'parar' | void> {
                     // Quem julga o numero e `decidirTiro`, num lugar so. Aqui so
                     // se pergunta se houve medicao.
                     if (leitura.desfecho === 'mediu' && leitura.lucroCru !== undefined) {
-                        medicoes.push({ contrato, lucroCru: leitura.lucroCru });
+                        medicoes.push({ contrato, lucroCru: leitura.lucroCru,
+                            modoEstavelV2: contrato.tipo==='V2'?modoEstavel:undefined });
                     } else if (vaoCruzar.has(alvo.devedor.toLowerCase())
                         && leitura.desfecho === 'revertido'
                         // Os DADOS crus vao junto: a identidade do erro está no
@@ -6551,7 +6576,8 @@ async function principal(): Promise<'parar' | void> {
                             erro: leitura.erro ?? '—',
                             oQueIssoQuerDizer: 'a posição ainda não cruzou; mando mirando o bloco em que ela cruza',
                         });
-                        medicoes.push({ contrato, lucroCru: 0n });
+                        medicoes.push({ contrato, lucroCru: 0n,
+                            modoEstavelV2: contrato.tipo==='V2'?modoEstavel:undefined });
                     } else if (vaoCruzar.has(alvo.devedor.toLowerCase())) {
                         // Estava escolhido para atirar antes, mas a medicao NAO
                         // reverteu por "ainda nao cruzou". Pode ser falha de rede
@@ -6571,6 +6597,7 @@ async function principal(): Promise<'parar' | void> {
                                 : 'a reversão não foi "ainda não cruzou" — pode ser configuração quebrada',
                         });
                     }
+                    } // modos das piscinas do mesmo contrato
                 }
 
                 // TITAN MULTI-HOP: plano REAL -> eth_call do contrato IMPLANTADO.
@@ -6813,7 +6840,7 @@ async function principal(): Promise<'parar' | void> {
                             divida: alvo.divida,
                             devedor: alvo.devedor,
                             quantoCobrir: cobrir(alvo),
-                            isStablePool: false,
+                            isStablePool: escolhida.modoEstavelV2??false,
                             lucroMinimo: piso,
                           });
                 
