@@ -29,7 +29,8 @@ import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAgg
 import { naoCruzouAinda, codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
-import { POOLS } from './contratos';
+import { POOLS, AERODROME } from './contratos';
+import { dadosGetPoolAerodrome, lerPoolAerodrome, classificarRota } from './cacaRotaAerodrome';
 import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
 import { reservarGasCompartilhado, conciliarGasCompartilhado, pontuacaoDeLiquidez } from './cacaDuasRotas';
 import { conferirJanelaDeNonce } from './janelaDeNonce';
@@ -3350,6 +3351,7 @@ async function principal(): Promise<'parar' | void> {
     // so na PRIMEIRA descoberta do par de um alvo priorizado por este boot.
     const paresAnunciados = new Set<string>();
     const fontesConsultadas = new Set<string>();
+    const rotasConsultadas = new Set<string>();
     // Base faz um bloco a cada 2 segundos. E daqui que sai "em quantos blocos".
     const MS_POR_BLOCO = numeroDoAmbiente('CACA_MS_POR_BLOCO', process.env.CACA_MS_POR_BLOCO, 2000);
     // Com quantos blocos de antecedencia mandar. Dois blocos sao 4 segundos: o
@@ -3389,6 +3391,36 @@ async function principal(): Promise<'parar' | void> {
                 // Fonte onchain e independente da heuristica Binance/Coinbase.
                 // Nao aguardamos este RPC: prearmamento e envio nunca podem
                 // esperar por um diagnostico do feed.
+                // Verifica se a rota Aerodrome que o V2 emprega realmente
+                // possui pool para o par descoberto na Aave.
+                //
+                // O CacadorV2 legado recebe 'isStablePool=false' em todos os
+                // envios. Uma garantia EURC/USDC pode requerer rota estavel
+                // e nao devemos descobrir esse defeito so depois do crash.
+                // Diagnostico paralelo, UMA VEZ por par, sem bloquear o envio.
+                const chaveRota=[a.garantia.toLowerCase(),a.divida.toLowerCase()].join('/');
+                if(!rotasConsultadas.has(chaveRota)&&a.garantia.toLowerCase()!==a.divida.toLowerCase()){
+                    rotasConsultadas.add(chaveRota);
+                    void (async()=>{
+                        const fabrica=AERODROME.factory.endereco;
+                        const ler=async(stable:boolean):Promise<string|null>=>{
+                            try{
+                                const raw=await chamar<string>('eth_call',[{
+                                    to:fabrica,
+                                    data:dadosGetPoolAerodrome(a.garantia,a.divida,stable),
+                                },'latest']);
+                                return lerPoolAerodrome(raw);
+                            }catch{return null;}
+                        };
+                        const [estavel,volatil]=await Promise.all([ler(true),ler(false)]);
+                        log.info('[CACA/ROTA-REAL] Pools Aerodrome para par de liquidacao.',{
+                            garantia:a.garantia,divida:a.divida,estavel,volatil,
+                            diagnostico:classificarRota(estavel,volatil),
+                            rotaDoExecutorAtual:'volatil (isStablePool=false)',
+                            observacao:'existencia de pool NAO prova quote, profundidade ou lucro; sem troca automatica de rota',
+                        });
+                    })();
+                }
                 const aaveOracle=oraculo;
                 if(aaveOracle){
                     for(const token of [a.garantia,a.divida]){
