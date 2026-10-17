@@ -43,6 +43,8 @@ import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
 import { coberturaPrioritariaPequena, enderecosPrioritarios } from './cacaFechamentoPequenos';
 import { reservarAlvosNaBrasa, acordarPorBlocoSeAlvoCritico } from './cacaPrioridadeBrasa';
+import { ordenarCaidosPorPremio } from './cacaOrdenarCaidos';
+import { dadosDaFonteNoAaveOracle, lerFonteDoAaveOracle } from './cacaFeedDaAave';
 import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type AvaliacaoEmCurso } from './cronometro';
 import { esperarOProximoCiclo } from './despertar';
 import {
@@ -3342,6 +3344,10 @@ async function principal(): Promise<'parar' | void> {
     let tentouArmarEm = 0;
     /** Impede armar em cima de armar: `void armar()` nao espera o anterior. */
     let armando = false;
+    // O raio-X nao interfere no prearmamento: chamadas de leitura separadas,
+    // so na PRIMEIRA descoberta do par de um alvo priorizado por este boot.
+    const paresAnunciados = new Set<string>();
+    const fontesConsultadas = new Set<string>();
     // Base faz um bloco a cada 2 segundos. E daqui que sai "em quantos blocos".
     const MS_POR_BLOCO = numeroDoAmbiente('CACA_MS_POR_BLOCO', process.env.CACA_MS_POR_BLOCO, 2000);
     // Com quantos blocos de antecedencia mandar. Dois blocos sao 4 segundos: o
@@ -3365,6 +3371,46 @@ async function principal(): Promise<'parar' | void> {
         try {
             const prontos = await montarAlvos(quem, moedas, dataProvider!, precos, casas);
             for (const a of prontos) lembrarAVia(a.devedor, viaDeQuebra(a.garantia, a.divida));
+            // Descobre o collateral/debt dos cinco enderecos em producao,
+            // sem assumir BTC, ETH ou Chainlink antes de LER o AaveOracle.
+            for (const a of prontos) {
+                const devedor=a.devedor.toLowerCase();
+                if(!enderecosFechamento.has(devedor))continue;
+                if(!paresAnunciados.has(devedor)){
+                    paresAnunciados.add(devedor);
+                    log.info('[CACA/RAIO-X] Par real do alvo priorizado.',{
+                        devedor,garantia:a.garantia,divida:a.divida,
+                        fonte:'getUserReserveData em montarAlvos',
+                        criterio:'nao substitui Health Factor, pool, cotacao ou simulacao',
+                    });
+                }
+                // Fonte onchain e independente da heuristica Binance/Coinbase.
+                // Nao aguardamos este RPC: prearmamento e envio nunca podem
+                // esperar por um diagnostico do feed.
+                const aaveOracle=oraculo;
+                if(aaveOracle){
+                    for(const token of [a.garantia,a.divida]){
+                        const chave=token.toLowerCase();
+                        if(fontesConsultadas.has(chave))continue;
+                        fontesConsultadas.add(chave);
+                        void (async()=>{
+                            try{
+                                const raw=await chamar<string>('eth_call',[{
+                                    to:aaveOracle,data:dadosDaFonteNoAaveOracle(token),
+                                },'latest']);
+                                log.info('[CACA/RAIO-X] Fonte real do preco Aave.',{
+                                    token,fonte:lerFonteDoAaveOracle(raw)??'nao retornada',
+                                    aaveOracle,naoPresumir:'pode ser Chainlink, adaptador ou outra fonte aprovada',
+                                });
+                            }catch(e){
+                                log.warn('[CACA/RAIO-X] Fonte nao legivel; sem inferir endereco.',{
+                                    token,motivo:e instanceof Error?e.message:String(e),
+                                });
+                            }
+                        })();
+                    }
+                }
+            }
             alvosArmados.clear();
             for (const a of prontos) alvosArmados.set(a.devedor.toLowerCase(), a);
             armadoEm = Date.now();
@@ -6186,6 +6232,33 @@ async function principal(): Promise<'parar' | void> {
             }
 
             if (caidos.length === 0) continue;
+            // A escolha de nonce acontece adiante. Se dois alvos ficam
+            // liquidaveis JUNTOS, o pequeno nao deve ocupar o nonce na frente
+            // do de maior premio. A ordem de observacao da BRASA nao muda;
+            // somente os candidatos ja caidos sao reordenados, pelo valor
+            // estimado de quem a dona explicitamente priorizou.
+            //
+            // Esta pontuacao nao autoriza envio: a simulacao, custo real,
+            // reserva de gas e margem continuam sendo os mesmos portoes.
+            if (caidos.length > 1 && enderecosFechamento.size > 0) {
+                const premioPorConta = new Map<string,Decimal>(
+                    medidosDaBrasa
+                        .filter(m=>enderecosFechamento.has(m.devedor.toLowerCase())
+                            && m.dividaUsd !== null)
+                        .map(m=>[m.devedor.toLowerCase(),lucroEstimado(m.dividaUsd!)]),
+                );
+                const ordenados = ordenarCaidosPorPremio({
+                    caidos,prioritarios:enderecosFechamento,premiosUsd:premioPorConta,
+                });
+                if (ordenados.some((d,i)=>d!==caidos[i])) {
+                    log.info('[CACA/ALVOS-PRIORITARIOS] Ordem de execucao das posicoes caidas.',{
+                        bloco:blocoAtual,
+                        ordem:ordenados,
+                        nota:'valor do radar so ordena; simulacao integral e margem continuam obrigatorias',
+                    });
+                }
+                caidos.splice(0,caidos.length,...ordenados);
+            }
 
             // Quem ja estava armado nao precisa de ida a rede nenhuma agora.
             // Alvo armado tem PRAZO, e a validade so era conferida na hora de
