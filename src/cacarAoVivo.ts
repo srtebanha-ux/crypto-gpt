@@ -31,6 +31,7 @@ import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PI
 import { POOLS } from './contratos';
 import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
 import { reservarGasCompartilhado, conciliarGasCompartilhado, pontuacaoDeLiquidez } from './cacaDuasRotas';
+import { conferirJanelaDeNonce } from './janelaDeNonce';
 import {
     prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca,
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
@@ -7064,6 +7065,21 @@ async function principal(): Promise<'parar' | void> {
                             }
                         }
                     }
+                    // A exclusividade com TITAN agora e real, nao somente uma
+                    // flag: papel determinado pelo timestamp de blocos Base
+                    // verificado por DOIS provedores, com 5min de guarda.
+                    if (process.env.TITAN_JANELAS_EXCLUSIVAS === '1') {
+                        const janela = await conferirJanelaDeNonce(leitor,donoCarteira,'CACA');
+                        if (!janela.pode) {
+                            log.info('[CACA/TITAN] Minha janela de assinatura fechada.', {
+                                motivo:janela.motivo, papel:'CACA',
+                            });
+                            continue;
+                        }
+                    } else if (COMBINADO_SEGURO) {
+                        log.error('[CACA/TITAN] Negociação bloqueada: falta exclusividade temporal.');
+                        continue;
+                    }
                     let reservaCompartilhadaId:string|null=null;
                     if (COMBINADO_SEGURO) {
                         // Reserva ao VALOR MAXIMO cobravel pelo gas, nao a media.
@@ -7073,7 +7089,7 @@ async function principal(): Promise<'parar' | void> {
                         const adicional=BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI??'0');
                         if(adicional>l1)l1=adicional;
                         const maxPorTx=650_000_000_000_000n; // 0.00065 ETH por tentativa
-                        const maxPorDia=1_300_000_000_000_000n; // 0.0013 ETH/dia
+                        const maxPorDia=650_000_000_000_000n; // 0.00065 ETH/dia CACA; TITAN tem budget separado
                         const maxCusto=limiteGas*maxFee+l1;
                         if (!custoMaximoMultiDentroDoTeto(limiteGas,maxFee,l1,maxPorTx)) {
                             log.warn('[DUAS ROTAS] Custo maximo ultrapassa teto por tentativa.');
@@ -7104,7 +7120,7 @@ async function principal(): Promise<'parar' | void> {
                         }
                         const reserva=reservarGasCompartilhado({
                             tipo:contrato.tipo,alvo:alvo.devedor,maxCostWei:maxCusto,
-                            maxPerTxWei:maxPorTx,maxDailyWei:maxPorDia,maxTxDia:2
+                            maxPerTxWei:maxPorTx,maxDailyWei:maxPorDia,maxTxDia:1
                         });
                         if(!reserva.id) {
                             log.warn('[DUAS ROTAS] Disjuntor do orcamento compartilhado.',{
