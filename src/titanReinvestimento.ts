@@ -6,8 +6,8 @@
  * Nunca tenta mover ativos de outro cofre e nunca converte saldo preexistente:
  * usa exatamente a quantidade do evento Cacou confirmado.
  *
- * O unwrap gasta uma segunda transacao na Base. Um marcador persistente
- * permite no maximo uma por dia; erro/timeout nunca autoriza reenvio cego.
+ * O unwrap gasta uma segunda transacao na Base. Um marcador persistente por
+ * hash original impede repeticoes; o acumulado diario limita a despesa.
  */
 import { Interface, JsonRpcProvider, Wallet, getAddress, keccak256 } from 'ethers';
 import fs from 'node:fs';
@@ -49,6 +49,7 @@ export async function reinvestirLucroTitan(
     carteira: Wallet,
     cofre: string,
     lucroConfirmadoWei: bigint,
+    hashArbitragem: string,
     ambiente: NodeJS.ProcessEnv,
 ): Promise<ReinvestimentoTitan> {
     if (ambiente.TITAN_GAS_SNOWBALL !== '1'
@@ -62,14 +63,18 @@ export async function reinvestirLucroTitan(
     if (lucroConfirmadoWei <= 0n) {
         return { estado: 'sem_margem', motivo: 'recibo nao comprovou lucro WETH' };
     }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(hashArbitragem)) {
+        return { estado: 'incompativel', motivo: 'hash do recibo de arbitragem invalido' };
+    }
     const diaUtc = new Date().toISOString().slice(0, 10);
-    const marcador = '/app/data/titan-snowball-unwrap-' + diaUtc + '.json';
+    const prefixo = 'titan-snowball-unwrap-' + diaUtc + '-';
+    const marcador = '/app/data/' + prefixo + hashArbitragem.slice(2).toLowerCase() + '.json';
     // Sem volume persistente, fail closed: crash nao pode desencadear segundo unwrap.
     if (!fs.existsSync('/app/data')) {
         return { estado: 'incompativel', motivo: 'volume persistente /app/data ausente' };
     }
     if (fs.existsSync(marcador)) {
-        return { estado: 'sem_margem', motivo: 'unwrap deste dia ja reservado; nao reenviar' };
+        return { estado: 'sem_margem', motivo: 'unwrap desta arbitragem ja reservado; nao reenviar' };
     }
     let hash: string | undefined;
     try {
@@ -115,8 +120,22 @@ export async function reinvestirLucroTitan(
         const custoMaximo = gasLimit * maxFee + 2n * feeL1;
         const saldoEth = await rpc.getBalance(carteira.address);
         const tetoDiario = BigInt(ambiente.TITAN_GAS_DIA_WEI ?? '0') / 10n;
+        // O teto vale para TODOS os unwraps do dia, inclusive os pendentes.
+        // Registro corrompido => nao ha autorizacao para gastar mais ETH.
+        let jaReservado = 0n;
+        for (const nome of fs.readdirSync('/app/data')) {
+            if (!nome.startsWith(prefixo) || !nome.endsWith('.json')) continue;
+            const registro = JSON.parse(fs.readFileSync('/app/data/' + nome, 'utf8')) as {
+                tetoGasWei?: string;
+            };
+            if (!registro.tetoGasWei || !/^\\d+$/.test(registro.tetoGasWei)) {
+                throw new Error('diario de unwrap corrompido; interrompido por seguranca');
+            }
+            jaReservado += BigInt(registro.tetoGasWei);
+        }
         if (!autorizarUnwrapSnowball(
-            lucroConfirmadoWei, saldoEth, custoMaximo, tetoDiario,
+            lucroConfirmadoWei, saldoEth, custoMaximo,
+            tetoDiario > jaReservado ? tetoDiario - jaReservado : 0n,
         )) {
             return { estado: 'sem_margem',
                 motivo: 'lucro, saldo ETH ou limite de gas nao justificam unwrap',
@@ -154,6 +173,7 @@ export async function reinvestirLucroTitan(
         fs.writeFileSync(marcador, JSON.stringify({
             estado, hash, diaUtc,
             quantidadeWei: lucroConfirmadoWei.toString(),
+            tetoGasWei: custoMaximo.toString(),
             gasL2Wei: (recibo.gasUsed * recibo.gasPrice).toString(),
         }), { mode: 0o600 });
         return { estado, hash, wethConvertidoWei: recibo.status === 1
