@@ -32,6 +32,7 @@ import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PI
 import { POOLS, AERODROME } from './contratos';
 import { dadosGetPoolAerodrome, lerPoolAerodrome, classificarRota } from './cacaRotaAerodrome';
 import { modosV2ParaSimular, type PoolsAerodromeConfirmados } from './cacaModosV2';
+import { permiteV1NaPoolPadrao } from './cacaV1Pool';
 import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
 import { reservarGasCompartilhado, conciliarGasCompartilhado, pontuacaoDeLiquidez } from './cacaDuasRotas';
 import { conferirJanelaDeNonce } from './janelaDeNonce';
@@ -6468,6 +6469,18 @@ async function principal(): Promise<'parar' | void> {
                     // Modo live seguro: nunca incluir candidatos V1/V2 ou tiros
                     // na escrita do oraculo, mesmo que CACA_ENVIAR=1.
                     if (SOMENTE_MULTIHOP) break;
+                    // Evita uma simulacao sabidamente impossivel: V1 default
+                    // vende SOMENTE WETH/USDC. EURC e cbBTC nao cabem no par.
+                    // Pool customizada permanece liberada para simulacao.
+                    if(contrato.tipo==='V1'&&!permiteV1NaPoolPadrao(
+                        alvo.garantia,alvo.divida,poolDeVendaV1,POOLS.aerodrome.endereco,
+                    )){
+                        log.info('[CACA/ROTA-REAL] V1 incompativel com garantia; economizei simulacao.',{
+                            devedor:alvo.devedor,garantia:alvo.garantia,
+                            divida:alvo.divida,par:'WETH/USDC',
+                        });
+                        continue;
+                    }
                     const chaveRota=chaveDeRota(alvo.garantia,alvo.divida);
                     const modos=contrato.tipo==='V2'
                         ? modosV2ParaSimular(
