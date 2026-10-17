@@ -152,10 +152,13 @@ export class OracleShadow {
             this.avisar(origem+' websocket conectado');
         });
         ws.on('message',data=>{
-            // Nao interpretar frames enormes nem cotacao de socket fechado.
-            if(!this.ativo || ws.readyState!==WebSocket.OPEN || data.length>16_384)return;
+            // RawData inclui ArrayBuffer (sem "length"), Buffer e Buffer[].
+            // Limitar o texto depois da conversao evita erro de typecheck.
+            if(!this.ativo || ws.readyState!==WebSocket.OPEN)return;
+            const texto=data.toString();
+            if(texto.length>16_384)return;
             let parsed:unknown;
-            try{parsed=JSON.parse(data.toString());}catch{return}
+            try{parsed=JSON.parse(texto);}catch{return}
             const c=decodificarCotacaoShadow(origem,parsed,this.pares,Date.now());
             if(c){
                 recebeuCotacao=true;
