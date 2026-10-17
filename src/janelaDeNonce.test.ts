@@ -31,3 +31,18 @@ test('nonce pendente, RPC stale e erro de rede bloqueiam imediatamente ambos',as
     assert.equal((await conferirJanelaDeNonce(fake(ms),base,'TITAN',
         {segundo:fake(ms,4,4,1n),agoraMs:ms})).pode,false);
 });
+
+test('TITAN SOLO funciona em qualquer minuto sem relaxar verificacao de nonce',async()=>{
+    for(const minuto of [0,1,2,15,26,27,30,32,45,56,59]){
+        const ms=t(minuto),rpc=fake(ms);
+        const r=await conferirJanelaDeNonce(rpc,base,'TITAN_SOLO',{segundo:rpc,agoraMs:ms});
+        assert.equal(r.pode,true,`minuto ${minuto}: ${r.motivo}`);
+    }
+    const ms=t(1);
+    assert.equal((await conferirJanelaDeNonce(fake(ms,5),base,'TITAN_SOLO',
+        {segundo:fake(ms),agoraMs:ms})).pode,false);
+    assert.equal((await conferirJanelaDeNonce(fake(ms-100000),base,'TITAN_SOLO',
+        {segundo:fake(ms),agoraMs:ms})).pode,false);
+    assert.equal((await conferirJanelaDeNonce(fake(ms),base,'TITAN_SOLO',
+        {segundo:fake(ms,4,3),agoraMs:ms})).pode,false);
+});
