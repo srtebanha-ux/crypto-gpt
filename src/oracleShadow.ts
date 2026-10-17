@@ -23,7 +23,13 @@ export interface RetratoShadow {
     divergentes:string[];
     quantidadeDeFontes:number;
 }
-const BINANCE_WS='wss://stream.binance.com:9443/stream?streams=';
+// Documentacao oficial oferece um dominio SEM autenticacao, dedicado a
+// market data. Alternar entre origens evita depender de um unico endpoint.
+const BINANCE_WS=[
+    'wss://data-stream.binance.vision:443/stream?streams=',
+    'wss://stream.binance.com:443/stream?streams=',
+    'wss://stream.binance.com:9443/stream?streams=',
+] as const;
 const COINBASE_WS='wss://ws-feed.exchange.coinbase.com';
 const MAX_IDADE_MS=2500;
 const DIVERGENCIA_MAXIMA_BPS=35; // 0.35%; USDT/USD or cross-venue moves can differ
@@ -120,7 +126,8 @@ export class OracleShadow {
     private conectar(origem:OrigemShadow,tentativa:number):void{
         if(!this.ativo)return;
         const url=origem==='binance'
-            ? BINANCE_WS+this.pares.map(p=>p.toLowerCase()+'@trade').join('/')
+            ? BINANCE_WS[tentativa % BINANCE_WS.length]
+                +this.pares.map(p=>p.toLowerCase()+'@trade').join('/')
             : COINBASE_WS;
         const ws=new WebSocket(url,{handshakeTimeout:8000,perMessageDeflate:false});
         this.conexoes.add(ws);
