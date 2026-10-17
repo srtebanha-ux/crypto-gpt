@@ -4111,7 +4111,12 @@ async function principal(): Promise<'parar' | void> {
             const paresReais=await montarAlvos(
                 devedores,moedas,dataProvider!,precos,casas,async()=>saldos,
             );
-            for(const par of paresReais)void descobrirRota(par.garantia,par.divida);
+            for(const par of paresReais){
+                void descobrirRota(par.garantia,par.divida);
+                // A cotacao Slipstream nao precisa aguardar o proximo pre-armamento:
+                // o raio-X ja identificou o par real sem uma leitura extra.
+                void avaliarSlipstream(par.garantia,par.divida);
+            }
             const tokensVistos=new Set<string>();
             for(let i=0;i<devedores.length;i++){
                 const eMode=lerEModeUsuario(contaResp[2*i]??null);
