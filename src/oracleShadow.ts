@@ -125,19 +125,25 @@ export class OracleShadow {
         const ws=new WebSocket(url,{handshakeTimeout:8000,perMessageDeflate:false});
         this.conexoes.add(ws);
         let fechado=false;
+        let conectadoEm=0, recebeuCotacao=false;
         const matar=()=>{
             if(fechado)return;fechado=true;
             this.conexoes.delete(ws);
             if(!this.ativo)return;
-            const pausa=Math.min(60000,1000*2**Math.min(tentativa,6));
+            // A Binance pode rejeitar nuvens. Sem leitura ESTAVEL, o backoff
+            // nao deve zerar ao receber apenas handshake antes da rejeicao.
+            const estavel=recebeuCotacao && conectadoEm>0
+                && Date.now()-conectadoEm>=10_000;
+            const proxima=estavel?0:Math.min(6,tentativa+1);
+            const pausa=Math.min(60_000,1000*2**proxima);
             const t=setTimeout(()=>{
                 this.temporizadores.delete(t);
-                if(this.ativo)this.conectar(origem,tentativa+1);
+                if(this.ativo)this.conectar(origem,proxima);
             },pausa);
             this.temporizadores.add(t);
         };
         ws.on('open',()=>{
-            tentativa=0;
+            conectadoEm=Date.now();
             if(origem==='coinbase'){
                 ws.send(JSON.stringify({type:'subscribe',
                     product_ids:this.pares.map(p=>EQUIVALENTES[p]!.coinbase),
@@ -151,7 +157,10 @@ export class OracleShadow {
             let parsed:unknown;
             try{parsed=JSON.parse(data.toString());}catch{return}
             const c=decodificarCotacaoShadow(origem,parsed,this.pares,Date.now());
-            if(c)this.recentes.set(c.par+':'+origem,c);
+            if(c){
+                recebeuCotacao=true;
+                this.recentes.set(c.par+':'+origem,c);
+            }
         });
         // ws responde ping automaticamente; pong duplicado atrasa o fluxo.
         ws.on('error',err=>{this.avisar(origem+' WS indisponivel: '+err.message.slice(0,100));});
