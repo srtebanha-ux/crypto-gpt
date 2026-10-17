@@ -42,7 +42,7 @@ import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
 import { coberturaPrioritariaPequena, enderecosPrioritarios } from './cacaFechamentoPequenos';
-import { reservarAlvosNaBrasa } from './cacaPrioridadeBrasa';
+import { reservarAlvosNaBrasa, acordarPorBlocoSeAlvoCritico } from './cacaPrioridadeBrasa';
 import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type AvaliacaoEmCurso } from './cronometro';
 import { esperarOProximoCiclo } from './despertar';
 import {
@@ -2598,6 +2598,9 @@ async function principal(): Promise<'parar' | void> {
     let quentes: string[] = [];
     /** Os mais frageis de todos: viajam de graca no multicall dos precos. */
     let brasa: string[] = [];
+    // Atualizado SOMENTE pelas leituras onchain do multicall da brasa.
+    let menorPrioritarioAoVivo: Decimal | null = null;
+    let despertaPorAlvo = false;
     /**
      * A saude de cada um da brasa ao longo do tempo.
      *
@@ -5253,6 +5256,7 @@ async function principal(): Promise<'parar' | void> {
             // o minimo global esta dentro dela entre varreduras — e um numero
             // de 8 segundos e melhor que um de 15 minutos em qualquer direcao.
             let menorAoVivo: Decimal | null = null;
+            let menorPrioritarioNesteCiclo: Decimal | null = null;
             /** O que a brasa mediu NESTE ciclo, para o livro dos episodios. */
             const medidosDaBrasa: Medida[] = [];
             const inicioDaBrasa = moedas.length + 2;
@@ -5264,6 +5268,15 @@ async function principal(): Promise<'parar' | void> {
                     const saude = conta.saude;
                     registrarDeriva(historicoDeSaude, brasa[i]!, saude, Date.now());
                     const queda = quedaAteLiquidar(saude);
+                    // Sem chamada nova: aproveita a saúde onchain ja presente.
+                    // Nenhum atalho para liquidar: apenas acelera o despertar
+                    // quando um dos DOIS escolhidos esta perto de HF=1.
+                    if (queda !== null && enderecosFechamento.has(brasa[i]!.toLowerCase())
+                        && conta.dividaBase.greaterThan(0)
+                        && (menorPrioritarioNesteCiclo === null
+                            || queda.lessThan(menorPrioritarioNesteCiclo))) {
+                        menorPrioritarioNesteCiclo = queda;
+                    }
                     if (queda !== null) {
                         medidosDaBrasa.push({
                             devedor: brasa[i]!, queda,
@@ -5409,6 +5422,8 @@ async function principal(): Promise<'parar' | void> {
                     }
                 } catch {}
             }
+
+            menorPrioritarioAoVivo = menorPrioritarioNesteCiclo;
 
             // O LIVRO, a cada ciclo: e aqui que o tempo efetivo se acumula.
             // Fora do `if` do log de proposito — a disponibilidade nao pode
@@ -7484,6 +7499,18 @@ async function principal(): Promise<'parar' | void> {
             await olharMercado();
             const ritmo = ritmoDaPostura(posturaAgora(), INTERVALO_MS);
             const resta = ritmo - (Date.now() - inicioDoCiclo);
+            const alvoCritico = acordarPorBlocoSeAlvoCritico(menorPrioritarioAoVivo);
+            if (alvoCritico !== despertaPorAlvo) {
+                despertaPorAlvo = alvoCritico;
+                log.info('[CACA/ALVOS-PRIORITARIOS] Despertar seletivo por bloco.', {
+                    ligado:alvoCritico,
+                    distancia:menorPrioritarioAoVivo === null
+                        ? 'sem leitura nesta rodada'
+                        : `${menorPrioritarioAoVivo.toFixed(4)}%`,
+                    politica:'somente leitura e simulacao; tiro segue seus portoes',
+                    custo:'aumenta RPC apenas quando um alvo prioritario entra em <=0.75%',
+                });
+            }
             // Com o dedo no gatilho o ciclo quase sempre passa dos 200ms — a
             // ida ao mercado sozinha leva mais que isso. Condicionar a espera a
             // `resta > 0` fazia o galho do WebSocket ser codigo morto
@@ -7501,7 +7528,7 @@ async function principal(): Promise<'parar' | void> {
                 {
                     ouvinte: ouvinte === null ? null
                         : { vivo: ouvinte.vivo, assinar: (f) => ouvinte.assinar(f) },
-                    acordaPorBloco: ACORDA_POR_BLOCO,
+                    acordaPorBloco: ACORDA_POR_BLOCO || alvoCritico,
                     dormir: async (ms) => { await dormir(ms); },
                     dormirDeOlho: (total, fatia) => dormirDeOlho(total, fatia, olharMercado,
                         async (ms) => { await dormir(ms); }),
