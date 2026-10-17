@@ -82,3 +82,28 @@ test('Multi-Hop usa oraculo de L1 do CACA e margem de segurança',async()=>{
     const zero = {call:async()=> '0x'+ '0'.repeat(64)} as unknown as JsonRpcProvider;
     await assert.rejects(()=>tetoL1PeloCaca(zero),/nao retornou custo valido/);
 });
+
+test('EURC Slipstream route is opt-in, uses canonical pool and tick spacing 50',()=>{
+    const eurc='0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42';
+    const usdc='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+    assert.equal(poolsDoCaca(undefined,false).length,3);
+    const pools=poolsDoCaca(undefined,true);
+    assert.equal(pools.length,4);
+    const rota=gerarRotasLiquidacao(pools,eurc,usdc,4,20);
+    assert.equal(rota.length,1);
+    assert.equal(rota[0].pernas[0].tipo,2);
+    assert.equal(rota[0].pernas[0].fee,50);
+    const data=codificarMulti({usuario:a(3),garantia:eurc,divida:usdc},
+        1_000_000n,1n,rota[0]);
+    const decoded=ABI_MULTI.decodeFunctionData('liquidar',data);
+    assert.equal(decoded[5][0].tipo,2n);
+    assert.equal(decoded[5][0].fee,50n);
+});
+test('Slipstream spoofed pool or spacing fails closed',()=>{
+    const real=poolsDoCaca(undefined,true)[3];
+    for (const p of [{...real,taxa:60},{...real,endereco:a(99)},
+        {...real,token0:a(98)}]) {
+        assert.equal(gerarRotasLiquidacao([p],real.token0,real.token1).length,0);
+        assert.throws(()=>poolsDaConfiguracao(JSON.stringify([p])));
+    }
+});
