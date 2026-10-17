@@ -8,14 +8,14 @@ export interface PoolLiquidacao {
     endereco: string;
     token0: string;
     token1: string;
-    protocolo: 'v3'|'aerodrome';
+    protocolo: 'v3'|'aerodrome'|'slipstream';
     taxa: number|null;
     permitida: boolean; // validada via factory/allowlist, não por suposição
 }
 export interface PernaLiquidacao {
     pool: string;
     tokenEntra: string;
-    tipo: 0|1;
+    tipo: 0|1|2;
     fee: number;
 }
 export interface RotaLiquidacao {
@@ -43,6 +43,11 @@ export function gerarRotasLiquidacao(
         if(p.protocolo==='v3'&&(!Number.isSafeInteger(p.taxa)||p.taxa===null
             ||p.taxa<=0||p.taxa>10000))continue;
         if(p.protocolo==='aerodrome'&&p.taxa!==null&&p.taxa!==0)continue;
+        if(p.protocolo==='slipstream' &&
+           (p.taxa!==50
+            || p.endereco.toLowerCase()!=='0xe846373c1a92b167b4e9cd5d8e4d6b1db9e90ec7'
+            || ![p.token0.toLowerCase(),p.token1.toLowerCase()].includes('0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42')
+            || ![p.token0.toLowerCase(),p.token1.toLowerCase()].includes('0x833589fcd6edb6e08f4c7c32d4f71b54bda02913')))continue;
         const a=p.token0.toLowerCase(),b=p.token1.toLowerCase();
         push(a,p,b);push(b,p,a);
     }
@@ -65,8 +70,8 @@ export function gerarRotasLiquidacao(
             if(visitados.has(out)||usados.has(poolid))continue;
             visitados.add(out);usados.add(poolid);
             pernas.push({pool:poolid,tokenEntra:atual,
-                tipo:pool.protocolo==='v3'?0:1,
-                fee:pool.protocolo==='v3'?pool.taxa!:0});
+                tipo:pool.protocolo==='v3'?0:pool.protocolo==='slipstream'?2:1,
+                fee:pool.protocolo==='aerodrome'?0:pool.taxa!});
             caminho.push(out);
             dfs(out,pernas,caminho);
             caminho.pop();pernas.pop();usados.delete(poolid);visitados.delete(out);
