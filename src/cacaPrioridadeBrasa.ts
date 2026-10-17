@@ -63,3 +63,20 @@ export function reservarAlvosNaBrasa(args:{
         semMedicao,
     };
 }
+
+
+/**
+ * Acordar por aviso de novo bloco APENAS quando uma carteira escolhida
+ * esta a menos de 0.75% de cruzar o HF=1.
+ *
+ * Fora da zona critica, o bot conserva o sono orientado a mercado e
+ * o orcamento de RPC. Nunca antecipa o envio: apenas antecipa a leitura.
+ */
+export function acordarPorBlocoSeAlvoCritico(
+    faltaPct:Decimal|null,
+    limitePct=new Decimal('0.75'),
+):boolean{
+    return faltaPct!==null && faltaPct.isFinite()
+        && faltaPct.greaterThanOrEqualTo(0)
+        && faltaPct.lessThanOrEqualTo(limitePct);
+}
