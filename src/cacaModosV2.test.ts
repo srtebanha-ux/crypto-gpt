@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {modosV2ParaSimular} from './cacaModosV2';
+const pool='0x1111111111111111111111111111111111111111';
+test('only stable pool enables stable flag',()=>assert.deepEqual(modosV2ParaSimular({estavel:pool,volatil:null},false),[true]));
+test('only volatile pool enables volatile flag',()=>assert.deepEqual(modosV2ParaSimular({estavel:null,volatil:pool},false),[false]));
+test('both pools are individually eligible for simulation',()=>assert.deepEqual(modosV2ParaSimular({estavel:pool,volatil:pool},false),[false,true]));
+test('both absent blocks impossible route',()=>assert.deepEqual(modosV2ParaSimular({estavel:null,volatil:null},false),[]));
+test('unknown RPC status preserves existing safe simulation',()=>assert.deepEqual(modosV2ParaSimular(null,false),[false]));
+test('same debt and collateral does not require a pool',()=>assert.deepEqual(modosV2ParaSimular({estavel:null,volatil:null},true),[false]));
