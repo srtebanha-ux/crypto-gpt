@@ -22,6 +22,7 @@ import {
 import { esperarBlocoOuTempo, OuvinteDeBlocos, enderecoDeBlocos, negociarWs, comoLerANegociacao } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, blocosAteCruzar, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDeQualquerFonte, quedaDoMercado } from './precoDeMercado';
+import { OracleShadow } from './oracleShadow';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, decodificarAggregate3Rapido, partirEmPedacos } from './multicall';
@@ -2263,6 +2264,8 @@ function desligarTudo(): void {
     }
 }
 
+// Uma tentativa anterior de boot nao pode manter sockets e listeners vivos.
+let oracleShadowDaSessao: OracleShadow | null = null;
 async function principal(): Promise<'parar' | void> {
     // O laco externo recria principal() a cada tropeco. Sem isto, cada
     // reinicio abandonava um WebSocket vivo com cadeia de reconexao eterna:
@@ -2531,6 +2534,22 @@ async function principal(): Promise<'parar' | void> {
         log.warn('Não consegui ler os símbolos das moedas; sigo sem preço de mercado.', { erro: (e as Error).message });
     }
     const paresDaBinance = [...new Set(parPorToken.values())];
+    // Pre-aquecimento Oracle Shadow: dados de Binance/Coinbase via WebSocket
+    // sao APENAS gatilho de leitura. Aave e o contrato executor sempre
+    // confirmam liquidabilidade e lucro com dados reais da Base.
+    // Desligar explicitamente via CACA_ORACLE_SHADOW=0, sem reconfigurar chaves.
+    // Reboots internos nao podem acumular dois observers e duas conexoes WS.
+    oracleShadowDaSessao?.parar();
+    const oracleShadow = process.env.CACA_ORACLE_SHADOW === '0'
+        ? null : new OracleShadow(paresDaBinance,(mensagem)=>
+            log.info('[ORACLE-SHADOW/WS] '+mensagem));
+    oracleShadowDaSessao=oracleShadow;
+    oracleShadow?.iniciar();
+    log.info('[ORACLE-SHADOW] Monitor de precos em tempo real.',{
+        habilitado:oracleShadow!==null,pares:paresDaBinance,
+        acesso:'somente leitura; nunca assina, nunca dispara',
+        fallback:'REST das tres casas quando websocket nao tem todas as cotacoes',
+    });
     log.info('Olho no mercado, fora da blockchain (custo zero em CU).', {
         pares: paresDaBinance,
         moedasAcompanhadas: parPorToken.size,
@@ -4906,7 +4925,13 @@ async function principal(): Promise<'parar' | void> {
      */
     async function olharMercado(): Promise<boolean> {
         if (paresDaBinance.length === 0) return false;
-        const { precos: doMercado, fonte } = await cotacoesDeQualquerFonte(paresDaBinance);
+        const ws=oracleShadow?.retrato();
+        // Nao misturar snapshots incompletos: o REST ja faz fallback de
+        // Binance para Coinbase e Kraken, e continua funcionando sem WS.
+        const merc=ws && ws.precos.size===paresDaBinance.length
+            ? {precos:ws.precos,fonte:'shadow:'+ws.origem}
+            : await cotacoesDeQualquerFonte(paresDaBinance);
+        const {precos:doMercado,fonte}=merc;
         if (fonte !== fonteDoPreco && doMercado.size > 0) {
             // Fonte que troca sozinha em silencio e a armadilha de sempre:
             // funciona, e ninguem sabe como.
