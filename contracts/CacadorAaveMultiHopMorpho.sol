@@ -35,6 +35,9 @@ interface ITitanMultiPool {
 interface ITitanMultiFactory {
     function getPool(address,address,uint24) external view returns(address);
 }
+interface ITitanSlipstreamFactory {
+    function getPool(address,address,int24) external view returns(address);
+}
 interface ITitanMultiAero {
     function token0() external view returns(address);
     function token1() external view returns(address);
@@ -47,14 +50,18 @@ contract CacadorAaveMultiHopMorpho {
     address public immutable aave;
     address public immutable morpho;
     address public immutable fabricaV3;
+    address public constant slipstreamFactory = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
+    address public constant slipstreamEurcUsdc = 0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7;
+    address public constant eurcBase = 0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42;
+    address public constant usdcBase = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     uint160 internal constant MIN_SQRT=4295128739+1;
     uint160 internal constant MAX_SQRT=1461446703485210103287273052203988822378723970342-1;
 
     struct Perna {
         address pool;
         address tokenEntra;
-        uint8 tipo; // 0=Uniswap V3, 1=Aerodrome volatile autorizado
-        uint24 fee; // feeTier V3, zero no Aerodrome
+        uint8 tipo; // 0=Uniswap V3, 1=Aerodrome volatile, 2=Slipstream EURC/USDC
+        uint24 fee; // Uniswap fee, Aero V2 zero, Slipstream tickSpacing
     }
     struct Caca {
         address usuario;
@@ -133,6 +140,13 @@ contract CacadorAaveMultiHopMorpho {
                     !=p.pool)revert RotaInvalida();
             }else if(p.tipo==1){
                 if(!aeroPermitida[p.pool]||p.fee!=0)revert RotaInvalida();
+            }else if(p.tipo==2){
+                // Pair, factory and tick spacing are fixed onchain.
+                if(p.pool!=slipstreamEurcUsdc||p.fee!=50
+                    ||(p.tokenEntra!=eurcBase&&p.tokenEntra!=usdcBase)
+                    ||ITitanSlipstreamFactory(slipstreamFactory)
+                        .getPool(eurcBase,usdcBase,int24(uint24(p.fee)))!=p.pool)
+                    revert RotaInvalida();
             }else revert RotaInvalida();
             proxima=saida;
         }
@@ -176,7 +190,7 @@ contract CacadorAaveMultiHopMorpho {
             uint256 valor=_livre(p.tokenEntra);
             if(valor==0||valor>uint256(type(int256).max))
                 revert SaldoCurto(p.tokenEntra,valor,1);
-            if(p.tipo==0){
+            if(p.tipo==0||p.tipo==2){
                 bool z=ITitanMultiPool(p.pool).token0()==p.tokenEntra;
                 poolEsperado=p.pool;
                 ITitanMultiPool(p.pool).swap(address(this),z,int256(valor),

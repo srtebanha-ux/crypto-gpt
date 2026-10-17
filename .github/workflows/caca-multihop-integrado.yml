@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - feat/caca-integracao-multihop-ativa
+      - feat/slipstream-liquidator-20261017
   pull_request:
     branches:
+      - feat/caca-integracao-multihop-ativa
       - claude/hft-triangular-arbitrage-jsq4i4
   workflow_dispatch:
 
@@ -33,6 +35,10 @@ jobs:
         env:
           ARB_BLOCO: "52418045"
         run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanMultiHopBaseFork.js
+      - name: Testar Aave/Morpho/Slipstream EURC em fork isolado da Base
+        env:
+          ARB_BLOCO: "52745456"
+        run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanSlipstreamBaseFork.js
       - name: Confirmar imagem do CACA inclui bytecode sem private key
         run: |
           docker build -t caca-multihop:test .

@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ContractFactory, Interface, JsonRpcProvider, Wallet, getAddress } from 'ethers';
 import { ORACULO_DE_GAS_L1 } from './custoDaBase';
-import { MORPHO_FLASH_BASE, ABI_MULTI } from './titanPonteMultiHop';
+import { MORPHO_FLASH_BASE, ABI_MULTI, FABRICA_SLIPSTREAM_BASE, POOL_SLIPSTREAM_EURC_USDC } from './titanPonteMultiHop';
 import { COFRE_ESPERADO } from './caca';
 import { REDES } from './liquidacoes';
 const oracle = new Interface(['function getL1Fee(bytes) view returns(uint256)']);
@@ -15,6 +15,7 @@ const artefato = '.tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/Cacador
 const MAX_DEPLOY_WEI=1_000_000_000_000_000n;
 // Uniswap V3 factory documentada oficialmente para Base Mainnet.
 const FACTORY_UNISWAP_V3_BASE='0x33128a8fC17869897dcE68Ed026d694621f6FDfD';
+const factoryClAbi=new Interface(['function getPool(address,address,int24) view returns(address)']);
 export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Promise<string>{
     if (env.TITAN_MULTI_DEPLOY!=='1'
         || env.TITAN_MULTI_CONFIRMAR_DEPLOY!=='IMPLANTAR_MULTIHOP_BASE_REAL')
@@ -53,6 +54,17 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
     try {
         if (BigInt(await rpc.send('eth_chainId',[]))!==8453n)
             throw new Error('RPC diferente de Base 8453');
+        // Before spending ETH, demand the verified canonical Slipstream pool.
+        const respostaPool=await rpc.call({to:FABRICA_SLIPSTREAM_BASE,
+            data:factoryClAbi.encodeFunctionData('getPool',[
+                POOL_SLIPSTREAM_EURC_USDC.token0,POOL_SLIPSTREAM_EURC_USDC.token1,50,
+            ])});
+        const enderecoPool=factoryClAbi.decodeFunctionResult('getPool',respostaPool)[0] as string;
+        if(getAddress(enderecoPool)!==getAddress(POOL_SLIPSTREAM_EURC_USDC.endereco))
+            throw new Error('pool Slipstream EURC/USDC divergente na Base');
+        if(await rpc.getCode(enderecoPool)==='0x')
+            throw new Error('pool Slipstream sem codigo');
+
         const bloco=await rpc.getBlock('latest');
         if (!bloco || !bloco.baseFeePerGas || bloco.baseFeePerGas<=0n)
             throw new Error('base fee nao disponivel');
@@ -96,7 +108,8 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
             throw new Error('recibo ausente ou deploy revertido; NAO repetir automaticamente');
         const contrato=recibo.contractAddress;
         for (const [fn,esperado] of Object.entries({dono:carteira.address,cofre,
-            aave,morpho:MORPHO_FLASH_BASE,fabricaV3:fabrica})) {
+            aave,morpho:MORPHO_FLASH_BASE,fabricaV3:fabrica,
+            slipstreamFactory:FABRICA_SLIPSTREAM_BASE})) {
             const dados=await rpc.call({to:contrato,data:ABI_MULTI.encodeFunctionData(fn)});
             const lido=ABI_MULTI.decodeFunctionResult(fn,dados)[0] as string;
             if (getAddress(lido)!==getAddress(esperado))
