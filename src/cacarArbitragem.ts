@@ -2412,6 +2412,7 @@ async function principal(): Promise<void> {
             );
             const escolha = priorizarCotacoes(
                 afetadasPotenciais, tri, tetoCotarRotas, FM.estadosAvaliados,
+                process.env.TITAN_ROTACIONAR_COTACOES==='1',
             );
             const afetadas = escolha.selecionadas;
             const escolhidas = new Set(afetadas.map((c) => c.chave));
