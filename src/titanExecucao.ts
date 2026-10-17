@@ -60,6 +60,10 @@ export interface ResultadoTitan {
 export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv): string | null {
     if (!p.estadoConsistente) return 'estado dos pools nao confirmado';
     if (!Number.isInteger(p.bloco) || p.bloco <= 0) return 'bloco ausente';
+    if (ambiente.TITAN_GAS_SNOWBALL === '1'
+        && p.rota[0]?.tokenEntra.toLowerCase() !== WETH_BASE_TITAN.toLowerCase()) {
+        return 'snowball exige lucro em WETH; nao comparar token arbitrario com gas em ETH';
+    }
     if (p.rota.length < 2 || p.rota.length > 4) return 'o contrato aceita apenas 2 a 4 pernas';
     if (p.quantia <= 0n || p.brutoEstimado <= 0n || p.liquidoEstimado <= 0n) {
         return 'cotacao sem lucro liquido positivo';
