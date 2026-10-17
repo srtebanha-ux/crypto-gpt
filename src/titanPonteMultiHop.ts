@@ -21,6 +21,13 @@ export const FABRICA_V3_BASE = '0x33128a8fC17869897dcE68Ed026d694621f6FDfD';
 const WETH_BASE = '0x4200000000000000000000000000000000000006';
 const USDC_BASE = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
 const USDBC_BASE = '0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA';
+export const FABRICA_SLIPSTREAM_BASE = '0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A';
+export const POOL_SLIPSTREAM_EURC_USDC: PoolLiquidacao = Object.freeze({
+    endereco:'0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7',
+    token0:'0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42',
+    token1:USDC_BASE,
+    protocolo:'slipstream',taxa:50,permitida:true,
+});
 export const POOLS_V3_BASE_CACA: readonly PoolLiquidacao[] = Object.freeze([
     {endereco:'0xd0b53D9277642d899DF5C87A3966A349A798F224',
         token0:WETH_BASE,token1:USDC_BASE,protocolo:'v3',taxa:500,permitida:true},
@@ -44,11 +51,15 @@ export async function tetoL1PeloCaca(rpc:JsonRpcProvider):Promise<bigint>{
     return teto*2n;
 }
 /** O CACA pode operar sem copiar novamente para Railway seu banco de pools. */
-export function poolsDoCaca(valor?: string): PoolLiquidacao[] {
-    if (!valor || !valor.trim()) return POOLS_V3_BASE_CACA.map(p => ({...p}));
-    const extras = poolsDaConfiguracao(valor);
+export function poolsDoCaca(
+    valor?: string, incluirSlipstream = process.env.CACA_MULTIHOP_SLIPSTREAM==='1',
+): PoolLiquidacao[] {
+    const extras = valor?.trim() ? poolsDaConfiguracao(valor) : [];
     const unicos = new Map<string,PoolLiquidacao>();
-    for (const pool of [...POOLS_V3_BASE_CACA,...extras])
+    const candidatos = incluirSlipstream
+        ? [...POOLS_V3_BASE_CACA,POOL_SLIPSTREAM_EURC_USDC,...extras]
+        : [...POOLS_V3_BASE_CACA,...extras];
+    for (const pool of candidatos)
         unicos.set(pool.endereco.toLowerCase(),pool);
     return [...unicos.values()];
 }
@@ -61,6 +72,7 @@ export const ABI_MULTI = new Interface([
     'function aave() view returns (address)',
     'function morpho() view returns (address)',
     'function fabricaV3() view returns (address)',
+    'function slipstreamFactory() view returns (address)',
     'event LiquidouComRota(address indexed usuario,address indexed origem,address indexed destino,uint256 quantia,uint256 lucro)',
 ]);
 export interface EntradaPonte {
@@ -105,11 +117,19 @@ export function poolsDaConfiguracao(valor: string | undefined): PoolLiquidacao[]
         if (typeof a.endereco !== 'string' || !ENDERECO.test(a.endereco)
             || typeof a.token0 !== 'string' || !ENDERECO.test(a.token0)
             || typeof a.token1 !== 'string' || !ENDERECO.test(a.token1)
-            || !['v3', 'aerodrome'].includes(String(a.protocolo))
+            || !['v3', 'aerodrome', 'slipstream'].includes(String(a.protocolo))
             || a.permitida !== true
             || (a.protocolo === 'v3' && (!Number.isSafeInteger(a.taxa)
                 || Number(a.taxa) <= 0 || Number(a.taxa) > 10000))
-            || (a.protocolo === 'aerodrome' && a.taxa !== null && a.taxa !== 0)) {
+            || (a.protocolo === 'aerodrome' && a.taxa !== null && a.taxa !== 0)
+            || (a.protocolo === 'slipstream' && (
+                a.taxa !== 50
+                || String(a.endereco).toLowerCase() !== POOL_SLIPSTREAM_EURC_USDC.endereco.toLowerCase()
+                || ![String(a.token0).toLowerCase(),String(a.token1).toLowerCase()].includes(
+                    POOL_SLIPSTREAM_EURC_USDC.token0.toLowerCase())
+                || ![String(a.token0).toLowerCase(),String(a.token1).toLowerCase()].includes(
+                    POOL_SLIPSTREAM_EURC_USDC.token1.toLowerCase())
+            ))) {
             throw new Error('pool nao validada: enderecos, protocolo, taxa ou permissao');
         }
         return a as unknown as PoolLiquidacao;
@@ -162,6 +182,14 @@ export async function conferirExecutorMulti(rpc: JsonRpcProvider, e: EntradaPont
         dono:e.dono,cofre:e.cofre,aave:e.aave,
         morpho:MORPHO_FLASH_BASE,fabricaV3:e.fabricaV3,
     };
+    if (e.pools.some(p=>p.protocolo==='slipstream')) {
+        // Endereco implantado anteriormente nao tem esse getter; fail closed.
+        const data=ABI_MULTI.encodeFunctionData('slipstreamFactory');
+        const retorno=await rpc.call({to:e.contrato,data});
+        const recebido=ABI_MULTI.decodeFunctionResult('slipstreamFactory',retorno)[0] as string;
+        if(getAddress(recebido)!==getAddress(FABRICA_SLIPSTREAM_BASE))
+            throw new Error('executor sem fabrica Slipstream canonica');
+    }
     for (const [campo, endereco] of Object.entries(esperado)) {
         const retorno = await rpc.call({to:e.contrato,data:ABI_MULTI.encodeFunctionData(campo)});
         const recebido = ABI_MULTI.decodeFunctionResult(campo,retorno)[0] as string;
