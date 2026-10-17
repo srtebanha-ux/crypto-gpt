@@ -41,6 +41,7 @@ import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './e
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
+import { coberturaPrioritariaPequena, enderecosPrioritarios } from './cacaFechamentoPequenos';
 import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type AvaliacaoEmCurso } from './cronometro';
 import { esperarOProximoCiclo } from './despertar';
 import {
@@ -3853,8 +3854,24 @@ async function principal(): Promise<'parar' | void> {
      * seis lugares para esquecer o teto da fatia em um deles — exatamente o
      * tipo de coisa que passa em teste e falha no dia do tiro.
      */
+    // Posições explicitamente priorizadas: o modo de fechamento usa a regra
+    // Aave V3.3 para dividas < US$ 2.000. Nao antecipa liquidacao.
+    // O enderecamento valida-se fora, e cada candidato passa no eth_call.
+    const enderecosFechamento=enderecosPrioritarios(process.env.CACA_ALVOS_PRIORITARIOS);
+    log.info('[CACA/ALVOS-PRIORITARIOS] Preparacao de cobertura integral de dividas pequenas.',{
+        quantidade:enderecosFechamento.size,
+        somenteNaLiquidacao:true,
+        confirmacao:'eth_call e decisao de lucro + gas antes do envio real',
+    });
     function cobrir(alvo: Alvo): bigint {
-        return quantoPedirEmprestado(alvo.dividaCrua!, alvo.dividaUsd, coberturaOtima());
+        const padrao=quantoPedirEmprestado(alvo.dividaCrua!, alvo.dividaUsd, coberturaOtima());
+        return coberturaPrioritariaPequena({
+            endereco:alvo.devedor,
+            dividaCrua:alvo.dividaCrua??0n,
+            dividaUsd:alvo.dividaUsd,
+            tamanhoBase:padrao,
+            enderecos:enderecosFechamento,
+        });
     }
 
     /**
