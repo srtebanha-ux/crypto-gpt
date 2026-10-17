@@ -52,8 +52,8 @@ contract CacadorAaveMultiHopMorpho {
     address public immutable fabricaV3;
     address public constant slipstreamFactory = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A;
     address public constant slipstreamEurcUsdc = 0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7;
-    address public constant eurcBase = 0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42;
-    address public constant usdcBase = 0x833589fcd6edb6e08f4c7c32d4f71b54bda02913;
+    address public constant eurcBase = 0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42;
+    address public constant usdcBase = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     uint160 internal constant MIN_SQRT=4295128739+1;
     uint160 internal constant MAX_SQRT=1461446703485210103287273052203988822378723970342-1;
 
