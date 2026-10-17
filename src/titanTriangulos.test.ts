@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {explorarTriangulos,avaliarTetoTriangulo,capacidadePrimeiroPool,tamanhosTriangulo,rotaExecutavelTriangulo} from './titanTriangulos';
+import {explorarTriangulos,avaliarTetoTriangulo,capacidadePrimeiroPool,tamanhosTriangulo,sondasTriangulo,rotaExecutavelTriangulo} from './titanTriangulos';
 import type {PoolMisto} from './rotasMistas';
 const adr=(x:number)=>'0x'+x.toString(16).padStart(40,'0');
 const pool=(id:number,a:number,b:number,venue:'v3'|'aerodrome'='v3'):PoolMisto=>({
@@ -61,4 +61,18 @@ test('filtro marginal de 3 pernas nunca rejeita com leitura desconhecida',()=>{
     assert.equal(avaliarTetoTriangulo(t,maps).estado,'dados-insuficientes');
     for(const p of t.pools){maps.sqrtPorPoolV3.set(p,2n**96n);maps.liquidezDoV3.set(p,1000n);}
     assert.equal(avaliarTetoTriangulo(t,maps).estado,'sem-spread');
+});
+
+test('sondas triangulares percorrem as tres fracoes de liquidez sem repetir ou extrapolar', () => {
+    const t = tamanhosTriangulo(1_000_000n);
+    assert.deepEqual(sondasTriangulo(t,0),[1000n,3333n,10000n]);
+    assert.deepEqual(sondasTriangulo(t,1),[3333n,10000n,1000n]);
+    assert.deepEqual(sondasTriangulo(t,2,2),[10000n,1000n]);
+    assert.deepEqual(sondasTriangulo(t,2,100),[10000n,1000n,3333n]);
+});
+test('sondas nao inventam capital em pool sem liquidez nem permitem entradas invalidas', () => {
+    assert.deepEqual(sondasTriangulo([],0),[]);
+    assert.deepEqual(sondasTriangulo([0n,-3n,100n,100n],0),[100n]);
+    assert.deepEqual(sondasTriangulo([100n],-1),[]);
+    assert.deepEqual(sondasTriangulo([100n],0,0),[]);
 });
