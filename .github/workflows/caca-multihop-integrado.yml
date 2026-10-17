@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - feat/caca-integracao-multihop-ativa
+      - feat/slipstream-liquidator-20261017
   pull_request:
     branches:
+      - feat/caca-integracao-multihop-ativa
       - claude/hft-triangular-arbitrage-jsq4i4
   workflow_dispatch:
 
