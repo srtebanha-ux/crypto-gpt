@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ORACULO_DE_GAS_L1, codificarTetoDeL1 } from './custoDaBase';
 import { conferirJanelaDeNonce } from './janelaDeNonce';
+import { diagnosticarReversaoTitan } from './titanTaticas';
 import {
     impedimentoTitanContinuo, parametrosTitanContinuo,
     reservarTitanContinuo, fecharTitanContinuo,
@@ -413,6 +414,8 @@ export type EnsaioAtomicoTitan = {
     motivo:string; bloco:number|null; brutoWei?:string; custoMaximoWei?:string;
     margemMinimaWei?:string; liquidoConservadorWei?:string;
     gasEstimado?:string; gasLimite?:string; contrato?:string;
+    erroContrato?:'pagamento-curto'|'lucro-insuficiente';
+    deficitUnidades?:string; deficitBps?:string;
 };
 
 export function avaliarEnsaioTitan(
@@ -502,7 +505,21 @@ export async function simularTitanAoVivo(
         if(atual-bloco>2)return{situacao:'desconhecido',
             motivo:'bloco mudou durante a simulacao integral',bloco,contrato};
         return{...avaliacao,bloco,contrato};
-    }catch(e){return{situacao:'desconhecido',bloco,contrato,
-        motivo:(e instanceof Error?e.message:'falha na simulacao').slice(0,240)};}
+    }catch(e){
+        const causa=diagnosticarReversaoTitan(e);
+        if(causa?.tipo==='pagamento-curto')return{
+            situacao:'inviavel',bloco,contrato,erroContrato:'pagamento-curto',
+            motivo:'PagamentoCurto: ciclo nao fecha, sem gasto onchain na simulacao',
+            deficitUnidades:causa.deficit.toString(),
+            deficitBps:causa.deficitBps.toString(),
+        };
+        if(causa?.tipo==='lucro-insuficiente')return{
+            situacao:'inviavel',bloco,contrato,erroContrato:'lucro-insuficiente',
+            motivo:'LucroInsuficiente: pagamento fecha, sobra inferior ao minimo',
+            deficitUnidades:causa.deficit.toString(),
+        };
+        return{situacao:'desconhecido',bloco,contrato,
+            motivo:(e instanceof Error?e.message:'falha na simulacao').slice(0,240)};
+    }
     finally{rpc.destroy();}
 }
