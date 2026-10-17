@@ -53,3 +53,18 @@ test('limites invalidos falham fechados', () => {
     assert.throws(()=>priorizarCotacoes([],triagem(),257,0),/ARB_COTAR_MAX_ROTAS/);
     assert.throws(()=>priorizarCotacoes([],triagem(),8,-1),/rodada/);
 });
+
+test('justica: rotas de spread positivo fora do top nao ficam eternamente adiadas',()=>{
+    const t=triagem(),cs=Array.from({length:44},(_,i)=>candidata('a'+i));
+    for(let i=0;i<cs.length;i++)comSpread(t,cs[i]!,BigInt(100+i));
+    const historico=new Set<string>();
+    for(let rodada=0;rodada<12;rodada++){
+        const x=priorizarCotacoes(cs,t,12,rodada,true);
+        assert.equal(x.selecionadas.length,12);
+        for(const c of x.selecionadas)historico.add(c.chave);
+        assert.equal(new Set(x.selecionadas.map(x=>x.chave)).size,12);
+        assert.deepEqual(x.selecionadas.slice(0,6).map(x=>x.chave),
+            ['a43','a42','a41','a40','a39','a38']);
+    }
+    assert.equal(historico.size,44);
+});
