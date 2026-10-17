@@ -2264,6 +2264,8 @@ function desligarTudo(): void {
     }
 }
 
+// Uma tentativa anterior de boot nao pode manter sockets e listeners vivos.
+let oracleShadowDaSessao: OracleShadow | null = null;
 async function principal(): Promise<'parar' | void> {
     // O laco externo recria principal() a cada tropeco. Sem isto, cada
     // reinicio abandonava um WebSocket vivo com cadeia de reconexao eterna:
@@ -2536,9 +2538,12 @@ async function principal(): Promise<'parar' | void> {
     // sao APENAS gatilho de leitura. Aave e o contrato executor sempre
     // confirmam liquidabilidade e lucro com dados reais da Base.
     // Desligar explicitamente via CACA_ORACLE_SHADOW=0, sem reconfigurar chaves.
+    // Reboots internos nao podem acumular dois observers e duas conexoes WS.
+    oracleShadowDaSessao?.parar();
     const oracleShadow = process.env.CACA_ORACLE_SHADOW === '0'
         ? null : new OracleShadow(paresDaBinance,(mensagem)=>
             log.info('[ORACLE-SHADOW/WS] '+mensagem));
+    oracleShadowDaSessao=oracleShadow;
     oracleShadow?.iniciar();
     log.info('[ORACLE-SHADOW] Monitor de precos em tempo real.',{
         habilitado:oracleShadow!==null,pares:paresDaBinance,
