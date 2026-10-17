@@ -8,6 +8,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ORACULO_DE_GAS_L1, codificarTetoDeL1 } from './custoDaBase';
 import { conferirJanelaDeNonce } from './janelaDeNonce';
+import { decidirGasSnowball } from './titanGasSnowball';
+import { reinvestirLucroTitan, type ReinvestimentoTitan } from './titanReinvestimento';
 import { diagnosticarReversaoTitan } from './titanTaticas';
 import {
     impedimentoTitanContinuo, parametrosTitanContinuo,
@@ -51,12 +53,17 @@ export interface ResultadoTitan {
     custoMaximoEstimadoWei?: string;
     margemMinimaWei?: string;
     lucroMinimoBrutoWei?: string;
+    reinvestimento?: ReinvestimentoTitan;
 }
 
 /** Este teste e puro: nao precisa de chave, internet ou contrato. */
 export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv): string | null {
     if (!p.estadoConsistente) return 'estado dos pools nao confirmado';
     if (!Number.isInteger(p.bloco) || p.bloco <= 0) return 'bloco ausente';
+    if (ambiente.TITAN_GAS_SNOWBALL === '1'
+        && p.rota[0]?.tokenEntra.toLowerCase() !== WETH_BASE_TITAN.toLowerCase()) {
+        return 'snowball exige lucro em WETH; nao comparar token arbitrario com gas em ETH';
+    }
     if (p.rota.length < 2 || p.rota.length > 4) return 'o contrato aceita apenas 2 a 4 pernas';
     if (p.quantia <= 0n || p.brutoEstimado <= 0n || p.liquidoEstimado <= 0n) {
         return 'cotacao sem lucro liquido positivo';
@@ -226,9 +233,9 @@ export async function executarTitan(
         if (defasagem < 0 || defasagem > 60) {
             throw new Error('sinal de bloco muito antigo ou no futuro');
         }
-        const gorjeta = BigInt(ambiente.TITAN_GORJETA_WEI ?? '20000000');
+        let gorjeta = BigInt(ambiente.TITAN_GORJETA_WEI ?? '20000000');
         if (gorjeta <= 0n) throw new Error('gorjeta invalida');
-        const maxFeePerGas = 2n * ultimo.baseFeePerGas + gorjeta;
+        let maxFeePerGas = 2n * ultimo.baseFeePerGas + gorjeta;
         const janelaPreflight=await conferirJanelaDeNonce(rpc,carteira.address,ambiente.TITAN_SOLO_24H === '1' ? 'TITAN_SOLO' : 'TITAN');
         if(!janelaPreflight.pode)
             return{estado:'recusado',motivo:'janela TITAN fechada: '+janelaPreflight.motivo};
@@ -266,7 +273,30 @@ export async function executarTitan(
             ABI_ORACULO, 'getL1Fee',
         );
         // O lucro minimo cobre o PIOR preco L2 permitido, L1 conservador e piso adicional.
-        const custoMaximo = limite * maxFeePerGas + feeL1 * 2n;
+        let custoMaximo = limite * maxFeePerGas + feeL1 * 2n;
+        if (ambiente.TITAN_GAS_SNOWBALL === '1') {
+            const saldoAtual = await rpc.getBalance(carteira.address);
+            const snowball = decidirGasSnowball({
+                saldoWei: saldoAtual,
+                gasLimit: limite,
+                baseFeeWei: ultimo.baseFeePerGas,
+                prioridadeDesejadaWei: gorjeta,
+                feeL1Wei: feeL1,
+                lucroBrutoWei: brutoReal,
+                tetoPorTransacaoWei: BigInt(ambiente.TITAN_ORCAMENTO_GAS_WEI!),
+                reservaBps: BigInt(ambiente.TITAN_SNOWBALL_RESERVA_BPS ?? '3000'),
+                riscoPorTentativaBps: BigInt(ambiente.TITAN_SNOWBALL_RISCO_BPS ?? '2000'),
+                gorjetaDoLucroBps: BigInt(ambiente.TITAN_SNOWBALL_GORJETA_LUCRO_BPS ?? '5000'),
+            });
+            if (!snowball.aprovado) {
+                return { estado: 'recusado', motivo: '[SNOWBALL] ' + snowball.motivo,
+                    custoMaximoEstimadoWei: snowball.custoMaximoWei.toString() };
+            }
+            // O teto de taxa sai do saldo ETH REAL, nao do lucro ainda em WETH.
+            gorjeta = snowball.prioridadeWei;
+            maxFeePerGas = snowball.maxFeePerGasWei;
+            custoMaximo = snowball.custoMaximoWei;
+        }
         if ((await rpc.getBalance(carteira.address)) < custoMaximo) {
             return { estado: 'recusado', motivo: 'ETH insuficiente para cobrir o teto total de gas' };
         }
@@ -381,8 +411,15 @@ export async function executarTitan(
                 confirmadoEm: new Date().toISOString(),
             }), { mode: 0o600 });
         }
+        // Reinvestir somente o lucro PROVADO no evento; WETH de outro cofre
+        // jamais e movimentado. Falha de unwrap nao muda o status da arbitragem.
+        const reinvestimento = recibo.status === 1 && lucroRealizado !== undefined
+            ? await reinvestirLucroTitan(rpc, carteira, cofre,
+                BigInt(lucroRealizado), hash!, ambiente)
+            : undefined;
         return {
             estado: recibo.status === 1 ? 'confirmado' : 'revertido', hash,
+            reinvestimento,
             gasUsado: recibo.gasUsed.toString(),
             custoGasL2Wei: (recibo.gasUsed * recibo.gasPrice).toString(),
             lucroRealizadoWei: lucroRealizado,
