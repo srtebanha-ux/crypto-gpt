@@ -40,6 +40,7 @@ test('nenhum dado/erro conhecido nao vira sinal economico',()=>{
 
 test('resultado de revert near-breakeven autoriza APENAS segunda cotacao offchain',()=>{
   assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,'pagamento-curto','55'),[500_000n]);
+  assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,'pagamento-curto','1'),[999_999n]);
   assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,'lucro-insuficiente','55'),[]);
   assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,undefined,'55'),[]);
   assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,'pagamento-curto','ruim'),[]);
