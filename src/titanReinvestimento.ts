@@ -128,7 +128,7 @@ export async function reinvestirLucroTitan(
             const registro = JSON.parse(fs.readFileSync('/app/data/' + nome, 'utf8')) as {
                 tetoGasWei?: string;
             };
-            if (!registro.tetoGasWei || !/^\\d+$/.test(registro.tetoGasWei)) {
+            if (!registro.tetoGasWei || !/^\d+$/.test(registro.tetoGasWei)) {
                 throw new Error('diario de unwrap corrompido; interrompido por seguranca');
             }
             jaReservado += BigInt(registro.tetoGasWei);
