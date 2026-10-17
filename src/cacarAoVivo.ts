@@ -29,6 +29,13 @@ import { naoCruzouAinda, codificarUserReserveData, decodificarUserReserveData, C
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS } from './contratos';
+import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
+import { reservarGasCompartilhado, conciliarGasCompartilhado, pontuacaoDeLiquidez } from './cacaDuasRotas';
+import { conferirJanelaDeNonce } from './janelaDeNonce';
+import {
+    prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca,
+    gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
+} from './titanPonteMultiHop';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
@@ -869,6 +876,10 @@ const SELETOR_BLOCO_DO_MULTICALL = '0x42cbb15c';
 const REDE_ESCOLHIDA = (process.env.CACA_REDE ?? 'base').toLowerCase();
 const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const ENVIAR = process.env.CACA_ENVIAR === '1';
+/** Modo de capital protegido: somente o executor Morpho Multi-Hop ja liquidavel. */
+const SOMENTE_MULTIHOP = process.env.CACA_SOMENTE_MULTIHOP === '1';
+/** Os DOIS caminhos concorrem com o MESMO nonce, somente sobre posicao ja liquidavel. */
+const COMBINADO_SEGURO = process.env.CACA_COMBINADO_SEGURO === '1';
 // A janela do PRIMEIRO boot, quando ainda não existe cache: 30 dias, para o bot
 // começar a caçar em minutos em vez de em duas horas.
 //
@@ -6091,6 +6102,10 @@ async function principal(): Promise<'parar' | void> {
             }
 
             for (const alvo of alvos) {
+                if (COMBINADO_SEGURO && vaoCruzar.has(alvo.devedor.toLowerCase())) {
+                    // Nao gastar com transacoes antes da escrita do oraculo.
+                    continue;
+                }
                 // O CORTE POR FALHA VEM ANTES DE MEDIR.
                 //
                 // MEDIDO no log de 2026-10-07 12:44: `[PULEI] tentativas: 4`
@@ -6130,8 +6145,19 @@ async function principal(): Promise<'parar' | void> {
                 // ganhado.
                 //
                 // Fase 1: medir todos (eth_call custa CU, nao gas).
-                const medicoes: Array<{ contrato: typeof contratos[number]; lucroCru: bigint }> = [];
+                // O terceiro candidato nao altera o cadastro dos contratos antigos.
+                // So participa da escolha quando tem quote atomica comprovada.
+                let medicoes: Array<{
+                    contrato: typeof contratos[number] | {nome:string;endereco:string;tipo:'MH'};
+                    lucroCru: bigint;
+                    envioMulti?: string;
+                    pontuacaoLiquida?: bigint;
+                }> = [];
+                let ofertaMulti: OfertaMulti | null = null;
                 for (const contrato of contratos) {
+                    // Modo live seguro: nunca incluir candidatos V1/V2 ou tiros
+                    // na escrita do oraculo, mesmo que CACA_ENVIAR=1.
+                    if (SOMENTE_MULTIHOP) break;
                     const dados = contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
@@ -6248,6 +6274,75 @@ async function principal(): Promise<'parar' | void> {
                     }
                 }
 
+                // TITAN MULTI-HOP: plano REAL -> eth_call do contrato IMPLANTADO.
+                // Nao entra em tiros especulativos: o contrato exige HF < 1.
+                // Na ausencia de endereco, pool, preço ou credito: o V1/V2 segue intocado.
+                if (process.env.CACA_MULTIHOP_AVALIAR === '1'
+                    && REDE_ESCOLHIDA === 'base'
+                    && !vaoCruzar.has(alvo.devedor.toLowerCase())
+                    && donoCarteira && alvo.dividaCrua && alvo.dividaCrua > 0n
+                    && alvo.dividaUsd && alvo.dividaUsd.greaterThan(0)
+                    && precoDoEth() && baseFeeAtual && baseFeeAtual > 0n) {
+                    try {
+                        const contratoMulti = process.env.CACA_MULTIHOP_CONTRATO ?? '';
+                        const fabrica = FABRICA_V3_BASE;
+                        const reservaBase = await tetoL1PeloCaca(leitor);
+                        const reservaOpcional = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const reserva = reservaOpcional > reservaBase ? reservaOpcional : reservaBase;
+                        const gasMax = BigInt(process.env.CACA_MULTIHOP_GAS_MAX ?? '1500000');
+                        ofertaMulti = await prepararOfertaMulti(leitor, {
+                            usuario: alvo.devedor,
+                            garantia: alvo.garantia,
+                            divida: alvo.divida,
+                            dividaCrua: alvo.dividaCrua,
+                            dividaUsd: alvo.dividaUsd,
+                            creditoMaximo: cobrir(alvo),
+                            ethUsd: precoDoEth()!,
+                            dono: donoCarteira,
+                            contrato: contratoMulti,
+                            cofre: COFRE_ESPERADO,
+                            aave: REDE.pool,
+                            fabricaV3: fabrica,
+                            pools: poolsDoCaca(process.env.CACA_MULTIHOP_POOLS_JSON),
+                            maxFeePerGas: 3n * baseFeeAtual + 20_000_000n,
+                            reservaL1Wei: reserva,
+                            gasMax,
+                            maxCotacoes: 32,
+                        });
+                        if (ofertaMulti) {
+                            // Dois consentimentos: o CACA original e a permissao
+                            // ESPECIFICA da nova ABI, sem autoativacao apos deploy.
+                            const liberar = process.env.CACA_MULTIHOP_ENVIAR === '1'
+                                && process.env.CACA_MULTIHOP_CONFIRMAR === 'OPERAR_BASE_REAL';
+                            const candidatoObservavel = SOMENTE_MULTIHOP && !ENVIAR;
+                            // O mesmo caminho de decisao e montado no ensaio.
+                            // A assinatura so ocorre no degrau final se ENVIAR.
+                            const incluirCandidato = liberar || candidatoObservavel;
+                            // Mesma carteira e mesmo LocalNonceManager do CACA.
+                            // NAO criar segundo processo de assinatura ou concorrente de nonce.
+                            log.info('[MULTIHOP] Plano simulado contra contrato real.', {
+                                devedor:alvo.devedor, bloco:ofertaMulti.bloco,
+                                saltos:ofertaMulti.rota.pernas.length,
+                                credito:ofertaMulti.cobrir.toString(),
+                                lucroCru:ofertaMulti.lucroCru.toString(),
+                                lucroLiquidoEstimadoCru:ofertaMulti.liquidoCru.toString(),
+                                situacao: liberar && ENVIAR ? 'execucao liberada' : 'somente observacao',
+                            });
+                            if (incluirCandidato) {
+                                medicoes.push({
+                                    contrato:{nome:'Multi-Hop Morpho',endereco:ofertaMulti.contrato,tipo:'MH'},
+                                    lucroCru:ofertaMulti.liquidoCru,
+                                    envioMulti:ofertaMulti.envio,
+                                });
+                            }
+                        }
+                    } catch(e) {
+                        log.warn('[MULTIHOP] Nao elegivel; mantenho V1/V2.', {
+                            motivo:e instanceof Error?e.message:'erro inesperado',
+                        });
+                    }
+                }
+
                 // Fase 2: UM tiro, no contrato que mediu o maior lucro.
                 // OS DOIS PORTOES QUE ERAM MUDOS, e e o defeito que este
                 // projeto mais persegue: um `continue` seco no caminho do
@@ -6317,10 +6412,44 @@ async function principal(): Promise<'parar' | void> {
                     });
                     continue;
                 }
-                medicoes.sort((a, b) => (b.lucroCru > a.lucroCru ? 1 : b.lucroCru < a.lucroCru ? -1 : 0));
+                if (COMBINADO_SEGURO && medicoes.length>0) {
+                    const precoEthAgora = precoDoEth();
+                    if (!baseFeeAtual || baseFeeAtual<=0n || !precoEthAgora
+                        || !alvo.dividaCrua || !alvo.dividaUsd) {
+                        log.warn('[DUAS ROTAS] Nao comparo lucro sem preco e unidades verificadas.');
+                        continue;
+                    }
+                    let reservaL1:bigint;
+                    try { reservaL1=await tetoL1PeloCaca(leitor); }
+                    catch { log.warn('[DUAS ROTAS] Oraculo L1 indisponivel.');continue; }
+                    const custoLegadoCru = gasEmTokenDaDivida(
+                        1_500_000n,3n*baseFeeAtual+20_000_000n,reservaL1,
+                        alvo.dividaCrua,alvo.dividaUsd,precoEthAgora
+                    );
+                    // CACA original retorna lucro BRUTO; o Multi-Hop ja retorna
+                    // o LIQUIDO estimado. Comparar brutos privilegiaria o legado.
+                    for (const m of medicoes)
+                        m.pontuacaoLiquida=pontuacaoDeLiquidez(m.contrato.tipo,
+                            m.lucroCru,custoLegadoCru);
+                    medicoes=medicoes.filter(m=>m.pontuacaoLiquida!==undefined
+                        && m.pontuacaoLiquida>0n);
+                    if(medicoes.length===0)continue;
+                    medicoes.sort((a,b)=>(b.pontuacaoLiquida!>a.pontuacaoLiquida! ? 1
+                        : b.pontuacaoLiquida!<a.pontuacaoLiquida! ? -1 : 0));
+                } else {
+                    medicoes.sort((a,b)=>(b.lucroCru>a.lucroCru ? 1
+                        : b.lucroCru<a.lucroCru ? -1 : 0));
+                }
                 const escolhida = medicoes[0];
                 const contrato = escolhida.contrato;
-                const lucroCruValido = escolhida.lucroCru;
+                // Um segundo portao protege o dinheiro mesmo com configuracao
+                // acidental das flags historicas do CACA.
+                if (SOMENTE_MULTIHOP && contrato.tipo !== 'MH') {
+                    log.error('[MULTIHOP-ONLY] Impedi contrato legado em modo protegido.');
+                    continue;
+                }
+                const lucroCruValido = contrato.tipo === 'MH' && ofertaMulti
+                    ? ofertaMulti.lucroCru : escolhida.lucroCru;
                 if (medicoes.length > 1) {
                     log.info('[ESCOLHA] Dois contratos mediram; atiro só no melhor.', {
                         devedor: alvo.devedor,
@@ -6365,9 +6494,13 @@ async function principal(): Promise<'parar' | void> {
                     //
                     // `pisoNoContrato` nunca devolve zero com cobertura
                     // positiva: sem medicao, o piso sai da divida coberta.
-                    const piso = pisoNoContrato(cobrir(alvo), lucroCruValido > 0n ? lucroCruValido : null);
+                    const piso = contrato.tipo === 'MH' && ofertaMulti
+                        ? ofertaMulti.piso
+                        : pisoNoContrato(cobrir(alvo), lucroCruValido > 0n ? lucroCruValido : null);
 
-                    const envio = contrato.tipo === 'V1'
+                    const envio = contrato.tipo === 'MH'
+                        ? (escolhida.envioMulti ?? '')
+                        : contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
                             divida: alvo.divida,
@@ -6435,6 +6568,7 @@ async function principal(): Promise<'parar' | void> {
                      * sobrevivencia, nao um dado de conveniencia.
                      */
                     const especulativo = vaoCruzar.has(alvo.devedor.toLowerCase());
+                    if(COMBINADO_SEGURO && especulativo)continue;
                     // O SALDO VAI DE CARONA NA ESTIMATIVA, pedido dela em
                     // 2026-10-03: "ler o saldo atual de ETH da carteira do
                     // enviador ANTES de construir o tiro".
@@ -6508,6 +6642,20 @@ async function principal(): Promise<'parar' | void> {
                         continue;
                     }
                     const limiteGas = doGas.limite;
+                    // Multi-Hop ja precisa ter simulado estimateGas no ABI novo.
+                    // Nunca usar fallback alto sem estimativa ou limite abaixo
+                    // da operacao observada, nem arriscar GAS insuficiente.
+                    if (contrato.tipo === 'MH' && (
+                        !ofertaMulti || estimado === null ||
+                        limiteGas < ofertaMulti.gasEstimado + ofertaMulti.gasEstimado/5n
+                    )) {
+                        log.warn('[MULTIHOP] Gas estimado nao cabe com 20% de folga; sem envio.', {
+                            estimado:estimado?.toString() ?? 'ausente',
+                            limite:limiteGas.toString(),
+                            custoDaRota:ofertaMulti?.gasEstimado.toString() ?? 'sem quote',
+                        });
+                        continue;
+                    }
                     const medido = emDolar(
                         lucroCruValido,
                         casas.get(alvo.divida.toLowerCase()),
@@ -6846,6 +6994,141 @@ async function principal(): Promise<'parar' | void> {
                         });
                         continue;
                     }
+                    if (SOMENTE_MULTIHOP
+                        && (contrato.tipo !== 'MH'
+                            || process.env.CACA_MULTIHOP_ENVIAR !== '1'
+                            || process.env.CACA_MULTIHOP_CONFIRMAR !== 'OPERAR_BASE_REAL')) {
+                        log.error('[MULTIHOP-ONLY] A assinatura foi bloqueada por flag ou executor incorreto.');
+                        continue;
+                    }
+                    // O piso em token da divida cobre o CUSTO MAXIMO do lance REAL,
+                    // nao a fee provisoria da fase de planejamento.
+                    if (contrato.tipo === 'MH' && ofertaMulti) {
+                        const ethAgora = precoDoEth();
+                        if (!ethAgora || !alvo.dividaCrua || !alvo.dividaUsd) {
+                            log.warn('[MULTIHOP] Sem preco de gas/divida para validar o lance real.');
+                            continue;
+                        }
+                        const l1Atual = await tetoL1PeloCaca(leitor);
+                        const l1Opcional = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const reservaNoEnvio = l1Opcional > l1Atual ? l1Opcional : l1Atual;
+                        const custoNoLance = gasEmTokenDaDivida(
+                            limiteGas, maxFee, reservaNoEnvio,
+                            alvo.dividaCrua, alvo.dividaUsd, ethAgora,
+                        );
+                        if (custoNoLance >= ofertaMulti.piso) {
+                            log.warn('[MULTIHOP] Fee real ultrapassou o lucro minimo garantido.', {
+                                devedor: alvo.devedor,
+                                custoEstimadoCru: custoNoLance.toString(),
+                                pisoDoContrato: ofertaMulti.piso.toString(),
+                            });
+                            continue;
+                        }
+                    }
+                    // Confirma o MESMO calldata novamente antes de reservar nonce.
+                    // A cotacao envelhece em poucos blocos; jamais operar com HF velho.
+                    if (contrato.tipo === 'MH'
+                        && (!ofertaMulti || !await revalidarOfertaMulti(leitor, ofertaMulti, donoCarteira))) {
+                        log.warn('[MULTIHOP] Quote expirou/reverteu antes de assinar. Sem envio.', {
+                            devedor:alvo.devedor,
+                        });
+                        continue;
+                    }
+                    if (contrato.tipo === 'MH') {
+                        const custoL1Wei = await tetoL1PeloCaca(leitor);
+                        const extraL1 = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const custoL1Usado = extraL1 > custoL1Wei ? extraL1 : custoL1Wei;
+                        // 0.00065 ETH: teto conservador do canary por tentativa.
+                        // Limite ajustavel para BAIXO em Railway, nunca para cima sem deploy novo.
+                        const tetoPadrao = 650_000_000_000_000n;
+                        const variavel = BigInt(process.env.CACA_MULTIHOP_GASTO_MAX_WEI ?? tetoPadrao.toString());
+                        const teto = variavel < tetoPadrao ? variavel : tetoPadrao;
+                        if (!custoMaximoMultiDentroDoTeto(limiteGas,maxFee,custoL1Usado,teto)) {
+                            log.error('[MULTIHOP/CANARY] Lance acima do teto de perda por tentativa. Sem envio.', {
+                                limiteGas:limiteGas.toString(),
+                                maxFeeWei:maxFee.toString(),
+                                l1:custoL1Usado.toString(),
+                                tetoWei:teto.toString(),
+                            });
+                            continue;
+                        }
+                        if (!COMBINADO_SEGURO && process.env.CACA_MULTIHOP_CANARY_UM_TIRO !== '0') {
+                            const reserva = reservarUmEnvioMulti({
+                                carteira:donoCarteira, devedor:alvo.devedor,
+                                contrato:contrato.endereco,bloco:blocoAtual,
+                            });
+                            if (!reserva.liberado) {
+                                log.error('[MULTIHOP/CANARY] Primeiro envio ja reservado ou volume indisponivel.', {
+                                    porque:reserva.motivo,
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                    // A exclusividade com TITAN agora e real, nao somente uma
+                    // flag: papel determinado pelo timestamp de blocos Base
+                    // verificado por DOIS provedores, com 5min de guarda.
+                    if (process.env.TITAN_JANELAS_EXCLUSIVAS === '1') {
+                        const janela = await conferirJanelaDeNonce(leitor,donoCarteira,'CACA');
+                        if (!janela.pode) {
+                            log.info('[CACA/TITAN] Minha janela de assinatura fechada.', {
+                                motivo:janela.motivo, papel:'CACA',
+                            });
+                            continue;
+                        }
+                    } else if (COMBINADO_SEGURO) {
+                        log.error('[CACA/TITAN] Negociação bloqueada: falta exclusividade temporal.');
+                        continue;
+                    }
+                    let reservaCompartilhadaId:string|null=null;
+                    if (COMBINADO_SEGURO) {
+                        // Reserva ao VALOR MAXIMO cobravel pelo gas, nao a media.
+                        let l1:bigint;
+                        try { l1=await tetoL1PeloCaca(leitor); }
+                        catch {log.warn('[DUAS ROTAS] Nao consigo certificar custo L1.');continue;}
+                        const adicional=BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI??'0');
+                        if(adicional>l1)l1=adicional;
+                        const maxPorTx=650_000_000_000_000n; // 0.00065 ETH por tentativa
+                        const maxPorDia=650_000_000_000_000n; // 0.00065 ETH/dia CACA; TITAN tem budget separado
+                        const maxCusto=limiteGas*maxFee+l1;
+                        if (!custoMaximoMultiDentroDoTeto(limiteGas,maxFee,l1,maxPorTx)) {
+                            log.warn('[DUAS ROTAS] Custo maximo ultrapassa teto por tentativa.');
+                            continue;
+                        }
+                        if (contrato.tipo !== 'MH') {
+                            if (estimado===null || especulativo || !alvo.dividaCrua
+                                || !alvo.dividaUsd || !precoDoEth()) {
+                                log.warn('[DUAS ROTAS] Legado sem estimativa de gas ou mercado verificado.');
+                                continue;
+                            }
+                            const custoEmDivida=gasEmTokenDaDivida(
+                                limiteGas,maxFee,l1,alvo.dividaCrua,alvo.dividaUsd,precoDoEth()!
+                            );
+                            if (lucroCruValido<=2n*custoEmDivida) {
+                                log.warn('[DUAS ROTAS] Legado nao paga 2x pior custo de gas.');
+                                continue;
+                            }
+                            // Revalidar CALldata final, piso inclusive, antes de gastar nonce.
+                            const checagem=await chamarCruComPaciencia([{
+                                from:donoCarteira,to:contrato.endereco,data:envio
+                            },'latest']);
+                            if(!checagem.ok) {
+                                log.warn('[DUAS ROTAS] Legado reverte na chamada final; nao envio.',{
+                                    contrato:contrato.nome
+                                }); continue;
+                            }
+                        }
+                        const reserva=reservarGasCompartilhado({
+                            tipo:contrato.tipo,alvo:alvo.devedor,maxCostWei:maxCusto,
+                            maxPerTxWei:maxPorTx,maxDailyWei:maxPorDia,maxTxDia:1
+                        });
+                        if(!reserva.id) {
+                            log.warn('[DUAS ROTAS] Disjuntor do orcamento compartilhado.',{
+                                porque:reserva.reason
+                            });continue;
+                        }
+                        reservaCompartilhadaId=reserva.id;
+                    }
                     const nonceAtual = await nonceManager.getNextNonce();
                     const msDoTiro = Date.now() - inicioDoCiclo;
                     enviados += 1;
@@ -6935,11 +7218,40 @@ async function principal(): Promise<'parar' | void> {
                         const hashDoTiro = tx.hash;
                         const chaveDoTiro = chaveAlvo;
                         const devedorDoTiro = alvo.devedor;
-                        const lucroDoTiro = lucroUsd;
+                        let lucroDoTiro = lucroUsd;
                         void (async () => {
                             let desfecho: ReturnType<typeof lerRecibo>;
+                            let comprovacaoEconomicaAusente=false;
                             try {
-                                desfecho = lerRecibo(await tx.wait(1, 120_000));
+                                const reciboFinal = await tx.wait(1, 120_000);
+                                desfecho = lerRecibo(reciboFinal);
+                                if (contrato.tipo === 'MH') {
+                                    const pago = reciboFinal && ofertaMulti
+                                        ? lucroConfirmadoPorEventoMulti(
+                                            reciboFinal.logs, contrato.endereco,
+                                            devedorDoTiro, ofertaMulti.cobrir,
+                                        ) : null;
+                                    if (desfecho === 'acertou' && pago !== null) {
+                                        const convertido = emDolar(pago,
+                                            casas.get(alvo.divida.toLowerCase()),
+                                            precos.get(alvo.divida.toLowerCase()));
+                                        lucroDoTiro = convertido;
+                                        log.info('[MULTIHOP NO COFRE] Evento confirma pagamento bruto.', {
+                                            hash:tx.hash, lucroBrutoCru:pago.toString(),
+                                            lucroBrutoUsdNaCotacao:convertido?.toFixed(2) ?? 'sem preco',
+                                            gasL2Wei:reciboFinal ? (reciboFinal.gasUsed * reciboFinal.gasPrice).toString() : 'indisponivel',
+                                            observacao:'descontar gas L1 e operacao para calcular lucro liquido real',
+                                        });
+                                    } else {
+                                        lucroDoTiro = null;
+                                        if (desfecho === 'acertou') {
+                                            comprovacaoEconomicaAusente=true;
+                                            log.error('[MULTIHOP SEM PROVA] Recibo status=1, mas pagamento nao verificado.', {
+                                                hash:tx.hash, acao:'conferir logs e saldo do cofre na Base',
+                                            });
+                                        }
+                                    }
+                                }
                             } catch (e) {
                                 // O ethers REJEITA quando `status === 0`, e o
                                 // recibo vem dentro do erro. Sem isto, todo
@@ -6960,6 +7272,14 @@ async function principal(): Promise<'parar' | void> {
                                 } else {
                                     desfecho = erro?.receipt ? lerRecibo(erro.receipt) : 'sumiu';
                                 }
+                            }
+                            if (reservaCompartilhadaId) {
+                                const reconciliado=conciliarGasCompartilhado(
+                                    reservaCompartilhadaId,
+                                    comprovacaoEconomicaAusente ? 'sumiu' : desfecho,hashDoTiro
+                                );
+                                if(!reconciliado)
+                                    log.error('[DUAS ROTAS] Recibo nao gravado no diario: BLOQUEIO de novos envios.');
                             }
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro, especulativo);
                             // AO DISCO AGORA, e não na próxima coleta.
