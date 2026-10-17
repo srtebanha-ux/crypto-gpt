@@ -45,11 +45,11 @@ import {
 import { pernasDaCandidata } from './rotasMistas';
 import { executarTitan, simularTitanAoVivo } from './titanExecucao';
 import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
-import { explorarTriangulos } from './titanTriangulos';
+import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
 import { priorizarCotacoes } from './titanPriorizacao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
-    type PoolMisto, type CandidataMista, type LeiturasDoEstado,
+    type PoolMisto, type CandidataMista, type LeiturasDoEstado, type PernaDescrita,
 } from './rotasMistas';
 import {
     QUOTER_V2, SELETORES_DA_COTACAO, quoterServeOPool, codificarQuoteV3, codificarGetAmountOut,
@@ -2039,10 +2039,17 @@ async function principal(): Promise<void> {
     let atomicasExecutaveis=0;
     let atomicasInviaveis=0;
     let atomicasDesconhecidas=0;
+    let ultimoTrianguloEm=0;
+    let indiceTriangular=0;
+    let triangulosComSpread=0;
+    let triangulosSemSpread=0;
+    let triangulosAtomicos=0;
     const exploradorTitan = new ExploradorDeRotasTitan();
     let MISTAS = candidatasMistas(paraRotas(memoria), WETH_DA_BASE);
+    let triangulosConhecidos:TrianguloTitan[]=[];
     if(process.env.TITAN_EXPLORAR_TRIANGULOS==='1') {
         const triangulos=explorarTriangulos(paraRotas(memoria),WETH_DA_BASE,2000);
+        triangulosConhecidos=triangulos;
         log.warn('[TITAN/TRIANGULOS] Descoberta de ciclos de 3 swaps; SOMENTE OBSERVACAO.',{
             total:triangulos.length,
             amostras:triangulos.slice(0,3).map(x=>({
@@ -2223,6 +2230,8 @@ async function principal(): Promise<void> {
                         // triagem e a cotacao do ciclo seguinte ja leem o
                         // estado NOVO — nenhum preco velho atravessa.
                         MISTAS = candidatasMistas(paraRotas(memoria), WETH_DA_BASE);
+                        if(process.env.TITAN_EXPLORAR_TRIANGULOS==='1')
+                            triangulosConhecidos=explorarTriangulos(paraRotas(memoria),WETH_DA_BASE,2000);
                         FM.rotasDistintas = MISTAS.length;
                         // eslint-disable-next-line no-await-in-loop
                         await gravarMemoria(caminhoDaMemoria, memoria);
@@ -2409,6 +2418,92 @@ async function principal(): Promise<void> {
             pendentesCotacao.clear();
             for (const c of afetadasPotenciais) {
                 if (!escolhidas.has(c.chave)) pendentesCotacao.add(c.chave);
+            }
+
+            // EXPLORACAO TRIANGULAR (3 hops). Nao reutiliza a cotacao de 2
+            // swaps nem seus tamanhos. Cada plano deriva a capacidade do
+            // PROPRIO pool inicial e vai primeiro para o contrato real via
+            // eth_call; so uma simulacao economicamente positiva permite
+            // chamar o executor de transacao (que valida tudo novamente).
+            if(triangulosConhecidos.length>0
+                && process.env.TITAN_EXPLORAR_TRIANGULOS==='1'
+                && Date.now()-ultimoTrianguloEm>=75_000) {
+                ultimoTrianguloEm=Date.now();
+                // Rotacao com limite: nao repetir o mesmo prefixo de 2000
+                // caminhos no boot, nem carregar 2000 pools em cada bloco.
+                const tamanhoAmostra=Number(process.env.TITAN_TRIANGULOS_POR_RODADA??'4');
+                const amostraSegura=Number.isSafeInteger(tamanhoAmostra)
+                    ? Math.max(1,Math.min(8,tamanhoAmostra)):4;
+                const amostra:TrianguloTitan[]=[];
+                for(let k=0;k<Math.min(amostraSegura,triangulosConhecidos.length);k++){
+                    amostra.push(triangulosConhecidos[(indiceTriangular+k)%triangulosConhecidos.length]!);
+                }
+                indiceTriangular=(indiceTriangular+amostra.length)%triangulosConhecidos.length;
+                // O leitor de estado recebe so as pernas tipadas. Para os
+                // triângulos, sao tres em vez das duas de CandidataMista.
+                const lTri=await lerEstadoMisto(chamar,amostra,blocoDaAmostra,etiqueta);
+                const avaliadas=amostra.map(t=>({
+                    t,veredicto:avaliarTetoTriangulo(t,lTri),
+                    liquidez:capacidadePrimeiroPool(t,lTri),
+                }));
+                triangulosSemSpread+=avaliadas.filter(x=>x.veredicto.estado==='sem-spread').length;
+                triangulosComSpread+=avaliadas.filter(x=>x.veredicto.estado==='vale-simular').length;
+                let tentativasTriangulares=0;
+                for(const item of avaliadas) {
+                    if(item.veredicto.estado==='sem-spread')continue;
+                    // Nao abre mao de dados completos. A falta de teto
+                    // economico manda SIMULAR, mas sem capacidade conhecida
+                    // do lender nao inventa tamanho nem dinheiro.
+                    const tamanhos=tamanhosTriangulo(item.liquidez);
+                    if(tamanhos.length===0)continue;
+                    // Uma configuracao pequena, alternando tamanho a cada
+                    // rodada: 0.1%, 0.33%, 1% do saldo observado do lender.
+                    const tamanho=tamanhos[indiceTriangular%tamanhos.length]!;
+                    const rota=rotaExecutavelTriangulo(item.t,tamanho);
+                    const sinal={rota,quantia:tamanho,bloco:blocoDaAmostra,
+                        brutoEstimado:0n,liquidoEstimado:0n,estadoConsistente:true};
+                    const resultado=await simularTitanAoVivo(sinal,
+                        process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                    tentativasTriangulares++;
+                    triangulosAtomicos++;
+                    log.warn('[TITAN/TRIANGULO-ATOMICO] Ciclo de 3 swaps conferido.',{
+                        pools:item.t.pools,tamanho:tamanho.toString(),resultado,
+                        razao:item.veredicto.estado,
+                        nota:'sem envio ate simulacao integral lucrativa; eticamente nao e receita',
+                        triados:triangulosComSpread,semSpread:triangulosSemSpread,
+                        simulados:triangulosAtomicos,
+                    });
+                    if(resultado.situacao!=='executavel')continue;
+                    if(process.env.TITAN_ENVIAR!=='1'
+                        ||tentativasTitan>=tetoTentativasTitan
+                        ||Date.now()-ultimoEnsaioTitanEm<60_000)continue;
+                    // Somente lucro verificado no executor, nao suposto
+                    // por produto de precos marginais.
+                    const bruto=BigInt(resultado.brutoWei??'0');
+                    const liquido=BigInt(resultado.liquidoConservadorWei??'0');
+                    if(bruto<=0n||liquido<=0n)continue;
+                    ultimoEnsaioTitanEm=Date.now();
+                    const envio=await executarTitan({...sinal,
+                        brutoEstimado:bruto,liquidoEstimado:liquido},
+                        process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                    if(['enviado','confirmado','revertido','desconhecido']
+                        .includes(envio.estado))tentativasTitan++;
+                    log.warn('[TITAN/TRIANGULO-EXECUTOR] Decisao financeira de 3 hops.',{
+                        pools:item.t.pools,tamanho:tamanho.toString(),
+                        resultado:envio,validacao:resultado,
+                        tentativasNestaSessao:tentativasTitan,
+                    });
+                    // Uma unica candidata com potencial de envio por rodada;
+                    // o controle duravel ainda limita 1/dia.
+                    break;
+                }
+                if(tentativasTriangulares===0 && amostra.length>0
+                    && FM.estadosAvaliados%30===0) {
+                    log.info('[TITAN/TRIANGULOS] Nao houve simulacao nesta amostra.',{
+                        analisadas:amostra.length,semSpread:triangulosSemSpread,
+                        capacidadeDesconhecida:avaliadas.filter(x=>x.liquidez===null).length,
+                    });
+                }
             }
 
             // A COTACAO: UM LOTE JSON-RPC POR DEGRAU da escada, com as rotas
