@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calcularPisoTitan, motivoDaRecusaTitan, type PlanoTitan } from './titanExecucao';
+import { calcularPisoTitan, motivoDaRecusaTitan, avaliarEnsaioTitan, type PlanoTitan } from './titanExecucao';
 import { avaliarLimitesDiariosTitan } from './titanAutorizacaoContinua';
 
 const END_A = '0x0000000000000000000000000000000000000011';
@@ -21,7 +21,7 @@ const plano = (): PlanoTitan => ({
 });
 const ambiente = (): NodeJS.ProcessEnv => ({
     TITAN_ENVIAR: '1', TITAN_CONFIRMAR: 'OPERAR_BASE_REAL',
-    TITAN_NONCE_EXCLUSIVO: '1',
+    TITAN_NONCE_EXCLUSIVO: '1', TITAN_JANELAS_EXCLUSIVAS: '1',
     TITAN_CONTRATO: END_A, TITAN_CHAVE_PRIVADA: 'TEST_KEY_NAO_UTILIZADA_PELA_VALIDACAO',
     TITAN_COFRE: END_B, TITAN_MIN_LUCRO_WEI: '1000000000000',
     TITAN_ORCAMENTO_GAS_WEI: '100000000000000',
@@ -140,4 +140,54 @@ test('fonte Morpho so calcula gas em WETH e segue os mesmos portoes', () => {
     assert.match(motivoDaRecusaTitan(p,e)!, /base WETH/);
     e.TITAN_ENVIAR='0';
     assert.match(motivoDaRecusaTitan(plano(),e)!, /desligado/);
+});
+
+test('cotacao atomica de arbitragem considera gas L2, L1 em dobro e margem',()=>{
+    const r=avaliarEnsaioTitan(1_000_000_000_000_000n,350_000n,
+        30_000_000n,20_000_000n,100_000_000_000n,
+        650_000n,1_000_000_000_000_000n,
+        {TITAN_LUCRO_GAS_BPS:'500'});
+    assert.equal(r.situacao,'executavel');
+    assert.ok(BigInt(r.liquidoConservadorWei!)>0n);
+    assert.equal(r.gasLimite,'420000');
+});
+test('gas, orcamento, retorno ou oracle L1 insuficientes nao autorizam envio',()=>{
+    const env={TITAN_LUCRO_GAS_BPS:'500'};
+    assert.equal(avaliarEnsaioTitan(1000n,350_000n,30_000_000n,
+        20_000_000n,100_000_000_000n,650_000n,1_000_000n,env).situacao,'inviavel');
+    assert.equal(avaliarEnsaioTitan(10_000_000_000_000n,600_000n,30_000_000n,
+        20_000_000n,100_000_000_000n,650_000n,1_000_000_000_000_000n,env).situacao,'inviavel');
+    assert.equal(avaliarEnsaioTitan(10_000_000_000_000n,350_000n,30_000_000n,
+        20_000_000n,0n,650_000n,1_000_000_000_000_000n,env).situacao,'desconhecido');
+});
+
+test('operador unico 24h nao exige horario, mas exige nonce exclusivo e os portoes financeiros',()=>{
+    const env=ambiente();
+    delete env.TITAN_JANELAS_EXCLUSIVAS;
+    assert.match(motivoDaRecusaTitan(plano(),env)!,/janela exclusiva/);
+    env.TITAN_SOLO_24H='1';
+    assert.equal(motivoDaRecusaTitan(plano(),env),null);
+    delete env.TITAN_NONCE_EXCLUSIVO;
+    assert.match(motivoDaRecusaTitan(plano(),env)!,/nonce exclusivo/);
+    env.TITAN_NONCE_EXCLUSIVO='1';
+    env.TITAN_ENVIAR='0';
+    assert.match(motivoDaRecusaTitan(plano(),env)!,/desligado/);
+});
+
+test('triangulo de 3 pernas chega aos mesmos portoes de gas e nonce do TITAN',()=>{
+    const p=plano();
+    p.rota=[
+        {pool:END_A,tokenEntra:WETH,tipo:0,pagamento:0n},
+        {pool:END_B,tokenEntra:USDC,tipo:0,pagamento:0n},
+        {pool:'0x0000000000000000000000000000000000000033',
+            tokenEntra:'0x0000000000000000000000000000000000000044',
+            tipo:1,pagamento:0n},
+    ];
+    assert.equal(motivoDaRecusaTitan(p,ambiente()),null);
+    const e=ambiente();
+    e.TITAN_SOLO_24H='1';
+    delete e.TITAN_JANELAS_EXCLUSIVAS;
+    assert.equal(motivoDaRecusaTitan(p,e),null);
+    delete e.TITAN_ORCAMENTO_GAS_WEI;
+    assert.match(motivoDaRecusaTitan(p,e)!,/teto financeiro/);
 });
