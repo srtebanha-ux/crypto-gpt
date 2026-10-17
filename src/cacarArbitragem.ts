@@ -263,7 +263,7 @@ const SELETORES = {
  */
 export async function lerEstadoMisto(
     chamar: Transporte,
-    candidatas: CandidataMista[],
+    candidatas: ReadonlyArray<{pernas:readonly PernaDescrita[]}>,
     bloco: number,
     etiqueta: 'latest' | 'pending' = 'latest',
 ): Promise<LeiturasDoEstado> {
