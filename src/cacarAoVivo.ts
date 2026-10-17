@@ -5914,6 +5914,43 @@ async function principal(): Promise<'parar' | void> {
                         });
                         brasa = prioridade.brasa;
                         quentes = prioridade.quentes;
+                        // RELATORIO DE LEITURA, SEM TRANSMISSAO: exporta TODAS as
+                        // 233 contas ja medidas, usando apenas informacao que a
+                        // varredura pagou para ler. Nunca altera selecao ou tiro.
+                        // Emitimos 20 linhas por lote para nao truncar os logs.
+                        if (process.env.CACA_RADAR_GAS !== '0') {
+                            const porEndereco = new Map(medidos.map(m=>[m.devedor.toLowerCase(),m]));
+                            const registros = brasa.map((devedor,indice)=>{
+                                const m=porEndereco.get(devedor.toLowerCase());
+                                const divida=m?.dividaUsd??null;
+                                const lucro=divida===null?null:lucroEstimado(divida);
+                                return {
+                                    n:indice+1,a:devedor.toLowerCase(),
+                                    q:m?.queda.toFixed(4)??null,
+                                    d:divida?.toFixed(2)??null,
+                                    v:m?.via??'?',
+                                    l:lucro?.toFixed(2)??null,
+                                    idade:m?.lidoEm===undefined?null:
+                                        Math.round((Date.now()-m.lidoEm)/1000),
+                                };
+                            });
+                            const lote=20;
+                            for(let i=0;i<registros.length;i+=lote){
+                                log.info('[CACA/RADAR-GAS] Carteiras em brasa, leitura sem broadcast.',{
+                                    bloco:blocoAtual, total:registros.length,
+                                    inicio:i+1, fim:Math.min(i+lote,registros.length),
+                                    saldoGasEth:saldoLidoEm===0?null:
+                                        new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6),
+                                    saldoLidoHaSegundos:saldoLidoEm===0?null:
+                                        Math.round((Date.now()-saldoLidoEm)/1000),
+                                    baseFeeGwei:baseFeeAtual===null?null:
+                                        new Decimal(baseFeeAtual.toString()).dividedBy(1e9).toFixed(4),
+                                    modelo:'lucro usa AGIO 5%, 50% da divida, custo medio e gas '+
+                                        'aproximado; NAO e simulacao nem promessa de ganho',
+                                    lista:registros.slice(i,i+lote),
+                                });
+                            }
+                        }
                         if (enderecosFechamento.size > 0) {
                             log.info('[CACA/ALVOS-PRIORITARIOS] Reserva confirmada no multicall.', {
                                 alvos: prioridade.incluidos,
