@@ -85,9 +85,9 @@ export function retentarTamanhoPorErroTitan(
     ||!/^\d+$/.test(deficitBps))return[];
   const bps=BigInt(deficitBps);
   if(bps>10_000n)return[];
-  const candidato=tamanho/2n;
-  if(candidato<1n||candidato===tamanho)return[];
-  // Tamanho menor reduz slippage. Variacoes unitarias podem ser testadas
-  // via cotador local, nunca exigem transacao real.
-  return[candidato];
+  // Falha microscopica: experimente -1 unidade, que pode atravessar
+  // um limite inteiro da curva. Se maior que 1bp, a variacao de um wei
+  // dificilmente altera a economia: teste metade e reduza impacto de preco.
+  const candidato=bps<=1n?tamanho-1n:tamanho/2n;
+  return candidato>0n&&candidato!==tamanho?[candidato]:[];
 }
