@@ -43,7 +43,7 @@ import {
     lerMemoria, gravarMemoria, memoriaVazia, juntar, paraRotas, deDescoberta, comoLerAMemoria,
 } from './memoriaDoUniverso';
 import { pernasDaCandidata } from './rotasMistas';
-import { executarTitan } from './titanExecucao';
+import { executarTitan, simularTitanAoVivo } from './titanExecucao';
 import { priorizarCotacoes } from './titanPriorizacao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
@@ -2033,6 +2033,10 @@ async function principal(): Promise<void> {
         // este projeto perder tudo o que havia aprendido.
         await gravarMemoria(caminhoDaMemoria, memoria);
     }
+    let ultimoEnsaioAtomicoEm=0;
+    let atomicasExecutaveis=0;
+    let atomicasInviaveis=0;
+    let atomicasDesconhecidas=0;
     let MISTAS = candidatasMistas(paraRotas(memoria), WETH_DA_BASE);
     const FM = funilVazio();
     FM.blocosVarridosParaDescoberta = porAtividade.blocosLidos;
@@ -2464,6 +2468,43 @@ async function principal(): Promise<void> {
                     && sn.lucroBrutoEstimado !== null && sn.lucroBrutoEstimado > 0n
                     && sn.melhorTamanho !== null && sn.melhorTamanho > 0n
                     && !sn.motivo.startsWith('ESTADO_'));
+                // Diagnostico financeiro REAL, sem enviar: simular o contrato
+                // implantado (flash, callbacks, swaps e retorno) sobre o estado
+                // corrente. Sinal estimado NUNCA e receita nem oportunidade
+                // validada por si so. Este ensaio e leitura onchain.
+                if (process.env.TITAN_VALIDAR_AO_VIVO === '1'
+                    && Date.now()-ultimoEnsaioAtomicoEm>=60_000) {
+                    const comBruto=sinais.filter(sn=>sn.lucroBrutoEstimado!==null
+                        && sn.lucroBrutoEstimado>0n
+                        && sn.melhorTamanho!==null && sn.melhorTamanho>0n
+                        && !sn.motivo.startsWith('ESTADO_'));
+                    const candidatasComRota=comBruto.map(sn=>({
+                        sinal:sn,rota:afetadas.find(c=>c.chave===sn.rota)
+                    })).filter((x)=>x.rota!==undefined);
+                    if(candidatasComRota.length>0) {
+                        ultimoEnsaioAtomicoEm=Date.now();
+                        const top=candidatasComRota.reduce((a,b)=>
+                            b.sinal.lucroBrutoEstimado!>a.sinal.lucroBrutoEstimado!?b:a);
+                        const sn=top.sinal;
+                        const resultado=await simularTitanAoVivo({
+                            rota:pernasDaCandidata(top.rota!,WETH_DA_BASE,sn.melhorTamanho!),
+                            quantia:sn.melhorTamanho!,bloco:blocoDaAmostra,
+                            brutoEstimado:sn.lucroBrutoEstimado!,
+                            liquidoEstimado:sn.lucroLiquidoEstimado??0n,
+                            estadoConsistente:true,
+                        },process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                        if(resultado.situacao==='executavel')atomicasExecutaveis+=1;
+                        else if(resultado.situacao==='inviavel')atomicasInviaveis+=1;
+                        else atomicasDesconhecidas+=1;
+                        log.warn('[TITAN/ATOMICA] Execucao de leitura integral no contrato real.',{
+                            rota:sn.rota,bloco:blocoDaAmostra,resultado,
+                            nota:'NAO transmitido: eth_call/estimateGas e nao lucro realizado',
+                            contadores:{executaveis:atomicasExecutaveis,
+                                inviaveis:atomicasInviaveis,
+                                desconhecidas:atomicasDesconhecidas},
+                        });
+                    }
+                }
                 if (process.env.TITAN_ENVIAR === '1' && prontas.length > 0
                     && tentativasTitan < tetoTentativasTitan
                     && Date.now() - ultimoEnsaioTitanEm >= 60_000) {
