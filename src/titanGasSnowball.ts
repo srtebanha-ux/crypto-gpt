@@ -67,7 +67,15 @@ export function decidirGasSnowball(e: EntradaSnowball): DecisaoSnowball {
     const tetoTipCarteira = (tetoRiscoWei - custoFixo) / e.gasLimit;
     const ganhoAposCustoFixo = e.lucroBrutoWei - custoFixo;
     const tetoTipLucro = (ganhoAposCustoFixo * gorjetaBps / BPS) / e.gasLimit;
-    const prioridadeWei = minimo(e.prioridadeDesejadaWei,
+    // O lance cresce SOMENTE quando existe premio simulado suficiente,
+    // e nunca mais de 10x a prioridade base configurada. O alvo adicional
+    // consome no maximo 10% do ganho apos custo fixo; 50% e teto absoluto,
+    // nao objetivo de gasto. Carteira pequena continua limitando o lance.
+    const alvoPorPremio = (ganhoAposCustoFixo / 10n) / e.gasLimit;
+    const alvoAutomatico = alvoPorPremio > e.prioridadeDesejadaWei
+        ? minimo(alvoPorPremio, e.prioridadeDesejadaWei * 10n)
+        : e.prioridadeDesejadaWei;
+    const prioridadeWei = minimo(alvoAutomatico,
         tetoTipCarteira, tetoTipLucro);
     if (prioridadeWei <= 0n) {
         return insuficiente('nao ha ETH ou margem para nenhuma prioridade');
