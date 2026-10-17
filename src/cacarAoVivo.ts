@@ -31,6 +31,7 @@ import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './re
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
 import { POOLS, AERODROME } from './contratos';
 import { dadosGetPoolAerodrome, lerPoolAerodrome, classificarRota } from './cacaRotaAerodrome';
+import { quantiaParaCotacaoUsd, encodeQuoteAerodrome, decodeQuoteAerodrome, usdDoToken } from './cacaQuoteAerodrome';
 import { modosV2ParaSimular, type PoolsAerodromeConfirmados } from './cacaModosV2';
 import { permiteV1NaPoolPadrao } from './cacaV1Pool';
 import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
@@ -3383,6 +3384,60 @@ async function principal(): Promise<'parar' | void> {
                   ? classificarRota(estavel.pool,volatil.pool):'inconclusivo',
                 criterio:'cada candidato passa no eth_call integral antes de reservar nonce',
             });
+            // Pre-quote de verdade, em lote e sem gasto de gas. Para cada par
+            // priorizado, simular venda de 1k, 10k e 40k USD-equivalentes de
+            // GARANTIA. O AaveOracle fornece o preco do token em 8 casas.
+            // Nao presumir que cbBTC tenha 6 decimais nem que EURC vale USD1.
+            // Estas cotacoes so diagnosticam profundidade: nao substituem
+            // a liquidacao completa, nem entram na decisao de nonce/gorjeta.
+            if(estavel.ok&&volatil.ok&&(estavel.pool||volatil.pool)){
+                const decGarantia=casas.get(g.toLowerCase());
+                const decDivida=casas.get(d.toLowerCase());
+                const precoGarantia=precos.get(g.toLowerCase());
+                const precoDivida=precos.get(d.toLowerCase());
+                const faixas=[1000,10000,40000].map(usd=>({
+                    usd,cru:quantiaParaCotacaoUsd(new Decimal(usd),precoGarantia,decGarantia),
+                })).filter((x):x is {usd:number;cru:bigint}=>x.cru!==null);
+                const modos:{modo:'estavel'|'volatil';stable:boolean}[]=[];
+                if(estavel.pool)modos.push({modo:'estavel',stable:true});
+                if(volatil.pool)modos.push({modo:'volatil',stable:false});
+                if(faixas.length>0){
+                    try{
+                        const consultas=faixas.flatMap(f=>modos.map(m=>({
+                            alvo:AERODROME.router.endereco,
+                            dados:encodeQuoteAerodrome(f.cru,g,d,AERODROME.factory.endereco,m.stable),
+                        })));
+                        const respostas=(await lerEmLote(consultas,'pares')).dados;
+                        let indice=0;
+                        for(const faixa of faixas){
+                            const cotacoes=modos.map(m=>{
+                                const saida=decodeQuoteAerodrome(respostas[indice++]??null,faixa.cru);
+                                const usdSaida=saida===null?null:usdDoToken(saida,precoDivida,decDivida);
+                                return {modo:m.modo,
+                                    saidaCrua:saida?.toString()??null,
+                                    saidaUsd:usdSaida?.toFixed(2)??null};
+                            });
+                            const validas=cotacoes.filter(q=>q.saidaCrua!==null);
+                            const melhor=validas.length===0?null:
+                                validas.reduce((a,b)=>BigInt(b.saidaCrua!)>BigInt(a.saidaCrua!)?b:a).modo;
+                            log.info('[CACA/COTACAO-REAL] Router Aerodrome por tamanho e modo.',{
+                                garantia:g,divida:d,entradaUsdReferencia:faixa.usd,
+                                entradaCrua:faixa.cru.toString(),cotacoes,melhor,
+                                limite:'cotacao do momento, SEM premio Aave, flash loan, gas, taxa L1, slippage futuro ou E-Mode',
+                                efeitoNoEnvio:'nenhum: so diagnostico para escolher a proxima melhoria',
+                            });
+                        }
+                    }catch(e){
+                        log.warn('[CACA/COTACAO-REAL] Nao obtive quote confiavel; nao inferir liquidez.',{
+                            garantia:g,divida:d,motivo:e instanceof Error?e.message:String(e),
+                        });
+                    }
+                }else{
+                    log.warn('[CACA/COTACAO-REAL] Preco/decimais do colateral indisponiveis.',{
+                        garantia:g,divida:d,
+                    });
+                }
+            }
         }finally{rotasEmLeitura.delete(chave);}
     }
     // Base faz um bloco a cada 2 segundos. E daqui que sai "em quantos blocos".
