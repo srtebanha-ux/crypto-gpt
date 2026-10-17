@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Decimal } from 'decimal.js';
 import type { JsonRpcProvider } from 'ethers';
 import {
-    ABI_MULTI, MORPHO_FLASH_BASE, prepararOfertaMulti, revalidarOfertaMulti,
+    ABI_MULTI, MORPHO_FLASH_BASE, FABRICA_SLIPSTREAM_BASE, POOL_SLIPSTREAM_EURC_USDC, prepararOfertaMulti, revalidarOfertaMulti,
     type EntradaPonte,
 } from './titanPonteMultiHop';
 const a=(n:number)=>'0x'+n.toString(16).padStart(40,'0');
@@ -23,13 +23,17 @@ const e:EntradaPonte={
 };
 const getters:Record<string,string>={dono:e.dono,cofre:e.cofre,aave:e.aave,
     morpho:MORPHO_FLASH_BASE,fabricaV3:e.fabricaV3};
-function provider(opts:{ownerCorrompido?:boolean;bloco?:number}={}):JsonRpcProvider {
+function provider(opts:{ownerCorrompido?:boolean;bloco?:number;slipstreamSupport?:boolean}={}):JsonRpcProvider {
     return {
         getNetwork:async()=>({chainId:8453n}),
         getCode:async()=> '0x60016000',
         getBlockNumber:async()=>opts.bloco??1000,
         estimateGas:async()=> 330_000n,
         call:async(t:{data:string})=>{
+            if (t.data===ABI_MULTI.encodeFunctionData('slipstreamFactory')) {
+                if (!opts.slipstreamSupport) throw new Error('old contract: unknown selector');
+                return ABI_MULTI.encodeFunctionResult('slipstreamFactory',[FABRICA_SLIPSTREAM_BASE]);
+            }
             for(const nome of Object.keys(getters)){
                 if(t.data===ABI_MULTI.encodeFunctionData(nome)){
                     const valor=nome==='dono'&&opts.ownerCorrompido?a(99):getters[nome];
@@ -60,4 +64,21 @@ test('o planejador chama ABI real no mesmo bloco e prefere multi-hop lucrativo',
 test('executor com dono diferente e recusado ANTES de simular swaps',async()=>{
     await assert.rejects(()=>prepararOfertaMulti(provider({ownerCorrompido:true}),e),
         /executor Multi-Hop divergente em dono/);
+});
+
+test('old deployed MultiHop rejects Slipstream before any liquidation call',async()=>{
+    const entrada={...e,usuario:a(4),garantia:POOL_SLIPSTREAM_EURC_USDC.token0,
+        divida:POOL_SLIPSTREAM_EURC_USDC.token1,
+        pools:[POOL_SLIPSTREAM_EURC_USDC]};
+    await assert.rejects(()=>prepararOfertaMulti(provider(),entrada),
+        /old contract: unknown selector/);
+});
+test('Slipstream executor getter permits simulated atomic EURC to USDC quote',async()=>{
+    const entrada={...e,usuario:a(4),garantia:POOL_SLIPSTREAM_EURC_USDC.token0,
+        divida:POOL_SLIPSTREAM_EURC_USDC.token1,
+        pools:[POOL_SLIPSTREAM_EURC_USDC]};
+    const oferta=await prepararOfertaMulti(provider({slipstreamSupport:true}),entrada);
+    assert.ok(oferta);
+    assert.equal(oferta.rota.pernas[0].tipo,2);
+    assert.equal(oferta.rota.pernas[0].fee,50);
 });
