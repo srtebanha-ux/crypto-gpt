@@ -46,6 +46,7 @@ import { pernasDaCandidata } from './rotasMistas';
 import { executarTitan, simularTitanAoVivo } from './titanExecucao';
 import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
 import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
+import { retentarTamanhoPorErroTitan } from './titanTaticas';
 import { priorizarCotacoes } from './titanPriorizacao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
@@ -2459,14 +2460,45 @@ async function principal(): Promise<void> {
                     if(tamanhos.length===0)continue;
                     // Uma configuracao pequena, alternando tamanho a cada
                     // rodada: 0.1%, 0.33%, 1% do saldo observado do lender.
-                    const tamanho=tamanhos[indiceTriangular%tamanhos.length]!;
-                    const rota=rotaExecutavelTriangulo(item.t,tamanho);
-                    const sinal={rota,quantia:tamanho,bloco:blocoDaAmostra,
-                        brutoEstimado:0n,liquidoEstimado:0n,estadoConsistente:true};
-                    const resultado=await simularTitanAoVivo(sinal,
+                    let tamanho=tamanhos[indiceTriangular%tamanhos.length]!;
+                    let sinal={
+                        rota:rotaExecutavelTriangulo(item.t,tamanho),
+                        quantia:tamanho,bloco:blocoDaAmostra,
+                        brutoEstimado:0n,liquidoEstimado:0n,estadoConsistente:true
+                    };
+                    let resultado=await simularTitanAoVivo(sinal,
                         process.env.TITAN_EXECUTOR_RPC_URL??rpc);
                     tentativasTriangulares++;
                     triangulosAtomicos++;
+                    // Truque da microbusca, com dados REAIS do revert:
+                    // PagamentoCurto prova exatamente quanto a rota perdeu.
+                    // Testar no maximo um segundo tamanho por triangulo,
+                    // SEM enviar, quando a perda foi <= 3% do token cobrado.
+                    const segundas=retentarTamanhoPorErroTitan(
+                        tamanho,resultado.erroContrato,resultado.deficitBps);
+                    if(resultado.erroContrato==='pagamento-curto'
+                        && BigInt(resultado.deficitBps??'10001')<=300n
+                        && segundas.length>0) {
+                        const menor=segundas[0]!;
+                        const alternativa={...sinal,quantia:menor,
+                            rota:rotaExecutavelTriangulo(item.t,menor)};
+                        const ensaioMenor=await simularTitanAoVivo(
+                            alternativa,process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                        tentativasTriangulares++;
+                        triangulosAtomicos++;
+                        log.info('[TITAN/DUST] Microbusca em segundo tamanho, sem broadcast.',{
+                            pools:item.t.pools,original:tamanho.toString(),
+                            menor:menor.toString(),
+                            deficitBps:resultado.deficitBps,
+                            segundo:ensaioMenor.situacao,
+                            motivo:ensaioMenor.motivo,
+                        });
+                        if(ensaioMenor.situacao==='executavel'){
+                            tamanho=menor;
+                            sinal=alternativa;
+                            resultado=ensaioMenor;
+                        }
+                    }
                     log.warn('[TITAN/TRIANGULO-ATOMICO] Ciclo de 3 swaps conferido.',{
                         pools:item.t.pools,tamanho:tamanho.toString(),resultado,
                         razao:item.veredicto.estado,
