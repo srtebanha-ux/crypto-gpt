@@ -35,6 +35,10 @@ jobs:
         env:
           ARB_BLOCO: "52418045"
         run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanMultiHopBaseFork.js
+      - name: Testar Aave/Morpho/Slipstream EURC em fork isolado da Base
+        env:
+          ARB_BLOCO: "52745456"
+        run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanSlipstreamBaseFork.js
       - name: Confirmar imagem do CACA inclui bytecode sem private key
         run: |
           docker build -t caca-multihop:test .
