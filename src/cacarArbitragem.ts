@@ -45,6 +45,7 @@ import {
 import { pernasDaCandidata } from './rotasMistas';
 import { executarTitan, simularTitanAoVivo } from './titanExecucao';
 import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
+import { explorarTriangulos } from './titanTriangulos';
 import { priorizarCotacoes } from './titanPriorizacao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
@@ -2040,6 +2041,16 @@ async function principal(): Promise<void> {
     let atomicasDesconhecidas=0;
     const exploradorTitan = new ExploradorDeRotasTitan();
     let MISTAS = candidatasMistas(paraRotas(memoria), WETH_DA_BASE);
+    if(process.env.TITAN_EXPLORAR_TRIANGULOS==='1') {
+        const triangulos=explorarTriangulos(paraRotas(memoria),WETH_DA_BASE,2000);
+        log.warn('[TITAN/TRIANGULOS] Descoberta de ciclos de 3 swaps; SOMENTE OBSERVACAO.',{
+            total:triangulos.length,
+            amostras:triangulos.slice(0,3).map(x=>({
+                tokens:x.tokens,pools:x.pools,venues:x.venues,prova:x.prova
+            })),
+            bloqueio:'sem simulador de tres hops no funil atual; NAO enviar',
+        });
+    }
     const FM = funilVazio();
     FM.blocosVarridosParaDescoberta = porAtividade.blocosLidos;
     FM.poolsVistos = {
