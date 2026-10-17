@@ -1,0 +1,23 @@
+name: TITAN Gas Snowball CI
+on:
+  push:
+    branches:
+      - feat/titan-zero-aporte-gas-snowball
+  pull_request:
+    branches:
+      - feat/titan-validacao-atomica-live
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
