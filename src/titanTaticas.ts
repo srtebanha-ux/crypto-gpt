@@ -73,3 +73,21 @@ export function tamanhosDePrecisaoTitan(
   return [...new Set(alt.filter(x=>x>0n&&x!==tamanho)
     .map(x=>x.toString()))].slice(0,3).map(BigInt);
 }
+
+/** Decisao do ensaio atômico: um segundo teste SEM ENVIO, limitado ao
+ * tamanho menor apos PagamentoCurto. Dust +/-1 e permitido so com deficit <=1bp.
+ * Evita repetir a mesma cotacao e nunca autoriza broadcast sozinho.
+ */
+export function retentarTamanhoPorErroTitan(
+  tamanho:bigint,erroContrato:string|undefined,deficitBps:string|undefined,
+):bigint[]{
+  if(erroContrato!=='pagamento-curto'||!deficitBps
+    ||!/^\d+$/.test(deficitBps))return[];
+  const bps=BigInt(deficitBps);
+  if(bps>10_000n)return[];
+  const candidato=tamanho/2n;
+  if(candidato<1n||candidato===tamanho)return[];
+  // Tamanho menor reduz slippage. Variacoes unitarias podem ser testadas
+  // via cotador local, nunca exigem transacao real.
+  return[candidato];
+}
