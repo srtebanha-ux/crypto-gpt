@@ -105,6 +105,24 @@ export function tamanhosTriangulo(capacidade:bigint|null):bigint[]{
     return [...new Set(partes.map(n=>capacidade/n)
         .filter(v=>v>0n).map(v=>v.toString()))].map(v=>BigInt(v));
 }
+/**
+ * Escalona ate 'limite' tamanhos REAIS observados, sem duplicatas.
+ * A primeira sonda roda em round-robin para nao favorecer sempre o
+ * mesmo percentual de liquidez. Nunca cria tx: apenas escolhe entradas
+ * para simulacao. 1..3 sondas, sem aumentar o tamanho do flash emprestado.
+ */
+export function sondasTriangulo(
+    tamanhos: readonly bigint[], rodada: number, limite = 3,
+): bigint[] {
+    if (!Number.isSafeInteger(rodada) || rodada < 0) return [];
+    if (!Number.isSafeInteger(limite) || limite < 1) return [];
+    const validos = [...new Set(tamanhos.filter(x => x > 0n).map(x => x.toString()))].map(BigInt);
+    if (validos.length === 0) return [];
+    const teto = Math.min(3, limite, validos.length);
+    const inicio = rodada % validos.length;
+    return Array.from({length: teto}, (_, i) => validos[(inicio + i) % validos.length]!);
+}
+
 export function rotaExecutavelTriangulo(t:TrianguloTitan,tamanho:bigint):PernaMista[]{
     if(tamanho<=0n||t.tokens[0].toLowerCase()!==t.tokens[3].toLowerCase()
         ||new Set(t.pools).size!==3)throw Error('triangulo invalido');
