@@ -411,7 +411,7 @@ export async function executarTitan(
         // jamais e movimentado. Falha de unwrap nao muda o status da arbitragem.
         const reinvestimento = recibo.status === 1 && lucroRealizado !== undefined
             ? await reinvestirLucroTitan(rpc, carteira, cofre,
-                BigInt(lucroRealizado), ambiente)
+                BigInt(lucroRealizado), hash!, ambiente)
             : undefined;
         return {
             estado: recibo.status === 1 ? 'confirmado' : 'revertido', hash,
