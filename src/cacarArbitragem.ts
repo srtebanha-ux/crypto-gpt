@@ -45,7 +45,7 @@ import {
 import { pernasDaCandidata } from './rotasMistas';
 import { executarTitan, simularTitanAoVivo } from './titanExecucao';
 import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
-import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
+import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, sondasTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
 import { retentarTamanhoPorErroTitan } from './titanTaticas';
 import { priorizarCotacoes } from './titanPriorizacao';
 import {
@@ -2457,55 +2457,70 @@ async function principal(): Promise<void> {
                     // economico manda SIMULAR, mas sem capacidade conhecida
                     // do lender nao inventa tamanho nem dinheiro.
                     const tamanhos=tamanhosTriangulo(item.liquidez);
-                    if(tamanhos.length===0)continue;
-                    // Uma configuracao pequena, alternando tamanho a cada
-                    // rodada: 0.1%, 0.33%, 1% do saldo observado do lender.
-                    let tamanho=tamanhos[indiceTriangular%tamanhos.length]!;
-                    let sinal={
-                        rota:rotaExecutavelTriangulo(item.t,tamanho),
-                        quantia:tamanho,bloco:blocoDaAmostra,
-                        brutoEstimado:0n,liquidoEstimado:0n,estadoConsistente:true
-                    };
-                    let resultado=await simularTitanAoVivo(sinal,
-                        process.env.TITAN_EXECUTOR_RPC_URL??rpc);
-                    tentativasTriangulares++;
-                    triangulosAtomicos++;
-                    // Truque da microbusca, com dados REAIS do revert:
-                    // PagamentoCurto prova exatamente quanto a rota perdeu.
-                    // Testar no maximo um segundo tamanho por triangulo,
-                    // SEM enviar, quando a perda foi <= 3% do token cobrado.
-                    const segundas=retentarTamanhoPorErroTitan(
-                        tamanho,resultado.erroContrato,resultado.deficitBps);
-                    if(resultado.erroContrato==='pagamento-curto'
-                        && BigInt(resultado.deficitBps??'10001')<=300n
-                        && segundas.length>0) {
-                        const menor=segundas[0]!;
-                        const alternativa={...sinal,quantia:menor,
-                            rota:rotaExecutavelTriangulo(item.t,menor)};
-                        const ensaioMenor=await simularTitanAoVivo(
-                            alternativa,process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                    // O deficit pode diminuir em OUTRO tamanho, mas isso
+                    // nunca prova lucro. Cada proposta passa no executor real
+                    // por eth_call, sem gas on-chain.
+                    const sondas=sondasTriangulo(tamanhos,indiceTriangular,3);
+                    if(sondas.length===0)continue;
+                    let escolhido:{
+                        tamanho:bigint;
+                        sinal:ReturnType<typeof rotaExecutavelTriangulo> extends infer R
+                            ? {rota:R;quantia:bigint;bloco:number;
+                                brutoEstimado:bigint;liquidoEstimado:bigint;
+                                estadoConsistente:boolean}
+                            : never;
+                        resultado:Awaited<ReturnType<typeof simularTitanAoVivo>>;
+                    }|null=null;
+                    const feitos=new Set<string>();
+                    const testar=async(tamanho:bigint)=>{
+                        if(tamanho<=0n||feitos.has(tamanho.toString()))return null;
+                        feitos.add(tamanho.toString());
+                        const sinal={
+                            rota:rotaExecutavelTriangulo(item.t,tamanho),
+                            quantia:tamanho,bloco:blocoDaAmostra,
+                            brutoEstimado:0n,liquidoEstimado:0n,estadoConsistente:true
+                        };
+                        const resultado=await simularTitanAoVivo(sinal,
+                            process.env.TITAN_EXECUTOR_RPC_URL??rpc);
                         tentativasTriangulares++;
                         triangulosAtomicos++;
-                        log.info('[TITAN/DUST] Microbusca em segundo tamanho, sem broadcast.',{
-                            pools:item.t.pools,original:tamanho.toString(),
-                            menor:menor.toString(),
-                            deficitBps:resultado.deficitBps,
-                            segundo:ensaioMenor.situacao,
-                            motivo:ensaioMenor.motivo,
+                        return{tamanho,sinal,resultado};
+                    };
+                    let ultimaSituacao:'executavel'|'inviavel'|'desconhecido'='desconhecido';
+                    // Maximo 3 chamadas completas por triangulo nesta rodada.
+                    // Repete escalas de liquidez DIFERENTES, sem presumir
+                    // monotonicidade da curva entre ticks e DEXs.
+                    for(const tamanho of sondas){
+                        const tentativa=await testar(tamanho);
+                        if(!tentativa)continue;
+                        ultimaSituacao=tentativa.resultado.situacao;
+                        log.info('[TITAN/SONDA] Variacao de tamanho simulada.',{
+                            pools:item.t.pools,
+                            tamanho:tamanho.toString(),
+                            resultado:tentativa.resultado.situacao,
+                            erro:tentativa.resultado.erroContrato??null,
+                            deficitBps:tentativa.resultado.deficitBps??null,
+                            gasGastoOnchain:'zero: eth_call, sem broadcast',
                         });
-                        if(ensaioMenor.situacao==='executavel'){
-                            tamanho=menor;
-                            sinal=alternativa;
-                            resultado=ensaioMenor;
+                        if(tentativa.resultado.situacao==='executavel'){
+                            const atual=BigInt(tentativa.resultado.liquidoConservadorWei??'0');
+                            const melhor=escolhido===null?-1n:
+                                BigInt(escolhido.resultado.liquidoConservadorWei??'0');
+                            if(atual>melhor)escolhido=tentativa;
                         }
                     }
-                    log.warn('[TITAN/TRIANGULO-ATOMICO] Ciclo de 3 swaps conferido.',{
-                        pools:item.t.pools,tamanho:tamanho.toString(),resultado,
+                    log.warn('[TITAN/TRIANGULO-ATOMICO] Busca de tamanhos conferida.',{
+                        pools:item.t.pools,
+                        sondasFeitas:feitos.size,
+                        executavel:escolhido!==null,
+                        melhorTamanho:escolhido?.tamanho.toString()??null,
+                        ultimaSituacao,
                         razao:item.veredicto.estado,
-                        nota:'sem envio ate simulacao integral lucrativa; eticamente nao e receita',
                         triados:triangulosComSpread,semSpread:triangulosSemSpread,
                         simulados:triangulosAtomicos,
                     });
+                    if(escolhido===null)continue;
+                    const {tamanho,sinal,resultado}=escolhido;
                     if(resultado.situacao!=='executavel')continue;
                     if(process.env.TITAN_ENVIAR!=='1'
                         ||tentativasTitan>=tetoTentativasTitan
