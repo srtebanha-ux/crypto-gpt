@@ -160,3 +160,16 @@ test('gas, orcamento, retorno ou oracle L1 insuficientes nao autorizam envio',()
     assert.equal(avaliarEnsaioTitan(10_000_000_000_000n,350_000n,30_000_000n,
         20_000_000n,0n,650_000n,1_000_000_000_000_000n,env).situacao,'desconhecido');
 });
+
+test('operador unico 24h nao exige horario, mas exige nonce exclusivo e os portoes financeiros',()=>{
+    const env=ambiente();
+    delete env.TITAN_JANELAS_EXCLUSIVAS;
+    assert.match(motivoDaRecusaTitan(plano(),env)!,/janela exclusiva/);
+    env.TITAN_SOLO_24H='1';
+    assert.equal(motivoDaRecusaTitan(plano(),env),null);
+    delete env.TITAN_NONCE_EXCLUSIVO;
+    assert.match(motivoDaRecusaTitan(plano(),env)!,/nonce exclusivo/);
+    env.TITAN_NONCE_EXCLUSIVO='1';
+    env.TITAN_ENVIAR='0';
+    assert.match(motivoDaRecusaTitan(plano(),env)!,/desligado/);
+});
