@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
-import {reservarAlvosNaBrasa} from './cacaPrioridadeBrasa';
+import {reservarAlvosNaBrasa,acordarPorBlocoSeAlvoCritico} from './cacaPrioridadeBrasa';
 
 const a='0x03d0a5c9e1843986fb2f9335f7eb936754f7eaf0';
 const b='0xeb3885780e0ca097e46b516533948e6980a5741a';
@@ -50,4 +50,14 @@ test('zero slots never silently expand the multicall',()=>{
         medidos:[m(a,'1',1891)],prioritarios:new Set([a]),vagas:0,pisoUsd:null});
     assert.deepEqual(r.brasa,[]);
     assert.deepEqual(r.movidos,[]);
+});
+
+test('per-block only within critical zone, not on missing or corrupt readings',()=>{
+    for(const pct of ['0','0.1','0.7499','0.75']){
+        assert.equal(acordarPorBlocoSeAlvoCritico(new Decimal(pct)),true,pct);
+    }
+    for(const pct of ['0.7501','1.9','-0.01','NaN','Infinity']){
+        assert.equal(acordarPorBlocoSeAlvoCritico(new Decimal(pct)),false,pct);
+    }
+    assert.equal(acordarPorBlocoSeAlvoCritico(null),false);
 });
