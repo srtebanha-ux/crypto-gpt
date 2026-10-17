@@ -173,3 +173,21 @@ test('operador unico 24h nao exige horario, mas exige nonce exclusivo e os porto
     env.TITAN_ENVIAR='0';
     assert.match(motivoDaRecusaTitan(plano(),env)!,/desligado/);
 });
+
+test('triangulo de 3 pernas chega aos mesmos portoes de gas e nonce do TITAN',()=>{
+    const p=plano();
+    p.rota=[
+        {pool:END_A,tokenEntra:WETH,tipo:0,pagamento:0n},
+        {pool:END_B,tokenEntra:USDC,tipo:0,pagamento:0n},
+        {pool:'0x0000000000000000000000000000000000000033',
+            tokenEntra:'0x0000000000000000000000000000000000000044',
+            tipo:1,pagamento:0n},
+    ];
+    assert.equal(motivoDaRecusaTitan(p,ambiente()),null);
+    const e=ambiente();
+    e.TITAN_SOLO_24H='1';
+    delete e.TITAN_JANELAS_EXCLUSIVAS;
+    assert.equal(motivoDaRecusaTitan(p,e),null);
+    delete e.TITAN_ORCAMENTO_GAS_WEI;
+    assert.match(motivoDaRecusaTitan(p,e)!,/teto financeiro/);
+});
