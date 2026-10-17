@@ -1,0 +1,46 @@
+name: Slipstream receipt verification (read-only)
+on:
+  push:
+    branches:
+      - audit/slipstream-receipt-20261017
+permissions:
+  contents: read
+jobs:
+  receipt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Check Base transaction across public providers, no key or broadcast
+        shell: bash
+        run: |
+          node <<'JS'
+          const hash='0xacad3ee78d2783ae7d9a79424007b37715f82084931f695266e441f36d2678ce';
+          const urls=['https://mainnet.base.org','https://base-rpc.publicnode.com',
+                      'https://base.llamarpc.com','https://1rpc.io/base'];
+          async function query(url,method){
+            const ac=new AbortController();
+            const timer=setTimeout(()=>ac.abort(),9000);
+            try {
+              const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:[hash]}),signal:ac.signal});
+              let json=await res.json();
+              return {endpoint:url,http:res.status,value:json.result||null,error:json.error||null};
+            } catch(e){return {endpoint:url,error:String(e)}}finally{clearTimeout(timer);}
+          }
+          (async()=>{
+            for(const url of urls){
+              const [receipt,tx]=await Promise.all([
+                query(url,'eth_getTransactionReceipt'),
+                query(url,'eth_getTransactionByHash')]);
+              const clean=r=>({
+                endpoint:r.endpoint,http:r.http,
+                error:r.error,
+                result:r.value?{status:r.value.status,blockNumber:r.value.blockNumber,
+                  contractAddress:r.value.contractAddress,from:r.value.from,to:r.value.to,
+                  gasUsed:r.value.gasUsed,hash:r.value.transactionHash||r.value.hash}:null,
+              });
+              console.log('RECEIPT '+JSON.stringify(clean(receipt)));
+              console.log('TX '+JSON.stringify(clean(tx)));
+            }
+          })().catch(e=>{console.error(e);process.exitCode=1});
+          JS
