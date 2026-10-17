@@ -97,7 +97,10 @@ export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv):
         }
         if (fs.existsSync(marcador)) return 'ja houve tentativa de envio para esta autorizacao';
     }
-    if (ambiente.TITAN_JANELAS_EXCLUSIVAS !== '1') {
+    // Operador unico: remove somente a restricao de horario.
+    // Nonce pendente, saude de RPC e propriedade do contrato seguem obrigatorios.
+    const somenteTitan = ambiente.TITAN_SOLO_24H === '1';
+    if (!somenteTitan && ambiente.TITAN_JANELAS_EXCLUSIVAS !== '1') {
         return 'TITAN exige janela exclusiva Base compartilhada com CACA';
     }
     if (ambiente.TITAN_NONCE_EXCLUSIVO !== '1') {
@@ -225,7 +228,7 @@ export async function executarTitan(
         const gorjeta = BigInt(ambiente.TITAN_GORJETA_WEI ?? '20000000');
         if (gorjeta <= 0n) throw new Error('gorjeta invalida');
         const maxFeePerGas = 2n * ultimo.baseFeePerGas + gorjeta;
-        const janelaPreflight=await conferirJanelaDeNonce(rpc,carteira.address,'TITAN');
+        const janelaPreflight=await conferirJanelaDeNonce(rpc,carteira.address,ambiente.TITAN_SOLO_24H === '1' ? 'TITAN_SOLO' : 'TITAN');
         if(!janelaPreflight.pode)
             return{estado:'recusado',motivo:'janela TITAN fechada: '+janelaPreflight.motivo};
         const nonce = await rpc.getTransactionCount(carteira.address, 'pending');
@@ -317,7 +320,7 @@ export async function executarTitan(
         }
         // A simulacao pode atravessar a janela; conferir de novo ANTES da
         // reserva duravel/assinatura para nunca concorrer com o CACA.
-        const janelaNoEnvio=await conferirJanelaDeNonce(rpc,carteira.address,'TITAN');
+        const janelaNoEnvio=await conferirJanelaDeNonce(rpc,carteira.address,ambiente.TITAN_SOLO_24H === '1' ? 'TITAN_SOLO' : 'TITAN');
         if(!janelaNoEnvio.pode || janelaNoEnvio.nonce!==nonce)
             return{estado:'recusado',motivo:'exclusividade/nonce mudou no pre-broadcast: '+
                 janelaNoEnvio.motivo};
