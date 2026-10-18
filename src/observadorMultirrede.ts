@@ -132,6 +132,25 @@ export function tamanhoSeguroPorRede(rede:NomeRede,solicitado:number):number{
     return solicitado;
 }
 
+/**
+ * Historical RPC gateways can reject a filter's block interval even when
+ * eth_chainId and the contract are fine (observed on Polygon mainnet).
+ * The caller must retry the SAME cursor with a smaller interval.
+ */
+export function faixaAposErroRpc(atual:number,erro:string):number{
+    if(!Number.isSafeInteger(atual)||atual<1)throw new Error('faixa invalida');
+    if(!/invalid block range|block.range|too.large|exceed|max.blocks|limit.*blocks|response.size/i.test(erro))
+        return atual;
+    return Math.max(1,Math.floor(atual/2));
+}
+/** Slowly restore throughput, without bouncing straight back after one success. */
+export function faixaAposSucessos(atual:number,original:number,sucessos:number):number{
+    if(!Number.isSafeInteger(atual)||atual<1||!Number.isSafeInteger(original)||original<1)
+        throw new Error('faixa invalida');
+    if(sucessos<20||atual>=original)return atual;
+    return Math.min(original,Math.max(atual+1,atual*2));
+}
+
 export interface ResultadoMonitoramento {
     rede:NomeRede;bloco:number;proximoBloco:number;
     devedoresNoCache:number;avaliados:number;
@@ -215,7 +234,14 @@ export async function iniciarObservadorMultirrede():Promise<void>{
     };
     const intervalo=LIMITAR(process.env.CACA_OBSERVADOR_INTERVALO_MS,120000,30000,3600000);
     const tamanhosPorRede=new Map<NomeRede,number>();
-    for(const nome of nomes)tamanhosPorRede.set(nome,tamanhoSeguroPorRede(nome,options.range));
+    const tamanhosOriginais=new Map<NomeRede,number>();
+    const ciclosEstaveis=new Map<NomeRede,number>();
+    for(const nome of nomes){
+        const inicial=tamanhoSeguroPorRede(nome,options.range);
+        tamanhosPorRede.set(nome,inicial);
+        tamanhosOriginais.set(nome,inicial);
+        ciclosEstaveis.set(nome,0);
+    }
     const providers=new Map<NomeRede,JsonRpcProvider>();
     for(const nome of nomes){
         const rede=REDES_AAVE_V3[nome];
@@ -237,16 +263,27 @@ export async function iniciarObservadorMultirrede():Promise<void>{
                     range:tamanhosPorRede.get(nome)??options.range,
                     faixasPorCiclo:faixasSegurasPorRede(nome,options.faixasPorCiclo)};
                 const resultado=await monitorarRede(rede,providers.get(nome)!,progresso,seguro);
+                const estaveis=(ciclosEstaveis.get(nome)??0)+1;
+                const anterior=tamanhosPorRede.get(nome)??options.range;
+                const recuperado=faixaAposSucessos(
+                    anterior,tamanhosOriginais.get(nome)??options.range,estaveis);
+                if(recuperado!==anterior){
+                    tamanhosPorRede.set(nome,recuperado);
+                    ciclosEstaveis.set(nome,0);
+                    console.info('[MULTIRREDE/RANGE_RECUPERADO]',JSON.stringify({
+                        rede:nome,anterior,novo:recuperado,cursor:progresso.proximoBloco,
+                    }));
+                }else ciclosEstaveis.set(nome,estaveis);
                 await salvarEstado(arquivo,estado);
                 console.info('[MULTIRREDE/CICLO]',JSON.stringify(resultado));
             }catch(e){
-                // Reduce only the failing chain on oversized-range failures.
-                // Never skip blocks, reset a cursor, or penalize other networks.
+                // Reduce only the failing chain; preserve its exact next block.
+                // Polygon's "invalid block range params" must not loop forever.
                 const erro=e instanceof Error?e.message:String(e);
                 const atual=tamanhosPorRede.get(nome)??options.range;
-                if((nome==='arbitrum'||nome==='avalanche')&&atual>options.range
-                    &&/block.range|too.large|exceed|max.blocks|limit/i.test(erro)){
-                    const reduzido=Math.max(options.range,Math.floor(atual/2));
+                const reduzido=faixaAposErroRpc(atual,erro);
+                ciclosEstaveis.set(nome,0);
+                if(reduzido!==atual){
                     tamanhosPorRede.set(nome,reduzido);
                     console.warn('[MULTIRREDE/RANGE_RECUO]',JSON.stringify({
                         rede:nome,anterior:atual,novo:reduzido,cursor:progresso.proximoBloco,

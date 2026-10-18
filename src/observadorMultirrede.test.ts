@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {type Log,type JsonRpcProvider} from 'ethers';
 import {
     REDES_AAVE_V3,ifaceAave,alvosDeBorrow,faixasHistoricas,
-    redesSolicitadas,carregarEstado,salvarEstado,verificarRede,faixasSegurasPorRede,tamanhoSeguroPorRede,
+    redesSolicitadas,carregarEstado,salvarEstado,verificarRede,faixasSegurasPorRede,tamanhoSeguroPorRede,faixaAposErroRpc,faixaAposSucessos,
 } from './observadorMultirrede';
 
 test('configuracao read-only: cada rede usa o Pool oficial com seu proprio chainId',()=>{
@@ -82,4 +82,16 @@ test('Arbitrum recupera backlog e limita faixa separadamente das outras redes',(
     assert.equal(tamanhoSeguroPorRede('optimism',50),50);
     assert.equal(tamanhoSeguroPorRede('polygon',50),50);
     assert.throws(()=>tamanhoSeguroPorRede('arbitrum',0),/invalido/);
+});
+
+test('Polygon reduz faixa rejeitada e restaura throughput apenas apos ciclos estaveis',()=>{
+    assert.equal(faixaAposErroRpc(50,'could not coalesce error: invalid block range params'),25);
+    assert.equal(faixaAposErroRpc(25,'invalid block range params'),12);
+    assert.equal(faixaAposErroRpc(1,'invalid block range params'),1);
+    assert.equal(faixaAposErroRpc(50,'network timeout'),50);
+    assert.equal(faixaAposSucessos(12,50,19),12);
+    assert.equal(faixaAposSucessos(12,50,20),24);
+    assert.equal(faixaAposSucessos(24,50,20),48);
+    assert.equal(faixaAposSucessos(48,50,20),50);
+    assert.throws(()=>faixaAposErroRpc(0,'invalid block range params'),/invalida/);
 });
