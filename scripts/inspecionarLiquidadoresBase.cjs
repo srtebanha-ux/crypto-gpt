@@ -43,8 +43,18 @@ async function inspect(addr){
    rpc('eth_getCode',[addr,'latest']),rpc('eth_getStorageAt',[addr,implSlot,'latest'])
   ]);
   details.codeBytes=(code.length-2)/2;
+  if(details.codeBytes<=500)details.proxyRuntimeHex=code;
+  details.eip1967RawStorage=storage;
   if(storage&&/^0x[0-9a-fA-F]{64}$/.test(storage)&&BigInt(storage)>0n)
    details.eip1967Implementation='0x'+storage.slice(-40);
+  for(const selector of ['0x5c60da1b','0xaaf10f42']){
+   try{
+    const reply=await rpc('eth_call',[{to:addr,data:selector},'latest']);
+    if(/^0x[0-9a-fA-F]{64}$/.test(reply)&&BigInt(reply)>0n){
+      (details.readFunctions??={})[selector]='0x'+reply.slice(-40);
+    }
+   }catch(_e){}
+  }
  }catch(e){details.rpcError=String(e.message).slice(0,150)}
  details.verifiedSource=await blockscout(addr);
  if(details.eip1967Implementation){
