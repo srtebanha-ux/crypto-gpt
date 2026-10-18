@@ -5,7 +5,7 @@
  */
 import fs from 'node:fs';
 import {Interface,JsonRpcProvider,Wallet,getAddress,keccak256} from 'ethers';
-import {pisoConservadorV2,codigoFlashArbComDono,WETH_BASE,type CandidatoV2Prova} from './titanV2Prova';
+import {pisoConservadorV2,correspondeFlashArb,WETH_BASE,type CandidatoV2Prova} from './titanV2Prova';
 import {ORACULO_DE_GAS_L1} from './custoDaBase';
 import {conferirJanelaDeNonce} from './janelaDeNonce';
 import {impedimentoTitanContinuo,reservarTitanContinuo,fecharTitanContinuo} from './titanAutorizacaoContinua';
@@ -50,7 +50,7 @@ export async function diagnosticarFlashArbV2(
    const codigo=await rpc.getCode(contrato);
    if(codigo==='0x')
      return {pronto:false,motivo:'endereco sem bytecode na Base'};
-   if(codigo.toLowerCase()!==codigoFlashArbComDono(arquivo,wallet.address).toLowerCase())
+   if(!correspondeFlashArb(codigo,arquivo,wallet.address))
      return {pronto:false,motivo:'bytecode onchain nao corresponde ao FlashArb do executor'};
    const dono=i.decodeFunctionResult('owner',await rpc.call({
      to:contrato,data:i.encodeFunctionData('owner'),
@@ -80,7 +80,7 @@ export async function executarFlashArbV2(
    if(BigInt(await rpc.send('eth_chainId',[]))!==8453n)
      throw Error('RPC nao e Base');
    const onchain=await rpc.getCode(contrato);
-   if(onchain.toLowerCase()!==codigoFlashArbComDono(arquivo,wallet.address).toLowerCase())
+   if(!correspondeFlashArb(onchain,arquivo,wallet.address))
      throw Error('bytecode do FlashArb V2 diverge do solc e owner imutavel');
    const dono= i.decodeFunctionResult('owner',await rpc.call({
      to:contrato,data:i.encodeFunctionData('owner')}))[0] as string;

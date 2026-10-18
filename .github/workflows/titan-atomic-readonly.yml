@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/titan-validacao-atomica-live
+      - fix/titan-v2-runtime-solc-compat-20261018
       - fix/titan-v2-skip-taxed-tokens-20261018
       - fix/titan-v2-atomic-preflight-20261018
       - fix/titan-weth-gas-selection-20261018
