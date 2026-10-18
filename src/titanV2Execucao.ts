@@ -33,6 +33,36 @@ export function habilitacaoV2(env:NodeJS.ProcessEnv):string|null{
     return 'executor V2 implantado, carteira ou teto de gas ausente';
  return null;
 }
+/** Read-only contract preflight at boot: never sends or signs. */
+export async function diagnosticarFlashArbV2(
+ rpcUrl:string,env:NodeJS.ProcessEnv=process.env,
+):Promise<{pronto:boolean;motivo:string}> {
+ if(!env.TITAN_V2_CONTRATO||!env.TITAN_CHAVE_PRIVADA)
+   return {pronto:false,motivo:'contrato ou identidade do executor nao configurados'};
+ let rpc:JsonRpcProvider|undefined;
+ try {
+   const wallet=new Wallet(env.TITAN_CHAVE_PRIVADA);
+   const contrato=getAddress(env.TITAN_V2_CONTRATO);
+   const arquivo=JSON.parse(fs.readFileSync('.tmp/artifacts/FlashArbProva.json','utf8')) as Artifact;
+   rpc=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true});
+   if(BigInt(await rpc.send('eth_chainId',[]))!==8453n)
+     return {pronto:false,motivo:'RPC nao aponta para Base 8453'};
+   const codigo=await rpc.getCode(contrato);
+   if(codigo==='0x')
+     return {pronto:false,motivo:'endereco sem bytecode na Base'};
+   if(codigo.toLowerCase()!==codigoFlashArbComDono(arquivo,wallet.address).toLowerCase())
+     return {pronto:false,motivo:'bytecode onchain nao corresponde ao FlashArb do executor'};
+   const dono=i.decodeFunctionResult('owner',await rpc.call({
+     to:contrato,data:i.encodeFunctionData('owner'),
+   }))[0] as string;
+   if(getAddress(dono)!==wallet.address)
+     return {pronto:false,motivo:'owner do contrato e carteira do TITAN sao diferentes'};
+   return {pronto:true,motivo:'Base 8453, bytecode exato e owner correspondem; nao e prova de lucro'};
+ }catch(e) {
+   return {pronto:false,motivo:'auditoria de implantacao: '+(e instanceof Error?e.message.slice(0,160):'falha desconhecida')};
+ }finally {rpc?.destroy()}
+}
+
 export async function executarFlashArbV2(
  c:CandidatoV2Prova,rpcUrl:string,env:NodeJS.ProcessEnv=process.env,
 ):Promise<ResultadoV2Pago>{
