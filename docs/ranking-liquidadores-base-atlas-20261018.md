@@ -3,7 +3,7 @@ Data da coleta: **2026-10-18 UTC**. Fontes: eventos emitidos no Morpho Blue e Aa
 
 ## Prova: ranking de SETE dias (nao apenas sinais)
 
-**Blocos 52.480.736 até 52.783.136**, janela UTC de ~7 dias. Scanner `scripts/rankearLiquidadoresBase.cjs` concluiu **379 de 379** janelas, **787 eventos de liquidação** Aave+Morpho; relatório JSON no [GitHub Actions — Base Liquidator Leaderboard](https://github.com/srtebanha-ux/crypto-gpt/actions/runs/39164113577).
+**Blocos 52.480.736 até 52.783.136**, janela UTC de ~7 dias. Scanner `scripts/rankearLiquidadoresBase.cjs` concluiu **379 de 379** janelas, **787 eventos de liquidação** Aave+Morpho; relatório JSON no [GitHub Actions — Base Liquidator Leaderboard](https://github.com/srtebanha-ux/crypto-gpt/actions/runs/39163847878).
 
 Critério: evento `LiquidationCall` da Aave pelo campo *liquidator*, e `Liquidate` do Morpho pelo campo *caller*; **não** o endereço `tx.from`. Contagens são de EVENTOS, não lucro em dólares.
 
