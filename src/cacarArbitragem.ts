@@ -48,6 +48,7 @@ import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
 import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, sondasTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
 import { retentarTamanhoPorErroTitan } from './titanTaticas';
 import { priorizarCotacoes } from './titanPriorizacao';
+import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
     type PoolMisto, type CandidataMista, type LeiturasDoEstado, type PernaDescrita,
@@ -1315,7 +1316,7 @@ export function decidir(
     // O GAS EM U. Conhecido so quando U e o WETH: para qualquer outro token eu
     // nao sei a conversao sem um preco, e inventa-la seria fabricar o piso
     // economico. Sem conversao o candidato NAO e aprovavel, e o motivo e dito.
-    if (c.U !== WETH_DA_BASE) {
+    if (c.U.toLowerCase() !== WETH_DA_BASE) {
         return {
             candidato: c, aprovado: false, motivo: 'gasDesconhecido',
             custoEmU: null, liquido: null,
@@ -2284,7 +2285,22 @@ async function principal(): Promise<void> {
         for (const p of pools) anterior.set(p.endereco, p);
 
         const fimDecisao = av.etapa('decisao');
-        const candidatos = montarCandidatos(pools).slice(0, tetoDeRotas);
+        const v2Montadas=montarCandidatos(pools);
+        const custoComparavel=selecionarRotasComGasComparavel(
+            v2Montadas,WETH_DA_BASE,tetoDeRotas);
+        const candidatos=custoComparavel.selecionados;
+        // The old top-50 was sorted by raw numbers across token decimals.
+        // It routinely selected ONLY tokens without any gas conversion.
+        // A candidate whose profit unit is unknown must never be "approved".
+        if(ciclo===1||ciclo%30===0){
+            log.info('[TITAN/GAS-FUNIL] V2 route units verified before profit ranking.',{
+                montadas:v2Montadas.length,
+                comparaveisEmWeth:custoComparavel.comConversao,
+                selecionadas:candidatos.length,
+                semPrecoEmWeth:custoComparavel.semConversao,
+                razao:'semPrecoEmWeth nao e nenhuma oportunidade; rotas seguem sem custo medido',
+            });
+        }
         // O BASEFEE PURO, lido UMA vez, e o preco por gas DERIVADO dele.
         //
         // Antes eu lia `precoDoGasWei` (base + gorjeta) e devolvia o baseFee
