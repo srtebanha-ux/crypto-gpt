@@ -2623,16 +2623,28 @@ async function principal(): Promise<void> {
                 // memoria de recusa e rotas alternativas em lugar de insistir
                 // sempre na mesma rota aparentemente positiva.
                 const validar = process.env.TITAN_VALIDAR_AO_VIVO === '1';
-                const chanceDeNovoEnsaio = Date.now()-ultimoEnsaioAtomicoEm>=60_000;
+                const intervaloEnsaio=Math.max(10_000,Math.min(60_000,
+                    Number(process.env.TITAN_ATOMICA_INTERVALO_MS??'20000')||20_000));
+                const chanceDeNovoEnsaio = Date.now()-ultimoEnsaioAtomicoEm>=intervaloEnsaio;
                 if (validar && chanceDeNovoEnsaio) {
                     const candidatos = exploradorTitan.selecionar(
                         sinais,afetadas,
                         limiteAtomicoSeguro(process.env.TITAN_ATOMICA_MAX_CANDIDATAS),
+                        Date.now(),true, // read-only probes may quantify previously unknown gas
                     );
                     if(candidatos.length>0) {
+                        log.info('[TITAN/ATOMICA/FILA] Candidatos para prova integral onchain sem broadcast.',{
+                            elegiveis:candidatos.length,
+                            permitiuCustoDesconhecido:true,
+                            teto:limiteAtomicoSeguro(process.env.TITAN_ATOMICA_MAX_CANDIDATAS),
+                            brutosPositivos:sinais.filter(x=>x.lucroBrutoEstimado!==null&&x.lucroBrutoEstimado>0n).length,
+                            custoConhecido:sinais.filter(x=>x.lucroLiquidoEstimado!==null).length,
+                            nota:'nenhum sinal autoriza envio sem lucro real positivo medido em eth_call',
+                        });
                         ultimoEnsaioAtomicoEm=Date.now();
                         let melhorExecutavel:(typeof candidatos)[number]|null=null;
                         let melhorGanhoReal:bigint=0n;
+                        let melhorBrutoReal:bigint=0n;
                         for(const c of candidatos){
                             const sn=c.sinal;
                             // Simular separadamente cada rota no executor real,
@@ -2642,15 +2654,20 @@ async function principal(): Promise<void> {
                                 rota:pernasDaCandidata(c.rota,WETH_DA_BASE,sn.melhorTamanho!),
                                 quantia:sn.melhorTamanho!,bloco:blocoDaAmostra,
                                 brutoEstimado:sn.lucroBrutoEstimado!,
-                                liquidoEstimado:sn.lucroLiquidoEstimado!,
+                                // Only for the READ-ONLY eth_call. The real
+                                // profit is independently measured by the
+                                // contract and its L1/L2 gas preflight.
+                                liquidoEstimado:sn.lucroLiquidoEstimado??0n,
                                 estadoConsistente:true,
                             },process.env.TITAN_EXECUTOR_RPC_URL??rpc);
                             exploradorTitan.registrar(sn.rota,resultado.situacao);
                             if(resultado.situacao==='executavel'){
                                 atomicasExecutaveis++;
                                 const ganho=BigInt(resultado.liquidoConservadorWei??'0');
-                                if(ganho>melhorGanhoReal) {
-                                    melhorGanhoReal=ganho;melhorExecutavel=c;
+                                if(ganho>melhorGanhoReal){
+                                    melhorGanhoReal=ganho;
+                                    melhorBrutoReal=BigInt(resultado.brutoWei??'0');
+                                    melhorExecutavel=c;
                                 }
                             }else if(resultado.situacao==='inviavel')atomicasInviaveis++;
                             else atomicasDesconhecidas++;
@@ -2677,8 +2694,11 @@ async function principal(): Promise<void> {
                                 rota:pernasDaCandidata(melhorExecutavel.rota,
                                     WETH_DA_BASE,sn.melhorTamanho!),
                                 quantia:sn.melhorTamanho!,bloco:blocoDaAmostra,
-                                brutoEstimado:sn.lucroBrutoEstimado!,
-                                liquidoEstimado:sn.lucroLiquidoEstimado!,
+                                // The only approval comes from the
+                                // complete EVM simulation, NOT from the
+                                // possibly missing gas-aware quote.
+                                brutoEstimado:melhorBrutoReal,
+                                liquidoEstimado:melhorGanhoReal,
                                 estadoConsistente:true,
                             },process.env.TITAN_EXECUTOR_RPC_URL??rpc);
                             if(['enviado','confirmado','revertido','desconhecido']
