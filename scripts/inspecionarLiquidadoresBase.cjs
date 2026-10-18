@@ -36,6 +36,40 @@ async function blockscout(addr){
    sourceBytes:typeof j.source_code==='string'?j.source_code.length:0};
  }catch(e){return{error:String(e.message).slice(0,150)}}
 }
+async function sourcify(addr) {
+ try {
+  const ac=new AbortController(),t=setTimeout(()=>ac.abort(),10000);
+  let response;try{
+   response=await fetch('https://sourcify.dev/server/v2/contract/8453/'+addr+'?fields=abi,metadata,sources,verifiedAt,match',{signal:ac.signal});
+  }finally{clearTimeout(t)}
+  if(!response.ok)return {status:response.status};
+  const data=await response.json();
+  const abi=Array.isArray(data.abi)?data.abi:[];
+  return {found:true,match:data.match??null,verifiedAt:data.verifiedAt??null,
+   contractName:data.metadata?.settings?.compilationTarget??null,
+   sourceFiles:Object.keys(data.sources??{}).slice(0,25),
+   methodNames:abi.filter(x=>x.type==='function').map(x=>x.name).filter(Boolean).slice(0,110),
+   events:abi.filter(x=>x.type==='event').map(x=>x.name).filter(Boolean).slice(0,45)};
+ }catch(e){return{error:String(e.message).slice(0,140)}}
+}
+function publicSelectors(code){
+ // EVM PUSH4 bytecode candidates, not proof of public function dispatch.
+ const found=new Set();
+ let bytes=Buffer.from(code.slice(2),'hex');
+ for(let i=0;i<bytes.length;i++){
+   const op=bytes[i];
+   if(op===0x63&&i+4<bytes.length)found.add('0x'+bytes.subarray(i+1,i+5).toString('hex'));
+   if(op>=0x60&&op<=0x7f)i+=op-0x5f;
+ }
+ const known=['executeOperation(address,uint256,uint256,address,bytes)',
+  'onMorphoLiquidate(uint256,bytes)','uniswapV3SwapCallback(int256,int256,bytes)',
+  'pancakeV3SwapCallback(int256,int256,bytes)','liquidate(address,address,uint256,bool)',
+  'liquidate((address,address,address,address,uint256),address,uint256,uint256,bytes)',
+  'atlasSolverCall(address,address,uint256,uint256,bytes,bytes)',
+  'withdraw(address,uint256)','sweep(address,address,uint256)'];
+ return {candidateCount:found.size,examples:[...found].slice(0,95),
+  matchesKnown:known.filter(fn=>found.has(id(fn).slice(0,10)))};
+}
 async function inspect(addr){
  const details={address:addr,explorer:'https://basescan.org/address/'+addr+'#code'};
  try{
@@ -44,6 +78,7 @@ async function inspect(addr){
   ]);
   details.codeBytes=(code.length-2)/2;
   if(details.codeBytes<=500)details.proxyRuntimeHex=code;
+  details.selectorAnalysis=publicSelectors(code);
   details.eip1967RawStorage=storage;
   if(storage&&/^0x[0-9a-fA-F]{64}$/.test(storage)&&BigInt(storage)>0n)
    details.eip1967Implementation='0x'+storage.slice(-40);
@@ -57,11 +92,13 @@ async function inspect(addr){
   }
  }catch(e){details.rpcError=String(e.message).slice(0,150)}
  details.verifiedSource=await blockscout(addr);
+ details.sourcify=await sourcify(addr);
  if(details.eip1967Implementation){
   const impl=details.eip1967Implementation;
   details.implementationExplorer='https://basescan.org/address/'+impl+'#code';
   details.implementationSource=await blockscout(impl);
-  try{let code=await rpc('eth_getCode',[impl,'latest']);details.implBytes=(code.length-2)/2}
+  details.implementationSourcify=await sourcify(impl);
+  try{let code=await rpc('eth_getCode',[impl,'latest']);details.implBytes=(code.length-2)/2;details.implSelectors=publicSelectors(code)}
   catch(e){details.implError=String(e.message).slice(0,140)}
  }
  return details;
