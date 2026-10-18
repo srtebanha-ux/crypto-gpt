@@ -4789,7 +4789,7 @@ async function principal(): Promise<'parar' | void> {
                     ultimoSalvoEm=dado.atualizadoEm??0;
                     for(const a of dado.achadas!){
                         if(Number.isSafeInteger(a.bloco) && typeof a.cru==='string'
-                            && /^\\d+$/.test(a.cru))
+                            && /^\d+$/.test(a.cru))
                             achadas.push({...a,cru:BigInt(a.cru)});
                     }
                     // The snapshot must keep its original upper block.
@@ -4838,8 +4838,6 @@ async function principal(): Promise<'parar' | void> {
                 for(const cru of resultado.logs){
                     try{
                         const l=decodificarLiquidacao(cru);
-                        if(achadas.some(a=>a.hash===cru.transactionHash && a.bloco===l.bloco))
-                            continue;
                         achadas.push({bloco:l.bloco,ativo:l.ativoDaDivida,
                             cru:l.dividaCrua,hash:cru.transactionHash,
                             liquidante:l.liquidante});
@@ -4890,6 +4888,9 @@ async function principal(): Promise<'parar' | void> {
             });
             return;
         }
+        // All blocks were eventually read; earlier retried range errors no
+        // longer imply missing coverage.
+        janelasQueFalharam=0;
         const veredicto=veredictoDaVarredura({
             lidas:janelasLidas, falharam:0, achados:achadas.length,
         });
