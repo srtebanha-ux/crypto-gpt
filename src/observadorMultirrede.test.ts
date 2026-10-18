@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {type Log,type JsonRpcProvider} from 'ethers';
 import {
     REDES_AAVE_V3,ifaceAave,alvosDeBorrow,faixasHistoricas,
-    redesSolicitadas,carregarEstado,salvarEstado,verificarRede,
+    redesSolicitadas,carregarEstado,salvarEstado,verificarRede,faixasSegurasPorRede,
 } from './observadorMultirrede';
 
 test('configuracao read-only: cada rede usa o Pool oficial com seu proprio chainId',()=>{
@@ -63,4 +63,13 @@ test('RPC sem contrato Aave V3 nunca produz falso zero',async()=>{
         getCode:async()=> '0x',
     } as unknown as JsonRpcProvider;
     await assert.rejects(verificarRede(fake,REDES_AAVE_V3.arbitrum),/nao implantado/);
+});
+
+test('Avalanche limita burst sem reduzir cadencia Arbitrum',()=>{
+    assert.equal(faixasSegurasPorRede('avalanche',16),3);
+    assert.equal(faixasSegurasPorRede('avalanche',2),2);
+    assert.equal(faixasSegurasPorRede('arbitrum',8),8);
+    assert.equal(faixasSegurasPorRede('polygon',8),8);
+    assert.equal(faixasSegurasPorRede('optimism',8),8);
+    assert.throws(()=>faixasSegurasPorRede('avalanche',0),/invalido/);
 });
