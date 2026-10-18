@@ -50,7 +50,7 @@ import { retentarTamanhoPorErroTitan } from './titanTaticas';
 import { priorizarCotacoes } from './titanPriorizacao';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
-import { executarFlashArbV2 } from './titanV2Execucao';
+import { executarFlashArbV2, diagnosticarFlashArbV2 } from './titanV2Execucao';
 import { selecionarProximaProvaV2 } from './titanV2Selecao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
@@ -1861,6 +1861,19 @@ async function principal(): Promise<void> {
         custoRpc: `maximo ${process.env.ARB_HTTP_RPS ?? 'sem limite'} HTTP/s, `
             + `${process.env.ARB_HTTP_POR_HORA ?? 'sem limite'} HTTP/h`,
     });
+
+    // Checagem de implantacao sem assinar ou gastar gas, antes de procurar ordens.
+    // A permissao de envio NAO basta quando o deploy manual foi feito por outra conta.
+    if (process.env.TITAN_V2_CONTRATO) {
+        const diagnostico = await diagnosticarFlashArbV2(
+            process.env.TITAN_EXECUTOR_RPC_URL ?? rpc,
+        );
+        if (diagnostico.pronto) {
+            log.info('[TITAN/V2-IMPLANTACAO] Executor V2 confere onchain.', diagnostico);
+        } else {
+            log.warn('[TITAN/V2-IMPLANTACAO] Executor V2 NAO pronto para envio.', diagnostico);
+        }
+    }
 
     // O AVISO DE BLOCO: reusa o ouvinte que já existe, com a mesma política de
     // endereço (CACA_WS_URL, ou derivar só com CACA_WS_DERIVAR=1).
