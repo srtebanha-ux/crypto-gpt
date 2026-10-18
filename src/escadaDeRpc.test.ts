@@ -230,12 +230,12 @@ test('historico: quando principal responde, nao usa segundo RPC',async()=>{
     assert.equal(fallbackChamado,0);
 });
 test('historico: archive 403 usa somente eth_getLogs read-only no RPC secundario',async()=>{
-    let pedido:Record<string,unknown>|null=null;
+    const pedidos:Record<string,unknown>[]=[];
     const resultado=await logsComRpcHistorico<{blockNumber:string}>(
         async()=>{throw Error('HTTP 403 archive requires token')},FILTRO_HISTORICO,{
             urlSecundaria:'https://mainnet.base.org',
             buscar:async(_url,init)=>{
-                pedido=JSON.parse(String(init?.body)) as Record<string,unknown>;
+                pedidos.push(JSON.parse(String(init?.body)) as Record<string,unknown>);
                 return {ok:true,json:async()=>({jsonrpc:'2.0',id:1,
                     result:[{blockNumber:'0x124'}]})} as Response;
             },
@@ -243,8 +243,8 @@ test('historico: archive 403 usa somente eth_getLogs read-only no RPC secundario
     assert.equal(resultado.origem,'secundario');
     assert.equal(resultado.provedor,'mainnet.base.org');
     assert.equal(resultado.logs[0]?.blockNumber,'0x124');
-    assert.equal(pedido?.method,'eth_getLogs');
-    assert.deepEqual(pedido?.params,[FILTRO_HISTORICO]);
+    assert.equal(pedidos[0]?.method,'eth_getLogs');
+    assert.deepEqual(pedidos[0]?.params,[FILTRO_HISTORICO]);
 });
 test('historico: 403 dos dois RPCs nunca se torna zero liquidacoes',async()=>{
     await assert.rejects(logsComRpcHistorico(async()=>{throw Error('403 archive')},
