@@ -3484,7 +3484,11 @@ async function principal(): Promise<'parar' | void> {
                 tokens:[meta[0],meta[1]],espaco,fabrica:fabr,
                 confirmadoPelaFactory:confirmado,
                 fabricaDoQuoter,verificado:valido,
-                soDiagnostico:true,novoExecutor:'NAO IMPLANTADO',
+                soDiagnostico:true,
+                executorMultiHopConfigurado:/^0x[0-9a-fA-F]{40}$/.test(process.env.CACA_MULTIHOP_CONTRATO??''),
+                multiHopAvaliacaoLigada:process.env.CACA_MULTIHOP_AVALIAR==='1',
+                slipstreamHabilitada:process.env.CACA_MULTIHOP_SLIPSTREAM==='1',
+                observacao:'Esta funcao so valida cotacao; o MultiHop confere contrato e lucro em rotina separada',
             });
             if(!valido)return;
             const faixas=[1000,10000,40000].map(usd=>({
