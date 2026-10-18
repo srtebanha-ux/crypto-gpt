@@ -62,7 +62,7 @@ describe('TITAN SVR: Atlas solver, WETH-funded bids and 16-position batch',funct
   // Back ETH reserves in WETH. Use 200 ETH from local funded test signer;
   // these are NOT used as TITAN solver funds.
   await trans(owner,weth.address,'0x',parseEther('200'));
-  await send(owner,weth,'criar',[router.address,200n]);
+  await send(owner,weth,'criar',[router.address,2000n]);
   await send(owner,collateral,'criar',[morpho.address,2000n]);
   // Pre-existing funds must not pay a bid, repay, or inflate profit.
   await send(owner,weth,'criar',[solver.address,25n]);
