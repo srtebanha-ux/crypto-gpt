@@ -30,6 +30,7 @@ export interface AlvoCacaPainel {
 export interface CacaPainel {
  observadoEm:string; bloco:number; vigiados:number; podemAtirar:number;
  envioAutorizado:boolean; alvos:AlvoCacaPainel[];
+ placar?:{enviadas:number;confirmadas:number;revertidas:number;semResposta:number};
  ultimoTiro?:{hash:string;bloco:number;estado:'enviado'|'confirmado'|'revertido'|'desconhecido'};
 }
 let cacaRecebido:CacaPainel|null=null;
@@ -51,6 +52,13 @@ export function validarCacaPainel(raw:unknown):CacaPainel|null {
   if(x.lidoEm!==null&&(typeof x.lidoEm!=='string'||!Number.isFinite(Date.parse(x.lidoEm))))return null;
   alvos.push({id:x.id.toLowerCase(),hf:x.hf,faltaPct:x.faltaPct,bloco:x.bloco,lidoEm:x.lidoEm});
  }
+ let placar:CacaPainel['placar'];
+ if(q.placar) {
+  const s=q.placar;
+  if(![s.enviadas,s.confirmadas,s.revertidas,s.semResposta].every(n=>Number.isSafeInteger(n)&&n>=0)
+    ||s.enviadas<s.confirmadas+s.revertidas+s.semResposta)return null;
+  placar={enviadas:s.enviadas,confirmadas:s.confirmadas,revertidas:s.revertidas,semResposta:s.semResposta};
+ }
  let ultimoTiro:CacaPainel['ultimoTiro'];
  if(q.ultimoTiro && /^0x[0-9a-fA-F]{64}$/.test(q.ultimoTiro.hash)
     &&Number.isSafeInteger(q.ultimoTiro.bloco)
@@ -59,7 +67,7 @@ export function validarCacaPainel(raw:unknown):CacaPainel|null {
  }
  return{observadoEm:q.observadoEm,bloco:q.bloco!,vigiados:q.vigiados!,
   podemAtirar:q.podemAtirar!,envioAutorizado:q.envioAutorizado!,alvos,
-  ...(ultimoTiro?{ultimoTiro}:{})};
+  ...(placar?{placar}:{}),...(ultimoTiro?{ultimoTiro}:{})};
 }
 export interface EstadoTitan {
  startedAt:string;updatedAt:string;
