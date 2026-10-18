@@ -14,8 +14,9 @@ export type CandidatoV2Prova = {
     venda:{endereco:string;lidoEm:number};
     T:string; U:string;quantia:bigint;
 };
-type Artifact = {runtime:string;creation:string;
+type RuntimeArtifact = {runtime:string;creation:string;
     ownerReferences:Array<{start:number;length:number}>};
+type Artifact = RuntimeArtifact & {variantes?:RuntimeArtifact[]};
 export type ProvaV2 = {
     estado:'executavel-em-override'|'inviavel'|'desconhecido';
     motivo:string; bloco:number|null; contratoVirtual?:string;
@@ -42,6 +43,36 @@ export function codigoFlashArbComDono(a:Artifact,owner:string):string{
         hex=hex.slice(0,ref.start*2)+dono+hex.slice((ref.start+32)*2);
     }
     return '0x'+hex;
+}
+/**
+ * Solc appends CBOR metadata after the generated executable code.
+ * Source path alone can change this suffix while instructions remain identical.
+ * Permit only the exact executable code of compiler-built, known FlashArb
+ * variants, with immutable owner patched. Do NOT ignore executable bytes.
+ */
+function executarSemMetadataSolc(codigo:string):string|null{
+ if(!/^0x(?:[0-9a-fA-F]{2})+$/.test(codigo))return null;
+ const hex=codigo.slice(2).toLowerCase();
+ if(hex.length<8)return null;
+ const metadataBytes=parseInt(hex.slice(-4),16);
+ if(metadataBytes<8||metadataBytes>1024||metadataBytes*2+4>=hex.length)
+   return null;
+ const inicio=hex.length-4-metadataBytes*2;
+ const metadata=hex.slice(inicio,hex.length-4);
+ if(!/^a[0-9a-f]/.test(metadata))return null;
+ return hex.slice(0,inicio);
+}
+export function correspondeFlashArb(
+ onchain:string,artefato:Artifact,owner:string,
+):boolean{
+ const observado=executarSemMetadataSolc(onchain);
+ const variantes=[artefato,...(artefato.variantes??[])];
+ return variantes.some((a)=>{
+   const esperado=codigoFlashArbComDono(a,owner);
+   if(onchain.toLowerCase()===esperado.toLowerCase())return true;
+   const compilado=executarSemMetadataSolc(esperado);
+   return observado!==null&&compilado!==null&&observado===compilado;
+ });
 }
 export function pisoConservadorV2(
     gasEstimado:bigint,gasMax:bigint,baseFee:bigint,gorjeta:bigint,
