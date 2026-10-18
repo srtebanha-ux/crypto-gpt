@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { priorizarCotacoes } from './titanPriorizacao';
+import { priorizarCotacoes, MemoriaDeCotacoesNegativas } from './titanPriorizacao';
 import type { CandidataMista, Triagem, VeredictoDoSpread } from './rotasMistas';
 
 const candidata = (chave: string): CandidataMista => ({
@@ -67,4 +67,34 @@ test('justica: rotas de spread positivo fora do top nao ficam eternamente adiada
             ['a43','a42','a41','a40','a39','a38']);
     }
     assert.equal(historico.size,44);
+});
+
+test('mesmo estado negativo nao repete cotacao; TTL e mudanca do pool reabrem',()=>{
+ const m=new MemoriaDeCotacoesNegativas(120_000);
+ const rota={...candidata('x'),pernas:[{pool:'0xAB'},{pool:'0xCD'}]} as CandidataMista;
+ const velho=new Map([['0xab','v3:123/L456'],['0xcd','ae:1/2']]);
+ assert.equal(m.deveCotar(rota,velho,0),true);
+ assert.equal(m.registrar(rota,velho,-1n,true,100),true);
+ assert.equal(m.deveCotar(rota,velho,101),false);
+ assert.equal(m.venceu(rota,velho,119_000),false);
+ assert.equal(m.deveCotar(rota,velho,120_100),true);
+ assert.equal(m.venceu(rota,velho,120_100),true);
+ const novo=new Map([['0xab','v3:124/L456'],['0xcd','ae:1/2']]);
+ assert.equal(m.deveCotar(rota,novo,102),true);
+ assert.equal(m.venceu(rota,novo,102),false);
+});
+test('lucro positivo, dados ausentes ou inconsistencia nunca suprimem validacao',()=>{
+ const m=new MemoriaDeCotacoesNegativas();
+ const rota={...candidata('z'),pernas:[{pool:'0xAB'},{pool:'0xCD'}]} as CandidataMista;
+ const ok=new Map([['0xab','v3:123/L456'],['0xcd','ae:1/2']]);
+ const desconhecido=new Map([['0xab',null],['0xcd','ae:1/2']]);
+ assert.equal(m.registrar(rota,ok,-7n,false,100),false);
+ assert.equal(m.deveCotar(rota,ok,101),true);
+ assert.equal(m.registrar(rota,desconhecido,-7n,true,100),false);
+ assert.equal(m.registrar(rota,ok,10n,true,100),false);
+ assert.equal(m.deveCotar(rota,ok,101),true);
+ assert.equal(m.registrar(rota,ok,0n,true,100),true);
+ assert.equal(m.deveCotar(rota,ok,101),false);
+ assert.equal(m.registrar(rota,ok,null,true,102),false);
+ assert.equal(m.deveCotar(rota,ok,103),true);
 });

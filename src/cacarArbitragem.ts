@@ -47,7 +47,7 @@ import { executarTitan, simularTitanAoVivo } from './titanExecucao';
 import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
 import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, sondasTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
 import { retentarTamanhoPorErroTitan } from './titanTaticas';
-import { priorizarCotacoes } from './titanPriorizacao';
+import { priorizarCotacoes, MemoriaDeCotacoesNegativas } from './titanPriorizacao';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
 import { executarFlashArbV2, diagnosticarFlashArbV2 } from './titanV2Execucao';
@@ -2131,6 +2131,10 @@ async function principal(): Promise<void> {
     let tentativasTitan = 0;
     let ultimoEnsaioTitanEm = 0;
     const pendentesCotacao = new Set<string>();
+    const memoriaDeCotacoesNegativas = new MemoriaDeCotacoesNegativas(
+        Math.max(1_000,Math.min(600_000,
+            Number(process.env.TITAN_RECHECK_NEGATIVAS_MS??120_000)||120_000)),
+    );
     // Gas-free V2 checks are limited and diverse. Never hammer a toxic
     // token/pool or mistake an old estimate for a current arbitrage.
     const ultimaProvaV2=new Map<string,number>();
@@ -2147,6 +2151,12 @@ async function principal(): Promise<void> {
     // rodar, e reler a mesma janela no primeiro ciclo gastaria RPC para receber
     // a resposta que acabou de chegar.
     let ultimaRedescoberta = Date.now();
+    // Busca de pools em paralelo ao loop de cotacao: uma varredura de 150
+    // blocos pode levar > 1 minuto com RPC de 2 requests/s.
+    // O MESMO transporte e orçamento são compartilhados com o scanner.
+    let redescobertaEmAndamento = false;
+    let redescobertaPronta: Awaited<ReturnType<typeof universoPorAtividade>> | null = null;
+    let redescobertaFalha: string | null = null;
 
     // O ORCAMENTO DO EXPERIMENTO, por ordem dela: *"observação em tempo real,
     // sem envios, com orçamento limitado de chamadas RPC e duração máxima de 20
@@ -2220,16 +2230,38 @@ async function principal(): Promise<void> {
         // `eth_blockNumber` + N `eth_getBlockReceipts` (N = ARB_ATIVIDADE_BLOCOS)
         // + ~3 multicalls de token/taxa. `ARB_REDESCOBRIR_MIN=0` desliga.
         const minutosDaRedescoberta = Number(process.env.ARB_REDESCOBRIR_MIN ?? 5);
-        if (minutosDaRedescoberta > 0
+        if (minutosDaRedescoberta > 0 && !redescobertaEmAndamento
             && Date.now() - ultimaRedescoberta >= minutosDaRedescoberta * 60_000) {
             ultimaRedescoberta = Date.now();
+            redescobertaEmAndamento = true;
+            // Sem await: continuar cotando enquanto os logs de swap são lidos.
+            // O mesmo transporte continua impondo o teto global de RPC.
+            void universoPorAtividade(chamar, {
+                blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
+                tetoDePools: Number(process.env.ARB_ATIVIDADE_TETO ?? 300),
+            }).then((nova) => { redescobertaPronta = nova; })
+              .catch((e) => { redescobertaFalha = String(e).slice(0, 160); })
+              .finally(() => { redescobertaEmAndamento = false; });
+            log.info('[UNIVERSO] Redescoberta em paralelo (sem bloquear cotacoes).', {
+                blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
+                observacao: 'sem broadcast e com o mesmo limite RPC',
+            });
+        }
+        if (redescobertaFalha !== null) {
+            log.warn('[UNIVERSO] Redescoberta em paralelo falhou; scanner segue.', {
+                erro: redescobertaFalha,
+            });
+            redescobertaFalha = null;
+        }
+        // A conclusão ocorre em callback assíncrono. A anotação explícita
+        // evita que o fluxo síncrono do TypeScript a estreite para 'never'.
+        const novaPronta = redescobertaPronta as
+            Awaited<ReturnType<typeof universoPorAtividade>> | null;
+        if (novaPronta !== null) {
+            const nova = novaPronta;
+            redescobertaPronta = null;
             const fimRe = av.etapa('leitura');
             try {
-                // eslint-disable-next-line no-await-in-loop
-                const nova = await universoPorAtividade(chamar, {
-                    blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
-                    tetoDePools: Number(process.env.ARB_ATIVIDADE_TETO ?? 300),
-                });
                 fimRe();
                 if (nova.metodoIndisponivel) {
                     log.warn('[UNIVERSO] Redescoberta NÃO rodou: o nó não tem '
@@ -2459,13 +2491,18 @@ async function principal(): Promise<void> {
             const poolsQueMudaram = new Set(ESTADOS_DOS_POOLS.mudaram(cru));
             // Carrega a pequena fila adiada do ciclo anterior: sem isso, uma rota
             // nao selecionada desaparece se os pools nao mudarem novamente.
-            const afetadasPotenciais = tri.valem.filter(
+            const selecionaveisPeloEstado=tri.valem.filter(
                 (c) => pendentesCotacao.has(c.chave)
-                    || c.pernas.some((p) => poolsQueMudaram.has(p.pool.toLowerCase())),
+                    || c.pernas.some((p) => poolsQueMudaram.has(p.pool.toLowerCase()))
+                    || memoriaDeCotacoesNegativas.venceu(c,cru,Date.now()),
             );
+            const afetadasPotenciais=selecionaveisPeloEstado.filter(
+                (c)=>memoriaDeCotacoesNegativas.deveCotar(c,cru,Date.now()),
+            );
+            const repetidasEvitadas=selecionaveisPeloEstado.length-afetadasPotenciais.length;
             const escolha = priorizarCotacoes(
                 afetadasPotenciais, tri, tetoCotarRotas, FM.estadosAvaliados,
-                process.env.TITAN_ROTACIONAR_COTACOES==='1',
+                process.env.TITAN_ROTACIONAR_COTACOES!=='0',
             );
             const afetadas = escolha.selecionadas;
             const escolhidas = new Set(afetadas.map((c) => c.chave));
@@ -2651,7 +2688,15 @@ async function principal(): Promise<void> {
                     if (rota === undefined) continue;
                     const poolsDaRota = rota.pernas.map((p) => p.pool);
                     const v = compararEstados(cru, cruDepois, poolsDaRota);
-                    if (v === 'CONSISTENTE') { FM.estadosConsistentes += 1; continue; }
+                    if (v === 'CONSISTENTE') {
+                        FM.estadosConsistentes += 1;
+                        if(!sn.motivo.startsWith('EXPIRADO')){
+                            memoriaDeCotacoesNegativas.registrar(
+                                rota,cru,sn.lucroLiquidoEstimado,true,Date.now(),
+                            );
+                        }
+                        continue;
+                    }
                     if (v === 'NAO_VALIDADA') {
                         FM.estadoNaoValidado += 1;
                         sn.motivo = 'ESTADO_NAO_VALIDADO: não li algum pool desta rota na '
@@ -2802,6 +2847,7 @@ async function principal(): Promise<void> {
                     + 'outras têm os dois pools no MESMO estado já avaliado, e recotar repetiria '
                     + 'a resposta',
                 cotacoesExecutadas: cotadasAgora,
+                repeticoesNegativasEvitadas: repetidasEvitadas,
                 cotacoesAdiadasPorCapacidade: escolha.adiadas,
                 pendentesCotacao: pendentesCotacao.size,
                 mudancasIntrabloco: `${INTRABLOCO.detectadas} estado(s) novo(s) detectado(s) com `
