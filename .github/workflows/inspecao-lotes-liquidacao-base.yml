@@ -1,0 +1,27 @@
+name: Inspect Base Liquidation Batches (Read-only)
+on:
+  push:
+    branches: [feat/inspecao-executor-batch-base-20261018]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Confirm batches, recipient contracts, selector and real gas on Base
+        run: node scripts/inspecionarLotesLiquidacaoBase.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: base-batch-liquidator-reverse-engineering
+          path: .tmp/base-batch-liquidator-audit.json
+          if-no-files-found: warn
+          retention-days: 14
