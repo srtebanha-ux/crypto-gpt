@@ -1,0 +1,16 @@
+name: Probe Morpho Base Indexer (Read-only)
+on:
+  push:
+    branches: [feat/ranking-morpho-graphql-20261018]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: node scripts/probeMorphoGraphql.cjs
