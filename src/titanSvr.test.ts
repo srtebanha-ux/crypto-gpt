@@ -51,7 +51,19 @@ test('bid only if gross beats oracle fees, slippage, swap, min net and safety',(
  }
  assert.equal(planejarLanceSvr({...base,lanceCompetidorWei:650n}).permitido,false);
  assert.equal(planejarLanceSvr({...base,custoGasEAtualizacaoOracleWei:780n}).permitido,false);
- assert.equal(planejarLanceSvr({...base,lanceCompetidorWei:undefined}).permitido,false);
+ const semRival=planejarLanceSvr({...base,lanceCompetidorWei:undefined});
+ assert.equal(semRival.permitido,true);
+ if(semRival.permitido) {
+  // gross 1000 - costs 280 - min-net 100 = 620;
+  // ceiling 80% of 620 = 496; fallback 75% of ceiling = 372
+  assert.equal(semRival.lanceWei,372n);
+  assert.equal(semRival.lucroLiquidoPrevistoWei,348n);
+  assert.equal(semRival.origemLance,'proprio');
+ }
+ assert.equal(planejarLanceSvr({...base,lanceCompetidorWei:undefined,
+   fracaoTetoSemRivalBps:10001}).permitido,false);
+ assert.equal(planejarLanceSvr({...base,lanceCompetidorWei:undefined,
+   lucroBrutoEsperadoWei:381n}).permitido,false);
  assert.equal(planejarLanceSvr({...base,lucroBrutoEsperadoWei:-5n}).permitido,false);
  assert.equal(planejarLanceSvr({...base,limiteOfertaBps:10000}).permitido,false);
 });
