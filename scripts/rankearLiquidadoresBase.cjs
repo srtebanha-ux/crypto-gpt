@@ -18,7 +18,7 @@ const MORPHO_ABI=new Interface([
 ]);
 const AAVE_TOPIC=id('LiquidationCall(address,address,address,uint256,uint256,address,bool)');
 const MORPHO_TOPIC=id('Liquidate(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)');
-const RPCS=(process.env.RANK_RPC_URLS||'https://base-rpc.publicnode.com,https://mainnet.base.org')
+const RPCS=(process.env.RANK_RPC_URLS||'https://base.gateway.tenderly.co,https://base.drpc.org')
  .split(',').map(x=>x.trim()).filter(x=>/^https:\/\//.test(x));
 const wait=(ms)=>new Promise(resolve=>setTimeout(resolve,ms));
 let callCount=0;
@@ -156,9 +156,10 @@ async function main(){
  const endTime=Number(BigInt(topHeader.timestamp));
  const start=await findBlockAt(endTime-days*86400,top);
  const total=top-start+1;
- const chunk=Number(process.env.RANK_CHUNK||'1500');
+ const chunk=Number(process.env.RANK_CHUNK||'800');
  if(!Number.isInteger(chunk)||chunk<100||chunk>5000)throw Error('RANK_CHUNK 100..5000');
  const maxChunks=Math.ceil(total/chunk);
+ if(RPCS.length===0)throw Error('No archive RPCs; use Tenderly or dRPC');
  console.log('[RANK] Base 8453 | start='+start+' top='+top+' days='+days+
   ' windows='+maxChunks+' | Aave '+AAVE+' Morpho '+MORPHO);
  let all=[],windows=0,missed=[];
