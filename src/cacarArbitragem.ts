@@ -2226,6 +2226,22 @@ async function principal(): Promise<void> {
                             + 'publicado como ausência',
                     });
                 } else {
+                    // Entra no universo V2 efetivo, nao apenas na memoria dos concentrados.
+                    // Nao presumimos lucro: o scanner e as provas atomicas continuam
+                    // fazendo todas as validacoes economicas antes de qualquer envio.
+                    const novosV2 = nova.pools.filter((pool) => !universo.porFabrica.has(pool));
+                    for (const pool of novosV2) {
+                        const fabrica = nova.porFabrica.get(pool);
+                        if (fabrica === undefined) continue;
+                        universo.pools.push(pool);
+                        universo.porFabrica.set(pool, fabrica);
+                    }
+                    if (novosV2.length > 0) {
+                        log.info('[UNIVERSO/V2] Pools ativos incorporados sem reiniciar.', {
+                            novos: novosV2.length, totalV2: universo.pools.length,
+                            regra: 'somente fabrica reconhecida; nenhuma ordem sem prova atomica',
+                        });
+                    }
                     const antesDeRotas = MISTAS.length;
                     const j = juntar(
                         memoria,
@@ -3210,12 +3226,26 @@ export async function universoPorAtividade(
         });
     }
 
-    const fatias = await emLote(candidatos.slice(0, teto * 2), async (pool) => ({
-        pool, fabrica: endDe(await lerComPaciencia(chamar, pool, SELETORES.factory)),
-    }));
-    for (const { pool, fabrica } of fatias) {
+    // Os V2 nao concorrem por posicao com V3/Aerodrome no corte global.
+    // No universo anterior, os concentrados mais ativos podiam consumir
+    // candidatos.slice(0, teto*2) antes de verificar um unico V2.
+    // E factory() passa pelo mesmo MULTICALL que ja le tokens, sem centenas
+    // de eth_call individuais no caminho de descoberta.
+    const ativosV2 = candidatos.filter((pool) => tipoVisto.get(pool) === 'v2')
+        .slice(0, teto * 2);
+    const lidosDaFabrica = await lerEmLote(chamar, ativosV2.map((pool) => ({
+        alvo: pool, dados: SELETORES.factory,
+    })));
+    for (let i = 0; i < ativosV2.length; i += 1) {
+        const pool = ativosV2[i]!;
+        const resposta = lidosDaFabrica[i];
+        if (resposta === undefined || !resposta.ok) { falhas += 1; continue; }
+        const fabrica = endDe(resposta.dados);
         if (fabrica === null) { falhas += 1; continue; }
-        if (!aceitas.has(fabrica)) { recusadosPorFabrica += 1; continue; }
+        if (!aceitas.has(fabrica.toLowerCase())) {
+            recusadosPorFabrica += 1;
+            continue;
+        }
         if (pools.length >= teto) break;
         pools.push(pool);
         porFabrica.set(pool, fabrica);
