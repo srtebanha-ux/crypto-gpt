@@ -4,6 +4,7 @@ import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
 import { createLogger } from './logger';
 import { configurarRadarCaca, atualizarRadarCaca, registrarAlvoCaca, registrarTiroCaca, registrarPlacarCaca } from './cacaTelemetria';
 import { iniciarObservadorSvr } from './titanSvrObservador';
+import { triarLeilaoSvr } from './titanSvrTriagem';
 import { iniciarMonitorProntidaoSvr } from './titanSvrDiagnostico';
 import { iniciarRadarMorphoMultirrede } from './titanRadarMorphoMultirrede';
 import { exigirAtivacao } from './ativacao';
@@ -2951,7 +2952,17 @@ async function principal(): Promise<'parar' | void> {
     // Independente do caminho Aave e Morpho. Somente assiste leiloes Atlas,
     // sem chaves, sem novas transacoes e sem aguardar RPC nem bloquear tiros.
     // Ativado apenas com TITAN_SVR_OBSERVAR=1.
-    iniciarObservadorSvr(log);
+    iniciarObservadorSvr(log,(auction)=>{
+        const triagem=triarLeilaoSvr(auction,process.env);
+        log.info('[TITAN/SVR-TRIAGEM] Preco futuro e bloqueios financeiros.',{
+            auctionId:auction.id,agregador:auction.precoPrevisto?.aggregador??null,
+            novoPreco:auction.precoPrevisto?.medianPrice.toString()??null,
+            dapp:auction.dapp??null,
+            prontoParaEnviar:triagem.prontoParaEnviar,
+            bloqueios:triagem.bloqueios,
+            nota:'Triagem de hints nao substitui posicao onchain, simulacao ou recibo'
+        });
+    });
     // Leitura publica do Atlas: bond + bytecode do executor, sem envio nem assinatura.
     iniciarMonitorProntidaoSvr(log,leitor,donoCarteira);
     // Monitor Morpho across EVM networks; READ ONLY and independent of the Base sender.
