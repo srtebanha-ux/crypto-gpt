@@ -1,0 +1,24 @@
+name: Atlas SVR Base Auction Transaction Decoding
+on:
+  push:
+    branches: [feat/forense-vencedor-morpho-base-20261018]
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  atlas-forensic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '22',cache: npm}
+      - run: npm ci
+      - name: Decode actual Atlas metacall bids and executed solver receipt events
+        run: node scripts/decodificarAtlasMorphoBase.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: atlas-morpho-auctions
+          path: .tmp/atlasMorphoLeiloes.json
+          if-no-files-found: ignore
+          retention-days: 14
