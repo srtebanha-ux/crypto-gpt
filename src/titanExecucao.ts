@@ -483,6 +483,18 @@ export function avaliarEnsaioTitan(
         : {situacao:'inviavel',motivo:'lucro bruto simulado menor que gas total e margem',...dados};
 }
 
+/**
+ * A heuristic quote may have been calculated several Base blocks earlier;
+ * the full eth_call is intentionally executed at latest and verifies current
+ * profit instead. This only permits doing that READ-ONLY check, never sending
+ * based on an old quote: executarTitan re-simulates and guards block/nonce.
+ */
+export function blocoValidoParaProvaAtomica(blocoDaCotacao:number,blocoAtual:number):boolean{
+    return Number.isSafeInteger(blocoDaCotacao)&&blocoDaCotacao>0
+        &&Number.isSafeInteger(blocoAtual)&&blocoAtual>=blocoDaCotacao
+        &&blocoAtual-blocoDaCotacao<=20;
+}
+
 export async function simularTitanAoVivo(
     plano:PlanoTitan,rpcUrl:string,ambiente:NodeJS.ProcessEnv=process.env
 ):Promise<EnsaioAtomicoTitan>{
@@ -517,8 +529,8 @@ export async function simularTitanAoVivo(
         const block=await rpc.getBlock('latest');
         if(!block?.baseFeePerGas || block.baseFeePerGas<=0n)throw Error('baseFee indisponivel');
         bloco=block.number;
-        if(bloco-plano.bloco>3 || bloco<plano.bloco)
-            return{situacao:'desconhecido',motivo:'cotacao anterior a 3 blocos; nao simular stale',bloco};
+        if(!blocoValidoParaProvaAtomica(plano.bloco,bloco))
+            return{situacao:'desconhecido',motivo:'cotacao anterior a 20 blocos; prova atomica cancelada',bloco};
         const data=ABI_TITAN.encodeFunctionData('executarRota',[
             plano.rota,plano.quantia,0n
         ]);

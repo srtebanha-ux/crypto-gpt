@@ -35,3 +35,22 @@ test('qualquer configuracao inesperada conserva limite de consultas por ciclo',(
         assert.equal(limiteAtomicoSeguro(bad),2);
     assert.equal(limiteAtomicoSeguro('4'),4);
 });
+
+test('sonda atomica read-only investiga custo desconhecido sem promover estimativa a lucro',()=>{
+    const e=new ExploradorDeRotasTitan();
+    const sinais=[
+        {...signal('nao-simulada',5n),lucroLiquidoEstimado:null},
+        {...signal('sem-spread',-5n),lucroLiquidoEstimado:null,lucroBrutoEstimado:0n},
+        {...signal('inconsistente',-5n),lucroLiquidoEstimado:null,motivo:'ESTADO_INCONSISTENTE'},
+        signal('confirmado',20n,35n),
+    ];
+    const rs=sinais.map(x=>rota(x.rota));
+    // Old strict selector still forbids unknown costs, preserving API invariants.
+    assert.deepEqual(e.selecionar(sinais,rs,4,1000).map(x=>x.sinal.rota),['confirmado']);
+    // New probe is NOT a transaction: allows missing gas only to MEASURE it.
+    assert.deepEqual(e.selecionar(sinais,rs,4,1000,true).map(x=>x.sinal.rota),
+        ['confirmado','nao-simulada']);
+    e.registrar('nao-simulada','inviavel',1000);
+    assert.deepEqual(e.selecionar(sinais,rs,4,2000,true).map(x=>x.sinal.rota),
+        ['confirmado']);
+});
