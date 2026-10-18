@@ -2151,6 +2151,12 @@ async function principal(): Promise<void> {
     // rodar, e reler a mesma janela no primeiro ciclo gastaria RPC para receber
     // a resposta que acabou de chegar.
     let ultimaRedescoberta = Date.now();
+    // Busca de pools em paralelo ao loop de cotacao: uma varredura de 150
+    // blocos pode levar > 1 minuto com RPC de 2 requests/s.
+    // O MESMO transporte e orçamento são compartilhados com o scanner.
+    let redescobertaEmAndamento = false;
+    let redescobertaPronta: Awaited<ReturnType<typeof universoPorAtividade>> | null = null;
+    let redescobertaFalha: string | null = null;
 
     // O ORCAMENTO DO EXPERIMENTO, por ordem dela: *"observação em tempo real,
     // sem envios, com orçamento limitado de chamadas RPC e duração máxima de 20
@@ -2224,16 +2230,34 @@ async function principal(): Promise<void> {
         // `eth_blockNumber` + N `eth_getBlockReceipts` (N = ARB_ATIVIDADE_BLOCOS)
         // + ~3 multicalls de token/taxa. `ARB_REDESCOBRIR_MIN=0` desliga.
         const minutosDaRedescoberta = Number(process.env.ARB_REDESCOBRIR_MIN ?? 5);
-        if (minutosDaRedescoberta > 0
+        if (minutosDaRedescoberta > 0 && !redescobertaEmAndamento
             && Date.now() - ultimaRedescoberta >= minutosDaRedescoberta * 60_000) {
             ultimaRedescoberta = Date.now();
+            redescobertaEmAndamento = true;
+            // Sem await: continuar cotando enquanto os logs de swap são lidos.
+            // O mesmo transporte continua impondo o teto global de RPC.
+            void universoPorAtividade(chamar, {
+                blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
+                tetoDePools: Number(process.env.ARB_ATIVIDADE_TETO ?? 300),
+            }).then((nova) => { redescobertaPronta = nova; })
+              .catch((e) => { redescobertaFalha = String(e).slice(0, 160); })
+              .finally(() => { redescobertaEmAndamento = false; });
+            log.info('[UNIVERSO] Redescoberta em paralelo (sem bloquear cotacoes).', {
+                blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
+                observacao: 'sem broadcast e com o mesmo limite RPC',
+            });
+        }
+        if (redescobertaFalha !== null) {
+            log.warn('[UNIVERSO] Redescoberta em paralelo falhou; scanner segue.', {
+                erro: redescobertaFalha,
+            });
+            redescobertaFalha = null;
+        }
+        if (redescobertaPronta !== null) {
+            const nova = redescobertaPronta;
+            redescobertaPronta = null;
             const fimRe = av.etapa('leitura');
             try {
-                // eslint-disable-next-line no-await-in-loop
-                const nova = await universoPorAtividade(chamar, {
-                    blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
-                    tetoDePools: Number(process.env.ARB_ATIVIDADE_TETO ?? 300),
-                });
                 fimRe();
                 if (nova.metodoIndisponivel) {
                     log.warn('[UNIVERSO] Redescoberta NÃO rodou: o nó não tem '
