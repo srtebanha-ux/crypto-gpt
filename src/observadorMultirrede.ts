@@ -105,6 +105,18 @@ export async function verificarRede(provider:JsonRpcProvider,rede:RedeAave):Prom
     if(code==='0x')throw new Error('Aave V3 Pool nao implantado neste RPC');
     return block;
 }
+/**
+ * Avalanche's public RPC intermittently rejects >6 log queries in one burst.
+ * It supports two eth_getLogs per slice (Borrow and LiquidationCall).
+ * Limit this chain alone to three 50-block slices each cycle, while the fast
+ * Arbitrum feed retains enough throughput to catch up with incoming blocks.
+ */
+export function faixasSegurasPorRede(rede:NomeRede,faixasSolicitadas:number):number{
+    if(!Number.isSafeInteger(faixasSolicitadas)||faixasSolicitadas<1)
+        throw new Error('faixasSolicitadas invalido');
+    return rede==='avalanche'?Math.min(3,faixasSolicitadas):faixasSolicitadas;
+}
+
 export interface ResultadoMonitoramento {
     rede:NomeRede;bloco:number;proximoBloco:number;
     devedoresNoCache:number;avaliados:number;
@@ -199,7 +211,8 @@ export async function iniciarObservadorMultirrede():Promise<void>{
             const progresso=estado.redes[nome]??{proximoBloco:0,observados:[],proximoIndice:0};
             estado.redes[nome]=progresso;
             try{
-                const resultado=await monitorarRede(rede,providers.get(nome)!,progresso,options);
+                const seguro={...options,faixasPorCiclo:faixasSegurasPorRede(nome,options.faixasPorCiclo)};
+                const resultado=await monitorarRede(rede,providers.get(nome)!,progresso,seguro);
                 await salvarEstado(arquivo,estado);
                 console.info('[MULTIRREDE/CICLO]',JSON.stringify(resultado));
             }catch(e){
