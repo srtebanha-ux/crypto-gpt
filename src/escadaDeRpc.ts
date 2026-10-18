@@ -282,3 +282,14 @@ export async function logsComRpcHistorico<T>(
         }finally{clearTimeout(timeout)}
     }
 }
+
+/** Inclusive historical ranges, scanned backwards with no overlap or gaps. */
+export function faixaHistoricaReversa(ate:number,inicio:number,tamanho:number):{
+    de:number;ate:number;proximoAte:number;
+}{
+    if(![ate,inicio,tamanho].every(Number.isSafeInteger)
+        ||inicio<0||ate<inicio||tamanho<1)
+        throw new Error('faixa historica invalida');
+    const de=Math.max(inicio,ate-tamanho+1);
+    return {de,ate,proximoAte:de-1};
+}
