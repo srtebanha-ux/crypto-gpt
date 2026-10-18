@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/titan-validacao-atomica-live
+      - feat/titan-rebote-morpho-atlas-20261018
       - feat/titan-rebote-liquidacoes-20261018
       - feat/titan-cacador-unificado-20261018
       - feat/titan-painel-tempo-real-20261018
