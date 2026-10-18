@@ -22,9 +22,9 @@ jobs:
       - run: npm ci
       - name: Test event attribution before counting
         run: node --test scripts/rankearLiquidadoresBase.test.cjs
-      - name: Scan 7 days of real Base Aave and Morpho liquidations
+      - name: Scan recent 24h of Base Aave and Morpho liquidations (fast check)
         env:
-          RANK_DAYS: '7'
+          RANK_DAYS: '1'
           RANK_CHUNK: '1500'
         run: node scripts/rankearLiquidadoresBase.cjs
       - uses: actions/upload-artifact@v4
