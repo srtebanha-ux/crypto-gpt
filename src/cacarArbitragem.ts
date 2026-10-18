@@ -2253,8 +2253,12 @@ async function principal(): Promise<void> {
             });
             redescobertaFalha = null;
         }
-        if (redescobertaPronta !== null) {
-            const nova = redescobertaPronta;
+        // A conclusão ocorre em callback assíncrono. A anotação explícita
+        // evita que o fluxo síncrono do TypeScript a estreite para 'never'.
+        const novaPronta = redescobertaPronta as
+            Awaited<ReturnType<typeof universoPorAtividade>> | null;
+        if (novaPronta !== null) {
+            const nova = novaPronta;
             redescobertaPronta = null;
             const fimRe = av.etapa('leitura');
             try {
