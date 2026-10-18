@@ -4847,10 +4847,25 @@ async function principal(): Promise<'parar' | void> {
                 ultimaRecusa=null;
                 freio.passou();
                 await salvar(); // checkpoint advances ONLY after a successful read
-                await dormir(100);
+                // Keyless archive gateway: max 2 RPC/s; never burst so quickly
+                // that subsequent eth_getLogs receive HTTP 429.
+                await dormir(650);
             }catch(e){
                 janelasQueFalharam+=1;
                 ultimaRecusa=e instanceof Error?e.message:String(e);
+                // HTTP 429 is a request-rate throttle, NOT a range-size limit.
+                // Reducing from 1800 to 50 blocks after 429 wastes thousands
+                // of requests. Keep the range, respect a cooldown and retry.
+                if(/HTTP 429|too many requests|rate.limit/i.test(ultimaRecusa)){
+                    const resultadoDoFreio=freio.recusou(ultimaRecusa);
+                    log.warn('[MERCADO/CENSO] RPC historico aplicou 429; recuando sem reduzir faixa.',{
+                        proximoAte,faixaTentada:tamanho,recuoMs:2400,
+                        diagnostico:'limite de frequencia; nao e prova de limite de tamanho',
+                    });
+                    await dormir(2400);
+                    if(resultadoDoFreio==='adiar'||janelasQueFalharam>=3)break;
+                    continue;
+                }
                 if(tamanho>PASSO_MINIMO){
                     tamanho=Math.max(PASSO_MINIMO,Math.floor(tamanho/2));
                     log.warn('[MERCADO/CENSO] RPC historico recusou faixa; reduzindo, sem pular blocos.',{
