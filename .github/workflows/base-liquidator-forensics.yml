@@ -17,4 +17,5 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: node scripts/forenseLiquidacoesVencedorBase.cjs
+      - name: Query indexed Morpho events and fetch real transaction receipts
+        run: node scripts/forenseRecibosMorphoBase.cjs
