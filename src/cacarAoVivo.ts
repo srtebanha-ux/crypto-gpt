@@ -4,6 +4,7 @@ import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
 import { createLogger } from './logger';
 import { configurarRadarCaca, atualizarRadarCaca, registrarAlvoCaca, registrarTiroCaca, registrarPlacarCaca } from './cacaTelemetria';
 import { iniciarObservadorSvr } from './titanSvrObservador';
+import { iniciarRadarMorphoMultirrede } from './titanRadarMorphoMultirrede';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
@@ -2950,6 +2951,8 @@ async function principal(): Promise<'parar' | void> {
     // sem chaves, sem novas transacoes e sem aguardar RPC nem bloquear tiros.
     // Ativado apenas com TITAN_SVR_OBSERVAR=1.
     iniciarObservadorSvr(log);
+    // Monitor Morpho across EVM networks; READ ONLY and independent of the Base sender.
+    iniciarRadarMorphoMultirrede(log);
 
     // OS BOTÕES, NO BOOT. Uma linha, sempre.
     //
