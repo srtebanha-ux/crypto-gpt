@@ -8,7 +8,7 @@ import type {Logger} from './logger';
 import {DedupLeiloesSvr,decodificarNotificacaoSvr,SVR_GATEWAY,type LeilaoSvr} from './titanSvr';
 export type EstadoObservadorSvr={
  status:'desligado'|'conectando'|'conectado'|'reconectando'|'parado';
- recebidos:number;unicos:number;invalidos:number;erros:number;ultimo?:LeilaoSvr;
+ recebidos:number;unicos:number;invalidos:number;erros:number;inscricaoConfirmada:boolean;ultimo?:LeilaoSvr;
 };
 export function iniciarObservadorSvr(
  logger:Logger,
@@ -17,7 +17,7 @@ export function iniciarObservadorSvr(
 ):{estado:()=>EstadoObservadorSvr;parar:()=>void}{
  const state:EstadoObservadorSvr={
   status:env.TITAN_SVR_OBSERVAR==='1'?'conectando':'desligado',
-  recebidos:0,unicos:0,invalidos:0,erros:0
+  recebidos:0,unicos:0,invalidos:0,erros:0,inscricaoConfirmada:false
  };
  if(env.TITAN_SVR_OBSERVAR!=='1')return{
   estado:()=>({...state}),parar:()=>{}
@@ -33,6 +33,21 @@ export function iniciarObservadorSvr(
   let decoded:unknown;
   try{decoded=JSON.parse(data.toString('utf8'))}catch{state.invalidos++;return;}
   const o=decoded as Record<string,unknown>;
+  if(o?.id===1&&typeof o.result==='string'&&o.result.length>0){
+   state.inscricaoConfirmada=true;state.status='conectado';
+   logger.info('[TITAN/SVR] Inscricao de leiloes ACEITA pelo gateway.',{
+    subscriptionId:o.result,modo:'somente observacao',transacoesAssinadas:0
+   });
+   return;
+  }
+  if(o?.id===1&&o.error){
+   state.erros++;state.inscricaoConfirmada=false;
+   logger.warn('[TITAN/SVR] Inscricao recusada pelo gateway.',{
+    resposta:JSON.stringify(o.error).slice(0,300)
+   });
+   ws?.close();
+   return;
+  }
   if(o?.method!=='solver_subscription')return;
   state.recebidos++;
   const auction=decodificarNotificacaoSvr(o);
@@ -55,7 +70,7 @@ export function iniciarObservadorSvr(
   try{
    ws=new WebSocket(SVR_GATEWAY,{maxPayload:512000,handshakeTimeout:12000});
    ws.on('open',()=>{
-    state.status='conectado';delay=1000;
+    state.status='conectando';state.inscricaoConfirmada=false;delay=1000;
     ws?.send(JSON.stringify({
      jsonrpc:'2.0',id:1,method:'solver_subscribe',params:['userOperations']
     }));
@@ -63,7 +78,7 @@ export function iniciarObservadorSvr(
     heartbeat=setInterval(()=>{
      if(ws?.readyState===WebSocket.OPEN)ws.ping();
     },25000);heartbeat.unref?.();
-    logger.info('[TITAN/SVR] Gateway conectado; monitoramento sem dinheiro real.');
+    logger.info('[TITAN/SVR] WebSocket aberto; aguardando ACEITE da inscricao SVR.');
    });
    ws.on('message',onMessage);
    ws.on('error',(err:Error)=>{
@@ -75,13 +90,13 @@ export function iniciarObservadorSvr(
    ws.on('close',()=>{
     if(heartbeat){clearInterval(heartbeat);heartbeat=null;}
     if(fechado)return;
-    state.status='reconectando';
+    state.status='reconectando';state.inscricaoConfirmada=false;
     reconnect=setTimeout(connect,delay);
     reconnect.unref?.();
     delay=Math.min(30000,delay*2);
    });
   }catch(err){
-   state.erros++;state.status='reconectando';
+   state.erros++;state.status='reconectando';state.inscricaoConfirmada=false;
    logger.warn('[TITAN/SVR] Conexao ainda nao estabelecida.',{
     causa:String(err).slice(0,130)
    });
