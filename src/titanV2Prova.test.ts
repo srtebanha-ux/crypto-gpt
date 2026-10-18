@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {codigoFlashArbComDono,pisoConservadorV2,WETH_BASE} from './titanV2Prova';
+import {codigoFlashArbComDono,correspondeFlashArb,pisoConservadorV2,WETH_BASE} from './titanV2Prova';
 const owner='0x1111111111111111111111111111111111111111';
 test('FlashArb immutable owner is patched by exact 32-byte solc metadata',()=>{
  const runtime='0x'+'00'.repeat(150);
@@ -33,4 +33,26 @@ test('build artifact FlashArb has full EVM runtime and owner immutable offsets',
  assert.ok(x.ownerReferences.length>0);
  const c=codigoFlashArbComDono(x,owner);
  assert.equal(c.length,x.runtime.length);
+});
+
+test('accept known FlashArb executable code with different Solidity CBOR metadata',()=>{
+ const executable='00'.repeat(150);
+ const metadataA='a164736f6c634300081a';
+ const metadataB='a164736f6c634300081b';
+ const a={runtime:'0x'+executable+metadataA+'000b',
+   creation:'0x',ownerReferences:[{start:40,length:32}]};
+ const onchain=codigoFlashArbComDono(a,owner).slice(0,-metadataA.length-4)
+   +metadataB+'000b';
+ assert.equal(correspondeFlashArb(onchain,a,owner),true);
+ const changed='0x01'+onchain.slice(4);
+ assert.equal(correspondeFlashArb(changed,a,owner),false);
+});
+test('multiple known optimizer variants are accepted without weakening opcode match',()=>{
+ const x={runtime:'0x'+'00'.repeat(150),creation:'0x',
+   ownerReferences:[{start:40,length:32}]};
+ const y={runtime:'0x'+'01'.repeat(150),creation:'0x',
+   ownerReferences:[{start:40,length:32}]};
+ const onchain=codigoFlashArbComDono(y,owner);
+ assert.equal(correspondeFlashArb(onchain,{...x,variantes:[y]},owner),true);
+ assert.equal(correspondeFlashArb(onchain,x,owner),false);
 });
