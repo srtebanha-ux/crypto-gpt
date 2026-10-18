@@ -24,6 +24,51 @@ interface DiarioExposto {
  grossWei:string;gasL2Wei:string;
  recent:Array<{hash:string;status:string;date:string;profitWei?:string}>;
 }
+export interface AlvoCacaPainel {
+ id:string; hf:number|null; faltaPct:number|null; bloco:number|null; lidoEm:string|null;
+}
+export interface CacaPainel {
+ observadoEm:string; bloco:number; vigiados:number; podemAtirar:number;
+ envioAutorizado:boolean; alvos:AlvoCacaPainel[];
+ placar?:{enviadas:number;confirmadas:number;revertidas:number;semResposta:number};
+ ultimoTiro?:{hash:string;bloco:number;estado:'enviado'|'confirmado'|'revertido'|'desconhecido'};
+}
+let cacaRecebido:CacaPainel|null=null;
+export function validarCacaPainel(raw:unknown):CacaPainel|null {
+ if(!raw||typeof raw!=='object')return null;
+ const q=raw as Partial<CacaPainel>;
+ if(typeof q.observadoEm!=='string'||!Number.isFinite(Date.parse(q.observadoEm)))return null;
+ if(Math.abs(Date.now()-Date.parse(q.observadoEm))>120_000)return null;
+ if(!Number.isSafeInteger(q.bloco)||q.bloco!<0||!Number.isSafeInteger(q.vigiados)||q.vigiados!<0
+   ||!Number.isSafeInteger(q.podemAtirar)||q.podemAtirar!<0
+   ||typeof q.envioAutorizado!=='boolean'||!Array.isArray(q.alvos)||q.alvos.length>20)return null;
+ const ids=new Set<string>();const alvos:AlvoCacaPainel[]=[];
+ for(const x of q.alvos){
+  if(!x||typeof x.id!=='string'||!/^0x[0-9a-fA-F]{40}$/.test(x.id)||ids.has(x.id.toLowerCase()))return null;
+  ids.add(x.id.toLowerCase());
+  if(x.hf!==null&&(!Number.isFinite(x.hf)||x.hf!<0||x.hf!>100))return null;
+  if(x.faltaPct!==null&&(!Number.isFinite(x.faltaPct)||x.faltaPct!<0||x.faltaPct!>100))return null;
+  if(x.bloco!==null&&(!Number.isSafeInteger(x.bloco)||x.bloco!<0))return null;
+  if(x.lidoEm!==null&&(typeof x.lidoEm!=='string'||!Number.isFinite(Date.parse(x.lidoEm))))return null;
+  alvos.push({id:x.id.toLowerCase(),hf:x.hf,faltaPct:x.faltaPct,bloco:x.bloco,lidoEm:x.lidoEm});
+ }
+ let placar:CacaPainel['placar'];
+ if(q.placar) {
+  const s=q.placar;
+  if(![s.enviadas,s.confirmadas,s.revertidas,s.semResposta].every(n=>Number.isSafeInteger(n)&&n>=0)
+    ||s.enviadas<s.confirmadas+s.revertidas+s.semResposta)return null;
+  placar={enviadas:s.enviadas,confirmadas:s.confirmadas,revertidas:s.revertidas,semResposta:s.semResposta};
+ }
+ let ultimoTiro:CacaPainel['ultimoTiro'];
+ if(q.ultimoTiro && /^0x[0-9a-fA-F]{64}$/.test(q.ultimoTiro.hash)
+    &&Number.isSafeInteger(q.ultimoTiro.bloco)
+    &&(['enviado','confirmado','revertido','desconhecido'] as string[]).includes(q.ultimoTiro.estado)){
+  ultimoTiro={hash:q.ultimoTiro.hash,bloco:q.ultimoTiro.bloco,estado:q.ultimoTiro.estado};
+ }
+ return{observadoEm:q.observadoEm,bloco:q.bloco!,vigiados:q.vigiados!,
+  podemAtirar:q.podemAtirar!,envioAutorizado:q.envioAutorizado!,alvos,
+  ...(placar?{placar}:{}),...(ultimoTiro?{ultimoTiro}:{})};
+}
 export interface EstadoTitan {
  startedAt:string;updatedAt:string;
  phase:string;description:string;mode:string;
@@ -33,9 +78,10 @@ export interface EstadoTitan {
  proof:string;
  chart:PontoTitan[];events:EventoTitan[];
  journal:DiarioExposto|null;
+ caca:CacaPainel|null;
 }
 const startedAt=new Date().toISOString();
-const state:Omit<EstadoTitan,'journal'>={
+const state:Omit<EstadoTitan,'journal'|'caca'>={
  startedAt,updatedAt:startedAt,phase:'Inicializando monitoramento',
  description:'Carregando universo da Base e preparando a leitura de pools.',
  mode:'Somente leitura',contractReady:null,
@@ -75,7 +121,8 @@ function diario():DiarioExposto|null {
  }catch{return null;}
 }
 export function lerEstadoTitan():EstadoTitan {
- return{...state,chart:[...state.chart],events:[...state.events],journal:diario()};
+ return{...state,chart:[...state.chart],events:[...state.events],journal:diario(),
+  caca:cacaRecebido&&Date.now()-Date.parse(cacaRecebido.observadoEm)<60_000?cacaRecebido:null};
 }
 function publicar():void {
  if(timer!==null)return;
@@ -151,7 +198,34 @@ export function iniciarPainelTitan(env:NodeJS.ProcessEnv=process.env):http.Serve
  if(file?.startsWith('/app/data/')&&!file.includes('..')&&file.endsWith('.json'))diarioPath=file;
  const server=http.createServer((req,res)=>{
   headers(res);
-  if(!autorizado(req,usuario,senha)){
+  // Endpoint exclusivo do Caçador, com credencial independente da senha web.
+ // Não oferece comandos e não aceita logs, carteiras ou chaves.
+ if(req.url==='/api/caca'&&req.method==='POST'){
+  const token=env.TITAN_TELEMETRIA_TOKEN;
+  const head=req.headers.authorization;
+  const supplied=typeof head==='string'&&head.startsWith('Bearer ')?head.slice(7):'';
+  if(!token||token.length<24||!supplied||!timingSafeEqual(hashed(supplied),hashed(token))){
+   res.writeHead(401);res.end('Nao autorizado');return;
+  }
+  let bytes=0,parts:Buffer[]=[];
+  req.on('data',(chunk:Buffer)=>{
+   bytes+=chunk.length;
+   if(bytes>8192){parts=[];req.destroy();return;}
+   parts.push(chunk);
+  });
+  req.on('end',()=>{
+   try {
+    if(bytes>8192)throw Error('payload muito grande');
+    const parsed=validarCacaPainel(JSON.parse(Buffer.concat(parts).toString('utf8')));
+    if(!parsed){res.writeHead(422);res.end('Medicao invalida');return;}
+    cacaRecebido=parsed;
+    publicar();
+    res.writeHead(204);res.end();
+   }catch{res.writeHead(400);res.end('Formato invalido')}
+  });
+  return;
+ }
+ if(!autorizado(req,usuario,senha)){
    res.statusCode=401;
    res.setHeader('WWW-Authenticate','Basic realm="TITAN Mission Control", charset="UTF-8"');
    res.setHeader('Content-Type','text/plain; charset=utf-8');
