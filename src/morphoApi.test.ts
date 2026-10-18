@@ -6,6 +6,7 @@ import {
     soOsQuePagam, lerIdToMarketParams, lerPosition, lerMarket, sharesParaAtivos,
     apiConfereComACorrente, codificarIdToMarketParams, codificarPosition, codificarMarket,
     consultaDeDevedores, lerDevedores, paraCache, doCache, idadeDoIndice, comoLerADescoberta,
+    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
     CHAIN_ID_DA_BASE, POR_PAGINA, TETO_DE_PAGINAS, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
 import { OrcamentoHttp } from './canais';
@@ -567,4 +568,43 @@ test('8. memória corrompida no disco não impede a descoberta nem lança', asyn
     // Não lançou (chegamos aqui) e a memória foi REESCRITA com algo legível.
     const m = lerMemoria(JSON.parse(await readFile(memoria, 'utf8')));
     assert.notEqual(m.ultimaTentativa, null, 'a memória torta impediu a gravação nova');
+});
+
+
+test('mercados Morpho com divida ativa sao priorizados mas validados depois na corrente',()=>{
+ const mercados=lerPaginaDeMercados(JSON.parse(pagina(Array.from({length:32},(_,i)=>i+1)))).itens;
+ assert.equal(mercados.length,32);
+ const rankingIds=[mercados[21]!.id, mercados[4]!.id];
+ const ranking=lerRankingMercadosMorpho({
+  data:{markets:{items:rankingIds.map(marketId=>({marketId}))}},
+ });
+ assert.deepEqual(ranking,rankingIds);
+ const selection=priorizarMercadosDaLista(mercados,ranking,12);
+ assert.equal(selection.length,12);
+ assert.equal(selection[0]!.id,rankingIds[0]);
+ assert.equal(selection[1]!.id,rankingIds[1]);
+ assert.equal(new Set(selection.map(m=>m.id)).size,12);
+ assert.ok(selection.slice(2).some(m=>m.id===mercados[30]!.id
+  ||Number.parseInt(m.id.slice(-2),16)>24),
+  'fallback precisa amostrar tambem mercados do FIM da enumeracao');
+ assert.ok(selection.every(m=>!m.confirmadoNaCorrente),
+  'ranking de terceiros nunca pode se declarar confirmado');
+ assert.match(JSON.parse(consultaMercadosMorphoComDivida()).query,/BorrowAssetsUsd/);
+ assert.equal(lerRankingMercadosMorpho({data:{markets:{items:[]}},errors:[{message:'schema changed'}]}),null);
+ assert.equal(lerRankingMercadosMorpho({data:{wrong:[]}}),null);
+});
+
+test('Morpho GraphQL: erro em HTTP 200 nao vira ausencia de devedores',async()=>{
+ const mock=fingir([{status:200,corpo:JSON.stringify({
+   errors:[{message:'Query field deprecated'}],data:null,
+ })}]);
+ const r=await enumerarDevedores(mock.buscar,'0x'+'1'.repeat(64),{
+   dormir:semSono,tetoDePaginas:2,
+ });
+ assert.equal(r.devedores.length,0);
+ assert.equal(r.completa,false);
+ assert.match(r.falha??'',/GraphQL/);
+ const query=JSON.parse(consultaDeDevedores('0x'+'1'.repeat(64),25,0)).query;
+ assert.match(query,/orderBy: BorrowShares/);
+ assert.match(query,/orderDirection: Desc/);
 });

@@ -93,6 +93,7 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
  */
 import {
     enumerarMercados, enumerarDevedores, soOsQuePagam, soDaBase, codificarIdToMarketParams,
+    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
     codificarPosition, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
@@ -381,8 +382,8 @@ export async function descobrirMorphoPorApi(
     const caminho = opcoes.caminhoDoCache
         ?? process.env.CACA_CACHE_MORPHO
         ?? '/app/data/mercadosMorpho.json';
-    const tetoValid = opcoes.tetoDeValidacoes ?? 12;
-    const tetoDev = opcoes.tetoDeMercadosComDevedores ?? 3;
+    const tetoValid = opcoes.tetoDeValidacoes ?? 24;
+    const tetoDev = opcoes.tetoDeMercadosComDevedores ?? 8;
     const infra: EstadoDaInfra = opcoes.infra
         ?? { provedoresEsgotados: [], noFallback: false };
 
@@ -455,6 +456,31 @@ export async function descobrirMorphoPorApi(
     // leria como "mercado recusado" em vez de "mercado de outra chain".
     const porChain = soDaBase(legiveis);
     const quePagam = soOsQuePagam(porChain.daBase);
+    // Morpho REST lista identidade, não dívida. Antes a seleção era
+    // `slice(0,12)` e os primeiros mercados NÃO tinham devedores.
+    // Uma consulta GraphQL ordenada pela dívida atual prioriza de fato
+    // mercados usados. Se falhar, amostramos TODA a lista elegível.
+    let rankingDeDividas:string[]|null=null;
+    if(quePagam.length>0&&orcamento.pedir()) {
+        try {
+            const resp=await buscar('https://api.morpho.org/graphql',{
+                method:'POST',headers:{'content-type':'application/json',
+                    'accept':'application/json'},
+                body:consultaMercadosMorphoComDivida(),signal:orcamento.sinal,
+            });
+            if(resp.status===200)rankingDeDividas=
+                lerRankingMercadosMorpho(JSON.parse(await resp.text()));
+        }catch{/* Sem ranking nunca vira "sem mercado"; existe fallback. */}
+    }
+    const escolhidos=priorizarMercadosDaLista(quePagam,rankingDeDividas,tetoValid);
+    log.info('[MORPHO/API] Selecao de mercados para conferir na Base.',{
+        mercadosEnumerados:quePagam.length,
+        rankingComDivida:rankingDeDividas?.length??null,
+        candidatosParaProva:escolhidos.length,
+        politica:rankingDeDividas===null
+          ? 'amostra distribuida pela lista inteira, ranking indisponivel'
+          : 'mercados ordenados pela divida da API; validacao onchain obrigatoria',
+    });
 
     if (veioDoCache) {
         log.warn('[MORPHO/API] A API não respondeu: sigo com o CACHE.', {
@@ -554,7 +580,7 @@ export async function descobrirMorphoPorApi(
 
     let confirmados = 0;
     const recusados: string[] = [];
-    for (const m of rpcMudo ? [] : quePagam.slice(0, tetoValid)) {
+    for (const m of rpcMudo ? [] : escolhidos) {
         const cru = await chamarRpc(codificarIdToMarketParams(m.id));
         const veredicto = apiConfereComACorrente(m, cru === null ? null : lerIdToMarketParams(cru));
         m.confirmadoNaCorrente = veredicto.confere;
@@ -568,7 +594,7 @@ export async function descobrirMorphoPorApi(
     let validados = 0;
     let reqGraph = 0;
     const falhasDeDevedores: string[] = [];
-    for (const m of quePagam.filter((x) => x.confirmadoNaCorrente).slice(0, tetoDev)) {
+    for (const m of escolhidos.filter((x) => x.confirmadoNaCorrente).slice(0, tetoDev)) {
         const r = await enumerarDevedores(buscar, m.id);
         reqGraph += r.requisicoes;
         devedores += r.devedores.length;
