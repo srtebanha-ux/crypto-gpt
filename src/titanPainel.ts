@@ -73,7 +73,7 @@ export interface EstadoTitan {
  caca:CacaPainel|null;
 }
 const startedAt=new Date().toISOString();
-const state:Omit<EstadoTitan,'journal'>={
+const state:Omit<EstadoTitan,'journal'|'caca'>={
  startedAt,updatedAt:startedAt,phase:'Inicializando monitoramento',
  description:'Carregando universo da Base e preparando a leitura de pools.',
  mode:'Somente leitura',contractReady:null,
