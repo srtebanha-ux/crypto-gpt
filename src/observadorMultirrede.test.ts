@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {type Log,type JsonRpcProvider} from 'ethers';
 import {
     REDES_AAVE_V3,ifaceAave,alvosDeBorrow,faixasHistoricas,
-    redesSolicitadas,carregarEstado,salvarEstado,verificarRede,faixasSegurasPorRede,
+    redesSolicitadas,carregarEstado,salvarEstado,verificarRede,faixasSegurasPorRede,tamanhoSeguroPorRede,
 } from './observadorMultirrede';
 
 test('configuracao read-only: cada rede usa o Pool oficial com seu proprio chainId',()=>{
@@ -72,4 +72,14 @@ test('Avalanche limita burst sem reduzir cadencia Arbitrum',()=>{
     assert.equal(faixasSegurasPorRede('polygon',8),8);
     assert.equal(faixasSegurasPorRede('optimism',8),8);
     assert.throws(()=>faixasSegurasPorRede('avalanche',0),/invalido/);
+});
+
+test('Arbitrum recupera backlog e limita faixa separadamente das outras redes',()=>{
+    assert.equal(tamanhoSeguroPorRede('arbitrum',50),200);
+    assert.equal(tamanhoSeguroPorRede('arbitrum',250),250);
+    assert.equal(tamanhoSeguroPorRede('avalanche',50),100);
+    assert.equal(tamanhoSeguroPorRede('avalanche',200),100);
+    assert.equal(tamanhoSeguroPorRede('optimism',50),50);
+    assert.equal(tamanhoSeguroPorRede('polygon',50),50);
+    assert.throws(()=>tamanhoSeguroPorRede('arbitrum',0),/invalido/);
 });

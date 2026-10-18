@@ -117,6 +117,21 @@ export function faixasSegurasPorRede(rede:NomeRede,faixasSolicitadas:number):num
     return rede==='avalanche'?Math.min(3,faixasSolicitadas):faixasSolicitadas;
 }
 
+/**
+ * Arbitrum produces blocks faster than the default 50-block scan budget.
+ * Dedicated Arbitrum public RPC can try wider slices; any provider rejection
+ * triggers a safe size reduction with the cursor left intact.
+ */
+export function tamanhoSeguroPorRede(rede:NomeRede,solicitado:number):number{
+    if(!Number.isSafeInteger(solicitado)||solicitado<1)
+        throw new Error('tamanhoSolicitado invalido');
+    if(rede==='arbitrum')return Math.max(200,solicitado);
+    // On Avalanche the gateway enforces an aggregate max of 100 blocks
+    // per HTTP batch. Read Borrow and LiquidationCall SEQUENTIALLY.
+    if(rede==='avalanche')return 100;
+    return solicitado;
+}
+
 export interface ResultadoMonitoramento {
     rede:NomeRede;bloco:number;proximoBloco:number;
     devedoresNoCache:number;avaliados:number;
@@ -137,10 +152,15 @@ export async function monitorarRede(
     let eventosLiquidados=0;
     // Advance cursor ONLY after both log calls returned successfully.
     for(const [de,ate] of faixas){
-        const [novos,liquidados]=await Promise.all([
-            provider.getLogs({address:rede.pool,fromBlock:de,toBlock:ate,topics:[emprestimo]}),
-            provider.getLogs({address:rede.pool,fromBlock:de,toBlock:ate,topics:[liquidacao]}),
-        ]);
+        const emprestimosFiltro={address:rede.pool,fromBlock:de,toBlock:ate,topics:[emprestimo]};
+        const liquidacaoFiltro={address:rede.pool,fromBlock:de,toBlock:ate,topics:[liquidacao]};
+        // Avalanche rejects a BATCH whose sum of ranges >100 even when
+        // each individual filter is valid. Keep calls sequential there.
+        const [novos,liquidados]=rede.nome==='avalanche'
+            ? [await provider.getLogs(emprestimosFiltro),await provider.getLogs(liquidacaoFiltro)]
+            : await Promise.all([
+                provider.getLogs(emprestimosFiltro),provider.getLogs(liquidacaoFiltro),
+            ]);
         eventosLiquidados+=liquidados.length;
         const existentes=new Set(estado.observados);
         for(const a of alvosDeBorrow(novos))if(!existentes.has(a)){
@@ -194,6 +214,8 @@ export async function iniciarObservadorMultirrede():Promise<void>{
         lookback:LIMITAR(process.env.CACA_OBSERVADOR_LOOKBACK,5000,1,1_000_000),
     };
     const intervalo=LIMITAR(process.env.CACA_OBSERVADOR_INTERVALO_MS,120000,30000,3600000);
+    const tamanhosPorRede=new Map<NomeRede,number>();
+    for(const nome of nomes)tamanhosPorRede.set(nome,tamanhoSeguroPorRede(nome,options.range));
     const providers=new Map<NomeRede,JsonRpcProvider>();
     for(const nome of nomes){
         const rede=REDES_AAVE_V3[nome];
@@ -211,11 +233,25 @@ export async function iniciarObservadorMultirrede():Promise<void>{
             const progresso=estado.redes[nome]??{proximoBloco:0,observados:[],proximoIndice:0};
             estado.redes[nome]=progresso;
             try{
-                const seguro={...options,faixasPorCiclo:faixasSegurasPorRede(nome,options.faixasPorCiclo)};
+                const seguro={...options,
+                    range:tamanhosPorRede.get(nome)??options.range,
+                    faixasPorCiclo:faixasSegurasPorRede(nome,options.faixasPorCiclo)};
                 const resultado=await monitorarRede(rede,providers.get(nome)!,progresso,seguro);
                 await salvarEstado(arquivo,estado);
                 console.info('[MULTIRREDE/CICLO]',JSON.stringify(resultado));
             }catch(e){
+                // Reduce only the failing chain on oversized-range failures.
+                // Never skip blocks, reset a cursor, or penalize other networks.
+                const erro=e instanceof Error?e.message:String(e);
+                const atual=tamanhosPorRede.get(nome)??options.range;
+                if((nome==='arbitrum'||nome==='avalanche')&&atual>options.range
+                    &&/block.range|too.large|exceed|max.blocks|limit/i.test(erro)){
+                    const reduzido=Math.max(options.range,Math.floor(atual/2));
+                    tamanhosPorRede.set(nome,reduzido);
+                    console.warn('[MULTIRREDE/RANGE_RECUO]',JSON.stringify({
+                        rede:nome,anterior:atual,novo:reduzido,cursor:progresso.proximoBloco,
+                    }));
+                }
                 // Both failed historical reads and RPC timeouts retain cursor.
                 await salvarEstado(arquivo,estado);
                 console.warn('[MULTIRREDE/SEM_COBERTURA]',JSON.stringify({

@@ -4071,7 +4071,7 @@ async function principal(): Promise<'parar' | void> {
         }finally{censoHistoricoRodando=false}
     };
     void executarCensoHistorico();
-    const intervaloCenso=setInterval(()=>{void executarCensoHistorico()},10*60_000);
+    const intervaloCenso=setInterval(()=>{void executarCensoHistorico()},60_000);
     intervaloCenso.unref();
     // O tiro em seco NAO pode sair daqui: a brasa so existe depois da primeira
     // varredura completa, e chamado aqui ele achava a lista vazia e desistia
@@ -4741,8 +4741,11 @@ async function principal(): Promise<'parar' | void> {
         const inicio = Math.max(0, topo - NOVE_DIAS_EM_BLOCOS + 1);
         const caminho = process.env.CACA_CENSO_ESTADO
             ?? '/app/data/censoAaveBaseHistorico.json';
-        const limite = 36; // requests per round, not per 9-day scan
-        const orcamento = new OrcamentoDaTarefa('historico', limite, 55_000);
+        // Run bounded background reads frequently until the entire historical
+        // snapshot is complete. Requests are paced and 429s back off; live
+        // block processing and wallet traffic never use this RPC.
+        const limite = 110; // 9-day backfill; max requests in each round
+        const orcamento = new OrcamentoDaTarefa('historico', limite, 100_000);
         const freio = new FreioDeRecusas();
         type Achado = {
             bloco:number; ativo:string; cru:bigint | Decimal;
