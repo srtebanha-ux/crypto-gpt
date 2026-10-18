@@ -39,10 +39,10 @@ test('accept known FlashArb executable code with different Solidity CBOR metadat
  const executable='00'.repeat(150);
  const metadataA='a164736f6c634300081a';
  const metadataB='a164736f6c634300081b';
- const a={runtime:'0x'+executable+metadataA+'000b',
+ const a={runtime:'0x'+executable+metadataA+'000a',
    creation:'0x',ownerReferences:[{start:40,length:32}]};
  const onchain=codigoFlashArbComDono(a,owner).slice(0,-metadataA.length-4)
-   +metadataB+'000b';
+   +metadataB+'000a';
  assert.equal(correspondeFlashArb(onchain,a,owner),true);
  const changed='0x01'+onchain.slice(4);
  assert.equal(correspondeFlashArb(changed,a,owner),false);
