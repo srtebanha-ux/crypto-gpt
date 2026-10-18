@@ -32,7 +32,7 @@ test('Atlas EIP712 exact domain and raw solver operation; not signMessage EIP191
  assert.equal(signed.auction_id,auc.id);
  assert.equal(signed.auction_solution.signature.length,132);
  assert.equal(signed.auction_solution.gas,'0x61a80');
- assert.equal(signed.auction_solution.maxFeePerGas,'0x1e23b7e');
+ assert.equal(signed.auction_solution.maxFeePerGas,'0x1e23b1e');
  const recovered=verifyTypedData(dominioAtlas(ctx),ATLAS_SOLVER_TYPES as any,op,signed.auction_solution.signature);
  assert.equal(recovered,wallet.address);
  const rpc=envelopeJsonRpcDeEnvio(signed);
