@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calcularPisoTitan, motivoDaRecusaTitan, avaliarEnsaioTitan, type PlanoTitan } from './titanExecucao';
+import { calcularPisoTitan, motivoDaRecusaTitan, avaliarEnsaioTitan, blocoValidoParaProvaAtomica, type PlanoTitan } from './titanExecucao';
 import { avaliarLimitesDiariosTitan } from './titanAutorizacaoContinua';
 
 const END_A = '0x0000000000000000000000000000000000000011';
@@ -190,4 +190,14 @@ test('triangulo de 3 pernas chega aos mesmos portoes de gas e nonce do TITAN',()
     assert.equal(motivoDaRecusaTitan(p,e),null);
     delete e.TITAN_ORCAMENTO_GAS_WEI;
     assert.match(motivoDaRecusaTitan(p,e)!,/teto financeiro/);
+});
+
+test('prova atomica pode medir estado latest mesmo que a cotacao tenha atravessado alguns blocos',()=>{
+    assert.equal(blocoValidoParaProvaAtomica(100,101),true);
+    assert.equal(blocoValidoParaProvaAtomica(100,105),true);
+    assert.equal(blocoValidoParaProvaAtomica(100,120),true);
+    assert.equal(blocoValidoParaProvaAtomica(100,121),false);
+    assert.equal(blocoValidoParaProvaAtomica(100,99),false);
+    assert.equal(blocoValidoParaProvaAtomica(0,120),false);
+    assert.equal(blocoValidoParaProvaAtomica(NaN,120),false);
 });
