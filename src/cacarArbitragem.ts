@@ -25,6 +25,7 @@
 import Decimal from 'decimal.js';
 import { AbiCoder, id } from 'ethers';
 import { createLogger } from './logger';
+import { iniciarPainelTitan, atualizarTitan, progressoTitan, eventoTitan } from './titanPainel';
 import { sobraDoFlashSwap } from './ammMath';
 import {
     OuvinteDeBlocos, wsDoHttp, enderecoDeBlocos, esperarBlocoOuTempo,
@@ -1806,6 +1807,15 @@ export function comoLerOPlacar(): string {
  * roda indefinidamente.
  */
 async function principal(): Promise<void> {
+    // O painel usa os eventos do MESMO motor, sem processo concorrente ou
+    // leitura de logs. Nenhum caminho HTTP permite assinar ou enviar operacoes.
+    iniciarPainelTitan();
+    atualizarTitan({
+        mode: process.env.TITAN_ENVIAR === '1' ? 'Operacao autorizada' : 'Somente leitura',
+        phase: 'Conectando aos mercados',
+        description: 'Aguardando os primeiros blocos e preparando os pools na Base.',
+    });
+    eventoTitan('sistema','Motor TITAN iniciado','Telemetria estruturada, sem acesso a chaves ou funcoes de envio.');
     const rpc = process.env.ARB_RPC_URL ?? process.env.CACA_RPC_URL ?? 'https://mainnet.base.org';
     const tetoPorFabrica = Number(process.env.ARB_POOLS ?? 120);
     const tetoDeCiclos = Number(process.env.ARB_CICLOS ?? 0);
@@ -1868,6 +1878,10 @@ async function principal(): Promise<void> {
         const diagnostico = await diagnosticarFlashArbV2(
             process.env.TITAN_EXECUTOR_RPC_URL ?? rpc,
         );
+        atualizarTitan({ contractReady: diagnostico.pronto });
+        eventoTitan(diagnostico.pronto ? 'sistema' : 'alerta',
+            diagnostico.pronto ? 'Contrato FlashArb verificado' : 'Contrato com pendencia',
+            diagnostico.motivo);
         if (diagnostico.pronto) {
             log.info('[TITAN/V2-IMPLANTACAO] Executor V2 confere onchain.', diagnostico);
         } else {
@@ -2036,6 +2050,12 @@ async function principal(): Promise<void> {
         { teto: Number(process.env.ARB_MEMORIA_TETO ?? 5_000) },
     );
     memoria = primeiraJuncao.memoria;
+    atualizarTitan({ phase: 'Universo de mercados atualizado',
+        description: 'Identificando pools por atividade e memoria persistente.',
+        pools: porAtividade.pools.length,
+    });
+    eventoTitan('descoberta','Mercados mapeados',
+        String(porAtividade.pools.length)+' pools V2 conhecidos no inicio da sessao.');
     log.info('[UNIVERSO] A memória dos pools conhecidos.', {
         doDisco: doDisco === null
             ? `NÃO havia memória em ${caminhoDaMemoria} (ou estava torta/de outra rede) — isto `
@@ -2505,6 +2525,12 @@ async function principal(): Promise<void> {
                 process.env.TITAN_ROTACIONAR_COTACOES!=='0',
             );
             const afetadas = escolha.selecionadas;
+            atualizarTitan({
+                phase: 'Avaliando rotas em tempo real',
+                description: 'O scanner compara precos e custos antes da simulacao completa.',
+                block: blocoDaAmostra, quotes: afetadas.length,
+                queue: escolha.adiadas, mixed: MISTAS.length,
+            });
             const escolhidas = new Set(afetadas.map((c) => c.chave));
             pendentesCotacao.clear();
             for (const c of afetadasPotenciais) {
@@ -2625,6 +2651,8 @@ async function principal(): Promise<void> {
                         process.env.TITAN_EXECUTOR_RPC_URL??rpc);
                     if(['enviado','confirmado','revertido','desconhecido']
                         .includes(envio.estado))tentativasTitan++;
+                    eventoTitan('envio','Executor triangular: '+envio.estado,
+                        envio.hash ? 'Transacao '+envio.hash+'; '+envio.motivo : envio.motivo);
                     log.warn('[TITAN/TRIANGULO-EXECUTOR] Decisao financeira de 3 hops.',{
                         pools:item.t.pools,tamanho:tamanho.toString(),
                         resultado:envio,validacao:resultado,
@@ -2800,6 +2828,10 @@ async function principal(): Promise<void> {
                             },process.env.TITAN_EXECUTOR_RPC_URL??rpc);
                             if(['enviado','confirmado','revertido','desconhecido']
                                 .includes(resultado.estado))tentativasTitan++;
+                            eventoTitan('envio','Executor multi-rota: '+resultado.estado,
+                                resultado.hash
+                                    ? 'Transacao '+resultado.hash+'; '+resultado.motivo
+                                    : resultado.motivo);
                             log.warn('[TITAN/EXECUTOR] So enviou candidata atomica validada.',{
                                 bloco:blocoDaAmostra,rota:sn.rota,resultado,
                                 candidatosExplorados:candidatos.length,
@@ -2930,6 +2962,10 @@ async function principal(): Promise<void> {
                 ultimoEnsaioV2Em=Date.now();
                 const prova=await provarV2Atomico(pendente.candidato,
                     process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                eventoTitan('prova',
+                    prova.estado === 'executavel-em-override'
+                        ? 'Prova V2 passou' : 'Prova V2 recusada',
+                    'Rota '+k.slice(0,13)+'…: '+String(prova.motivo??prova.estado).slice(0,130));
                 log.warn('[TITAN/V2-PROVA] Flash swap V2 integral sem transacao paga.',{
                     rota:k,tokenEmprestado:pendente.candidato.T,
                     quantidade:pendente.candidato.quantia.toString(),
@@ -2942,6 +2978,10 @@ async function principal(): Promise<void> {
                     &&process.env.TITAN_V2_ENVIAR==='1'){
                     const resultadoPago=await executarFlashArbV2(
                         pendente.candidato,process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                    eventoTitan('envio','Executor V2: '+resultadoPago.status,
+                        resultadoPago.hash
+                            ? 'Transacao '+resultadoPago.hash+'; '+resultadoPago.motivo
+                            : resultadoPago.motivo);
                     log.warn('[TITAN/V2-EXECUTOR] Operacao na Base somente apos prova dupla.',{
                         rota:k,resultado:resultadoPago,
                         nota:'somente recibo confirma operacao; gas sempre tem risco residual',
@@ -2994,6 +3034,19 @@ async function principal(): Promise<void> {
 
         livro.guardar(av.fechar('ok'));
 
+        atualizarTitan({
+            phase: 'Varredura de oportunidades',
+            description: 'Analisando pools, validando precos e preparando provas atomicas.',
+            block: blocoAgora,cycles: ciclo,
+            routes: PLACAR.avaliados,positives:PLACAR.estimadosPositivos,
+            pools: pools.length,mixed:MISTAS.length,
+        });
+        progressoTitan(ciclo,candidatos.length);
+        if(ciclo===1||ciclo%4===0){
+            eventoTitan('ciclo','Bloco '+blocoAgora+' analisado',
+                candidatos.length+' rotas avaliadas neste ciclo; '
+                +PLACAR.estimadosPositivos+' sinais teóricos desde o inicio.');
+        }
         log.info(`[ARB ${blocoAgora}] ciclo ${ciclo}.`, {
             cobertura: (() => {
                 const total = Math.max(1, universo.pools.length);
