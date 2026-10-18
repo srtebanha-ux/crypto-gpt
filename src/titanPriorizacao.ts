@@ -71,3 +71,48 @@ export function priorizarCotacoes(
         conhecidas: principais.length + rotativas.length + sobra.length, semProva: desconhecidas.length,
     };
 }
+
+/**
+ * Cooldown de cotações comprovadamente sem lucro líquido no MESMO snapshot.
+ * Não retém oportunidades positivas, erros de leitura ou preço alterado.
+ * TTL reabre mesmo sem swap para permitir reavaliar quando o gás variar.
+ */
+export class MemoriaDeCotacoesNegativas {
+    private readonly registros = new Map<string,{assinatura:string;quando:number}>();
+    constructor(private readonly intervaloMs=120_000) {
+        if(!Number.isSafeInteger(intervaloMs)||intervaloMs<1_000||intervaloMs>600_000)
+            throw Error('intervalo de recotacao invalido');
+    }
+    private assinatura(c:Pick<CandidataMista,'pernas'>,estado:ReadonlyMap<string,string|null>):string|null {
+        if(c.pernas.length!==2)return null;
+        const x=c.pernas.map(p=>estado.get(p.pool.toLowerCase())??null);
+        if(x.some(v=>v===null))return null;
+        return JSON.stringify(x);
+    }
+    deveCotar(c:CandidataMista,estado:ReadonlyMap<string,string|null>,agora=Date.now()):boolean {
+        const antes=this.registros.get(c.chave);
+        if(!antes)return true;
+        const atual=this.assinatura(c,estado);
+        return atual===null||atual!==antes.assinatura||agora-antes.quando>=this.intervaloMs;
+    }
+    venceu(c:CandidataMista,estado:ReadonlyMap<string,string|null>,agora=Date.now()):boolean {
+        const antes=this.registros.get(c.chave);
+        if(!antes)return false;
+        const atual=this.assinatura(c,estado);
+        return atual!==null&&atual===antes.assinatura
+            &&agora-antes.quando>=this.intervaloMs;
+    }
+    registrar(
+        c:CandidataMista,estado:ReadonlyMap<string,string|null>,
+        lucroLiquido:bigint|null,consistente:boolean,agora=Date.now(),
+    ):boolean {
+        if(!consistente||lucroLiquido===null||lucroLiquido>0n){
+            this.registros.delete(c.chave);
+            return false;
+        }
+        const assinatura=this.assinatura(c,estado);
+        if(assinatura===null)return false;
+        this.registros.set(c.chave,{assinatura,quando:agora});
+        return true;
+    }
+}
