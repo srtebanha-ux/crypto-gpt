@@ -1316,7 +1316,7 @@ export function decidir(
     // O GAS EM U. Conhecido so quando U e o WETH: para qualquer outro token eu
     // nao sei a conversao sem um preco, e inventa-la seria fabricar o piso
     // economico. Sem conversao o candidato NAO e aprovavel, e o motivo e dito.
-    if (c.U !== WETH_DA_BASE) {
+    if (c.U.toLowerCase() !== WETH_DA_BASE) {
         return {
             candidato: c, aprovado: false, motivo: 'gasDesconhecido',
             custoEmU: null, liquido: null,
