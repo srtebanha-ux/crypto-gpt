@@ -45,7 +45,8 @@
     "achar-pool": "ts-node src/acharPool.ts",
     "achar-pool:prod": "node dist/acharPool.js",
     "caca": "ts-node src/cacarAoVivo.ts",
-    "caca:prod": "node dist/cacarAoVivo.js"
+    "caca:prod": "node dist/cacarAoVivo.js",
+    "observador:multirrede": "node dist/observadorMultirrede.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",
