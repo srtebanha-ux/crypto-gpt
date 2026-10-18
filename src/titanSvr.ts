@@ -14,7 +14,8 @@ export const TITAN_ATLAS_BATCH_ABI=[
 export type ResultadoLanceSvr =
  | {permitido:false;motivo:string;excedenteWei?:bigint}
  | {permitido:true;lanceWei:bigint;lucroLiquidoPrevistoWei:bigint;
-    reservaGasWei:bigint;limiteEconomicoWei:bigint};
+    reservaGasWei:bigint;limiteEconomicoWei:bigint;
+    origemLance:'proprio'|'competidor';};
 export interface CustosSvr {
  lucroBrutoEsperadoWei:bigint;
  custoSwapWei:bigint;riscoSlippageWei:bigint;
@@ -24,6 +25,9 @@ export interface CustosSvr {
  lanceCompetidorWei?:bigint;
  limiteOfertaBps?:number; // 8000 max by default; never unconditional ALL profit
  incrementoWei?:bigint;
+ // When rival bids are private, bid a configurable share of our own ceiling.
+ // 7500 bps of the ceiling = at most 60% of the uncommitted surplus by default.
+ fracaoTetoSemRivalBps?:number;
 }
 export function planejarLanceSvr(x:CustosSvr):ResultadoLanceSvr {
  const vals=[x.lucroBrutoEsperadoWei,x.custoSwapWei,x.riscoSlippageWei,
@@ -41,17 +45,24 @@ export function planejarLanceSvr(x:CustosSvr):ResultadoLanceSvr {
   return{permitido:false,motivo:'lucro abaixo dos custos e reserva'};
  const sobra=x.lucroBrutoEsperadoWei-custos-x.minimoLiquidoWei;
  const limite=(sobra*BigInt(bps))/10000n;
- // Without competitor evidence do not fabricate a competitive bid.
- if(x.lanceCompetidorWei===undefined)
-  return{permitido:false,motivo:'sem lance de referencia confiavel',excedenteWei:sobra};
- const proposta=x.lanceCompetidorWei+(x.incrementoWei??1n);
+ if(limite<=0n)return{permitido:false,motivo:'nao sobra valor para lance',excedenteWei:sobra};
+ const fallbackBps=x.fracaoTetoSemRivalBps??7500;
+ if(!Number.isInteger(fallbackBps)||fallbackBps<1||fallbackBps>10000)
+  return{permitido:false,motivo:'fraçao sem rival fora da politica',excedenteWei:sobra};
+ const semRival=x.lanceCompetidorWei===undefined;
+ // Actual live competitor bids are generally private. Using our own
+ // simulated surplus avoids blocking every legitimate Atlas auction.
+ const proposta=semRival
+   ?(limite*BigInt(fallbackBps))/10000n
+   :x.lanceCompetidorWei!+(x.incrementoWei??1n);
  if(proposta<=0n||proposta>limite)
-  return{permitido:false,motivo:'lance vencedor nao cabe no lucro real',excedenteWei:sobra};
+  return{permitido:false,motivo:'lance nao cabe no lucro disponivel',excedenteWei:sobra};
  const liquido=x.lucroBrutoEsperadoWei-custos-proposta;
  if(liquido<x.minimoLiquidoWei)
   return{permitido:false,motivo:'resultado abaixo do lucro minimo',excedenteWei:sobra};
  return{permitido:true,lanceWei:proposta,limiteEconomicoWei:limite,
-    lucroLiquidoPrevistoWei:liquido,reservaGasWei:x.custoGasEAtualizacaoOracleWei};
+    lucroLiquidoPrevistoWei:liquido,reservaGasWei:x.custoGasEAtualizacaoOracleWei,
+    origemLance:semRival?'proprio':'competidor'};
 }
 export interface LeilaoSvr{
  id:string;hash:string;atlas:string;control:string;
