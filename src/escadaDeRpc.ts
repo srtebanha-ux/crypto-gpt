@@ -278,7 +278,7 @@ export async function logsComRpcHistorico<T>(
             // No URLs from the original error are printed: API keys can be in paths.
             throw new Error('historico indisponivel em ambos RPCs: primario='
                 +(p.includes('403')||/archive/i.test(p)?'arquivo/403':'indisponivel')
-                +'; secundario='+(/abort/i.test(s)?'timeout':s.replace(/https?:\\/\\/\\S+/g,'[url]').slice(0,95)));
+                +'; secundario='+(/abort/i.test(s)?'timeout':s.replace(/https?:\/\/\S+/g,'[url]').slice(0,95)));
         }finally{clearTimeout(timeout)}
     }
 }
