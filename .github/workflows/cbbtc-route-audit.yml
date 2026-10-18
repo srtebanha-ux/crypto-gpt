@@ -52,7 +52,9 @@ jobs:
               availableBorrowsUSD8:String(acc[2]),thresholdBps:String(acc[4]),healthFactor:String(acc[5])}));
             for(const [a,b] of [[cbbtc,usdc],[cbbtc,weth]]){
               for(const fee of [100,500,3000,10000]){
-                const pool=(await call(uni,IF,'getPool',[a,b,fee]))[0];
+                let pool;
+                try{pool=(await call(uni,IF,'getPool',[a,b,fee]))[0]}
+                catch(e){console.log('POOL_SKIPPED '+JSON.stringify({dex:'uniswap-v3',pair:[a,b],fee,reason:String(e).slice(0,130)}));continue}
                 if(pool==='0x0000000000000000000000000000000000000000')continue;
                 let entry={dex:'uniswap-v3',pair:[a,b],fee,pool};
                 try{
