@@ -46,7 +46,7 @@ import {
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
     creditoMaximoComResiduoCbBtc, CBBTC_BASE,
 } from './titanPonteMultiHop';
-import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
+import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte, logsComRpcHistorico } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
@@ -5124,12 +5124,21 @@ async function principal(): Promise<'parar' | void> {
         const de = ultimoBlocoPerdidas + 1;
         let logs: Array<{ address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string }>;
         try {
-            logs = await chamar('eth_getLogs', [{
+            const filtro = {
                 address: REDE.pool,
                 fromBlock: `0x${de.toString(16)}`,
                 toBlock: `0x${ate.toString(16)}`,
                 topics: [TOPIC_LIQUIDATION_CALL],
-            }]);
+            };
+            const resposta = await logsComRpcHistorico(
+                () => chamar<typeof logs[number]>('eth_getLogs',[filtro],1,'demorada','historico'),
+                filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL},
+            );
+            logs=resposta.logs;
+            if(resposta.origem==='secundario')log.info('[PLACAR/RPC] Recuperado por RPC historico independente.',{
+                host:resposta.provedor,faixa:`${de}–${ate}`,
+                observacao:'etapa de auditoria read-only; nao altera RPC de envio',
+            });
         } catch (e) {
             // Falhar aqui nao pode parar a cacada: isto e placar, nao motor.
             log.warn('Não consegui contar as liquidações que passaram.', { erro: (e as Error).message });
