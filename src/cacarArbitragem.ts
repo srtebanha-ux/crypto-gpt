@@ -49,6 +49,7 @@ import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, taman
 import { retentarTamanhoPorErroTitan } from './titanTaticas';
 import { priorizarCotacoes } from './titanPriorizacao';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
+import { provarV2Atomico } from './titanV2Prova';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
     type PoolMisto, type CandidataMista, type LeiturasDoEstado, type PernaDescrita,
@@ -2115,6 +2116,10 @@ async function principal(): Promise<void> {
     let tentativasTitan = 0;
     let ultimoEnsaioTitanEm = 0;
     const pendentesCotacao = new Set<string>();
+    // Gas-free V2 checks are limited and diverse. Never hammer a toxic
+    // token/pool or mistake an old estimate for a current arbitrage.
+    const ultimaProvaV2=new Map<string,number>();
+    let ultimoEnsaioV2Em=0;
     const tetoCotarRotas = Number(process.env.ARB_COTAR_MAX_ROTAS ?? 12);
     const tetoTentativasCru = Number(process.env.TITAN_TX_POR_SESSAO ?? 1);
     // O modo continuo nao herda o teto de UMA tentativa por sessao:
@@ -2837,6 +2842,29 @@ async function principal(): Promise<void> {
         // fazer sem um contrato implantado é `eth_call` do `executarArbitragem`
         // — e isso fica DECLARADO como pendente, não escondido.
         const aprovadas = decisoes.filter((d) => d.aprovado);
+        if(process.env.TITAN_V2_SONDA==='1' && aprovadas.length>0
+            &&Date.now()-ultimoEnsaioV2Em>=25_000){
+            const pendente=aprovadas.find(d=>{
+                const k=d.candidato.emprestimo.endereco+'>'+d.candidato.venda.endereco;
+                return Date.now()-(ultimaProvaV2.get(k)??0)>=240_000;
+            });
+            if(pendente){
+                const k=pendente.candidato.emprestimo.endereco+'>'+
+                    pendente.candidato.venda.endereco;
+                ultimaProvaV2.set(k,Date.now());
+                ultimoEnsaioV2Em=Date.now();
+                const prova=await provarV2Atomico(pendente.candidato,
+                    process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                log.warn('[TITAN/V2-PROVA] Flash swap V2 integral sem transacao paga.',{
+                    rota:k,tokenEmprestado:pendente.candidato.T,
+                    quantidade:pendente.candidato.quantia.toString(),
+                    resultado:prova,
+                    decisaoFinanceira:prova.estado==='executavel-em-override'
+                       ? 'candidato PROVADO na EVM simulada; enviar depende de executor V2 implantado e revalidacao de verdade'
+                       : 'NAO ENVIAR; sinal teorico nao foi validado',
+                });
+            }
+        }
         for (const d of aprovadas.slice(0, 3)) {
             const fimSim = av.etapa('simulacao');
             const frescos = await lerPools(
