@@ -224,3 +224,5 @@ export class EscadaDeRpc {
         this.degraus[0]!.caiuEm = 0;
     }
 }
+
+// Consultas historicas devem ter limite de tempo separado das decisoes urgentes.
