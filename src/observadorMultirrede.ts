@@ -125,7 +125,11 @@ export function faixasSegurasPorRede(rede:NomeRede,faixasSolicitadas:number):num
 export function tamanhoSeguroPorRede(rede:NomeRede,solicitado:number):number{
     if(!Number.isSafeInteger(solicitado)||solicitado<1)
         throw new Error('tamanhoSolicitado invalido');
-    return rede==='arbitrum'?Math.max(200,solicitado):solicitado;
+    if(rede==='arbitrum')return Math.max(200,solicitado);
+    // On Avalanche the gateway enforces an aggregate max of 100 blocks
+    // per HTTP batch. Read Borrow and LiquidationCall SEQUENTIALLY.
+    if(rede==='avalanche')return Math.min(100,Math.max(50,solicitado));
+    return solicitado;
 }
 
 export interface ResultadoMonitoramento {
@@ -148,10 +152,15 @@ export async function monitorarRede(
     let eventosLiquidados=0;
     // Advance cursor ONLY after both log calls returned successfully.
     for(const [de,ate] of faixas){
-        const [novos,liquidados]=await Promise.all([
-            provider.getLogs({address:rede.pool,fromBlock:de,toBlock:ate,topics:[emprestimo]}),
-            provider.getLogs({address:rede.pool,fromBlock:de,toBlock:ate,topics:[liquidacao]}),
-        ]);
+        const emprestimosFiltro={address:rede.pool,fromBlock:de,toBlock:ate,topics:[emprestimo]};
+        const liquidacaoFiltro={address:rede.pool,fromBlock:de,toBlock:ate,topics:[liquidacao]};
+        // Avalanche rejects a BATCH whose sum of ranges >100 even when
+        // each individual filter is valid. Keep calls sequential there.
+        const [novos,liquidados]=rede.nome==='avalanche'
+            ? [await provider.getLogs(emprestimosFiltro),await provider.getLogs(liquidacaoFiltro)]
+            : await Promise.all([
+                provider.getLogs(emprestimosFiltro),provider.getLogs(liquidacaoFiltro),
+            ]);
         eventosLiquidados+=liquidados.length;
         const existentes=new Set(estado.observados);
         for(const a of alvosDeBorrow(novos))if(!existentes.has(a)){
@@ -235,7 +244,7 @@ export async function iniciarObservadorMultirrede():Promise<void>{
                 // Never skip blocks, reset a cursor, or penalize other networks.
                 const erro=e instanceof Error?e.message:String(e);
                 const atual=tamanhosPorRede.get(nome)??options.range;
-                if(nome==='arbitrum'&&atual>options.range
+                if((nome==='arbitrum'||nome==='avalanche')&&atual>options.range
                     &&/block.range|too.large|exceed|max.blocks|limit/i.test(erro)){
                     const reduzido=Math.max(options.range,Math.floor(atual/2));
                     tamanhosPorRede.set(nome,reduzido);
