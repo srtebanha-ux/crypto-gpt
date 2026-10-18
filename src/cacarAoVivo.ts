@@ -46,7 +46,7 @@ import {
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
     creditoMaximoComResiduoCbBtc, CBBTC_BASE,
 } from './titanPonteMultiHop';
-import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte, logsComRpcHistorico } from './escadaDeRpc';
+import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte, logsComRpcHistorico, faixaHistoricaReversa } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
@@ -4818,8 +4818,7 @@ async function principal(): Promise<'parar' | void> {
 
         let tentativas=0;
         while(proximoAte>=menorBloco && tentativas<limite && orcamento.pedir()){
-            const de=Math.max(menorBloco,proximoAte-tamanho+1);
-            const ate=proximoAte;
+            const {de,ate}=faixaHistoricaReversa(proximoAte,menorBloco,tamanho);
             const filtro={
                 address:REDE.pool,
                 fromBlock:'0x'+de.toString(16),
