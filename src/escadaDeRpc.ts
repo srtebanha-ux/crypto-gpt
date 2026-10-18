@@ -226,3 +226,59 @@ export class EscadaDeRpc {
 }
 
 // Consultas historicas devem ter limite de tempo separado das decisoes urgentes.
+
+/**
+ * Historical log lookup is READ ONLY and isolated from the urgent trading RPC.
+ * A 403/archive restriction on the primary must not make the competitor ledger
+ * permanently blind when another Base node can answer. Neither path signs or
+ * sends a transaction, and a second failure is NEVER treated as an empty log.
+ *
+ * The configured URL remains private: callers receive only its hostname.
+ * A one-off fallback gets a strict deadline to protect block processing.
+ */
+export async function logsComRpcHistorico<T>(
+    consultarPrimario: () => Promise<T[]>,
+    filtro: {address:string;fromBlock:string;toBlock:string;topics:string[]},
+    opcoes: {
+        urlSecundaria?:string;
+        buscar?:typeof fetch;
+        tempoLimiteMs?:number;
+    } = {},
+):Promise<{logs:T[];origem:'primario'|'secundario';provedor:string}> {
+    try {
+        const logs=await consultarPrimario();
+        if(!Array.isArray(logs)) throw new Error('resposta do RPC principal nao e lista');
+        return {logs,origem:'primario',provedor:'principal'};
+    }catch(erroPrincipal) {
+        const url=opcoes.urlSecundaria?.trim()||'https://mainnet.base.org';
+        const problema=porQueNaoServe(url);
+        if(problema!==null||new URL(url).protocol!=='https:')
+            throw new Error('RPC historico secundario invalido (exige HTTPS)');
+        const abortar=new AbortController();
+        const limite=Math.max(500,Math.min(opcoes.tempoLimiteMs??5000,10000));
+        const timeout=setTimeout(()=>abortar.abort(),limite);
+        try {
+            const resposta=await (opcoes.buscar??fetch)(url,{
+                method:'POST',
+                headers:{'content-type':'application/json'},
+                body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_getLogs',params:[filtro]}),
+                signal:abortar.signal,
+            });
+            if(!resposta.ok)throw new Error('HTTP '+resposta.status);
+            const corpo:unknown=await resposta.json();
+            if(!corpo||typeof corpo!=='object'
+                ||('error' in corpo&&Boolean(corpo.error))
+                ||!('result' in corpo)||!Array.isArray(corpo.result))
+                throw new Error('JSON-RPC historico sem lista de logs valida');
+            return {logs:corpo.result as T[],origem:'secundario',
+                provedor:new URL(url).hostname};
+        }catch(erroSecundario){
+            const p=erroPrincipal instanceof Error?erroPrincipal.message:String(erroPrincipal);
+            const s=erroSecundario instanceof Error?erroSecundario.message:String(erroSecundario);
+            // No URLs from the original error are printed: API keys can be in paths.
+            throw new Error('historico indisponivel em ambos RPCs: primario='
+                +(p.includes('403')||/archive/i.test(p)?'arquivo/403':'indisponivel')
+                +'; secundario='+(/abort/i.test(s)?'timeout':s.replace(/https?:\\/\\/\\S+/g,'[url]').slice(0,95)));
+        }finally{clearTimeout(timeout)}
+    }
+}
