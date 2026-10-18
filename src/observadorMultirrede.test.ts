@@ -32,7 +32,7 @@ test('Borrow identifica o devedor correto: onBehalfOf, nao quem pediu o empresti
     const operador='0x03d0a5c9e1843986fb2f9335f7eb936754f7eaf0';
     const dono='0x1b9f859e0c9d14f516273552d8de48b77388603c';
     const encoded=ifaceAave.encodeEventLog(event,[reserve,operador,dono,1000000n,2,1n,0]);
-    const log={topics:encoded.topics,data:encoded.data} as Log;
+    const log={topics:encoded.topics,data:encoded.data} as unknown as Log;
     assert.deepEqual(alvosDeBorrow([log]),[dono]);
     assert.deepEqual(alvosDeBorrow([log,log]),[dono]);
 });
