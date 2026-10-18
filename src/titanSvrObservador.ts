@@ -4,8 +4,8 @@
  * Uses Chainlink's documented read-only solver_subscribe transport.
  */
 import WebSocket from 'ws';
+import type {Logger} from './logger';
 import {DedupLeiloesSvr,decodificarNotificacaoSvr,SVR_GATEWAY,type LeilaoSvr} from './titanSvr';
-type Logger={info:(s:string,data?:unknown)=>void;warn:(s:string,data?:unknown)=>void};
 export type EstadoObservadorSvr={
  status:'desligado'|'conectando'|'conectado'|'reconectando'|'parado';
  recebidos:number;unicos:number;invalidos:number;erros:number;ultimo?:LeilaoSvr;
@@ -28,7 +28,8 @@ export function iniciarObservadorSvr(
  let heartbeat:ReturnType<typeof setInterval>|null=null;
  let fechado=false,delay=1000;
  const onMessage=(data:WebSocket.RawData)=>{
-  if(data.length>512000){state.invalidos++;return;}
+  const tamanho=Array.isArray(data)?data.reduce((n,b)=>n+b.byteLength,0):data.byteLength;
+  if(tamanho>512000){state.invalidos++;return;}
   let decoded:unknown;
   try{decoded=JSON.parse(data.toString('utf8'))}catch{state.invalidos++;return;}
   const o=decoded as Record<string,unknown>;
