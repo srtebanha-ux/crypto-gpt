@@ -128,7 +128,7 @@ export function tamanhoSeguroPorRede(rede:NomeRede,solicitado:number):number{
     if(rede==='arbitrum')return Math.max(200,solicitado);
     // On Avalanche the gateway enforces an aggregate max of 100 blocks
     // per HTTP batch. Read Borrow and LiquidationCall SEQUENTIALLY.
-    if(rede==='avalanche')return Math.min(100,Math.max(50,solicitado));
+    if(rede==='avalanche')return 100;
     return solicitado;
 }
 
