@@ -59,7 +59,7 @@ export class RadarDeRebotes {
  }
  ativos(bloco:number):ReadonlySet<string> {
   for(const [p,observado] of this.pistas) {
-   if(bloco>observado+3||bloco<observado)this.pistas.delete(p);
+   if(bloco>observado+3)this.pistas.delete(p);
   }
   return new Set(this.pistas.keys());
  }
