@@ -77,3 +77,21 @@ test('batch calldata is deterministic and refuses mixed seized/repaid and empty 
  assert.throws(()=>codificarLoteSvr([{...one,repaidShares:1n}],7n));
  assert.throws(()=>codificarLoteSvr([one],0n));
 });
+
+test('Chainlink SVR hints include future oracle price but missing data is never guessed',()=>{
+ const r=aviso(id1);
+ const future={...r,params:{...r.params,result:{...r.params.result,
+  partial_user_operation:{...r.params.result.partial_user_operation,
+   dapp:atlas,hints:{aggregator:control,medianPrice:'0x05f5e100',rawReport:'0xaabb'}}
+ }}};
+ const decoded=decodificarNotificacaoSvr(future);
+ assert.equal(decoded?.precoPrevisto?.aggregador,control);
+ assert.equal(decoded?.precoPrevisto?.medianPrice,100000000n);
+ assert.equal(decoded?.dapp,atlas);
+ const malformed={...future,params:{...future.params,result:{...future.params.result,
+  partial_user_operation:{...future.params.result.partial_user_operation,
+   hints:{aggregator:control,medianPrice:'not-a-number'}}
+ }}};
+ assert.equal(decodificarNotificacaoSvr(malformed)?.precoPrevisto,undefined);
+ assert.equal(decodificarNotificacaoSvr(aviso(id2))?.precoPrevisto,undefined);
+});

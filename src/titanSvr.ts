@@ -67,6 +67,9 @@ export function planejarLanceSvr(x:CustosSvr):ResultadoLanceSvr {
 export interface LeilaoSvr{
  id:string;hash:string;atlas:string;control:string;
  deadline:bigint;maxFeePerGas:bigint;gasDaOracle:bigint;
+ // From Chainlink SVR user-operation hints, never from an onchain stale price.
+ precoPrevisto?:{aggregador:string;medianPrice:bigint};
+ dapp?:string;
 }
 function obj(x:unknown):Record<string,unknown>|null{
  return x!==null&&typeof x==='object'&&!Array.isArray(x)
@@ -87,8 +90,19 @@ export function decodificarNotificacaoSvr(raw:unknown):LeilaoSvr|null{
     ||chain!==BigInt(BASE_CHAIN_ID)||deadline===null||fee===null||gas===null
     ||typeof uo.to!=='string'||!isAddress(uo.to)
     ||typeof uo.control!=='string'||!isAddress(uo.control))return null;
+ // Invalid/missing hints do not become zero price or a fabricated feed.
+ // Keep the auction for observability, but the execution gate must reject it.
+ const hints=obj(uo.hints);
+ const aggregador=hints?.aggregator;
+ const median=hexNumber(hints?.medianPrice);
+ const precoPrevisto=(typeof aggregador==='string'&&isAddress(aggregador)
+    &&median!==null&&median>0n&&median<(1n<<192n))
+   ?{aggregador:aggregador.toLowerCase(),medianPrice:median}:undefined;
+ const dapp=typeof uo.dapp==='string'&&isAddress(uo.dapp)
+    ?uo.dapp.toLowerCase():undefined;
  return {id,hash:hash.toLowerCase(),atlas:uo.to.toLowerCase(),
-   control:uo.control.toLowerCase(),deadline,maxFeePerGas:fee,gasDaOracle:gas};
+   control:uo.control.toLowerCase(),deadline,maxFeePerGas:fee,gasDaOracle:gas,
+   ...(precoPrevisto?{precoPrevisto}:{}),...(dapp?{dapp}:{})};
 }
 /**
  * The same userOpHash can have TWO independent auction IDs on Base.

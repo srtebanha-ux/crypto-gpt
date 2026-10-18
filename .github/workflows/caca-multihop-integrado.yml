@@ -32,7 +32,7 @@ jobs:
       - name: Testar executora Morpho e seguranca dos saldos na EVM local
         run: npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/morphoAuditoriaLocal.js
       - name: Validar roteamento, nonce unico e contrato
-        run: node --require ts-node/register --test src/titanPonteMultiHop.test.ts src/titanPonteMultiHopIntegration.test.ts src/implantarTitanMultiHop.test.ts src/titanCanary.test.ts src/cacaDuasRotas.test.ts src/janelaDeNonce.test.ts src/escadaDeRpc.test.ts src/observadorMultirrede.test.ts
+        run: node --require ts-node/register --test src/titanPonteMultiHop.test.ts src/titanPonteMultiHopIntegration.test.ts src/implantarTitanMultiHop.test.ts src/titanCanary.test.ts src/cacaDuasRotas.test.ts src/janelaDeNonce.test.ts src/escadaDeRpc.test.ts src/observadorMultirrede.test.ts src/titanSvr.test.ts src/titanSvrTriagem.test.ts
       - name: Testar carteira unica sem enviar transacao na Base (fork)
         env:
           ARB_BLOCO: "52418045"

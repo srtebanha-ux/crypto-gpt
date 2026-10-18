@@ -23,3 +23,7 @@ jobs:
         run: npx hardhat compile --config hardhat.morpho-local.cjs
       - name: Safety and atomicity regression on Hardhat EVM
         run: npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanAtlasMorphoLocal.js
+      - name: Verify Atlas v1.6.4, Morpho, Aerodrome and TITAN deployment in a real Base fork (no broadcast)
+        env:
+          ARB_BLOCO: "52786700"
+        run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanAtlasBaseForkPreflight.js
