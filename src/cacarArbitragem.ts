@@ -49,6 +49,7 @@ import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
 import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, sondasTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
 import { retentarTamanhoPorErroTitan } from './titanTaticas';
 import { priorizarCotacoes, MemoriaDeCotacoesNegativas } from './titanPriorizacao';
+import { detectarRebotesAave, RadarDeRebotes, priorizarRebotes } from './titanRebote';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
 import { executarFlashArbV2, diagnosticarFlashArbV2 } from './titanV2Execucao';
@@ -2151,6 +2152,12 @@ async function principal(): Promise<void> {
     let tentativasTitan = 0;
     let ultimoEnsaioTitanEm = 0;
     const pendentesCotacao = new Set<string>();
+    const radarRebote=new RadarDeRebotes();
+    let ultimoBlocoReboteSolicitado=0;
+    let leituraReboteEmAndamento=false;
+    let falhasRebote=0;
+    let liquidacoesObservadas=0;
+    let poolsVinculadosRebote=0;
     const memoriaDeCotacoesNegativas = new MemoriaDeCotacoesNegativas(
         Math.max(1_000,Math.min(600_000,
             Number(process.env.TITAN_RECHECK_NEGATIVAS_MS??120_000)||120_000)),
@@ -2350,6 +2357,39 @@ async function principal(): Promise<void> {
         if (blocoAnterior === null || blocoAgora > blocoAnterior) PLACAR.blocos += 1;
         blocoAnterior = blocoAgora;
 
+        // O rebote nao exige ganhar o leilao da LIQUIDACAO: observa, na
+        // mesma transacao, swaps ligados a uma LiquidationCall da Aave.
+        // Sao recibos CONFIRMADOS e correlacao, nao prova de venda nem lucro.
+        // Uma leitura curta por bloco que o scanner efetivamente alcança.
+        // Nao bloqueia a leitura de reservas e usa o MESMO limite de RPC.
+        if(process.env.TITAN_MONITORAR_REBOTE!=='0'&&blocoAgora>0
+            &&blocoAgora>ultimoBlocoReboteSolicitado&&!leituraReboteEmAndamento){
+            const blocoDoPedido=blocoAgora;
+            ultimoBlocoReboteSolicitado=blocoDoPedido;
+            leituraReboteEmAndamento=true;
+            void chamar('eth_getBlockReceipts',[`0x${blocoDoPedido.toString(16)}`])
+              .then(recibos=>{
+                  if(!Array.isArray(recibos)){falhasRebote++;return;}
+                  const observacao=detectarRebotesAave(recibos);
+                  radarRebote.registrar(blocoDoPedido,observacao);
+                  liquidacoesObservadas+=observacao.liquidacoes;
+                  poolsVinculadosRebote+=observacao.pools.length;
+                  if(observacao.liquidacoes>0){
+                      log.info('[TITAN/REBOTE] Liquidacao Aave confirmada: swaps da MESMA transacao.',{
+                          bloco:blocoDoPedido,liquidacoes:observacao.liquidacoes,
+                          transacoesComSwap:observacao.transacoesComSwaps,
+                          pools:observacao.pools,
+                          significado:'pista para cotar apos a liquidacao; nenhuma venda ou lucro presumido',
+                      });
+                      eventoTitan('descoberta','Liquidacao Aave detectada',
+                        observacao.pools.length+' piscina(s) com swap na mesma transacao. '
+                        +'Verificando se sobrou diferenca de preco.');
+                  }
+              })
+              .catch(()=>{falhasRebote++;})
+              .finally(()=>{leituraReboteEmAndamento=false;});
+        }
+
         const fimLeitura = av.etapa('leitura');
         const { pools, falhas, vazios } = await lerPools(
             chamar, universo.pools, universo.porFabrica, blocoAgora,
@@ -2524,7 +2564,13 @@ async function principal(): Promise<void> {
                 afetadasPotenciais, tri, tetoCotarRotas, FM.estadosAvaliados,
                 process.env.TITAN_ROTACIONAR_COTACOES!=='0',
             );
-            const afetadas = escolha.selecionadas;
+            const destaqueRebote=radarRebote.ativos(blocoDaAmostra);
+            const afetadas=priorizarRebotes(
+                escolha.selecionadas,afetadasPotenciais,destaqueRebote,
+                Math.max(1,Math.floor(tetoCotarRotas/4)),
+            );
+            const rotasPromovidas=afetadas.filter(
+                r=>!escolha.selecionadas.some(q=>q.chave===r.chave)).length;
             atualizarTitan({
                 phase: 'Avaliando rotas em tempo real',
                 description: 'O scanner compara precos e custos antes da simulacao completa.',
@@ -2880,6 +2926,11 @@ async function principal(): Promise<void> {
                     + 'a resposta',
                 cotacoesExecutadas: cotadasAgora,
                 repeticoesNegativasEvitadas: repetidasEvitadas,
+                reboteAave:{
+                    liquidacoesObservadas,poolsComSwapAssociado:poolsVinculadosRebote,
+                    poolsAtivos:destaqueRebote.size,rotasPromovidas,leiturasQueFalharam:falhasRebote,
+                    nota:'swaps na mesma tx de liquidacao; spread so existe apos cotacao atual',
+                },
                 cotacoesAdiadasPorCapacidade: escolha.adiadas,
                 pendentesCotacao: pendentesCotacao.size,
                 mudancasIntrabloco: `${INTRABLOCO.detectadas} estado(s) novo(s) detectado(s) com `
