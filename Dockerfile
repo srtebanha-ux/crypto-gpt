@@ -14,6 +14,8 @@ RUN npm run build
 # Gera o bytecode necessário ao cotador V3 (state override em eth_call).
 # Hardhat utiliza o solc local definido em hardhat.config.cjs: sem baixar compilador.
 RUN npx hardhat compile
+COPY scripts/gerarProvaFlashArb.cjs ./scripts/gerarProvaFlashArb.cjs
+RUN node scripts/gerarProvaFlashArb.cjs
 
 FROM node:22-slim AS runtime
 WORKDIR /app
@@ -21,6 +23,7 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/.tmp/artifacts/FlashArbProva.json ./.tmp/artifacts/FlashArbProva.json
 # O cotador misto lê este JSON em tempo de execução; nenhum contrato é implantado.
 COPY --from=build /app/.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json ./.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json
 # Executor alternativo Morpho: artefato disponivel apenas para validacao/deploy explicito.
