@@ -49,7 +49,7 @@ import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
 import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, sondasTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
 import { retentarTamanhoPorErroTitan } from './titanTaticas';
 import { priorizarCotacoes, MemoriaDeCotacoesNegativas } from './titanPriorizacao';
-import { detectarRebotesAave, RadarDeRebotes, priorizarRebotes } from './titanRebote';
+import { detectarRebotesAave, detectarRebotesMorpho, RadarDeRebotes, priorizarRebotes } from './titanRebote';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
 import { executarFlashArbV2, diagnosticarFlashArbV2 } from './titanV2Execucao';
@@ -2158,6 +2158,10 @@ async function principal(): Promise<void> {
     let falhasRebote=0;
     let liquidacoesObservadas=0;
     let poolsVinculadosRebote=0;
+    let liquidacoesMorphoObservadas=0;
+    let liquidacoesViaAtlasObservadas=0;
+    let piscinasMorphoAssociadas=0;
+    let transacoesAtlasObservadas=0;
     const memoriaDeCotacoesNegativas = new MemoriaDeCotacoesNegativas(
         Math.max(1_000,Math.min(600_000,
             Number(process.env.TITAN_RECHECK_NEGATIVAS_MS??120_000)||120_000)),
@@ -2371,9 +2375,36 @@ async function principal(): Promise<void> {
               .then(recibos=>{
                   if(!Array.isArray(recibos)){falhasRebote++;return;}
                   const observacao=detectarRebotesAave(recibos);
-                  radarRebote.registrar(blocoDoPedido,observacao);
+                  const morpho=detectarRebotesMorpho(recibos);
+                  // Ambos compartilham EXATAMENTE os mesmos recibos. Nenhum
+                  // RPC extra e nenhum caminho de envio novo.
+                  radarRebote.registrar(blocoDoPedido,{
+                      liquidacoes:observacao.liquidacoes+morpho.liquidacoes,
+                      transacoesComSwaps:observacao.transacoesComSwaps+morpho.transacoesComSwaps,
+                      pools:[...new Set([...observacao.pools,...morpho.pools])],
+                  });
                   liquidacoesObservadas+=observacao.liquidacoes;
                   poolsVinculadosRebote+=observacao.pools.length;
+                  liquidacoesMorphoObservadas+=morpho.liquidacoes;
+                  liquidacoesViaAtlasObservadas+=morpho.liquidacoesViaAtlas;
+                  piscinasMorphoAssociadas+=morpho.pools.length;
+                  transacoesAtlasObservadas+=morpho.transacoesAtlas;
+                  if(morpho.liquidacoes>0){
+                      log.info('[TITAN/REBOTE-MORPHO] Liquidacao Morpho confirmada.',{
+                          bloco:blocoDoPedido,
+                          liquidacoes:morpho.liquidacoes,
+                          liquidacoesViaAtlas:morpho.liquidacoesViaAtlas,
+                          transacoesAtlas:morpho.transacoesAtlas,
+                          swapsNaMesmaTransacao:morpho.transacoesComSwaps,
+                          piscinas:morpho.pools,
+                          nota:'observacao onchain; swap correlacionado nao comprova lucro',
+                      });
+                      if(morpho.pools.length>0){
+                          eventoTitan('descoberta','Rebote Morpho identificado',
+                            morpho.liquidacoes+' liquidacao(oes), '
+                            +morpho.pools.length+' pool(s) com Swap na mesma transacao.');
+                      }
+                  }
                   if(observacao.liquidacoes>0){
                       log.info('[TITAN/REBOTE] Liquidacao Aave confirmada: swaps da MESMA transacao.',{
                           bloco:blocoDoPedido,liquidacoes:observacao.liquidacoes,
@@ -2930,6 +2961,13 @@ async function principal(): Promise<void> {
                     liquidacoesObservadas,poolsComSwapAssociado:poolsVinculadosRebote,
                     poolsAtivos:destaqueRebote.size,rotasPromovidas,leiturasQueFalharam:falhasRebote,
                     nota:'swaps na mesma tx de liquidacao; spread so existe apos cotacao atual',
+                },
+                reboteMorpho:{
+                    liquidacoesObservadas:liquidacoesMorphoObservadas,
+                    liquidacoesViaAtlas:liquidacoesViaAtlasObservadas,
+                    transacoesAtlasObservadas,
+                    piscinasComSwapNaMesmaTx:piscinasMorphoAssociadas,
+                    regra:'somente eventos em recibo confirmado, sem criar cotacao ficticia',
                 },
                 cotacoesAdiadasPorCapacidade: escolha.adiadas,
                 pendentesCotacao: pendentesCotacao.size,
