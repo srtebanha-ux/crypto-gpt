@@ -64,7 +64,9 @@ jobs:
               }
             }
             for(const sp of [1,10,50,100,200,300]){
-              const pool=(await call(slip,SL,'getPool',[cbbtc,usdc,sp]))[0];
+              let pool;
+              try { pool=(await call(slip,SL,'getPool',[cbbtc,usdc,sp]))[0]; }
+              catch(e){console.log('POOL_SKIPPED '+JSON.stringify({tickSpacing:sp,reason:String(e).slice(0,120)}));continue;}
               if(pool==='0x0000000000000000000000000000000000000000')continue;
               let entry={dex:'slipstream',pair:[cbbtc,usdc],tickSpacing:sp,pool};
               try{
