@@ -1,0 +1,42 @@
+name: TITAN V2 Base RPC state-override capability
+on:
+  push:
+    branches:
+      - fix/titan-v2-atomic-preflight-20261018
+permissions:
+  contents: read
+jobs:
+  rpc-overrides:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe Base eth_call and eth_estimateGas with code override read-only
+        run: |
+          node <<'JS'
+          // No wallet, no transaction broadcast, no secrets.
+          const urls=['https://mainnet.base.org','https://base-rpc.publicnode.com',
+                      'https://base.llamarpc.com','https://1rpc.io/base'];
+          const target='0x00000000000000000000000000000000F1A5BEEF';
+          const overrides={[target]:{code:'0x602a60005260206000f3'}};
+          const from='0x0000000000000000000000000000000000000001';
+          async function rpc(url,method,params){
+            const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),7000);
+            try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},
+                  signal:ctl.signal,body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});
+              const j=await r.json();return {ok:r.ok&&!j.error,result:j.result??null,
+                error:j.error?.message?.slice(0,140)||null,status:r.status};}
+            catch(e){return {ok:false,result:null,error:String(e).slice(0,140)}}
+            finally{clearTimeout(t)}
+          }
+          (async()=>{
+            for(const url of urls){
+              const result={host:new URL(url).host};
+              const chain=await rpc(url,'eth_chainId',[]);
+              result.chainId=chain.result;
+              const tx={from,to:target,data:'0x',gas:'0x100000'};
+              result.call=await rpc(url,'eth_call',[tx,'latest',overrides]);
+              result.estimate=await rpc(url,'eth_estimateGas',[tx,'latest',overrides]);
+              console.log('RPC_OVERRIDE_PROBE '+JSON.stringify(result));
+            }
+          })().catch(e=>{console.error('RPC_PROBE_FATAL '+String(e));process.exitCode=1});
+          JS
