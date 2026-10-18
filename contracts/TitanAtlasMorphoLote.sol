@@ -127,34 +127,46 @@ contract TitanAtlasMorphoLote {
 
         executandoAtlas = true;
         uint256 inicial = IWethTitan(weth).balanceOf(address(this));
+        (uint256 quantidade, uint256 minimoWeth) = _rodarCalldata(solverOpData);
+        _pagarBidEReconciliar(executionEnvironment,bidAmount,inicial,minimoWeth,quantidade);
+        executandoAtlas=false;
+    }
+
+    function _rodarCalldata(bytes calldata solverOpData)
+        internal returns(uint256 quantidade,uint256 minimoWeth)
+    {
         (bool passou, bytes memory response) = address(this).call(solverOpData);
         if (!passou) {
             assembly { revert(add(response, 32), mload(response)) }
         }
-        (uint256 quantidade, uint256 minimoWeth) = abi.decode(response, (uint256,uint256));
+        return abi.decode(response, (uint256,uint256));
+    }
+
+    function _pagarBidEReconciliar(
+        address executionEnvironment,uint256 bidAmount,uint256 inicial,
+        uint256 minimoWeth,uint256 quantidade
+    ) internal {
         uint256 atual = IWethTitan(weth).balanceOf(address(this));
         if (atual < inicial) revert SaldoAntigoUtilizado();
         uint256 gerado = atual - inicial;
         if (gerado < bidAmount) revert LanceInsuficiente(gerado, bidAmount);
-        if (gerado - bidAmount < minimoWeth) revert LucroInsuficiente(gerado-bidAmount,minimoWeth);
+        if (gerado-bidAmount < minimoWeth) revert LucroInsuficiente(gerado-bidAmount,minimoWeth);
 
         // Bid paid strictly from WETH earned in the SAME Atlas transaction.
         IWethTitan(weth).withdraw(bidAmount);
         (bool paid,) = executionEnvironment.call{value: bidAmount}("");
         if (!paid) revert PagamentoLanceFalhou();
 
-        (uint256 gasLiability, uint256 borrowLiability) = IAtlasTitan(atlas).shortfall();
-        // Forbid receiving borrowed native ETH outside the proved profit.
+        (uint256 gasLiability,uint256 borrowLiability) = IAtlasTitan(atlas).shortfall();
         if (borrowLiability != 0) revert ReconciliacaoComCreditoExterno();
         IAtlasTitan(atlas).reconcile(gasLiability);
 
         uint256 depois = IWethTitan(weth).balanceOf(address(this));
         if (depois < inicial) revert SaldoAntigoUtilizado();
-        uint256 lucro = depois - inicial;
+        uint256 lucro = depois-inicial;
         if (lucro < minimoWeth) revert LucroInsuficiente(lucro,minimoWeth);
         if (lucro != 0) _tokenOk(weth,abi.encodeCall(IWethTitan.transfer,(cofre,lucro)));
         emit LoteAtlasExecutado(quantidade,bidAmount,lucro);
-        executandoAtlas=false;
     }
 
     /**
