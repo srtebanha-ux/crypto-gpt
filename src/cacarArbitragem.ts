@@ -47,7 +47,7 @@ import { executarTitan, simularTitanAoVivo } from './titanExecucao';
 import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
 import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, sondasTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
 import { retentarTamanhoPorErroTitan } from './titanTaticas';
-import { priorizarCotacoes } from './titanPriorizacao';
+import { priorizarCotacoes, MemoriaDeCotacoesNegativas } from './titanPriorizacao';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
 import { executarFlashArbV2, diagnosticarFlashArbV2 } from './titanV2Execucao';
@@ -2131,6 +2131,10 @@ async function principal(): Promise<void> {
     let tentativasTitan = 0;
     let ultimoEnsaioTitanEm = 0;
     const pendentesCotacao = new Set<string>();
+    const memoriaDeCotacoesNegativas = new MemoriaDeCotacoesNegativas(
+        Math.max(1_000,Math.min(600_000,
+            Number(process.env.TITAN_RECHECK_NEGATIVAS_MS??120_000)||120_000)),
+    );
     // Gas-free V2 checks are limited and diverse. Never hammer a toxic
     // token/pool or mistake an old estimate for a current arbitrage.
     const ultimaProvaV2=new Map<string,number>();
@@ -2459,13 +2463,18 @@ async function principal(): Promise<void> {
             const poolsQueMudaram = new Set(ESTADOS_DOS_POOLS.mudaram(cru));
             // Carrega a pequena fila adiada do ciclo anterior: sem isso, uma rota
             // nao selecionada desaparece se os pools nao mudarem novamente.
-            const afetadasPotenciais = tri.valem.filter(
+            const selecionaveisPeloEstado=tri.valem.filter(
                 (c) => pendentesCotacao.has(c.chave)
-                    || c.pernas.some((p) => poolsQueMudaram.has(p.pool.toLowerCase())),
+                    || c.pernas.some((p) => poolsQueMudaram.has(p.pool.toLowerCase()))
+                    || memoriaDeCotacoesNegativas.venceu(c,cru,Date.now()),
             );
+            const afetadasPotenciais=selecionaveisPeloEstado.filter(
+                (c)=>memoriaDeCotacoesNegativas.deveCotar(c,cru,Date.now()),
+            );
+            const repetidasEvitadas=selecionaveisPeloEstado.length-afetadasPotenciais.length;
             const escolha = priorizarCotacoes(
                 afetadasPotenciais, tri, tetoCotarRotas, FM.estadosAvaliados,
-                process.env.TITAN_ROTACIONAR_COTACOES==='1',
+                process.env.TITAN_ROTACIONAR_COTACOES!=='0',
             );
             const afetadas = escolha.selecionadas;
             const escolhidas = new Set(afetadas.map((c) => c.chave));
@@ -2651,7 +2660,15 @@ async function principal(): Promise<void> {
                     if (rota === undefined) continue;
                     const poolsDaRota = rota.pernas.map((p) => p.pool);
                     const v = compararEstados(cru, cruDepois, poolsDaRota);
-                    if (v === 'CONSISTENTE') { FM.estadosConsistentes += 1; continue; }
+                    if (v === 'CONSISTENTE') {
+                        FM.estadosConsistentes += 1;
+                        if(!sn.motivo.startsWith('EXPIRADO')){
+                            memoriaDeCotacoesNegativas.registrar(
+                                rota,cru,sn.lucroLiquidoEstimado,true,Date.now(),
+                            );
+                        }
+                        continue;
+                    }
                     if (v === 'NAO_VALIDADA') {
                         FM.estadoNaoValidado += 1;
                         sn.motivo = 'ESTADO_NAO_VALIDADO: não li algum pool desta rota na '
@@ -2802,6 +2819,7 @@ async function principal(): Promise<void> {
                     + 'outras têm os dois pools no MESMO estado já avaliado, e recotar repetiria '
                     + 'a resposta',
                 cotacoesExecutadas: cotadasAgora,
+                repeticoesNegativasEvitadas: repetidasEvitadas,
                 cotacoesAdiadasPorCapacidade: escolha.adiadas,
                 pendentesCotacao: pendentesCotacao.size,
                 mudancasIntrabloco: `${INTRABLOCO.detectadas} estado(s) novo(s) detectado(s) com `
