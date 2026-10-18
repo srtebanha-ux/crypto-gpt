@@ -19,7 +19,7 @@ jobs:
       - name: Compile TypeScript
         run: npm run build
       - name: Validate EIP712 Atlas signing, hard gates and no broadcast
-        run: node --require ts-node/register --test src/titanSvrOperacao.test.ts src/titanSvr.test.ts
+        run: node --require ts-node/register --test src/titanSvrOperacao.test.ts src/titanSvr.test.ts src/titanRadarMorphoMultirrede.test.ts
       - name: Inspect readonly onchain Atlas Verification and gas cap
         run: node scripts/titanAtlasLeiturasPublicas.cjs
       - name: Check public Atlas bonded ETH of existing TITAN signer
