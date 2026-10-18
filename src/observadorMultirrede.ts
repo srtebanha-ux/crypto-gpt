@@ -38,7 +38,7 @@ export interface ProgressoRede {
     observados:string[];
     proximoIndice:number;
 }
-export interface EstadoLeitura {versao:1;redes:Partial<Record<NomeRede,ProgressoRede>>>}
+export interface EstadoLeitura {versao:1;redes:Partial<Record<NomeRede,ProgressoRede>>}
 const ENDERECO=/^0x[a-fA-F0-9]{40}$/;
 export function alvosDeBorrow(logs:readonly Log[]):string[]{
     const out=new Set<string>();
