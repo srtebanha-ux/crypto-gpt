@@ -21,6 +21,16 @@ export const FABRICA_V3_BASE = '0x33128a8fC17869897dcE68Ed026d694621f6FDfD';
 const WETH_BASE = '0x4200000000000000000000000000000000000006';
 const USDC_BASE = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
 const USDBC_BASE = '0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA';
+export const CBBTC_BASE = '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf';
+export const POOLS_CBBTC_V3_BASE: readonly PoolLiquidacao[] = Object.freeze([
+    // Verified on-chain via canonical Uniswap V3 Base factory getPool on 2026-10-17.
+    {endereco:'0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef',
+        token0:USDC_BASE,token1:CBBTC_BASE,protocolo:'v3',taxa:500,permitida:true},
+    {endereco:'0xeC558e484cC9f2210714E345298fdc53B253c27D',
+        token0:USDC_BASE,token1:CBBTC_BASE,protocolo:'v3',taxa:3000,permitida:true},
+    {endereco:'0x7AeA2E8A3843516afa07293a10Ac8E49906dabD1',
+        token0:WETH_BASE,token1:CBBTC_BASE,protocolo:'v3',taxa:500,permitida:true},
+]);
 export const FABRICA_SLIPSTREAM_BASE = '0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A';
 export const POOL_SLIPSTREAM_EURC_USDC: PoolLiquidacao = Object.freeze({
     endereco:'0xE846373C1a92B167b4E9cd5d8E4d6B1Db9E90EC7',
@@ -53,12 +63,16 @@ export async function tetoL1PeloCaca(rpc:JsonRpcProvider):Promise<bigint>{
 /** O CACA pode operar sem copiar novamente para Railway seu banco de pools. */
 export function poolsDoCaca(
     valor?: string, incluirSlipstream = process.env.CACA_MULTIHOP_SLIPSTREAM==='1',
+    incluirCbBtc = process.env.CACA_MULTIHOP_CBBTC==='1',
 ): PoolLiquidacao[] {
     const extras = valor?.trim() ? poolsDaConfiguracao(valor) : [];
     const unicos = new Map<string,PoolLiquidacao>();
-    const candidatos = incluirSlipstream
-        ? [...POOLS_V3_BASE_CACA,POOL_SLIPSTREAM_EURC_USDC,...extras]
-        : [...POOLS_V3_BASE_CACA,...extras];
+    const candidatos = [
+        ...POOLS_V3_BASE_CACA,
+        ...(incluirCbBtc?POOLS_CBBTC_V3_BASE:[]),
+        ...(incluirSlipstream?[POOL_SLIPSTREAM_EURC_USDC]:[]),
+        ...extras,
+    ];
     for (const pool of candidatos)
         unicos.set(pool.endereco.toLowerCase(),pool);
     return [...unicos.values()];
@@ -135,6 +149,25 @@ export function poolsDaConfiguracao(valor: string | undefined): PoolLiquidacao[]
         return a as unknown as PoolLiquidacao;
     });
 }
+/**
+ * Aave residue guard measured on Base fork (synthetic positions).
+ * For debt below ~2040 USD, covering exactly 50% can leave
+ * less than the accepted residual. Conservative cap only: no fabricated
+ * profit or assumption that a real multi-collateral position will accept it.
+ */
+export function creditoMaximoComResiduoCbBtc(
+    dividaCrua:bigint,dividaUsd:Decimal,limiteAtual:bigint,
+):bigint{
+    if(dividaCrua<=0n||limiteAtual<=0n||!dividaUsd.isFinite()||dividaUsd.lte(0))
+        return 0n;
+    const restoSeguro=new Decimal('1020.1632'); // 1000.16 * 1.02
+    const maxParcialUsd=dividaUsd.minus(restoSeguro);
+    if(maxParcialUsd.lte(0))return 0n;
+    const maxParcial=BigInt(new Decimal(dividaCrua.toString())
+        .mul(maxParcialUsd).div(dividaUsd).floor().toFixed(0));
+    return maxParcial<limiteAtual?maxParcial:limiteAtual;
+}
+
 export function validarPonte(e: EntradaPonte): void {
     for (const x of [e.usuario,e.garantia,e.divida,e.dono,e.contrato,e.cofre,e.aave,e.fabricaV3]) {
         if (!ENDERECO.test(x)) throw new Error('endereco invalido na ponte Multi-Hop');

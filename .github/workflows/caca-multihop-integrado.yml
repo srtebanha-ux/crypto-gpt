@@ -39,6 +39,10 @@ jobs:
         env:
           ARB_BLOCO: "52745456"
         run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanSlipstreamBaseFork.js
+      - name: Testar alvo cbBTC real em fork Base (sem broadcast)
+        env:
+          ARB_BLOCO: "52746275"
+        run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanCbBtcBaseFork.js
       - name: Confirmar imagem do CACA inclui bytecode sem private key
         run: |
           docker build -t caca-multihop:test .
