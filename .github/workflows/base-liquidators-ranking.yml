@@ -25,7 +25,7 @@ jobs:
       - name: Scan recent 24h of Base Aave and Morpho liquidations (fast check)
         env:
           RANK_DAYS: '1'
-          RANK_CHUNK: '1500'
+          RANK_CHUNK: '800'
         run: node scripts/rankearLiquidadoresBase.cjs
       - uses: actions/upload-artifact@v4
         if: always()
