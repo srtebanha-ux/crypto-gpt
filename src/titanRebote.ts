@@ -14,8 +14,12 @@ export const TOPICOS_SWAP_REBOTE=new Set([
  id('Swap(address,address,uint256,uint256,uint256,uint256)').toLowerCase(),
 ]);
 const POOL_AAVE_BASE=(REDES.base?.pool??'').toLowerCase();
+const MORPHO_BLUE_BASE='0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb';
+const ATLAS_BASE_EXECUTOR='0x583dcfef0d240dc80753f0f0b26513fee27d9b77';
+export const TOPICO_LIQUIDACAO_MORPHO=id('Liquidate(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)').toLowerCase();
 export interface ReciboConfirmado {
  status?:string|number;
+ to?:string;
  logs?:Array<{address?:string;topics?:string[]}>;
 }
 export interface ReboteObservado {
@@ -49,6 +53,52 @@ export function detectarRebotesAave(recibos:unknown):ReboteObservado {
  }
  return{liquidacoes,transacoesComSwaps,pools:[...pools]};
 }
+/**
+ * Morpho Blue Base: correlaciona o evento Liquidate com swaps na MESMA
+ * transacao confirmada. Inclui o Atlas na contagem mesmo quando nao houve
+ * Swap (ex.: liquidacao em lote financiada de outra maneira).
+ *
+ * A evidência de um evento na tx NAO e evidência de spread exploravel.
+ * Uma liquidação pode ocorrer sem nenhum swap e nao gerar rota de rebote.
+ */
+export function detectarRebotesMorpho(recibos:unknown):ReboteObservado & {
+  liquidacoesViaAtlas:number;
+  transacoesAtlas:number;
+} {
+ const pools=new Set<string>();
+ let liquidacoes=0,transacoesComSwaps=0;
+ let liquidacoesViaAtlas=0,transacoesAtlas=0;
+ if(!Array.isArray(recibos))return{
+   liquidacoes,transacoesComSwaps,pools:[],liquidacoesViaAtlas,transacoesAtlas,
+ };
+ for(const item of recibos){
+   if(!item||typeof item!=='object')continue;
+   const r=item as ReciboConfirmado;
+   if(r.status!=='0x1'&&r.status!==1)continue;
+   if(!Array.isArray(r.logs)||!r.logs.length)continue;
+   const encontrados=r.logs.filter(z=>
+      typeof z?.address==='string'&&z.address.toLowerCase()===MORPHO_BLUE_BASE
+      &&Array.isArray(z.topics)
+      &&z.topics[0]?.toLowerCase()===TOPICO_LIQUIDACAO_MORPHO);
+   if(!encontrados.length)continue;
+   liquidacoes+=encontrados.length;
+   if(typeof r.to==='string'&&r.to.toLowerCase()===ATLAS_BASE_EXECUTOR){
+     liquidacoesViaAtlas+=encontrados.length;
+     transacoesAtlas++;
+   }
+   let teveSwap=false;
+   for(const z of r.logs){
+     if(typeof z?.address!=='string'||!/^0x[0-9a-fA-F]{40}$/.test(z.address)
+       ||!Array.isArray(z.topics)
+       ||!TOPICOS_SWAP_REBOTE.has(z.topics[0]?.toLowerCase()??''))continue;
+     pools.add(z.address.toLowerCase());
+     teveSwap=true;
+   }
+   if(teveSwap)transacoesComSwaps++;
+ }
+ return{liquidacoes,transacoesComSwaps,pools:[...pools],liquidacoesViaAtlas,transacoesAtlas};
+}
+
 /** Mantem pistas somente nos 3 proximos blocos. Nunca inventa cotacao. */
 export class RadarDeRebotes {
  private readonly pistas=new Map<string,number>();
