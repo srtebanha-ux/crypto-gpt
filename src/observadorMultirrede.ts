@@ -187,7 +187,9 @@ export async function iniciarObservadorMultirrede():Promise<void>{
         const rede=REDES_AAVE_V3[nome];
         const url=process.env[rede.envRpc]??rede.rpcPadrao;
         if(!/^https:\/\//i.test(url))throw new Error('RPC precisa usar HTTPS: '+nome);
-        providers.set(nome,new JsonRpcProvider(url,rede.id,{staticNetwork:true}));
+        // NEVER use staticNetwork: it would fabricate the expected chainId.
+        // The first getNetwork() must read the actual remote eth_chainId.
+        providers.set(nome,new JsonRpcProvider(url));
     }
     console.info('[MULTIRREDE] leitura ativada, envio de transacoes IMPOSSIVEL neste processo',
         JSON.stringify({redes:nomes,intervalo,options}));
