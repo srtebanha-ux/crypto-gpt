@@ -77,7 +77,8 @@ test('Avalanche limita burst sem reduzir cadencia Arbitrum',()=>{
 test('Arbitrum recupera backlog e limita faixa separadamente das outras redes',()=>{
     assert.equal(tamanhoSeguroPorRede('arbitrum',50),200);
     assert.equal(tamanhoSeguroPorRede('arbitrum',250),250);
-    assert.equal(tamanhoSeguroPorRede('avalanche',50),50);
+    assert.equal(tamanhoSeguroPorRede('avalanche',50),100);
+    assert.equal(tamanhoSeguroPorRede('avalanche',200),100);
     assert.equal(tamanhoSeguroPorRede('optimism',50),50);
     assert.equal(tamanhoSeguroPorRede('polygon',50),50);
     assert.throws(()=>tamanhoSeguroPorRede('arbitrum',0),/invalido/);
