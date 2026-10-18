@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Interface, type JsonRpcProvider } from 'ethers';
 import { Decimal } from 'decimal.js';
 import { gerarRotasLiquidacao } from './titanRotasLiquidacao';
-import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte, lucroConfirmadoPorEventoMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca } from './titanPonteMultiHop';
+import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte, lucroConfirmadoPorEventoMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca, creditoMaximoComResiduoCbBtc, CBBTC_BASE, POOLS_CBBTC_V3_BASE } from './titanPonteMultiHop';
 const a=(n:number)=>'0x'+n.toString(16).padStart(40,'0');
 const pool={endereco:a(11),token0:a(1),token1:a(2),protocolo:'v3' as const,taxa:500,permitida:true};
 test('ABI do contrato implantavel recebe tuple[] e piso nao zero',()=>{
@@ -106,4 +106,32 @@ test('Slipstream spoofed pool or spacing fails closed',()=>{
         assert.equal(gerarRotasLiquidacao([p],real.token0,real.token1).length,0);
         assert.throws(()=>poolsDaConfiguracao(JSON.stringify([p])));
     }
+});
+
+test('cbBTC/USDC routes require explicit opt-in; legacy pools remain identical',()=>{
+    const usdc='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+    assert.equal(poolsDoCaca(undefined,false,false).length,3);
+    assert.equal(gerarRotasLiquidacao(poolsDoCaca(undefined,false,false),CBBTC_BASE,usdc).length,0);
+    const pools=poolsDoCaca(undefined,false,true);
+    assert.equal(pools.length,6);
+    const rotas=gerarRotasLiquidacao(pools,CBBTC_BASE,usdc);
+    assert.ok(rotas.some(r=>r.pernas.length===1&&r.pernas[0].fee===500));
+    assert.ok(rotas.some(r=>r.pernas.length===1&&r.pernas[0].fee===3000));
+    assert.ok(rotas.some(r=>r.pernas.length===2&&r.caminho[1].toLowerCase()==='0x4200000000000000000000000000000000000006'));
+    for(const p of POOLS_CBBTC_V3_BASE){
+        assert.equal(p.protocolo,'v3');
+        assert.equal(p.permitida,true);
+    }
+});
+test('Aave residue cap keeps cbBTC target debt safely above measured dust',()=>{
+    const debt=1_891_533_663n;
+    const half=debt/2n;
+    const safe=creditoMaximoComResiduoCbBtc(debt,new Decimal('1891.533663'),half);
+    assert.ok(safe>870_000_000n&&safe<872_000_000n);
+    assert.ok(safe<half);
+    const remains=new Decimal(debt.toString()).minus(safe).div(1_000_000);
+    assert.ok(remains.gte(new Decimal('1020.1632')));
+    assert.equal(creditoMaximoComResiduoCbBtc(3_000_000_000n,new Decimal(3000),1_500_000_000n),1_500_000_000n);
+    assert.equal(creditoMaximoComResiduoCbBtc(1_000_000_000n,new Decimal(1000),500_000_000n),0n);
+    assert.equal(creditoMaximoComResiduoCbBtc(debt,new Decimal(1891.53),0n),0n);
 });
