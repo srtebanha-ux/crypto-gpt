@@ -40,7 +40,7 @@ async function sourcify(addr) {
  try {
   const ac=new AbortController(),t=setTimeout(()=>ac.abort(),10000);
   let response;try{
-   response=await fetch('https://sourcify.dev/server/v2/contract/8453/'+addr+'?fields=abi,metadata,sources,verifiedAt,match',{signal:ac.signal});
+   response=await fetch('https://sourcify.dev/server/v2/contract/8453/'+addr+'?fields=all',{signal:ac.signal});
   }finally{clearTimeout(t)}
   if(!response.ok)return {status:response.status};
   const data=await response.json();
