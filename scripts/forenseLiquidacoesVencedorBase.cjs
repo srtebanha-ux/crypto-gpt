@@ -63,7 +63,7 @@ async function findEvent(rangeFrom,rangeTo){
  try{return await rpc('eth_getLogs',[params],2)}
  catch(e){ console.log('eth_getLogs failed on '+rangeFrom+'-'+rangeTo+': '+e.message);
   const m=Math.floor((rangeFrom+rangeTo)/2);
-  if(m<=rangeFrom) return[];
+  if(m<=rangeFrom) throw Error('Historical eth_getLogs unavailable, including one block: '+e.message);
   const a=await findEvent(rangeFrom,m),b=await findEvent(m+1,rangeTo);
   return a.concat(b);
  }
@@ -138,6 +138,8 @@ async function main(){
    console.log('TRACE-DATA',JSON.stringify({date:iso, ...result}));
   }catch(e){report.push({timestamp:iso,error:String(e.message)});console.log('FAILED',iso,String(e.message).slice(0,250))}
  }
- console.log('FINAL-FORENSIC',JSON.stringify({entries:report,failedRpcCalls:failures,complete:report.length===targets.length},null,2));
+ const complete=report.length===targets.length&&report.every(x=>x.hash&&x.morphoEvents?.length>0);
+ console.log('FINAL-FORENSIC',JSON.stringify({entries:report,failedRpcCalls:failures,complete},null,2));
+ if(!complete)process.exitCode=2;
 }
 main().catch(e=>{console.error(e);process.exitCode=1});
