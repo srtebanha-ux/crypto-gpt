@@ -4,6 +4,9 @@ const {id}=require('ethers');
 const targets=[
   '0xd12810b19b596347a3afac206d3ca65d08594b3f',
   '0xb949a57ac64be7a9dbe535e14f859e4c56a0cf03',
+  '0x8b61f5925f4515edb0b7b76c38036aaf9a818472',
+  '0x3ae5122d62e78dc14b98d8d30aca4faf9d1f1bba',
+  '0x583dcfef0d240dc80753f0f0b26513fee27d9b77',
 ];
 const rpcUrls=['https://base-rpc.publicnode.com','https://mainnet.base.org'];
 async function rpc(method,params){
