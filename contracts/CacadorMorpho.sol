@@ -149,8 +149,11 @@ contract CacadorMorpho {
         address garantia;
         address divida;
         address poolDeVenda;
+        address devedor;
         bool poolEstavel;
         uint256 pisoDeLucro;
+        uint256 saldoDividaInicial;
+        uint256 saldoGarantiaInicial;
         bool viva;
     }
     Caca private caca;
@@ -161,6 +164,9 @@ contract CacadorMorpho {
     error SemGarantia();
     error LucroInsuficiente(uint256 obtido, uint256 exigido);
     error UmDosDoisZero();
+    error TokenFalhou(address token);
+    error SaldoAnteriorConsumido(address token);
+    error CallbackDevedorInvalido();
 
     event CacadaNoMorpho(
         address indexed devedor,
@@ -187,12 +193,25 @@ contract CacadorMorpho {
         cofre = _cofre;
     }
 
-    /** Autoriza zerando antes: USDT e parentes revertem sem isso. */
+    /**
+     * Suporta ERC20 com retorno booleano ou sem retorno. NUNCA aceita
+     * retorno false, inclusive de tokens que nao revertem ao falhar.
+     * (Portado como conceito de SafeERC20; sem dependencia no binario.)
+     */
+    function _tokenOk(address token, bytes memory chamada) internal {
+        (bool ok, bytes memory retorno) = token.call(chamada);
+        if (!ok || (retorno.length > 0
+            && (retorno.length < 32 || !abi.decode(retorno, (bool))))) {
+            revert TokenFalhou(token);
+        }
+    }
+
+    /** Autoriza apenas o montante necessario, zerando antes se preciso. */
     function _autorizar(address token, address gastador, uint256 quantia) internal {
         if (IERC20(token).allowance(address(this), gastador) != 0) {
-            IERC20(token).approve(gastador, 0);
+            _tokenOk(token, abi.encodeCall(IERC20.approve, (gastador, 0)));
         }
-        IERC20(token).approve(gastador, quantia);
+        _tokenOk(token, abi.encodeCall(IERC20.approve, (gastador, quantia)));
     }
 
     /**
@@ -219,12 +238,17 @@ contract CacadorMorpho {
     ) external apenasDono {
         if ((seizedAssets == 0) == (repaidShares == 0)) revert UmDosDoisZero();
 
+        // Compare saldos APENAS desta operacao: tokens que ja estavam aqui
+        // nao podem financiar o repay nem parecer lucro desta liquidacao.
         caca = Caca({
             garantia: params.collateralToken,
             divida: params.loanToken,
             poolDeVenda: poolDeVenda,
+            devedor: devedor,
             poolEstavel: poolEstavel,
             pisoDeLucro: pisoDeLucro,
+            saldoDividaInicial: IERC20(params.loanToken).balanceOf(address(this)),
+            saldoGarantiaInicial: IERC20(params.collateralToken).balanceOf(address(this)),
             viva: true
         });
 
@@ -257,10 +281,11 @@ contract CacadorMorpho {
     function onMorphoLiquidate(uint256 repaidAssets, bytes calldata data) external {
         if (msg.sender != address(morpho)) revert ChamadaInesperada();
         if (!caca.viva) revert ChamadaInesperada();
-        abi.decode(data, (address));
+        if (abi.decode(data, (address)) != caca.devedor) revert CallbackDevedorInvalido();
 
-        uint256 emCaixa = IERC20(caca.garantia).balanceOf(address(this));
-        if (emCaixa == 0) revert SemGarantia();
+        uint256 saldoDaGarantia = IERC20(caca.garantia).balanceOf(address(this));
+        if (saldoDaGarantia <= caca.saldoGarantiaInicial) revert SemGarantia();
+        uint256 emCaixa = saldoDaGarantia - caca.saldoGarantiaInicial;
 
         if (caca.poolDeVenda != address(0) && caca.garantia != caca.divida) {
             // O PISO VAI PARA O ROUTER, nao para uma conferencia depois.
@@ -304,8 +329,13 @@ contract CacadorMorpho {
      * mesmo token da divida, entao a conta e a mesma.
      */
     function _fecharEPagar(address devedor) internal returns (uint256 lucro) {
-        lucro = IERC20(caca.divida).balanceOf(address(this));
-        if (lucro > 0) IERC20(caca.divida).transfer(cofre, lucro);
+        uint256 finalDaDivida = IERC20(caca.divida).balanceOf(address(this));
+        if (finalDaDivida < caca.saldoDividaInicial)
+            revert SaldoAnteriorConsumido(caca.divida);
+        lucro = finalDaDivida - caca.saldoDividaInicial;
+        if (lucro > 0) {
+            _tokenOk(caca.divida, abi.encodeCall(IERC20.transfer, (cofre, lucro)));
+        }
         emit CacadaNoMorpho(devedor, caca.garantia, caca.divida, 0, 0, lucro);
     }
 
@@ -319,6 +349,6 @@ contract CacadorMorpho {
      */
     function resgatar(address token) external apenasDono {
         uint256 saldo = IERC20(token).balanceOf(address(this));
-        if (saldo > 0) IERC20(token).transfer(cofre, saldo);
+        if (saldo > 0) _tokenOk(token, abi.encodeCall(IERC20.transfer, (cofre, saldo)));
     }
 }
