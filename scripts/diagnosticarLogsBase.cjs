@@ -20,6 +20,20 @@ async function req(url,method,params){
    {fromBlock:'0x'+(n-100).toString(16),toBlock:'0x'+n.toString(16),address:'0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb'},
    {fromBlock:'0x'+(n-100).toString(16),toBlock:'0x'+n.toString(16),address:['0xA238Dd80C259a72e81d7e4664a9801594F98d1c5','0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb']},
   ];
+  // Historical Aave + Morpho topic filter from 7-day ranking, same parameters.
+  const {id}=require('ethers');
+  const topics=[
+    id('LiquidationCall(address,address,address,uint256,uint256,address,bool)'),
+    id('Liquidate(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)'),
+  ];
+  const toHex=x=>'0x'+x.toString(16);
+  for(const blocks of [2,50,1500]){
+    const historical={fromBlock:toHex(52479235),toBlock:toHex(52479235+blocks-1),
+      address:['0xA238Dd80C259a72e81d7e4664a9801594F98d1c5','0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb'],
+      topics:[topics]};
+    const v=await req(url,'eth_getLogs',[historical]);
+    console.log('[HISTORY]',url,'blocks',blocks,JSON.stringify(v).slice(0,780));
+  }
   for(let i=0;i<filters.length;i++){
     const v=await req(url,'eth_getLogs',[filters[i]]);
     console.log('[LOGS]',url,'test',i,JSON.stringify(v).slice(0,600));
