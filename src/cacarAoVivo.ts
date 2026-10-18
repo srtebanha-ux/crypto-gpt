@@ -3,6 +3,7 @@ import { Decimal } from 'decimal.js';
 import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
 import { createLogger } from './logger';
 import { configurarRadarCaca, atualizarRadarCaca, registrarAlvoCaca, registrarTiroCaca, registrarPlacarCaca } from './cacaTelemetria';
+import { iniciarObservadorSvr } from './titanSvrObservador';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
@@ -2945,6 +2946,11 @@ async function principal(): Promise<'parar' | void> {
     // Uma politica, lida uma vez. Antes cada montagem relia o ambiente por
     // conta propria, e foi assim que uma delas ficou com cinco campos de nove.
     const POLITICA = politicaDoTiro();
+    // Independente do caminho Aave e Morpho. Somente assiste leiloes Atlas,
+    // sem chaves, sem novas transacoes e sem aguardar RPC nem bloquear tiros.
+    // Ativado apenas com TITAN_SVR_OBSERVAR=1.
+    iniciarObservadorSvr(log);
+
     // OS BOTÕES, NO BOOT. Uma linha, sempre.
     //
     // `comoLerAPolitica` existia desde 2026-09-28, mas só saía dentro do
