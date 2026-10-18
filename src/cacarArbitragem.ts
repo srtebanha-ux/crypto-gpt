@@ -50,6 +50,7 @@ import { retentarTamanhoPorErroTitan } from './titanTaticas';
 import { priorizarCotacoes } from './titanPriorizacao';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
+import { executarFlashArbV2 } from './titanV2Execucao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
     type PoolMisto, type CandidataMista, type LeiturasDoEstado, type PernaDescrita,
@@ -2860,9 +2861,18 @@ async function principal(): Promise<void> {
                     quantidade:pendente.candidato.quantia.toString(),
                     resultado:prova,
                     decisaoFinanceira:prova.estado==='executavel-em-override'
-                       ? 'candidato PROVADO na EVM simulada; enviar depende de executor V2 implantado e revalidacao de verdade'
+                       ? 'prova virtual passou; executor IMPLANTADO deve revalidar tudo'
                        : 'NAO ENVIAR; sinal teorico nao foi validado',
                 });
+                if(prova.estado==='executavel-em-override'
+                    &&process.env.TITAN_V2_ENVIAR==='1'){
+                    const resultadoPago=await executarFlashArbV2(
+                        pendente.candidato,process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                    log.warn('[TITAN/V2-EXECUTOR] Operacao na Base somente apos prova dupla.',{
+                        rota:k,resultado:resultadoPago,
+                        nota:'somente recibo confirma operacao; gas sempre tem risco residual',
+                    });
+                }
             }
         }
         for (const d of aprovadas.slice(0, 3)) {
