@@ -13,6 +13,7 @@ interface TiroResumo {
 }
 const alvos=new Map<string,AlvoLeitura>();
 let blocos=0,vigiados=0,podemAtirar=0,envioAutorizado=false;
+let placar:{enviadas:number;confirmadas:number;revertidas:number;semResposta:number}|null=null;
 let ultimoTiro:TiroResumo|undefined;
 let ativo=false,ocupado=false;
 let intervalo:ReturnType<typeof setInterval>|undefined;
@@ -47,6 +48,11 @@ export function atualizarRadarCaca(
  if(Number.isSafeInteger(candidatosLiquidaveis)&&candidatosLiquidaveis>=0)
   podemAtirar=candidatosLiquidaveis;
 }
+export function registrarPlacarCaca(enviadas:number,confirmadas:number,revertidas:number,semResposta:number):void {
+ const nums=[enviadas,confirmadas,revertidas,semResposta];
+ if(nums.every(n=>Number.isSafeInteger(n)&&n>=0)&&enviadas>=confirmadas+revertidas+semResposta)
+  placar={enviadas,confirmadas,revertidas,semResposta};
+}
 export function registrarAlvoCaca(id:string,hf:number,faltaPct:number|null,bloco:number):void {
  const item=alvos.get(id.toLowerCase());if(!item)return;
  if(!Number.isFinite(hf)||hf<0||hf>100)return;
@@ -61,10 +67,12 @@ export function registrarTiroCaca(hash:string,bloco:number,
 export function estadoRadarCaca():{
  observadoEm:string;bloco:number;vigiados:number;podemAtirar:number;
  envioAutorizado:boolean;alvos:AlvoLeitura[];ultimoTiro?:TiroResumo;
+ placar?:{enviadas:number;confirmadas:number;revertidas:number;semResposta:number};
 }{
  return{
   observadoEm:new Date().toISOString(),bloco:blocos,vigiados,podemAtirar,
   envioAutorizado,alvos:Array.from(alvos.values()),
+  ...(placar?{placar}:{}),
   ...(ultimoTiro?{ultimoTiro}:{})
  };
 }
