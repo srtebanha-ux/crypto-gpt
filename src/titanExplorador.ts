@@ -39,6 +39,7 @@ export class ExploradorDeRotasTitan{
 
     selecionar<S extends SinalParaExplorar,R extends RotaParaExplorar>(
         sinais:readonly S[],rotas:readonly R[],limite=2,agora=Date.now(),
+        permitirMedirCusto=false,
     ):Array<{sinal:S;rota:R}>{
         const acesso=new Map(rotas.map(x=>[x.chave.toLowerCase(),x]));
         const vistas=new Set<string>();
@@ -49,7 +50,8 @@ export class ExploradorDeRotasTitan{
             if(!rota||vistas.has(key)||rota.pernas.length<2||rota.pernas.length>4)continue;
             if(sinal.melhorTamanho===null||sinal.melhorTamanho<=0n
                 ||sinal.lucroBrutoEstimado===null||sinal.lucroBrutoEstimado<=0n
-                ||sinal.lucroLiquidoEstimado===null||sinal.lucroLiquidoEstimado<=0n
+                ||(!permitirMedirCusto && (sinal.lucroLiquidoEstimado===null
+                    ||sinal.lucroLiquidoEstimado<=0n))
                 ||sinal.motivo.startsWith('ESTADO_'))continue;
             const anterior=this.resultados.get(key);
             if(anterior){
@@ -61,8 +63,19 @@ export class ExploradorDeRotasTitan{
             vistas.add(key);validos.push({sinal,rota});
         }
         validos.sort((a,b)=>{
-            const luA=a.sinal.lucroLiquidoEstimado!,luB=b.sinal.lucroLiquidoEstimado!;
-            if(luA!==luB)return luB>luA?1:-1;
+            // Only an EVM eth_call may establish actual net profit. Quotes
+            // missing a cost estimate can be probed read-only, NEVER sent.
+            // First prefer a positive known net, then gross for unknown costs.
+            const luA=a.sinal.lucroLiquidoEstimado;
+            const luB=b.sinal.lucroLiquidoEstimado;
+            const posA=luA!==null&&luA>0n, posB=luB!==null&&luB>0n;
+            if(posA!==posB)return posA?-1:1;
+            if(posA&&posB&&luA!==luB)return luB!>luA! ? 1 : -1;
+            if(permitirMedirCusto && !posA){
+                const ga=a.sinal.lucroBrutoEstimado!;
+                const gb=b.sinal.lucroBrutoEstimado!;
+                if(ga!==gb)return gb>ga?1:-1;
+            }
             // Mesma rentabilidade -> caminho mais curto paga menos gas/risco.
             if(a.rota.pernas.length!==b.rota.pernas.length)
                 return a.rota.pernas.length-b.rota.pernas.length;
