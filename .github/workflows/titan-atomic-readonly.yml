@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/titan-validacao-atomica-live
+      - feat/titan-cacador-unificado-20261018
       - feat/titan-painel-tempo-real-20261018
       - fix/titan-quote-throughput-20261018
       - fix/titan-v2-runtime-solc-compat-20261018
