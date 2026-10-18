@@ -6,7 +6,7 @@
 // milissegundos que decidem a liquidação em cima de uma resposta que já veio.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EscadaDeRpc, ehFalhaDeTransporte, escadaDeRpcs, listaDeRpcs, porQueNaoServe, logsComRpcHistorico } from './escadaDeRpc';
+import { EscadaDeRpc, ehFalhaDeTransporte, escadaDeRpcs, listaDeRpcs, porQueNaoServe, logsComRpcHistorico, faixaHistoricaReversa } from './escadaDeRpc';
 
 const A = 'https://a.exemplo/v2/k';
 const B = 'https://b.exemplo';
@@ -260,4 +260,28 @@ test('historico: RPC secundario aceita apenas HTTPS valido',async()=>{
     await assert.rejects(logsComRpcHistorico(async()=>{throw Error('archive')},
         FILTRO_HISTORICO,{urlSecundaria:'http://exemplo.org'}),
         /invalido/);
+});
+
+test('censo da Base: paginação reversa 9 dias sem buracos, inclusive com ajuste de tamanho',()=>{
+    const inicio=100000;
+    const topo=inicio+388799;
+    const vistos=new Set<number>();
+    let ate=topo,contagem=0;
+    while(ate>=inicio){
+        const tamanho=contagem%3===0?1800:contagem%3===1?900:50;
+        const f=faixaHistoricaReversa(ate,inicio,tamanho);
+        assert.equal(f.ate,ate);
+        assert.equal(f.proximoAte,f.de-1);
+        for(let n=f.de;n<=f.ate;n++){
+            assert.equal(vistos.has(n),false,'releitura desnecessária ou faixa sobreposta');
+            vistos.add(n);
+        }
+        ate=f.proximoAte;
+        contagem++;
+    }
+    assert.equal(vistos.size,388800);
+    assert.equal(ate,inicio-1);
+    assert.deepEqual(faixaHistoricaReversa(50,49,1800),{de:49,ate:50,proximoAte:48});
+    assert.throws(()=>faixaHistoricaReversa(48,49,100),/invalida/);
+    assert.throws(()=>faixaHistoricaReversa(100,0,0),/invalida/);
 });
