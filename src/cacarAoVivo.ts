@@ -5131,7 +5131,7 @@ async function principal(): Promise<'parar' | void> {
                 topics: [TOPIC_LIQUIDATION_CALL],
             };
             const resposta = await logsComRpcHistorico(
-                () => chamar<typeof logs[number]>('eth_getLogs',[filtro],1,'demorada','historico'),
+                () => chamar<typeof logs>('eth_getLogs',[filtro],1,'demorada','historico'),
                 filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL},
             );
             logs=resposta.logs;
