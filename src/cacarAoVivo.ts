@@ -7856,6 +7856,11 @@ async function principal(): Promise<'parar' | void> {
                                 if(!reconciliado)
                                     log.error('[DUAS ROTAS] Recibo nao gravado no diario: BLOQUEIO de novos envios.');
                             }
+                            registrarTiroCaca(
+                                hashDoTiro,blocoAtual,
+                                desfecho==='acertou'?'confirmado'
+                                    :desfecho==='reverteu'?'revertido':'desconhecido',
+                            );
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro, especulativo);
                             // AO DISCO AGORA, e não na próxima coleta.
                             //
