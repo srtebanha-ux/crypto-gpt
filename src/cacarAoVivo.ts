@@ -44,6 +44,7 @@ import { conferirJanelaDeNonce } from './janelaDeNonce';
 import {
     prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca,
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
+    creditoMaximoComResiduoCbBtc, CBBTC_BASE,
 } from './titanPonteMultiHop';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
@@ -6769,13 +6770,37 @@ async function principal(): Promise<'parar' | void> {
                         const reservaOpcional = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
                         const reserva = reservaOpcional > reservaBase ? reservaOpcional : reservaBase;
                         const gasMax = BigInt(process.env.CACA_MULTIHOP_GAS_MAX ?? '1500000');
+                        const ehCbBtcUsdc = alvo.garantia.toLowerCase()===CBBTC_BASE.toLowerCase()
+                            && alvo.divida.toLowerCase()==='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+                        const creditoInicial=cobrir(alvo);
+                        // For the 1.9k USDC target, Aave can revert if 50% leaves
+                        // forbidden dust. Only reduce the maximum for the MultiHop
+                        // executor and let the full onchain eth_call authorize.
+                        const creditoSeguro=ehCbBtcUsdc
+                            ? creditoMaximoComResiduoCbBtc(
+                                alvo.dividaCrua,alvo.dividaUsd,creditoInicial)
+                            : creditoInicial;
+                        if(creditoSeguro<=0n) {
+                            log.info('[MULTIHOP/RESIDUO] Pulo posicao sem cobertura parcial segura.',{
+                                devedor:alvo.devedor,dividaUsd:alvo.dividaUsd.toFixed(2),
+                                creditoOriginal:creditoInicial.toString(),
+                            });
+                            continue;
+                        }
+                        if(creditoSeguro<creditoInicial){
+                            log.info('[MULTIHOP/RESIDUO] Credito reduzido antes de simular.',{
+                                devedor:alvo.devedor,creditoOriginal:creditoInicial.toString(),
+                                creditoMaximo:creditoSeguro.toString(),
+                                nota:'residuo conservador medido em fork; sucesso exige eth_call completo',
+                            });
+                        }
                         ofertaMulti = await prepararOfertaMulti(leitor, {
                             usuario: alvo.devedor,
                             garantia: alvo.garantia,
                             divida: alvo.divida,
                             dividaCrua: alvo.dividaCrua,
                             dividaUsd: alvo.dividaUsd,
-                            creditoMaximo: cobrir(alvo),
+                            creditoMaximo: creditoSeguro,
                             ethUsd: precoDoEth()!,
                             dono: donoCarteira,
                             contrato: contratoMulti,
