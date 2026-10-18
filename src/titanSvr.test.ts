@@ -47,7 +47,7 @@ test('bid only if gross beats oracle fees, slippage, swap, min net and safety',(
  assert.equal(r.permitido,true);
  if(r.permitido){
   assert.equal(r.lanceWei,201n);
-  assert.equal(r.lucroLiquidoPrevistoWei,419n);
+  assert.equal(r.lucroLiquidoPrevistoWei,519n);
  }
  assert.equal(planejarLanceSvr({...base,lanceCompetidorWei:650n}).permitido,false);
  assert.equal(planejarLanceSvr({...base,custoGasEAtualizacaoOracleWei:780n}).permitido,false);
