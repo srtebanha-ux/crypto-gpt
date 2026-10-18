@@ -2,7 +2,7 @@
 import { Decimal } from 'decimal.js';
 import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
 import { createLogger } from './logger';
-import { configurarRadarCaca, atualizarRadarCaca, registrarAlvoCaca, registrarTiroCaca } from './cacaTelemetria';
+import { configurarRadarCaca, atualizarRadarCaca, registrarAlvoCaca, registrarTiroCaca, registrarPlacarCaca } from './cacaTelemetria';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
@@ -3707,6 +3707,7 @@ async function principal(): Promise<'parar' | void> {
     // boot de agora, com cara de resposta sobre o passado inteiro.
     if (estadoDoCache.usavel && estadoDoCache.cache.placar !== undefined) {
         tiros = placarDoCache(estadoDoCache.cache.placar);
+        registrarPlacarCaca(tiros.disparados,tiros.acertou,tiros.reverteu,tiros.sumiu);
         log.info('[CACHE] O placar dos tiros que sobreviveu ao deploy.', {
             // O nonce é a conferência DE FORA: ele conta transações saídas da
             // carteira e não volta para trás, então discordar dele é a única
@@ -7862,6 +7863,7 @@ async function principal(): Promise<'parar' | void> {
                                     :desfecho==='reverteu'?'revertido':'desconhecido',
                             );
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro, especulativo);
+                            registrarPlacarCaca(tiros.disparados,tiros.acertou,tiros.reverteu,tiros.sumiu);
                             // AO DISCO AGORA, e não na próxima coleta.
                             //
                             // A primeira versão da persistência da bússola
