@@ -4057,7 +4057,22 @@ async function principal(): Promise<'parar' | void> {
     }
 
     log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
-    void quandoFoiAUltimaLiquidacao(topo);
+    let censoHistoricoRodando=false;
+    const executarCensoHistorico=async():Promise<void>=>{
+        if(censoHistoricoRodando)return;
+        censoHistoricoRodando=true;
+        try{
+            const blocoAtual=await leitor.getBlockNumber();
+            await quandoFoiAUltimaLiquidacao(blocoAtual);
+        }catch(e){
+            log.warn('[MERCADO/CENSO] Falha controlada; monitoramento ao vivo intacto.',{
+                causa:e instanceof Error?sanitizar(e.message):'desconhecida',
+            });
+        }finally{censoHistoricoRodando=false}
+    };
+    void executarCensoHistorico();
+    const intervaloCenso=setInterval(()=>{void executarCensoHistorico()},10*60_000);
+    intervaloCenso.unref();
     // O tiro em seco NAO pode sair daqui: a brasa so existe depois da primeira
     // varredura completa, e chamado aqui ele achava a lista vazia e desistia
     // dois segundos antes de ela ser preenchida.
@@ -4717,156 +4732,171 @@ async function principal(): Promise<'parar' | void> {
      * Roda em segundo plano, uma vez por boot, uns 3.000 CUs — 0,03% do teto.
      */
     async function quandoFoiAUltimaLiquidacao(topo: number): Promise<void> {
-        const PASSO = PEDACO * 5;      // ~5,5 horas de blocos por consulta
-        const ATE_ONDE_OLHAR = 40;     // ~9 dias para tras
-
-        // ANTES esta funcao parava na PRIMEIRA janela com liquidacao e jogava
-        // todo o resto fora. Ela respondia "ha quanto tempo foi a ultima" e mais
-        // nada — e a pergunta que decide a estrategia e outra: nos ultimos nove
-        // dias, quantas migalhas passaram DENTRO da minha faixa, e valendo
-        // quanto?
-        //
-        // Essa resposta existe no historico da rede, sem esperar ninguem cair e
-        // sem mandar transacao nenhuma. Custa uns 3.000 CUs uma vez por boot —
-        // 0,008% do teto do mes.
-        const achadas: Array<{ bloco: number; ativo: string; cru: bigint | Decimal; hash: string; liquidante: string }> = [];
+        // Nine days of historical Base blocks, independently of the live RPC.
+        // Archive gateways differ on eth_getLogs ranges, so we shrink the
+        // *same* interval on errors and never skip a block.
+        const PASSO_MAXIMO = 1800;
+        const PASSO_MINIMO = 50;
+        const NOVE_DIAS_EM_BLOCOS = 9 * 24 * 3600 / 2;
+        const inicio = Math.max(0, topo - NOVE_DIAS_EM_BLOCOS + 1);
+        const caminho = process.env.CACA_CENSO_ESTADO
+            ?? '/app/data/censoAaveBaseHistorico.json';
+        const limite = 36; // requests per round, not per 9-day scan
+        const orcamento = new OrcamentoDaTarefa('historico', limite, 55_000);
+        const freio = new FreioDeRecusas();
+        type Achado = {
+            bloco:number; ativo:string; cru:bigint | Decimal;
+            hash:string; liquidante:string;
+        };
+        type AchadoSerial = {
+            bloco:number; ativo:string; cru:string;
+            hash:string; liquidante:string;
+        };
+        const achadas: Achado[] = [];
+        let proximoAte = topo;
         let janelasLidas = 0;
         let janelasQueFalharam = 0;
-        let blocoMaisAntigoOlhado = topo;
-        /** A ultima recusa, para o diagnostico dizer o que ela comprova. */
         let ultimaRecusa: string | null = null;
+        let tamanho = PASSO_MAXIMO;
+        let ultimoSalvoEm = 0;
+        const fs = await import('node:fs/promises');
+        const path = await import('node:path');
 
-        // O ORCAMENTO DA TAREFA INTEIRA: janelas E retentativas no mesmo bolso.
-        //
-        // Antes o laco rodava as 40 janelas sempre, e cada `chamar` repetia ate
-        // 4 vezes por conta — ate 160 `eth_getLogs` contra um provedor que
-        // recusava tudo, que e o que o log de 21:14:45 mostrou. Agora cada
-        // tentativa sai do orcamento, e `chamar` recebe `tentativas: 1` para
-        // nao multiplicar por fora dele.
-        const orcamento = new OrcamentoDaTarefa('historico', ATE_ONDE_OLHAR + 10, 60_000);
-        // O TETO GLOBAL NAO BASTA. Medido em 2026-10-11: 40 falhas em 40
-        // tentativas dentro de um orcamento de 50 — o teto limitou o total e nao
-        // impediu percorrer todas as janelas. O freio pergunta outra coisa:
-        // "ja falhei 3 vezes seguidas pela MESMA razao, vale a proxima?".
-        const freio = new FreioDeRecusas();
-        for (let i = 0; i < ATE_ONDE_OLHAR; i += 1) {
-            const ate = topo - i * PASSO;
-            const de = Math.max(0, ate - PASSO + 1);
-            if (ate <= 0) break;
-            if (!orcamento.pedir()) break;
-            // AS TRES CONDICOES JUNTAS, a cada janela e nao uma vez no comeco.
-            //
-            // A condicao dela: *"não transforme a recuperação parcial do
-            // eth_getLogs em autorização para consumir RPC indiscriminadamente"*.
-            // `autorizarVarredura` exige veredicto do provedor ATIVO para ESTE
-            // metodo, orcamento restante E teto de blocos MEDIDO — e um teto que
-            // passou numa consulta nao autoriza todas as consultas daquele
-            // tamanho, entao sem teto medido a resposta e sondar, nao varrer.
-            //
-            // Reavaliado por janela porque o provedor pode trocar no meio: a
-            // escada muda `rpc` sob os pes do laco.
-            const aqui = hostDoRpc(rpc);
-            const permissao = autorizarVarredura({
-                veredicto: DISPONIBILIDADE.veredicto(aqui, 'eth_getLogs'),
-                requisicoesRestantes: orcamento.restamTentativas(),
-                msRestantes: orcamento.restamMs(),
-                blocosDesejados: PASSO,
-            });
-            if (!permissao.pode) {
-                janelasQueFalharam += 1;
-                ADIADAS.historico += 1;
-                if (i === 0) {
-                    log.warn('[MERCADO] NÃO varro o histórico agora, e o motivo está medido.', {
-                        provedor: aqui,
-                        veredicto: DISPONIBILIDADE.comoLer(aqui, 'eth_getLogs'),
-                        porque: permissao.porque,
-                        oQueIssoNaoE: 'não é "não houve liquidação": é "não li". O monitoramento '
-                            + 'não é afetado — ele não passa por este portão',
-                    });
-                }
-                break;
-            }
-            try {
-                const logs = await chamar<Array<{ address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string }>>('eth_getLogs', [{
-                    address: REDE.pool,
-                    fromBlock: `0x${de.toString(16)}`,
-                    toBlock: `0x${Math.min(ate, de + (permissao.blocosPorChamada ?? PASSO) - 1).toString(16)}`,
-                    topics: [TOPIC_LIQUIDATION_CALL],
-                }], 1, 'demorada', 'historico');
-                janelasLidas += 1;
-                blocoMaisAntigoOlhado = de;
-                // SUCESSO SOLTA O FREIO — inclusive sucesso PARCIAL: uma janela
-                // lida prova que o provedor nao esta recusando tudo.
-                freio.passou();
-                for (const cru of logs) {
-                    try {
-                        const l = decodificarLiquidacao(cru);
-                        achadas.push({ bloco: l.bloco, ativo: l.ativoDaDivida, cru: l.dividaCrua, hash: cru.transactionHash, liquidante: l.liquidante });
-                    } catch { /* um log estranho nao invalida o censo */ }
-                }
-            } catch (e) {
-                // Uma janela que falha nao invalida a busca, mas ENTRA NA CONTA:
-                // um censo com buracos que se apresenta como completo seria
-                // ausencia com cara de resposta.
-                janelasQueFalharam += 1;
-                const msg = e instanceof Error ? e.message : String(e);
-                const d = decidirSobreRecusa({ mensagem: msg, ehTransporte: ehFalhaDeTransporte(msg) });
-                // COTA ENCERRA A TAREFA NA HORA: insistir nas 39 janelas
-                // restantes gasta o que sobrou para receber a mesma resposta.
-                if (d.marcarEsgotado) {
-                    orcamento.encerrar(`o provedor recusou por capacidade: ${sanitizar(msg)}`);
-                    break;
-                }
-                ultimaRecusa = msg;
-                const oQueFazer = freio.recusou(msg);
-                if (oQueFazer === 'adiar') {
-                    orcamento.encerrar(
-                        `${freio.seguidasAgora()} recusas equivalentes seguidas: adiei a tarefa `
-                        + 'em vez de percorrer as janelas restantes',
-                    );
-                    break;
-                }
-                if (oQueFazer === 'recuarESondar') {
-                    // RECUA UMA VEZ e deixa a janela seguinte servir de
-                    // sondagem: se ela passar, `freio.passou()` solta tudo.
-                    const recuo = VAZAO.recuar(2000);
-                    log.warn('[CENSO] Recuando: recusas equivalentes seguidas.', {
-                        freio: freio.comoLer(),
-                        recuandoMs: recuo,
-                        orcamento: orcamento.comoLer(),
-                        oQueVemAgora: 'a próxima janela vale como sondagem. Se ela passar, sigo; '
-                            + 'se as recusas continuarem, adio a tarefa',
-                    });
-                    await dormir(recuo);
+        try {
+            const dado = JSON.parse(await fs.readFile(caminho,'utf8')) as {
+                versao?:number; topo?:number; inicio?:number;
+                proximoAte?:number; lidas?:number;
+                achadas?:AchadoSerial[]; atualizadoEm?:number;
+            };
+            const valido=dado.versao===1
+                && Number.isSafeInteger(dado.topo)
+                && Number.isSafeInteger(dado.proximoAte)
+                && Number.isSafeInteger(dado.inicio)
+                && dado.inicio===Math.max(0,dado.topo!-NOVE_DIAS_EM_BLOCOS+1)
+                && dado.topo!<=topo && topo-dado.topo!<=NOVE_DIAS_EM_BLOCOS
+                && dado.proximoAte!>=dado.inicio!-1
+                && dado.proximoAte!<=dado.topo!
+                && Array.isArray(dado.achadas)
+                && dado.achadas.length<5000
+                && Number.isSafeInteger(dado.lidas) && dado.lidas!>=0;
+            if(valido){
+                const terminou=dado.proximoAte!<dado.inicio!;
+                // Completed censuses are refreshed daily. Incomplete censuses
+                // resume from the EXACT first unread block after a restart.
+                if(!terminou || Date.now()-(dado.atualizadoEm??0)<86_400_000){
+                    proximoAte=dado.proximoAte!;
+                    janelasLidas=dado.lidas!;
+                    ultimoSalvoEm=dado.atualizadoEm??0;
+                    for(const a of dado.achadas!){
+                        if(Number.isSafeInteger(a.bloco) && typeof a.cru==='string'
+                            && /^\\d+$/.test(a.cru))
+                            achadas.push({...a,cru:BigInt(a.cru)});
+                    }
+                    // The snapshot must keep its original upper block.
+                    topo=dado.topo!;
                 }
             }
-            await dormir(200);
-        }
+        }catch{ /* no checkpoint yet: start from current head */ }
 
-        const diasOlhados = ((topo - blocoMaisAntigoOlhado) * 2) / 86400;
-
-        const veredicto = veredictoDaVarredura({
-            lidas: janelasLidas, falharam: janelasQueFalharam, achados: achadas.length,
-        });
-        if (!veredicto.disponivel) {
-            // ZERO JANELAS LIDAS -> HISTORICO INDISPONIVEL, e nao "nenhuma
-            // liquidacao". A frase antiga publicava "a Aave da Base sem liquidar
-            // ninguem ha mais de uma semana" sobre 40 janelas que falharam, e a
-            // ressalva usava `janelasLidas / 4` como denominador: com zero
-            // lidas, `40 > 0` dava "um quarto das janelas falhou".
-            log.error('[MERCADO] HISTÓRICO INDISPONÍVEL — não concluo nada sobre o mercado.', {
-                veredicto: veredicto.frase,
-                orcamento: orcamento.comoLer(),
-                freio: freio.comoLer(),
-                diagnostico: ultimaRecusa === null
-                    ? 'nenhuma recusa registrada'
-                    : comoLerODiagnosticoDeLogs(diagnosticarRecusaDeLogs(ultimaRecusa)),
-                oQueFicaValendo: 'o censo anterior, se houver, com a idade dele. Esta volta não '
-                    + 'mede nada e não sobrescreve nada',
-                oQueIssoNaoE: 'não é "não houve liquidação": é "não consegui ler"',
+        const menorBloco = Math.max(0, topo-NOVE_DIAS_EM_BLOCOS+1);
+        const salvar = async():Promise<void>=>{
+            await fs.mkdir(path.dirname(caminho),{recursive:true});
+            const temporario=caminho+'.tmp';
+            await fs.writeFile(temporario,JSON.stringify({
+                versao:1,topo,inicio:menorBloco,proximoAte,lidas:janelasLidas,
+                atualizadoEm:Date.now(),
+                achadas:achadas.map(a=>({...a,cru:a.cru.toString()})),
+            }),'utf8');
+            await fs.rename(temporario,caminho);
+        };
+        if(proximoAte<menorBloco && Date.now()-ultimoSalvoEm<86_400_000){
+            log.info('[MERCADO/CENSO] Nove dias com cobertura completa; checkpoint ainda atualizado.',{
+                topo,blocoMaisAntigo:menorBloco,lidas:janelasLidas,eventos:achadas.length,
             });
             return;
         }
+
+        let tentativas=0;
+        while(proximoAte>=menorBloco && tentativas<limite && orcamento.pedir()){
+            const de=Math.max(menorBloco,proximoAte-tamanho+1);
+            const ate=proximoAte;
+            const filtro={
+                address:REDE.pool,
+                fromBlock:'0x'+de.toString(16),
+                toBlock:'0x'+ate.toString(16),
+                topics:[TOPIC_LIQUIDATION_CALL],
+            };
+            tentativas+=1;
+            try{
+                type LogRPC = {address:string;topics:string[];data:string;
+                    blockNumber:string;transactionHash:string};
+                const resultado=await logsComRpcHistorico<LogRPC>(
+                    async()=>{throw new Error('censo dedicado: usar apenas RPC historico');},
+                    filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
+                        tempoLimiteMs:6000},
+                );
+                for(const cru of resultado.logs){
+                    try{
+                        const l=decodificarLiquidacao(cru);
+                        if(achadas.some(a=>a.hash===cru.transactionHash && a.bloco===l.bloco))
+                            continue;
+                        achadas.push({bloco:l.bloco,ativo:l.ativoDaDivida,
+                            cru:l.dividaCrua,hash:cru.transactionHash,
+                            liquidante:l.liquidante});
+                    }catch{ /* invalid event is ignored, not a missing block */ }
+                }
+                janelasLidas+=1;
+                proximoAte=de-1; // inclusive intervals: never a gap
+                ultimaRecusa=null;
+                freio.passou();
+                await salvar(); // checkpoint advances ONLY after a successful read
+                await dormir(100);
+            }catch(e){
+                janelasQueFalharam+=1;
+                ultimaRecusa=e instanceof Error?e.message:String(e);
+                if(tamanho>PASSO_MINIMO){
+                    tamanho=Math.max(PASSO_MINIMO,Math.floor(tamanho/2));
+                    log.warn('[MERCADO/CENSO] RPC historico recusou faixa; reduzindo, sem pular blocos.',{
+                        proxAte:proximoAte,novoTamanho:tamanho,
+                        veredito:'nenhum bloco perdido nem contado como zero',
+                    });
+                    continue;
+                }
+                const acao=freio.recusou(ultimaRecusa);
+                if(acao==='adiar'||janelasQueFalharam>=3){
+                    log.warn('[MERCADO/CENSO] RPC historico indisponivel; checkpoint conservado.',{
+                        proximoAte,blocosRestantes:proximoAte-menorBloco+1,
+                        host:hostDoRpc(process.env.CACA_HISTORICO_RPC_URL
+                            ?? 'https://mainnet.base.org'),
+                        tentativas,porque:comoLerODiagnosticoDeLogs(
+                            diagnosticarRecusaDeLogs(ultimaRecusa)),
+                    });
+                    break;
+                }
+            }
+        }
+        const blocosLidos=topo-proximoAte;
+        const totalBlocos=topo-menorBloco+1;
+        const diasOlhados=blocosLidos*2/86400;
+        if(proximoAte>=menorBloco){
+            // PARTIAL reads must NEVER conclude there were no liquidations.
+            log.info('[MERCADO/CENSO_PROGRESSO] Varredura historica em andamento.',{
+                origem:'RPC historico independente',janelasLidas,
+                janelasQueFalharam,blocosLidos,totalBlocos,
+                percentual:Number((blocosLidos/totalBlocos*100).toFixed(2)),
+                eventosConfirmadosNaFaixaLida:achadas.length,
+                proximoBloco:proximoAte,
+                nota:'amostra INCOMPLETA, nao extrapolar para nove dias',
+            });
+            return;
+        }
+        const veredicto=veredictoDaVarredura({
+            lidas:janelasLidas, falharam:0, achados:achadas.length,
+        });
+        log.info('[MERCADO/CENSO_COMPLETO] Os nove dias foram lidos sem lacunas.',{
+            topo,blocoMaisAntigo:menorBloco,blocosLidos,totalBlocos,
+            janelasLidas,achados:achadas.length,
+        });
         if (achadas.length === 0) {
             log.warn('[MERCADO] NENHUMA liquidação encontrada para trás.', {
                 olheiPara: `${diasOlhados.toFixed(1)} dias`,
