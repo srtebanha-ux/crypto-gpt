@@ -6,7 +6,7 @@
 // milissegundos que decidem a liquidação em cima de uma resposta que já veio.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EscadaDeRpc, ehFalhaDeTransporte, escadaDeRpcs, listaDeRpcs, porQueNaoServe } from './escadaDeRpc';
+import { EscadaDeRpc, ehFalhaDeTransporte, escadaDeRpcs, listaDeRpcs, porQueNaoServe, logsComRpcHistorico } from './escadaDeRpc';
 
 const A = 'https://a.exemplo/v2/k';
 const B = 'https://b.exemplo';
@@ -214,4 +214,50 @@ test('URL quebrada NÃO é degrau — o caso real do log de 2026-10-09', () => {
         listaDeRpcs({ CACA_RPC_URLS: `${colada},https://mainnet.base.org` }, []),
         ['https://mainnet.base.org'],
     );
+});
+
+
+const FILTRO_HISTORICO={
+    address:'0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
+    fromBlock:'0x123',toBlock:'0x124',topics:['0xdead'],
+};
+test('historico: quando principal responde, nao usa segundo RPC',async()=>{
+    let fallbackChamado=0;
+    const resultado=await logsComRpcHistorico(async()=>[{blockNumber:'0x123'}],
+        FILTRO_HISTORICO,{buscar:async()=>{fallbackChamado++;throw Error('nao deveria ser chamado')}});
+    assert.equal(resultado.origem,'primario');
+    assert.equal(resultado.logs.length,1);
+    assert.equal(fallbackChamado,0);
+});
+test('historico: archive 403 usa somente eth_getLogs read-only no RPC secundario',async()=>{
+    let pedido:Record<string,unknown>|null=null;
+    const resultado=await logsComRpcHistorico<{blockNumber:string}>(
+        async()=>{throw Error('HTTP 403 archive requires token')},FILTRO_HISTORICO,{
+            urlSecundaria:'https://mainnet.base.org',
+            buscar:async(_url,init)=>{
+                pedido=JSON.parse(String(init?.body)) as Record<string,unknown>;
+                return {ok:true,json:async()=>({jsonrpc:'2.0',id:1,
+                    result:[{blockNumber:'0x124'}]})} as Response;
+            },
+        });
+    assert.equal(resultado.origem,'secundario');
+    assert.equal(resultado.provedor,'mainnet.base.org');
+    assert.equal(resultado.logs[0]?.blockNumber,'0x124');
+    assert.equal(pedido?.method,'eth_getLogs');
+    assert.deepEqual(pedido?.params,[FILTRO_HISTORICO]);
+});
+test('historico: 403 dos dois RPCs nunca se torna zero liquidacoes',async()=>{
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('403 archive')},
+        FILTRO_HISTORICO,{buscar:async()=>({ok:false,status:403}) as Response}),
+        /historico indisponivel em ambos RPCs/);
+});
+test('historico: resposta malformada nao significa lista vazia',async()=>{
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('archive')},
+        FILTRO_HISTORICO,{buscar:async()=>({ok:true,json:async()=>({result:null})}) as Response}),
+        /sem lista de logs valida/);
+});
+test('historico: RPC secundario aceita apenas HTTPS valido',async()=>{
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('archive')},
+        FILTRO_HISTORICO,{urlSecundaria:'http://exemplo.org'}),
+        /invalido/);
 });
