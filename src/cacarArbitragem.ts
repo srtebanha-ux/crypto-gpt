@@ -51,6 +51,7 @@ import { priorizarCotacoes } from './titanPriorizacao';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
 import { executarFlashArbV2 } from './titanV2Execucao';
+import { selecionarProximaProvaV2 } from './titanV2Selecao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
     type PoolMisto, type CandidataMista, type LeiturasDoEstado, type PernaDescrita,
@@ -2845,10 +2846,8 @@ async function principal(): Promise<void> {
         const aprovadas = decisoes.filter((d) => d.aprovado);
         if(process.env.TITAN_V2_SONDA==='1' && aprovadas.length>0
             &&Date.now()-ultimoEnsaioV2Em>=25_000){
-            const pendente=aprovadas.find(d=>{
-                const k=d.candidato.emprestimo.endereco+'>'+d.candidato.venda.endereco;
-                return Date.now()-(ultimaProvaV2.get(k)??0)>=240_000;
-            });
+            const proximo=selecionarProximaProvaV2(aprovadas,ultimaProvaV2);
+            const pendente=proximo.oportunidade;
             if(pendente){
                 const k=pendente.candidato.emprestimo.endereco+'>'+
                     pendente.candidato.venda.endereco;
