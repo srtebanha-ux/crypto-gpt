@@ -2,6 +2,7 @@
 import { Decimal } from 'decimal.js';
 import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
 import { createLogger } from './logger';
+import { configurarRadarCaca, atualizarRadarCaca, registrarAlvoCaca, registrarTiroCaca, registrarPlacarCaca } from './cacaTelemetria';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
@@ -3706,6 +3707,7 @@ async function principal(): Promise<'parar' | void> {
     // boot de agora, com cara de resposta sobre o passado inteiro.
     if (estadoDoCache.usavel && estadoDoCache.cache.placar !== undefined) {
         tiros = placarDoCache(estadoDoCache.cache.placar);
+        registrarPlacarCaca(tiros.disparados,tiros.acertou,tiros.reverteu,tiros.sumiu);
         log.info('[CACHE] O placar dos tiros que sobreviveu ao deploy.', {
             // O nonce é a conferência DE FORA: ele conta transações saídas da
             // carteira e não volta para trás, então discordar dele é a única
@@ -4102,6 +4104,7 @@ async function principal(): Promise<'parar' | void> {
     // Aave V3.3 para dividas < US$ 2.000. Nao antecipa liquidacao.
     // O enderecamento valida-se fora, e cada candidato passa no eth_call.
     const enderecosFechamento=enderecosPrioritarios(process.env.CACA_ALVOS_PRIORITARIOS);
+    configurarRadarCaca(enderecosFechamento,ENVIAR);
     log.info('[CACA/ALVOS-PRIORITARIOS] Preparacao de cobertura integral de dividas pequenas.',{
         quantidade:enderecosFechamento.size,
         somenteNaLiquidacao:true,
@@ -5633,6 +5636,11 @@ async function principal(): Promise<'parar' | void> {
                 try {
                     const conta = decodificarContaDoUsuario(dadoConta);
                     const saude = conta.saude;
+                    const faltaParaCaçar=quedaAteLiquidar(saude);
+                    registrarAlvoCaca(
+                        brasa[i]!,saude.dividedBy(1e18).toNumber(),
+                        faltaParaCaçar===null?null:faltaParaCaçar.toNumber(),blocoAtual,
+                    );
                     registrarDeriva(historicoDeSaude, brasa[i]!, saude, Date.now());
                     const queda = quedaAteLiquidar(saude);
                     // Sem chamada nova: aproveita a saúde onchain ja presente.
@@ -5791,6 +5799,8 @@ async function principal(): Promise<'parar' | void> {
             }
 
             menorPrioritarioAoVivo = menorPrioritarioNesteCiclo;
+            // Telemetria, não participa de decisões nem entra no caminho de RPC.
+            atualizarRadarCaca(blocoAtual,medidosDaBrasa.length,caidos.length);
 
             // O LIVRO, a cada ciclo: e aqui que o tempo efetivo se acumula.
             // Fora do `if` do log de proposito — a disponibilidade nao pode
@@ -7712,6 +7722,7 @@ async function principal(): Promise<'parar' | void> {
                         // recibo volta: o recibo leva segundos e o bloco dura
                         // 2s — esperar por ele deixaria o segundo tiro passar,
                         // que e exatamente o que a trava existe para impedir.
+                        registrarTiroCaca(tx.hash,blocoAtual,'enviado');
                         ultimoTiroNoBloco.set(chaveBloco, blocoAtual);
                         log.info(`[TIRO SAIU] (${contrato.nome}) — ainda NÃO é acerto.`, {
                             bloco: blocoAtual,
@@ -7846,7 +7857,13 @@ async function principal(): Promise<'parar' | void> {
                                 if(!reconciliado)
                                     log.error('[DUAS ROTAS] Recibo nao gravado no diario: BLOQUEIO de novos envios.');
                             }
+                            registrarTiroCaca(
+                                hashDoTiro,blocoAtual,
+                                desfecho==='acertou'?'confirmado'
+                                    :desfecho==='reverteu'?'revertido':'desconhecido',
+                            );
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro, especulativo);
+                            registrarPlacarCaca(tiros.disparados,tiros.acertou,tiros.reverteu,tiros.sumiu);
                             // AO DISCO AGORA, e não na próxima coleta.
                             //
                             // A primeira versão da persistência da bússola
