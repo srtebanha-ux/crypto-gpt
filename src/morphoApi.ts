@@ -727,10 +727,67 @@ export function apiConfereComACorrente(
 // ---------------------------------------------------------------------------
 
 /** A consulta. `first`/`skip` porque e o que a API documenta para paginar. */
+/**
+ * O GraphQL documenta a ordenação por BorrowAssetsUsd para ordenar
+ * os mercados da Base que têm empréstimos relevantes. Só PRIORIZA
+ * o trabalho; jamais substitui a validação dos parâmetros onchain.
+ */
+export function consultaMercadosMorphoComDivida():string {
+    return JSON.stringify({
+        query: `query {
+            markets(first: 100, orderBy: BorrowAssetsUsd, orderDirection: Desc,
+              where: { chainId_in: [8453] }) {
+                items { marketId }
+            }
+        }`,
+    });
+}
+export function lerRankingMercadosMorpho(corpo:unknown):string[]|null {
+    if(!corpo||typeof corpo!=='object')return null;
+    const o=corpo as Record<string,unknown>;
+    if(Array.isArray(o.errors)&&o.errors.length>0)return null;
+    const data=o.data as Record<string,unknown>|undefined;
+    const markets=data?.markets as Record<string,unknown>|undefined;
+    if(!Array.isArray(markets?.items))return null;
+    const vistos=new Set<string>();
+    for(const raw of markets.items) {
+        if(!raw||typeof raw!=='object')continue;
+        const marketId=(raw as Record<string,unknown>).marketId;
+        if(typeof marketId!=='string'||!/^0x[0-9a-fA-F]{64}$/.test(marketId))continue;
+        vistos.add(marketId.toLowerCase());
+    }
+    return [...vistos];
+}
+/** Cobre dezenas de posições na fila em vez de sempre os primeiros 12
+ * mercados descobertos. O ranking ajuda, mas não concede autorização.
+ */
+export function priorizarMercadosDaLista(
+    elegiveis:readonly MercadoDaApi[],ranking:readonly string[]|null,
+    quantidade:number,
+):MercadoDaApi[] {
+    if(!Number.isSafeInteger(quantidade)||quantidade<=0)return[];
+    const d=new Map(elegiveis.map(m=>[m.id.toLowerCase(),m]));
+    const selecionados:MercadoDaApi[]=[];
+    for(const id of ranking??[]) {
+        const m=d.get(id.toLowerCase());
+        if(!m)continue;
+        selecionados.push(m);d.delete(id.toLowerCase());
+        if(selecionados.length>=quantidade)return selecionados;
+    }
+    // Sem ranking da API ou se ele não cobrir a faixa LLTV, distribui
+    // pela lista inteira, incluindo mercados antigos e recentes.
+    const restantes=[...d.values()];
+    const vagas=Math.min(quantidade-selecionados.length,restantes.length);
+    for(let i=0;i<vagas;i++){
+        const indice=Math.min(restantes.length-1,Math.floor((i+.5)*restantes.length/vagas));
+        selecionados.push(restantes[indice]!);
+    }
+    return selecionados;
+}
 export function consultaDeDevedores(idDoMercado: string, primeiros: number, pular: number): string {
     return JSON.stringify({
         query: `query($id: String!, $first: Int!, $skip: Int!) {
-  marketPositions(where: { marketUniqueKey_in: [$id] }, first: $first, skip: $skip) {
+  marketPositions(where: { marketUniqueKey_in: [$id] }, first: $first, skip: $skip, orderBy: BorrowShares, orderDirection: Desc) {
     items { user { address } state { borrowShares collateral } }
   }
 }`,
@@ -810,6 +867,17 @@ export async function enumerarDevedores(
         try { corpo = JSON.parse(cru); } catch {
             return { devedores, requisicoes, completa: false,
                 falha: `o GraphQL respondeu NÃO-JSON: "${sanitizar(cru.slice(0, 50))}"` };
+        }
+        // A API pode responder HTTP 200 com erros GraphQL. Antes isso
+        // virava 0 devedores com completa=true, escondendo falha de schema.
+        const envelope=(corpo&&typeof corpo==='object')?
+            corpo as Record<string,unknown>:null;
+        if(!envelope||!envelope.data||typeof envelope.data!=='object'
+          ||Array.isArray(envelope.errors)&&envelope.errors.length>0
+          ||!((envelope.data as Record<string,unknown>).marketPositions as
+            Record<string,unknown>|undefined)?.items) {
+            return {devedores,requisicoes,completa:false,
+                falha:'GraphQL HTTP 200 sem marketPositions.items valido ou com errors'};
         }
         const lidos = lerDevedores(corpo);
         let novos = 0;
