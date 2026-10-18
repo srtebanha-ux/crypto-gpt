@@ -63,7 +63,8 @@ function diario():DiarioExposto|null {
    if(item.estado==='pendente')pending++;
    if(item.estado==='confirmado'&&/^\d+$/.test(item.lucroRealizadoWei||''))gross+=BigInt(item.lucroRealizadoWei!);
    if(/^\d+$/.test(item.gasRealL2Wei||''))gas+=BigInt(item.gasRealL2Wei!);
-   if(recent.length<8)recent.push({
+   if(recent.length>=8)recent.shift();
+   recent.push({
     hash:item.hash,status:item.estado,date:item.diaUtc,
     ...(item.estado==='confirmado'&&/^\d+$/.test(item.lucroRealizadoWei||'')
      ?{profitWei:item.lucroRealizadoWei}:{})
