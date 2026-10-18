@@ -27,6 +27,7 @@ export function iniciarObservadorSvr(
  let reconnect:ReturnType<typeof setTimeout>|null=null;
  let heartbeat:ReturnType<typeof setInterval>|null=null;
  let fechado=false,delay=1000;
+ let subscriptionId:string|null=null;
  const onMessage=(data:WebSocket.RawData)=>{
   const tamanho=Array.isArray(data)?data.reduce((n,b)=>n+b.byteLength,0):data.byteLength;
   if(tamanho>512000){state.invalidos++;return;}
@@ -34,6 +35,7 @@ export function iniciarObservadorSvr(
   try{decoded=JSON.parse(data.toString('utf8'))}catch{state.invalidos++;return;}
   const o=decoded as Record<string,unknown>;
   if(o?.id===1&&typeof o.result==='string'&&o.result.length>0){
+   subscriptionId=o.result;
    state.inscricaoConfirmada=true;state.status='conectado';
    logger.info('[TITAN/SVR] Inscricao de leiloes ACEITA pelo gateway.',{
     subscriptionId:o.result,modo:'somente observacao',transacoesAssinadas:0
@@ -41,7 +43,7 @@ export function iniciarObservadorSvr(
    return;
   }
   if(o?.id===1&&o.error){
-   state.erros++;state.inscricaoConfirmada=false;
+   state.erros++;state.inscricaoConfirmada=false;subscriptionId=null;
    logger.warn('[TITAN/SVR] Inscricao recusada pelo gateway.',{
     resposta:JSON.stringify(o.error).slice(0,300)
    });
@@ -49,6 +51,10 @@ export function iniciarObservadorSvr(
    return;
   }
   if(o?.method!=='solver_subscription')return;
+  // Never consume a notification from an unacknowledged/different subscription.
+  const params=o.params as Record<string,unknown>|undefined;
+  if(!state.inscricaoConfirmada||typeof params?.subscription!=='string'
+     ||params.subscription!==subscriptionId){state.invalidos++;return;}
   state.recebidos++;
   const auction=decodificarNotificacaoSvr(o);
   if(!auction){state.invalidos++;return;}
@@ -59,7 +65,9 @@ export function iniciarObservadorSvr(
    atlas:auction.atlas,control:auction.control,
    deadlineBlock:auction.deadline.toString(),
    userOpMaxFeePerGasWei:auction.maxFeePerGas.toString(),
-   totalAuctions:state.unicos,
+   aggregatorPrevisto:auction.precoPrevisto?.aggregador??null,
+   medianPricePrevisto:auction.precoPrevisto?.medianPrice.toString()??null,
+   dapp:auction.dapp??null,totalAuctions:state.unicos,
    modo:'observacao, sem assinatura nem envio'
   });
   try{onAuction(auction)}catch{state.erros++;}
@@ -70,7 +78,8 @@ export function iniciarObservadorSvr(
   try{
    ws=new WebSocket(SVR_GATEWAY,{maxPayload:512000,handshakeTimeout:12000});
    ws.on('open',()=>{
-    state.status='conectando';state.inscricaoConfirmada=false;delay=1000;
+    state.status='conectando';state.inscricaoConfirmada=false;
+    subscriptionId=null;delay=1000;
     ws?.send(JSON.stringify({
      jsonrpc:'2.0',id:1,method:'solver_subscribe',params:['userOperations']
     }));
@@ -91,12 +100,14 @@ export function iniciarObservadorSvr(
     if(heartbeat){clearInterval(heartbeat);heartbeat=null;}
     if(fechado)return;
     state.status='reconectando';state.inscricaoConfirmada=false;
+    subscriptionId=null;
     reconnect=setTimeout(connect,delay);
     reconnect.unref?.();
     delay=Math.min(30000,delay*2);
    });
   }catch(err){
    state.erros++;state.status='reconectando';state.inscricaoConfirmada=false;
+   subscriptionId=null;
    logger.warn('[TITAN/SVR] Conexao ainda nao estabelecida.',{
     causa:String(err).slice(0,130)
    });
@@ -109,7 +120,7 @@ export function iniciarObservadorSvr(
  return {
   estado:()=>({...state}),
   parar:()=>{
-   fechado=true;state.status='parado';
+   fechado=true;state.status='parado';state.inscricaoConfirmada=false;subscriptionId=null;
    if(reconnect)clearTimeout(reconnect);
    if(heartbeat)clearInterval(heartbeat);
    ws?.removeAllListeners();
