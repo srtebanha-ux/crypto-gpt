@@ -472,14 +472,21 @@ export async function descobrirMorphoPorApi(
                 lerRankingMercadosMorpho(JSON.parse(await resp.text()));
         }catch{/* Sem ranking nunca vira "sem mercado"; existe fallback. */}
     }
-    const escolhidos=priorizarMercadosDaLista(quePagam,rankingDeDividas,tetoValid);
+    // Uma janela muda a amostra sem aumentar o custo RPC de cada rodada.
+    // Antes a escolha era IDENTICA em todo boot e nao cobria o universo.
+    // Usamos hora UTC em fatias de 15min: recomecar o processo nao
+    // causa um viés para os primeiros 24 mercados.
+    const rodada=Math.floor(Date.now()/900_000);
+    const escolhidos=priorizarMercadosDaLista(quePagam,rankingDeDividas,tetoValid,rodada);
     log.info('[MORPHO/API] Selecao de mercados para conferir na Base.',{
         mercadosEnumerados:quePagam.length,
         rankingComDivida:rankingDeDividas?.length??null,
         candidatosParaProva:escolhidos.length,
+        rodada,
+        fixosDeAltaDivida:rankingDeDividas===null?0:Math.floor(tetoValid/3),
         politica:rankingDeDividas===null
-          ? 'amostra distribuida pela lista inteira, ranking indisponivel'
-          : 'mercados ordenados pela divida da API; validacao onchain obrigatoria',
+          ? 'amostra rotativa por fatia UTC em TODOS os mercados: confirmacao onchain obrigatoria'
+          : 'grupo de alta divida constante e restante em rotacao por fatia UTC; validacao onchain obrigatoria',
     });
 
     if (veioDoCache) {
