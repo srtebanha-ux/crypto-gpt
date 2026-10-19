@@ -50,7 +50,7 @@ import { conferirJanelaDeNonce } from './janelaDeNonce';
 import {
     prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca,
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
-    creditoMaximoComResiduoCbBtc, CBBTC_BASE,
+    creditoMaximoComResiduoUsdc,
 } from './titanPonteMultiHop';
 import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte, logsComRpcHistorico, faixaHistoricaReversa } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
@@ -6875,14 +6875,17 @@ async function principal(): Promise<'parar' | void> {
                         const reservaOpcional = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
                         const reserva = reservaOpcional > reservaBase ? reservaOpcional : reservaBase;
                         const gasMax = BigInt(process.env.CACA_MULTIHOP_GAS_MAX ?? '1500000');
-                        const ehCbBtcUsdc = alvo.garantia.toLowerCase()===CBBTC_BASE.toLowerCase()
-                            && alvo.divida.toLowerCase()==='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+                        // Residuo minimo de divida USDC e uma regra da Aave,
+                        // nao uma propriedade do colateral cbBTC. Aplica o
+                        // limite conservador tambem para EURC/USDC e outras
+                        // garantias; somente a simulacao atomica integral
+                        // prova o resultado em cada posicao multi-ativo.
+                        const dividaEhUsdc =
+                            alvo.divida.toLowerCase()==='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'
+                            && alvo.garantia.toLowerCase()!==alvo.divida.toLowerCase();
                         const creditoInicial=cobrir(alvo);
-                        // For the 1.9k USDC target, Aave can revert if 50% leaves
-                        // forbidden dust. Only reduce the maximum for the MultiHop
-                        // executor and let the full onchain eth_call authorize.
-                        const creditoSeguro=ehCbBtcUsdc
-                            ? creditoMaximoComResiduoCbBtc(
+                        const creditoSeguro=dividaEhUsdc
+                            ? creditoMaximoComResiduoUsdc(
                                 alvo.dividaCrua,alvo.dividaUsd,creditoInicial)
                             : creditoInicial;
                         if(creditoSeguro<=0n) {

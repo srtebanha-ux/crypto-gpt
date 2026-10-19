@@ -43,11 +43,12 @@ export const POR_PAGINA = 100;
 /**
  * O teto de paginas por varredura.
  *
- * Existe para a paginacao nao virar laco infinito quando a API devolver sempre
- * a mesma pagina — defeito que eu nao posso descartar sem ter testado contra o
- * servico real. Vinte paginas sao 2.000 mercados: muito acima do que a Base tem.
+ * A Base devolveu mais de 2.000 mercados em producao, e o limite anterior
+ * cortava toda varredura na pagina 20 (a API ainda oferecia cursor).
+ * O teto maior continua sujeito ao OrcamentoHttp de chamadas e tempo e
+ * encerra de forma INCOMPLETA quando nao for possivel finalizar.
  */
-export const TETO_DE_PAGINAS = 20;
+export const TETO_DE_PAGINAS = 40;
 
 /** Espera entre paginas, para respeitar o limite de requisicoes da API. */
 export const ENTRE_PAGINAS_MS = 250;
@@ -607,6 +608,22 @@ export function soOsQuePagam(ms: MercadoDaApi[]): MercadoDaApi[] {
     return ms.filter((m) => m.lltv.lessThanOrEqualTo(LLTV_MAXIMO_QUE_PAGA));
 }
 
+/**
+ * Universo para TRIAGEM, nao para envio. O corte de 77% mede onde o bonus
+ * teorico supera o caso Aave de referencia, NAO se a liquidacao pode
+ * pagar gas. O proprio censo real encontrou bonus positivo em LLTV
+ * 86%, 91,5%, 94,5% e 96,5%. Excluir esses mercados impedia a validacao
+ * onchain de posicoes grandes que podem ser economicamente interessantes.
+ *
+ * Nao autoriza transacao: nem a API nem o incentivo teorico provam HF<1,
+ * saldo, liquidez de swap ou lucro apos gas. O portao economico continua
+ * dentro da simulacao atomica do executor.
+ */
+export function mercadosParaSondagem(ms: readonly MercadoDaApi[]): MercadoDaApi[] {
+    return ms.filter(m=>m.lltv.isFinite()&&m.lltv.gt(0)&&m.lltv.lt(1)
+        &&m.bonusPct!==null&&m.bonusPct.isFinite()&&m.bonusPct.gt(0));
+}
+
 // ---------------------------------------------------------------------------
 // A VALIDACAO NA CORRENTE. E ela que autoriza, nao a API.
 // ---------------------------------------------------------------------------
@@ -761,28 +778,80 @@ export function lerRankingMercadosMorpho(corpo:unknown):string[]|null {
 /** Cobre dezenas de posições na fila em vez de sempre os primeiros 12
  * mercados descobertos. O ranking ajuda, mas não concede autorização.
  */
+/**
+ * Seleciona ate `quantidade` mercados; 1/3 de alta divida sao fixos,
+ * 2/3 circulam no universo restante a cada rodada. Sem esta rotacao, a
+ * descoberta confirmava os MESMOS 24 mercados para sempre e 1.300+
+ * mercados elegiveis nao chegavam ao eth_call. Isso ainda NAO e sinal de
+ * liquidacao: ranking apenas altera prioridade de validacao.
+ *
+ * `rodada=0` conserva a ordem de preferencia inicial e serve aos testes.
+ * Em producao o numero de rodada vem do relogio UTC dividido em fatias;
+ * a rotacao nunca ultrapassa o numero de validacoes no RPC.
+ */
 export function priorizarMercadosDaLista(
     elegiveis:readonly MercadoDaApi[],ranking:readonly string[]|null,
-    quantidade:number,
+    quantidade:number,rodada=0,
 ):MercadoDaApi[] {
-    if(!Number.isSafeInteger(quantidade)||quantidade<=0)return[];
-    const d=new Map(elegiveis.map(m=>[m.id.toLowerCase(),m]));
-    const selecionados:MercadoDaApi[]=[];
+    if(!Number.isSafeInteger(quantidade)||quantidade<=0
+       ||!Number.isSafeInteger(rodada)||rodada<0)return[];
+    const disponiveis=new Map(elegiveis.map(m=>[m.id.toLowerCase(),m]));
+    const ordenar:MercadoDaApi[]=[];
     for(const id of ranking??[]) {
-        const m=d.get(id.toLowerCase());
+        const m=disponiveis.get(id.toLowerCase());
         if(!m)continue;
-        selecionados.push(m);d.delete(id.toLowerCase());
-        if(selecionados.length>=quantidade)return selecionados;
+        ordenar.push(m);disponiveis.delete(id.toLowerCase());
     }
-    // Sem ranking da API ou se ele não cobrir a faixa LLTV, distribui
-    // pela lista inteira, incluindo mercados antigos e recentes.
-    const restantes=[...d.values()];
-    const vagas=Math.min(quantidade-selecionados.length,restantes.length);
+    // Mantem um grupo fixo para as posicoes com mais divida, se houver
+    // ranking confiavel. Sem ranking distribui a busca por TODO o universo.
+    const fixos=ranking===null?0:Math.min(
+        Math.floor(quantidade/3),ordenar.length);
+    const selecao=ordenar.slice(0,fixos);
+    const restantes=[...ordenar.slice(fixos),...disponiveis.values()];
+    const vagas=Math.min(quantidade-selecao.length,restantes.length);
+    if(vagas===0)return selecao;
+    // Mantem a amostragem DISTRIBUIDA usada antes da rotacao. A rodada
+    // altera o indice dentro de cada segmento, evitando que os mesmos
+    // 16 ids monopolizem a capacidade entre ciclos.
     for(let i=0;i<vagas;i++){
-        const indice=Math.min(restantes.length-1,Math.floor((i+.5)*restantes.length/vagas));
-        selecionados.push(restantes[indice]!);
+        const inicio=Math.floor(i*restantes.length/vagas);
+        const fim=Math.floor((i+1)*restantes.length/vagas);
+        const largura=Math.max(1,fim-inicio);
+        const indice=inicio+((rodada+Math.floor(largura/2))%largura);
+        selecao.push(restantes[indice]!);
     }
-    return selecionados;
+    return selecao;
+}
+/** Entre mercados confirmados, preserva os de maior divida e visita
+ * mercados diferentes a cada rodada. Nunca aumenta a cota HTTP/RPC.
+ */
+export function selecionarMercadosParaDevedores<T>(
+    mercados: readonly T[],quantidade:number,rodada:number,
+):T[]{
+    if(!Number.isSafeInteger(quantidade)||quantidade<=0
+       ||!Number.isSafeInteger(rodada)||rodada<0)return [];
+    if(mercados.length<=quantidade)return [...mercados];
+    const fixos=Math.max(1,Math.floor(quantidade/2));
+    const resultado=mercados.slice(0,fixos);
+    const outros=mercados.slice(fixos);
+    const vagas=quantidade-fixos;
+    const indices=new Set<number>();
+    for(let i=0;i<vagas;i++){
+        const inicio=Math.floor(i*outros.length/vagas);
+        const fim=Math.floor((i+1)*outros.length/vagas);
+        const largura=Math.max(1,fim-inicio);
+        const idx=inicio+(rodada%largura);
+        indices.add(idx);
+    }
+    for(const idx of indices)resultado.push(outros[idx]!);
+    return resultado;
+}
+
+/** Mantem maiores devedores e alterna os demais, sem confiar em API para tiro. */
+export function selecionarDevedoresParaConferir<T>(
+    devedores:readonly T[],limite:number,rodada:number,
+):T[]{
+    return selecionarMercadosParaDevedores(devedores,limite,rodada);
 }
 export function consultaDeDevedores(idDoMercado: string, primeiros: number, pular: number): string {
     return JSON.stringify({

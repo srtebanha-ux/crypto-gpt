@@ -155,7 +155,12 @@ export function poolsDaConfiguracao(valor: string | undefined): PoolLiquidacao[]
  * less than the accepted residual. Conservative cap only: no fabricated
  * profit or assumption that a real multi-collateral position will accept it.
  */
-export function creditoMaximoComResiduoCbBtc(
+/** Limite conservador para divida USDC com qualquer garantia, em unidades cruas USDC.
+ *  A medicao da fronteira foi em POSICOES SINTETICAS com WETH:
+ *  para EURC/cbBTC este e somente um teto de busca. O eth_call COMPLETO
+ *  do executor segue obrigatorio e nao pode ser ignorado.
+ */
+export function creditoMaximoComResiduoUsdc(
     dividaCrua:bigint,dividaUsd:Decimal,limiteAtual:bigint,
 ):bigint{
     if(dividaCrua<=0n||limiteAtual<=0n||!dividaUsd.isFinite()||dividaUsd.lte(0))
@@ -167,6 +172,9 @@ export function creditoMaximoComResiduoCbBtc(
         .mul(maxParcialUsd).div(dividaUsd).floor().toFixed(0));
     return maxParcial<limiteAtual?maxParcial:limiteAtual;
 }
+
+/** Compatibilidade com chamadas e testes antigos (cbBTC/USDC). */
+export const creditoMaximoComResiduoCbBtc = creditoMaximoComResiduoUsdc;
 
 export function validarPonte(e: EntradaPonte): void {
     for (const x of [e.usuario,e.garantia,e.divida,e.dono,e.contrato,e.cofre,e.aave,e.fabricaV3]) {

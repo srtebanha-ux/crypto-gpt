@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Interface, type JsonRpcProvider } from 'ethers';
 import { Decimal } from 'decimal.js';
 import { gerarRotasLiquidacao } from './titanRotasLiquidacao';
-import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte, lucroConfirmadoPorEventoMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca, creditoMaximoComResiduoCbBtc, CBBTC_BASE, POOLS_CBBTC_V3_BASE } from './titanPonteMultiHop';
+import { ABI_MULTI, codificarMulti, poolsDaConfiguracao, gasEmTokenDaDivida, validarPonte, lucroConfirmadoPorEventoMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca, creditoMaximoComResiduoCbBtc, creditoMaximoComResiduoUsdc, CBBTC_BASE, POOLS_CBBTC_V3_BASE } from './titanPonteMultiHop';
 const a=(n:number)=>'0x'+n.toString(16).padStart(40,'0');
 const pool={endereco:a(11),token0:a(1),token1:a(2),protocolo:'v3' as const,taxa:500,permitida:true};
 test('ABI do contrato implantavel recebe tuple[] e piso nao zero',()=>{
@@ -134,4 +134,21 @@ test('Aave residue cap keeps cbBTC target debt safely above measured dust',()=>{
     assert.equal(creditoMaximoComResiduoCbBtc(3_000_000_000n,new Decimal(3000),1_500_000_000n),1_500_000_000n);
     assert.equal(creditoMaximoComResiduoCbBtc(1_000_000_000n,new Decimal(1000),500_000_000n),0n);
     assert.equal(creditoMaximoComResiduoCbBtc(debt,new Decimal(1891.53),0n),0n);
+});
+
+test('Aave: o mesmo USDC deixa resto seguro em EURC e cbBTC, sem presumir posicao liquidavel',()=>{
+    const divida=1_891_533_663n,metade=divida/2n;
+    const valor=new Decimal('1891.533663');
+    const cb=creditoMaximoComResiduoCbBtc(divida,valor,metade);
+    const eurc=creditoMaximoComResiduoUsdc(divida,valor,metade);
+    assert.equal(eurc,cb);
+    assert.ok(eurc>0n&&eurc<metade);
+    assert.ok(new Decimal((divida-eurc).toString()).div(1e6).gte('1020.1632'));
+    assert.equal(creditoMaximoComResiduoUsdc(1_000_000_000n,new Decimal(1000),500_000_000n),0n);
+    assert.equal(creditoMaximoComResiduoUsdc(divida,new Decimal('NaN'),metade),0n);
+    const code=require('node:fs').readFileSync(require('node:path').join(__dirname,'cacarAoVivo.ts'),'utf8') as string;
+    assert.match(code,/const dividaEhUsdc\s*=/);
+    assert.match(code,/creditoSeguro=dividaEhUsdc/);
+    assert.match(code,/creditoMaximoComResiduoUsdc\(/);
+    assert.match(code,/prepararOfertaMulti\(leitor/,'cobertura corrigida nao pula simulação onchain');
 });

@@ -92,8 +92,9 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
  * o Morpho paga o MESMO que a Aave — e aí nao ha razao para a obra.
  */
 import {
-    enumerarMercados, enumerarDevedores, soOsQuePagam, soDaBase, codificarIdToMarketParams,
+    enumerarMercados, enumerarDevedores, soOsQuePagam, mercadosParaSondagem, soDaBase, codificarIdToMarketParams,
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
+    selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
     codificarPosition, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
@@ -407,7 +408,7 @@ export async function descobrirMorphoPorApi(
     // ORCAMENTO PROPRIO: requisicoes, tempo e CANCELAMENTO de verdade. Ele e
     // o unico limitador deste canal — nao a cota de RPC, que e de outro.
     const orcamento = new OrcamentoHttp(
-        opcoes.tetoDeRequisicoes ?? 40,
+        opcoes.tetoDeRequisicoes ?? 65,
         opcoes.tetoDeMs ?? 45_000,
     );
 
@@ -456,12 +457,16 @@ export async function descobrirMorphoPorApi(
     // leria como "mercado recusado" em vez de "mercado de outra chain".
     const porChain = soDaBase(legiveis);
     const quePagam = soOsQuePagam(porChain.daBase);
+    // Observacao inclui LLTV mais alto com bonus positivo. O antigo corte de
+    // 77% e apenas uma comparacao de bonus com a Aave, nao um criterio
+    // para ignorar devedores. O API continua incapaz de autorizar tiro.
+    const candidatosParaSondagem=mercadosParaSondagem(porChain.daBase);
     // Morpho REST lista identidade, não dívida. Antes a seleção era
     // `slice(0,12)` e os primeiros mercados NÃO tinham devedores.
     // Uma consulta GraphQL ordenada pela dívida atual prioriza de fato
     // mercados usados. Se falhar, amostramos TODA a lista elegível.
     let rankingDeDividas:string[]|null=null;
-    if(quePagam.length>0&&orcamento.pedir()) {
+    if(candidatosParaSondagem.length>0&&orcamento.pedir()) {
         try {
             const resp=await buscar('https://api.morpho.org/graphql',{
                 method:'POST',headers:{'content-type':'application/json',
@@ -472,14 +477,23 @@ export async function descobrirMorphoPorApi(
                 lerRankingMercadosMorpho(JSON.parse(await resp.text()));
         }catch{/* Sem ranking nunca vira "sem mercado"; existe fallback. */}
     }
-    const escolhidos=priorizarMercadosDaLista(quePagam,rankingDeDividas,tetoValid);
+    // Uma janela muda a amostra sem aumentar o custo RPC de cada rodada.
+    // Antes a escolha era IDENTICA em todo boot e nao cobria o universo.
+    // Usamos hora UTC em fatias de 15min: recomecar o processo nao
+    // causa um viés para os primeiros 24 mercados.
+    const rodada=Math.floor(Date.now()/900_000);
+    const escolhidos=priorizarMercadosDaLista(candidatosParaSondagem,rankingDeDividas,tetoValid,rodada);
     log.info('[MORPHO/API] Selecao de mercados para conferir na Base.',{
-        mercadosEnumerados:quePagam.length,
+        mercadosEnumerados:candidatosParaSondagem.length,
+        llTvAte77PorCento:quePagam.length,
+        llTvMaisAltoTambemElegivelASondagem:candidatosParaSondagem.length>quePagam.length,
         rankingComDivida:rankingDeDividas?.length??null,
         candidatosParaProva:escolhidos.length,
+        rodada,
+        fixosDeAltaDivida:rankingDeDividas===null?0:Math.floor(tetoValid/3),
         politica:rankingDeDividas===null
-          ? 'amostra distribuida pela lista inteira, ranking indisponivel'
-          : 'mercados ordenados pela divida da API; validacao onchain obrigatoria',
+          ? 'amostra rotativa por fatia UTC em TODOS os mercados: confirmacao onchain obrigatoria'
+          : 'grupo de alta divida constante e restante em rotacao por fatia UTC; validacao onchain obrigatoria',
     });
 
     if (veioDoCache) {
@@ -594,14 +608,23 @@ export async function descobrirMorphoPorApi(
     let validados = 0;
     let reqGraph = 0;
     const falhasDeDevedores: string[] = [];
-    for (const m of escolhidos.filter((x) => x.confirmadoNaCorrente).slice(0, tetoDev)) {
-        const r = await enumerarDevedores(buscar, m.id);
+    // Verifica os mercados quentes em TODAS as rodadas e os outros
+    // em rodizio. Antes todos os oito mercados eram os primeiros da
+    // lista, mesmo com 24 confirmados, portanto repetiam os mesmos
+    // cinco devedores indefinidamente.
+    const mercadosComDevedores=selecionarMercadosParaDevedores(
+        escolhidos.filter(x=>x.confirmadoNaCorrente),tetoDev,rodada);
+    for (const m of mercadosComDevedores) {
+        // Tres paginas no maximo por mercado: consulta os maiores por
+        // BorrowShares antes do prazo do job. COMPLETA=false caso sobrem
+        // paginas, sem declarar que os demais devedores nao existem.
+        const r = await enumerarDevedores(buscar, m.id, {tetoDePaginas:3});
         reqGraph += r.requisicoes;
         devedores += r.devedores.length;
         if (r.falha !== null) falhasDeDevedores.push(`${m.id.slice(0, 10)}…: ${r.falha}`);
-        // VALIDA NA CORRENTE: a API aponta, o `position` confirma. Teto pequeno
-        // de proposito — o objetivo desta volta e provar o caminho, nao varrer.
-        for (const d of r.devedores.slice(0, 5)) {
+        // Metade dos cinco maiores mantida; a outra metade visita
+        // devedores diferentes, sempre conferidos por position() onchain.
+        for (const d of selecionarDevedoresParaConferir(r.devedores,5,rodada)) {
             const cru = await chamarRpc(codificarPosition(m.id, d.endereco));
             const p = cru === null ? null : lerPosition(cru);
             if (p !== null && p.borrowShares > 0n) validados += 1;
@@ -641,7 +664,7 @@ export async function descobrirMorphoPorApi(
                     // Formato RECONHECIDO e lista vazia. Agora sim e RESPOSTA,
                     // e so pode ser dita depois de o formato ter sido lido.
                     ? 'apiVaziaDeVerdade'
-                    : quePagam.length === 0
+                    : candidatosParaSondagem.length === 0
                         // Ha mercado e o FILTRO nao selecionou nenhum. E escolha
                         // nossa, nao ausencia de dado.
                         ? 'foraDaFaixa'
@@ -677,7 +700,7 @@ export async function descobrirMorphoPorApi(
                     + 'CONFIRMADOS para a próxima volta'
                 : `${disponibilidadeDoCanal('validacao', infra).degradado ? 'degradado' : 'livre'}`
                     + ` — ${chamadasRpc} chamada(s) eth_call/eth_getCode nesta volta`,
-            naoConfirmadosGuardados: quePagam.filter((x) => x.confirmadoNaCorrente !== true).length,
+            naoConfirmadosGuardados: candidatosParaSondagem.filter((x) => x.confirmadoNaCorrente !== true).length,
             porqueNaoValidou,
         }),
         orcamento: orcamento.comoLer(),
@@ -721,9 +744,9 @@ export async function descobrirMorphoPorApi(
             return 'a API respondeu no formato esperado e com ZERO mercados: não há o que '
                 + 'validar, e isto é RESPOSTA e não falha';
         }
-        if (quePagam.length === 0) {
-            return 'nenhum mercado na faixa de LLTV ≤ 77%: o filtro é nosso, e os mercados '
-                + 'existem. Não há o que validar nesta volta';
+        if (candidatosParaSondagem.length === 0) {
+            return 'nenhum mercado com LLTV valido e incentivo positivo para sondagem; '
+                + 'a API enumerou, mas nenhum candidato passou no filtro de observacao';
         }
         if (rpcMudo) return 'o RPC não respondeu ao eth_getCode: sem ele não valido mercado nenhum';
         if (confirmados === 0) {
