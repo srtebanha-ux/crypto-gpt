@@ -41,3 +41,13 @@ test('refuse unbounded/overly-frequent scans',()=>{
   assert.throws(()=>agendarDescobertaMorpho(async()=>{},ms,()=>{},clock));
  }
 });
+
+test('CACA wires periodic read-only Morpho discovery, not just a one-off boot',()=>{
+ const source=require('node:fs').readFileSync(
+  require('node:path').join(__dirname,'cacarAoVivo.ts'),'utf8') as string;
+ assert.match(source,/agendarDescobertaMorpho\(async\(\)=>/);
+ assert.match(source,/await descobrirMorphoPorApi\(\{/);
+ assert.match(source,/MEMORIA_MORPHO = await lerMemoriaDoDisco\(\)/);
+ assert.match(source,/CACA_MORPHO_INTERVALO_MS/);
+ assert.ok(!source.includes('FLAG RECONHECIDA. Vou descobrir mercados pela API, UMA vez'));
+});
