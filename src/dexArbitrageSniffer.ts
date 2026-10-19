@@ -31,6 +31,7 @@ import {
     ensaiarExecucao,
     enviarExecucao,
     lerSaldoDoContrato,
+    lerDonoDoContrato,
     montarCalldata,
     planejarExecucao,
 } from './flashArbExecutor';
@@ -803,7 +804,8 @@ async function main() {
             }
 
             const calldata = montarCalldata(plano);
-            const ensaio = await ensaiarExecucao(rpcUrl, contratoFlash, contratoFlash, calldata);
+            const dono = await lerDonoDoContrato(rpcUrl, contratoFlash);
+            const ensaio = await ensaiarExecucao(rpcUrl, contratoFlash, dono, calldata);
             if (!ensaio.ok) {
                 log.warn('ENSAIO REPROVADO — nada foi enviado, nenhum gás gasto.', {
                     ciclo: describeCycle(cycle),
@@ -813,7 +815,8 @@ async function main() {
             }
 
             if (!flashLive) {
-                log.info('*** ENSAIO APROVADO — esta operação daria certo AGORA ***', {
+                log.info('*** SIMULAÇÃO APROVADA — sem envio ou lucro realizado ***', {
+                    etapa: 'simulada',
                     ciclo: describeCycle(cycle),
                     quantidadeEmprestada: plano.quantidade.toString(),
                     lucroMinimoExigido: plano.lucroMinimo.toString(),
@@ -824,6 +827,7 @@ async function main() {
 
             const recibo = await enviarExecucao({ rpcUrl, chavePrivada: chavePrivada!, contrato: contratoFlash, calldata });
             log.info(recibo.sucesso ? '*** ARBITRAGEM EXECUTADA ***' : 'Transação enviada mas revertida na cadeia.', {
+                etapa: recibo.sucesso ? 'confirmada_sem_reconciliacao' : 'revertida',
                 ciclo: describeCycle(cycle),
                 hash: recibo.hash,
                 gasUsado: recibo.gasUsado.toString(),
@@ -957,7 +961,8 @@ async function main() {
                 profitableCount += 1;
                 somaDaVarredura = somaDaVarredura.plus(evaluation.netProfit);
                 lucrativosDaVarredura.set(describeCycle(cycle), evaluation.netProfit);
-                log.info('*** CICLO LUCRATIVO ENCONTRADO ***', {
+                log.info('*** OPORTUNIDADE TEÓRICA — requer simulação atômica ***', {
+                    etapa: 'teorica',
                     ciclo: describeCycle(cycle),
                     entradaOtima: evaluation.amountIn.toFixed(8),
                     lucroBruto: evaluation.grossProfit.toFixed(8),

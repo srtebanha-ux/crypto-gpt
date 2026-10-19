@@ -269,3 +269,35 @@ test('extrairDadoDeReversao acha o dado nos três formatos que os provedores usa
     assert.equal(extrairDadoDeReversao({ message: 'reverted: 0x9612b7e0aa' }), '0x9612b7e0aa');
     assert.equal(extrairDadoDeReversao(undefined), undefined);
 });
+
+test('piso on-chain reserva o gás inteiro além da fração de lucro líquido', () => {
+    const evaluation = avaliacao('0.01', '0.1');
+    evaluation.gasCost = new Decimal('0.02');
+    evaluation.grossProfit = new Decimal('0.03');
+    const plano = planejarExecucao({
+        cycle: cicloDeDoisPools(), hops: hopsDoCiclo(), evaluation,
+        decimaisPorToken: DECIMAIS, margemDeSeguranca: new Decimal('0.5'), saldoAtualDoLucro: 100n,
+    });
+    assert.ok(!('motivo' in plano));
+    assert.equal(plano.lucroMinimo, 25000000000000100n);
+});
+
+test('margens e custos inválidos não autorizam planejamento', () => {
+    for (const margem of ['0', '-1', '1.1', 'NaN', 'Infinity']) {
+        const plano = planejarExecucao({
+            cycle: cicloDeDoisPools(), hops: hopsDoCiclo(), evaluation: avaliacao('0.01', '0.1'),
+            decimaisPorToken: DECIMAIS, margemDeSeguranca: new Decimal(margem), saldoAtualDoLucro: 0n,
+        });
+        assert.ok('motivo' in plano, margem);
+    }
+});
+
+test('piso subunidade arredonda para cima em token de seis decimais', () => {
+    const plano = planejarExecucao({
+        cycle: cicloDeDoisPools(), hops: hopsDoCiclo(), evaluation: avaliacao('0.0000001', '0.1'),
+        decimaisPorToken: new Map([[WETH, 6], [ALT, 18]]),
+        margemDeSeguranca: new Decimal('0.5'), saldoAtualDoLucro: 0n,
+    });
+    assert.ok(!('motivo' in plano));
+    assert.equal(plano.lucroMinimo, 1n);
+});
