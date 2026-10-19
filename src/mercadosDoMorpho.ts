@@ -745,8 +745,8 @@ export async function descobrirMorphoPorApi(
                 + 'validar, e isto é RESPOSTA e não falha';
         }
         if (candidatosParaSondagem.length === 0) {
-            return 'nenhum mercado na faixa de LLTV ≤ 77%: o filtro é nosso, e os mercados '
-                + 'existem. Não há o que validar nesta volta';
+            return 'nenhum mercado com LLTV valido e incentivo positivo para sondagem; '
+                + 'a API enumerou, mas nenhum candidato passou no filtro de observacao';
         }
         if (rpcMudo) return 'o RPC não respondeu ao eth_getCode: sem ele não valido mercado nenhum';
         if (confirmados === 0) {
