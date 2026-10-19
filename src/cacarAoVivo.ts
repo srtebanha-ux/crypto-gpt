@@ -4,6 +4,7 @@ import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
 import { createLogger } from './logger';
 import { configurarRadarCaca, atualizarRadarCaca, registrarAlvoCaca, registrarTiroCaca, registrarPlacarCaca } from './cacaTelemetria';
 import { iniciarObservadorSvr } from './titanSvrObservador';
+import { iniciarObservadorFlashblocks } from './titanFlashblocks';
 import { triarLeilaoSvr } from './titanSvrTriagem';
 import { iniciarMonitorProntidaoSvr } from './titanSvrDiagnostico';
 import { iniciarRadarMorphoMultirrede } from './titanRadarMorphoMultirrede';
@@ -2949,6 +2950,10 @@ async function principal(): Promise<'parar' | void> {
     // Uma politica, lida uma vez. Antes cada montagem relia o ambiente por
     // conta propria, e foi assim que uma delas ficou com cinco campos de nove.
     const POLITICA = politicaDoTiro();
+    // Flashblocks via RPC WSS compativel: somente observador, opt-in.
+    // Nao toca nonce, carteira, gas nem executa liquidacoes, e cai para
+    // newHeads se o provedor descontinuar newFlashblocks (Denim).
+    iniciarObservadorFlashblocks(log);
     // Independente do caminho Aave e Morpho. Somente assiste leiloes Atlas,
     // sem chaves, sem novas transacoes e sem aguardar RPC nem bloquear tiros.
     // Ativado apenas com TITAN_SVR_OBSERVAR=1.

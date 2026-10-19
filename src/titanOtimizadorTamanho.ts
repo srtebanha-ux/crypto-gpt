@@ -13,6 +13,7 @@ export interface TamanhoTitan {
 export function otimizarTamanhoTitan(
     maximo:bigint,granularidade:bigint,cotar:CotarTamanho,
     maxCotacoes=32,
+    sementesTeoricas:readonly bigint[]=[],
 ):TamanhoTitan|null {
     if(maximo<granularidade||granularidade<=0n
         ||!Number.isSafeInteger(maxCotacoes)||maxCotacoes<8||maxCotacoes>256)
@@ -27,6 +28,13 @@ export function otimizarTamanhoTitan(
         cache.set(x,r);
         return r;
     };
+    // O pre-filtro matematico CPAMM pode propor tamanhos; a cotacao real
+    // continua mandatoria e tem prioridade economica sobre a equacao.
+    // Sem sementes, o algoritmo anterior permanece identico.
+    for(const x of sementesTeoricas.slice(0,Math.floor(maxCotacoes/4))){
+        if(cache.size>=maxCotacoes)break;
+        avaliar(x);
+    }
     // Grade inteira e refinamento AO REDOR de varios picos discretos.
     // Busca ternaria pressupoe unimodalidade, que ticks/fees NAO garantem.
     const n=BigInt(Math.floor(maxCotacoes/2));
