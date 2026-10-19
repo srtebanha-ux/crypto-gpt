@@ -4790,6 +4790,7 @@ async function principal(): Promise<'parar' | void> {
         let proximoAte = topo;
         let janelasLidas = 0;
         let janelasQueFalharam = 0;
+        let falhasConsecutivas = 0; // sucesso zera: 429 esporadico nao interrompe o censo
         let ultimaRecusa: string | null = null;
         let tamanho = PASSO_MAXIMO;
         let ultimoSalvoEm = 0;
@@ -4877,6 +4878,7 @@ async function principal(): Promise<'parar' | void> {
                     }catch{ /* invalid event is ignored, not a missing block */ }
                 }
                 janelasLidas+=1;
+                falhasConsecutivas=0;
                 proximoAte=de-1; // inclusive intervals: never a gap
                 ultimaRecusa=null;
                 freio.passou();
@@ -4886,6 +4888,7 @@ async function principal(): Promise<'parar' | void> {
                 await dormir(650);
             }catch(e){
                 janelasQueFalharam+=1;
+                falhasConsecutivas+=1;
                 ultimaRecusa=e instanceof Error?e.message:String(e);
                 // HTTP 429 is a request-rate throttle, NOT a range-size limit.
                 // Reducing from 1800 to 50 blocks after 429 wastes thousands
@@ -4897,7 +4900,10 @@ async function principal(): Promise<'parar' | void> {
                         diagnostico:'limite de frequencia; nao e prova de limite de tamanho',
                     });
                     await dormir(2400);
-                    if(resultadoDoFreio==='adiar'||janelasQueFalharam>=3)break;
+                    if(resultadoDoFreio==='adiar'||falhasConsecutivas>=3){
+                        orcamento.encerrar('RPC historico: 429 persistente, pausa segura sem avancar checkpoint');
+                        break;
+                    }
                     continue;
                 }
                 if(tamanho>PASSO_MINIMO){
@@ -4909,7 +4915,7 @@ async function principal(): Promise<'parar' | void> {
                     continue;
                 }
                 const acao=freio.recusou(ultimaRecusa);
-                if(acao==='adiar'||janelasQueFalharam>=3){
+                if(acao==='adiar'||falhasConsecutivas>=3){
                     log.warn('[MERCADO/CENSO] RPC historico indisponivel; checkpoint conservado.',{
                         proximoAte,blocosRestantes:proximoAte-menorBloco+1,
                         host:hostDoRpc(process.env.CACA_HISTORICO_RPC_URL
