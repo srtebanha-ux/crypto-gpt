@@ -94,6 +94,7 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
 import {
     enumerarMercados, enumerarDevedores, soOsQuePagam, soDaBase, codificarIdToMarketParams,
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
+    selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
     codificarPosition, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
@@ -407,7 +408,7 @@ export async function descobrirMorphoPorApi(
     // ORCAMENTO PROPRIO: requisicoes, tempo e CANCELAMENTO de verdade. Ele e
     // o unico limitador deste canal — nao a cota de RPC, que e de outro.
     const orcamento = new OrcamentoHttp(
-        opcoes.tetoDeRequisicoes ?? 40,
+        opcoes.tetoDeRequisicoes ?? 65,
         opcoes.tetoDeMs ?? 45_000,
     );
 
@@ -601,14 +602,23 @@ export async function descobrirMorphoPorApi(
     let validados = 0;
     let reqGraph = 0;
     const falhasDeDevedores: string[] = [];
-    for (const m of escolhidos.filter((x) => x.confirmadoNaCorrente).slice(0, tetoDev)) {
-        const r = await enumerarDevedores(buscar, m.id);
+    // Verifica os mercados quentes em TODAS as rodadas e os outros
+    // em rodizio. Antes todos os oito mercados eram os primeiros da
+    // lista, mesmo com 24 confirmados, portanto repetiam os mesmos
+    // cinco devedores indefinidamente.
+    const mercadosComDevedores=selecionarMercadosParaDevedores(
+        escolhidos.filter(x=>x.confirmadoNaCorrente),tetoDev,rodada);
+    for (const m of mercadosComDevedores) {
+        // Tres paginas no maximo por mercado: consulta os maiores por
+        // BorrowShares antes do prazo do job. COMPLETA=false caso sobrem
+        // paginas, sem declarar que os demais devedores nao existem.
+        const r = await enumerarDevedores(buscar, m.id, {tetoDePaginas:3});
         reqGraph += r.requisicoes;
         devedores += r.devedores.length;
         if (r.falha !== null) falhasDeDevedores.push(`${m.id.slice(0, 10)}…: ${r.falha}`);
-        // VALIDA NA CORRENTE: a API aponta, o `position` confirma. Teto pequeno
-        // de proposito — o objetivo desta volta e provar o caminho, nao varrer.
-        for (const d of r.devedores.slice(0, 5)) {
+        // Metade dos cinco maiores mantida; a outra metade visita
+        // devedores diferentes, sempre conferidos por position() onchain.
+        for (const d of selecionarDevedoresParaConferir(r.devedores,5,rodada)) {
             const cru = await chamarRpc(codificarPosition(m.id, d.endereco));
             const p = cru === null ? null : lerPosition(cru);
             if (p !== null && p.borrowShares > 0n) validados += 1;
