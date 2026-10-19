@@ -608,6 +608,22 @@ export function soOsQuePagam(ms: MercadoDaApi[]): MercadoDaApi[] {
     return ms.filter((m) => m.lltv.lessThanOrEqualTo(LLTV_MAXIMO_QUE_PAGA));
 }
 
+/**
+ * Universo para TRIAGEM, nao para envio. O corte de 77% mede onde o bonus
+ * teorico supera o caso Aave de referencia, NAO se a liquidacao pode
+ * pagar gas. O proprio censo real encontrou bonus positivo em LLTV
+ * 86%, 91,5%, 94,5% e 96,5%. Excluir esses mercados impedia a validacao
+ * onchain de posicoes grandes que podem ser economicamente interessantes.
+ *
+ * Nao autoriza transacao: nem a API nem o incentivo teorico provam HF<1,
+ * saldo, liquidez de swap ou lucro apos gas. O portao economico continua
+ * dentro da simulacao atomica do executor.
+ */
+export function mercadosParaSondagem(ms: readonly MercadoDaApi[]): MercadoDaApi[] {
+    return ms.filter(m=>m.lltv.isFinite()&&m.lltv.gt(0)&&m.lltv.lt(1)
+        &&m.bonusPct!==null&&m.bonusPct.isFinite()&&m.bonusPct.gt(0));
+}
+
 // ---------------------------------------------------------------------------
 // A VALIDACAO NA CORRENTE. E ela que autoriza, nao a API.
 // ---------------------------------------------------------------------------
