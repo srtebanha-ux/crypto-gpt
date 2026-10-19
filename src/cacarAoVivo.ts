@@ -56,6 +56,7 @@ import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte, logsComRpc
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
+import { agendarDescobertaMorpho } from './morphoAgendador';
 import { coberturaPrioritariaPequena, enderecosPrioritarios } from './cacaFechamentoPequenos';
 import { reservarAlvosNaBrasa, acordarPorBlocoSeAlvoCritico } from './cacaPrioridadeBrasa';
 import { ordenarCaidosPorPremio } from './cacaOrdenarCaidos';
@@ -3045,46 +3046,42 @@ async function principal(): Promise<'parar' | void> {
     });
 
     if (process.env.CACA_MORPHO_API === '1') {
-        // A DESCOBERTA SEM `eth_getLogs`: a API enumera, a corrente valida.
-        // Roda desgrudada do laco, igual a varredura por evento.
-        //
-        // E NAO E GATEADA PELO ESTADO DO RPC. `disponibilidadeDoCanal('apiHttp')`
-        // nao le nenhum campo de RPC, de proposito, e um teste exige isso em
-        // todas as combinacoes de estado.
+        // A API enumera e a Base valida. Antes isso rodava SO UMA VEZ
+        // no boot: os mesmos mercados nunca eram revalidados sem um deploy.
+        // Agora repete de hora em hora sem sobreposicao de jobs.
+        // HTTP e RPC tem orcamentos separados do laco de liquidacao.
+        const recebido=Number(process.env.CACA_MORPHO_INTERVALO_MS ?? '3600000');
+        const intervalo=Number.isSafeInteger(recebido)&&recebido>=900000
+            &&recebido<=86400000?recebido:3600000;
         const canal = disponibilidadeDoCanal('apiHttp', infraAgora);
-        log.warn('[MORPHO/API] FLAG RECONHECIDA. Vou descobrir mercados pela API, UMA vez, em paralelo.', {
-            flag: 'CACA_MORPHO_API=1',
-            canal: canal.pode ? 'apiHttp LIVRE' : 'apiHttp PAUSADO',
-            porqueOCanal: canal.porque,
-            rpcEsgotado: infraAgora.provedoresEsgotados.length > 0
-                ? `SIM (${infraAgora.provedoresEsgotados.join(', ')}) — e isto NÃO bloqueia este canal`
-                : 'não',
-            depois: 'apague CACA_MORPHO_API quando a linha [MORPHO/API] Descoberta sair',
+        log.warn('[MORPHO/API] Monitoramento periodico de mercados iniciado.', {
+            flag:'CACA_MORPHO_API=1',
+            intervaloMs:intervalo,
+            primeiraExecucao:'imediata no boot',
+            seguintes:'periodicas sem sobreposicao, mesmo sem novo deploy',
+            canal:canal.pode?'apiHttp LIVRE':'apiHttp PAUSADO',
+            porqueOCanal:canal.porque,
+            envio:'NENHUM: indice de terceiros nao autoriza liquidacao',
         });
-        void (async () => {
-            try {
-                const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
-                await descobrirMorphoPorApi({
-                    infra: infraAgora,
-                    // O INVENTARIO VE A DESCOBERTA. Antes ela usava `fetch` cru e
-                    // o consumo dela era invisivel — entao a ausencia dela no
-                    // `porTarefaEMetodo` nao provava nem que rodou nem que nao.
-                    // HTTP e RPC entram separados: HTTP nao consome CU.
-                    contarHttp: (host) => INVENTARIO.contarHttp('morpho', host),
-                    contarRpc: (metodo) => INVENTARIO.contar('morpho', metodo),
-                });
-                // Reler para o `[BLOCO]` passar a publicar o resultado desta
-                // volta sem esperar o proximo boot.
-                MEMORIA_MORPHO = await lerMemoriaDoDisco();
-            } catch (e) {
-                log.error('[MORPHO/API] A descoberta falhou, e o bot segue caçando.', {
-                    erro: e instanceof Error ? e.message : String(e),
-                    oQueIssoNaoE: 'não é "a API retornou vazio" nem "os mercados não passaram na '
-                        + 'validação": é a tarefa estourando. Ver [MORPHO/API] Descoberta, que '
-                        + 'não saiu',
-                });
-            }
-        })();
+        agendarDescobertaMorpho(async()=>{
+            const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
+            await descobrirMorphoPorApi({
+                infra:infraAgora,
+                contarHttp:(host)=>INVENTARIO.contarHttp('morpho',host),
+                contarRpc:(metodo)=>INVENTARIO.contar('morpho',metodo),
+            });
+            MEMORIA_MORPHO = await lerMemoriaDoDisco();
+            log.info('[MORPHO/API] Rodada periodica finalizada.', {
+                intervaloMs:intervalo,
+                memoria:resumoDaDescoberta(MEMORIA_MORPHO,Date.now()),
+                nota:'nao e alvo liquidavel nem operacao lucrativa',
+            });
+        },intervalo,(e)=>{
+            log.error('[MORPHO/API] Rodada falhou; voltarei no proximo intervalo.',{
+                erro:e instanceof Error?e.message:String(e),
+                nota:'sem reiniciar CACA, sem assinar transacao',
+            });
+        });
     }
 
     if (process.env.CACA_MERCADOS_MORPHO === '1'
