@@ -25,7 +25,8 @@
 // ficar preso num token ilíquido desaparece quando a transação reverte.
 import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
-import { evaluateCycle, cycleSpotRatio, type CycleEvaluation, type Hop } from './ammMath';
+import { cycleSpotRatio, type CycleEvaluation, type Hop } from './ammMath';
+import { avaliarCicloComSementeCpamm } from './titanCpammSniffer';
 import { findTriangularCycles, findTwoPoolCycles, hopsForCycle, type Cycle, type PoolInfo } from './dexGraph';
 import {
     ensaiarExecucao,
@@ -948,10 +949,17 @@ async function main() {
                 (min, h) => (h.reserveIn.lessThan(min) ? h.reserveIn : min),
                 hops[0].reserveIn,
             );
-            const evaluation = evaluateCycle(hops, smallestReserveIn.mul(maxFraction), {
-                flashLoanFeeFraction: flashLoanFee,
-                gasCostInToken: gasInToken,
-            });
+            // 2-pool CPAMM BigInt analytic size is a theoretical SEED only.
+            // Existing optimizer remains the fallback (3+ hops, unsupported fees).
+            // This doesn't authorize a transaction: tentarExecutar still
+            // demands a current eth_call of the actual onchain executor.
+            const tamanho = avaliarCicloComSementeCpamm(
+                cycle, hops, smallestReserveIn.mul(maxFraction), {
+                    flashLoanFeeFraction: flashLoanFee,
+                    gasCostInToken: gasInToken,
+                }, decimaisPorToken,
+            );
+            const evaluation = tamanho.evaluation;
 
             if (evaluation.netProfit.greaterThan(bestNet)) {
                 bestNet = evaluation.netProfit;
@@ -965,6 +973,8 @@ async function main() {
                     etapa: 'teorica',
                     ciclo: describeCycle(cycle),
                     entradaOtima: evaluation.amountIn.toFixed(8),
+                    modeloDoTamanho: tamanho.origem,
+                    statusEconomico: 'TEORICO; nao e simulado nem lucro',
                     lucroBruto: evaluation.grossProfit.toFixed(8),
                     taxaFlashLoan: evaluation.flashLoanFee.toFixed(8),
                     gas: evaluation.gasCost.toFixed(8),
