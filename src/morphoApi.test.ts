@@ -7,6 +7,7 @@ import {
     apiConfereComACorrente, codificarIdToMarketParams, codificarPosition, codificarMarket,
     consultaDeDevedores, lerDevedores, paraCache, doCache, idadeDoIndice, comoLerADescoberta,
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
+    selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
     CHAIN_ID_DA_BASE, POR_PAGINA, TETO_DE_PAGINAS, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
 import { OrcamentoHttp } from './canais';
@@ -640,4 +641,22 @@ test('Morpho: o mesmo grupo de 24 cotacoes cobre outros mercados em rodadas dife
  assert.equal(m.filter(x=>x.confirmadoNaCorrente).length,0,
   'rotacao da API nao autoriza liquidacao sem eth_call');
  assert.deepEqual(priorizarMercadosDaLista(m,ranking,24,-1),[]);
+});
+
+test('Morpho: mercado e devedor prioritarios estaveis, cauda rotativa e leitura limitada',()=>{
+ const universe=Array.from({length:40},(_,i)=>i);
+ const seen=new Set<number>();
+ for(let step=0;step<8;step++){
+  const sample=selecionarMercadosParaDevedores(universe,8,step);
+  assert.equal(sample.length,8);
+  assert.deepEqual(sample.slice(0,4),[0,1,2,3]);
+  for(const value of sample)seen.add(value);
+  assert.equal(new Set(sample).size,8);
+ }
+ assert.ok(seen.size>8,'nao verificar os mesmos oito mercados para sempre');
+ const borrowers=selecionarDevedoresParaConferir(universe,5,7);
+ assert.equal(borrowers.length,5,'quantidade de eth_call nao aumenta');
+ assert.deepEqual(borrowers.slice(0,2),[0,1]);
+ assert.deepEqual(selecionarDevedoresParaConferir([],5,7),[]);
+ assert.deepEqual(selecionarMercadosParaDevedores(universe,8,-1),[]);
 });
