@@ -608,3 +608,36 @@ test('Morpho GraphQL: erro em HTTP 200 nao vira ausencia de devedores',async()=>
  assert.match(query,/orderBy: BorrowShares/);
  assert.match(query,/orderDirection: Desc/);
 });
+
+test('Morpho: a varredura consegue atravessar mais de 20 paginas distintas sem declarar cobertura falsa',async()=>{
+ const resps=Array.from({length:25},(_,i)=>({
+  status:200,corpo:pagina([i+1],{},i<24?'cursor-'+(i+1):undefined),
+ }));
+ const fake=fingir(resps);
+ const result=await enumerarMercados(fake.buscar,{dormir:semSono});
+ assert.ok(TETO_DE_PAGINAS>=25,'teto antigo de 20 perdia mercados reais');
+ assert.equal(result.paginas,25);
+ assert.equal(result.completa,true);
+ assert.equal(result.mercados.length,25);
+ assert.ok(fake.urls[24]!.includes('cursor=cursor-24'));
+});
+
+test('Morpho: o mesmo grupo de 24 cotacoes cobre outros mercados em rodadas diferentes',()=>{
+ const m=lerPaginaDeMercados(JSON.parse(pagina(
+  Array.from({length:120},(_,i)=>i+1)))).itens;
+ const ranking=[m[1]!.id,m[20]!.id,m[41]!.id,m[60]!.id,m[90]!.id];
+ const cobertos=new Set<string>();
+ const primeiro=priorizarMercadosDaLista(m,ranking,24,0);
+ assert.equal(primeiro.length,24);
+ for(let rodada=0;rodada<11;rodada++){
+  const lote=priorizarMercadosDaLista(m,ranking,24,rodada);
+  assert.equal(lote.length,24,'o teto de validacao RPC nunca aumenta');
+  assert.equal(new Set(lote.map(x=>x.id)).size,24,'sem IDs duplicados');
+  assert.equal(lote[0]!.id,ranking[0]);
+  for(const market of lote)cobertos.add(market.id);
+ }
+ assert.ok(cobertos.size>=60,'a selecao nao pode repetir sempre os mesmos 24 mercados');
+ assert.equal(m.filter(x=>x.confirmadoNaCorrente).length,0,
+  'rotacao da API nao autoriza liquidacao sem eth_call');
+ assert.deepEqual(priorizarMercadosDaLista(m,ranking,24,-1),[]);
+});
