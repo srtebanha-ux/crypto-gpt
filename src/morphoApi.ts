@@ -806,6 +806,37 @@ export function priorizarMercadosDaLista(
     }
     return selecao;
 }
+/** Entre mercados confirmados, preserva os de maior divida e visita
+ * mercados diferentes a cada rodada. Nunca aumenta a cota HTTP/RPC.
+ */
+export function selecionarMercadosParaDevedores<T>(
+    mercados: readonly T[],quantidade:number,rodada:number,
+):T[]{
+    if(!Number.isSafeInteger(quantidade)||quantidade<=0
+       ||!Number.isSafeInteger(rodada)||rodada<0)return [];
+    if(mercados.length<=quantidade)return [...mercados];
+    const fixos=Math.max(1,Math.floor(quantidade/2));
+    const resultado=mercados.slice(0,fixos);
+    const outros=mercados.slice(fixos);
+    const vagas=quantidade-fixos;
+    const indices=new Set<number>();
+    for(let i=0;i<vagas;i++){
+        const inicio=Math.floor(i*outros.length/vagas);
+        const fim=Math.floor((i+1)*outros.length/vagas);
+        const largura=Math.max(1,fim-inicio);
+        const idx=inicio+(rodada%largura);
+        indices.add(idx);
+    }
+    for(const idx of indices)resultado.push(outros[idx]!);
+    return resultado;
+}
+
+/** Mantem maiores devedores e alterna os demais, sem confiar em API para tiro. */
+export function selecionarDevedoresParaConferir<T>(
+    devedores:readonly T[],limite:number,rodada:number,
+):T[]{
+    return selecionarMercadosParaDevedores(devedores,limite,rodada);
+}
 export function consultaDeDevedores(idDoMercado: string, primeiros: number, pular: number): string {
     return JSON.stringify({
         query: `query($id: String!, $first: Int!, $skip: Int!) {
