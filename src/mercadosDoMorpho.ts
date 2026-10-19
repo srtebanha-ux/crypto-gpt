@@ -92,7 +92,7 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
  * o Morpho paga o MESMO que a Aave — e aí nao ha razao para a obra.
  */
 import {
-    enumerarMercados, enumerarDevedores, soOsQuePagam, soDaBase, codificarIdToMarketParams,
+    enumerarMercados, enumerarDevedores, soOsQuePagam, mercadosParaSondagem, soDaBase, codificarIdToMarketParams,
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
     selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
     codificarPosition, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
@@ -457,12 +457,16 @@ export async function descobrirMorphoPorApi(
     // leria como "mercado recusado" em vez de "mercado de outra chain".
     const porChain = soDaBase(legiveis);
     const quePagam = soOsQuePagam(porChain.daBase);
+    // Observacao inclui LLTV mais alto com bonus positivo. O antigo corte de
+    // 77% e apenas uma comparacao de bonus com a Aave, nao um criterio
+    // para ignorar devedores. O API continua incapaz de autorizar tiro.
+    const candidatosParaSondagem=mercadosParaSondagem(porChain.daBase);
     // Morpho REST lista identidade, não dívida. Antes a seleção era
     // `slice(0,12)` e os primeiros mercados NÃO tinham devedores.
     // Uma consulta GraphQL ordenada pela dívida atual prioriza de fato
     // mercados usados. Se falhar, amostramos TODA a lista elegível.
     let rankingDeDividas:string[]|null=null;
-    if(quePagam.length>0&&orcamento.pedir()) {
+    if(candidatosParaSondagem.length>0&&orcamento.pedir()) {
         try {
             const resp=await buscar('https://api.morpho.org/graphql',{
                 method:'POST',headers:{'content-type':'application/json',
@@ -478,9 +482,11 @@ export async function descobrirMorphoPorApi(
     // Usamos hora UTC em fatias de 15min: recomecar o processo nao
     // causa um viés para os primeiros 24 mercados.
     const rodada=Math.floor(Date.now()/900_000);
-    const escolhidos=priorizarMercadosDaLista(quePagam,rankingDeDividas,tetoValid,rodada);
+    const escolhidos=priorizarMercadosDaLista(candidatosParaSondagem,rankingDeDividas,tetoValid,rodada);
     log.info('[MORPHO/API] Selecao de mercados para conferir na Base.',{
-        mercadosEnumerados:quePagam.length,
+        mercadosEnumerados:candidatosParaSondagem.length,
+        llTvAte77PorCento:quePagam.length,
+        llTvMaisAltoTambemElegivelASondagem:candidatosParaSondagem.length>quePagam.length,
         rankingComDivida:rankingDeDividas?.length??null,
         candidatosParaProva:escolhidos.length,
         rodada,
@@ -658,7 +664,7 @@ export async function descobrirMorphoPorApi(
                     // Formato RECONHECIDO e lista vazia. Agora sim e RESPOSTA,
                     // e so pode ser dita depois de o formato ter sido lido.
                     ? 'apiVaziaDeVerdade'
-                    : quePagam.length === 0
+                    : candidatosParaSondagem.length === 0
                         // Ha mercado e o FILTRO nao selecionou nenhum. E escolha
                         // nossa, nao ausencia de dado.
                         ? 'foraDaFaixa'
@@ -694,7 +700,7 @@ export async function descobrirMorphoPorApi(
                     + 'CONFIRMADOS para a próxima volta'
                 : `${disponibilidadeDoCanal('validacao', infra).degradado ? 'degradado' : 'livre'}`
                     + ` — ${chamadasRpc} chamada(s) eth_call/eth_getCode nesta volta`,
-            naoConfirmadosGuardados: quePagam.filter((x) => x.confirmadoNaCorrente !== true).length,
+            naoConfirmadosGuardados: candidatosParaSondagem.filter((x) => x.confirmadoNaCorrente !== true).length,
             porqueNaoValidou,
         }),
         orcamento: orcamento.comoLer(),
@@ -738,7 +744,7 @@ export async function descobrirMorphoPorApi(
             return 'a API respondeu no formato esperado e com ZERO mercados: não há o que '
                 + 'validar, e isto é RESPOSTA e não falha';
         }
-        if (quePagam.length === 0) {
+        if (candidatosParaSondagem.length === 0) {
             return 'nenhum mercado na faixa de LLTV ≤ 77%: o filtro é nosso, e os mercados '
                 + 'existem. Não há o que validar nesta volta';
         }
