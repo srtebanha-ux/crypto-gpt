@@ -31,6 +31,8 @@ jobs:
         run: |
           npm run typecheck
           node --require ts-node/register --test src/flashArbExecutor.test.ts src/flashArbRpc.test.ts src/titanCpammSniffer.test.ts src/titanTamanhoCpamm.test.ts
+      - name: Suite TypeScript completa - inclui regressao do censo historico
+        run: node --require ts-node/register --test src/*.test.ts
       - name: Compilar o contrato multi-hop
         run: npx hardhat compile
       - name: Testar executora Morpho e seguranca dos saldos na EVM local
