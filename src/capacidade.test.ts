@@ -694,20 +694,24 @@ test('uma recusa de cota ENCERRA o orçamento: não insiste nas 39 restantes', (
     assert.equal(o.gastas(), 1, 'uma tentativa gasta, não quarenta');
 });
 
-test('o censo passa `tentativas: 1` e consome o orçamento — não 4 por janela', () => {
-    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
-    const i = fonte.indexOf('async function quandoFoiAUltimaLiquidacao');
-    const corpo = fonte.slice(i, i + 9000).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-    assert.match(corpo, /new OrcamentoDaTarefa\('historico'/, 'a tarefa tem orçamento');
-    assert.match(corpo, /if \(!orcamento\.pedir\(\)\) break;/, 'cada janela sai do orçamento');
-    assert.match(corpo, /\}\], 1, 'demorada', 'historico'\)/,
-        '`tentativas: 1`: as retentativas internas multiplicavam o orçamento por quatro');
-    assert.match(corpo, /orcamento\.encerrar\(/, 'cota encerra a tarefa');
-    assert.match(corpo, /veredictoDaVarredura\(/, 'e o resultado sai dos contadores');
-    // A frase do "um quarto" não voltou.
-    assert.ok(!/janelasLidas \/ 4/.test(corpo));
+test('censo historico independente: o orcamento e cobrado por leitura e o checkpoint so avanca no sucesso',()=>{
+    const fonte=readFileSync(join(__dirname,'cacarAoVivo.ts'),'utf8');
+    const i=fonte.indexOf('async function quandoFoiAUltimaLiquidacao');
+    assert.ok(i>0);
+    const corpo=fonte.slice(i,i+11500).replace(/\/\*[\s\S]*?\*\//g,'').replace(/\/\/[^\n]*/g,'');
+    assert.match(corpo,/new OrcamentoDaTarefa\('historico'/);
+    assert.match(corpo,/while\s*\(proximoAte>=menorBloco[\s\S]*?orcamento\.pedir\(\)\)/,
+      'cada requisicao dedicada desconta uma tentativa, antes da chamada');
+    assert.match(corpo,/logsComRpcHistorico<LogRPC>\(/,
+      'a coleta dedicada nao compartilha RPC com o monitoramento');
+    assert.match(corpo,/tempoLimiteMs:6000/,'a coleta dedica timeout a cada chamada');
+    assert.match(corpo,/proximoAte=de-1;/,'intervalos inclusivos contiguos');
+    assert.match(corpo,/await salvar\(\)/,'checkpoint persistido no sucesso');
+    assert.ok(corpo.indexOf('proximoAte=de-1;')<corpo.indexOf('await salvar()'),
+      'checkpoint so avanca depois da leitura de logs');
+    assert.match(corpo,/orcamento\.encerrar\(/,'erro persistente encerra a rodada');
+    assert.ok(!/janelasLidas\s*\/\s*4/.test(corpo));
 });
-
 test('sondagem que FALHA não promove nem restaura disponibilidade', () => {
     const r = relogio();
     const k = new ControleDeCapacidade(r.agora);
@@ -810,25 +814,20 @@ test('a chave da recusa ignora credencial e detalhe variável', () => {
         .includes('CHAVE_SECRETA'));
 });
 
-test('o censo usa o freio DE VERDADE, com sucesso soltando', () => {
-    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
-    const i = fonte.indexOf('async function quandoFoiAUltimaLiquidacao');
-    assert.ok(i > 0, 'a função do censo desapareceu');
-    // A FATIA VAI ATE O FIM DA FUNCAO, e nao a um numero magico.
-    //
-    // Era `i + 6000`, e em 2026-10-14 o portao de `autorizarVarredura` empurrou
-    // `freio.recusou` para fora dessa janela: o teste reprovou sem que nada do
-    // que ele guarda tivesse mudado. Teste amarrado a um deslocamento quebra a
-    // cada edicao vizinha — e um teste que reprova por motivo errado deixa de
-    // responder "quebrou?", que e a unica coisa que ele existe para fazer.
-    const fim = fonte.indexOf('\n}\n', i);
-    assert.ok(fim > i, 'não achei o fim da função');
-    const corpo = fonte.slice(i, fim).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-    assert.match(corpo, /new FreioDeRecusas\(\)/);
-    assert.match(corpo, /freio\.passou\(\)/, 'sucesso solta o freio');
-    assert.match(corpo, /freio\.recusou\(msg\)/);
-    assert.match(corpo, /=== 'adiar'/, 'e o adiamento encerra a tarefa');
-    assert.match(corpo, /=== 'recuarESondar'/);
-    // `freio.passou()` vem no ramo de SUCESSO, antes do `catch`.
-    assert.ok(corpo.indexOf('freio.passou()') < corpo.indexOf('freio.recusou(msg)'));
+test('censo historico: 429 repetido freia, mas sucesso zera falhas consecutivas',()=>{
+    const fonte=readFileSync(join(__dirname,'cacarAoVivo.ts'),'utf8');
+    const i=fonte.indexOf('async function quandoFoiAUltimaLiquidacao');
+    assert.ok(i>0);
+    const corpo=fonte.slice(i,i+11500).replace(/\/\*[\s\S]*?\*\//g,'').replace(/\/\/[^\n]*/g,'');
+    assert.match(corpo,/new FreioDeRecusas\(\)/);
+    assert.match(corpo,/janelasQueFalharam\+=1/,'total de falhas fica para diagnostico');
+    assert.match(corpo,/falhasConsecutivas\+=1/,'falhas de RPC sobem o contador de sequencia');
+    assert.match(corpo,/falhasConsecutivas=0/,'sucesso limpa a sequencia');
+    assert.match(corpo,/freio\.passou\(\)/,'sucesso solta o freio');
+    assert.match(corpo,/freio\.recusou\(ultimaRecusa\)/,'freio recebe a causa real');
+    assert.match(corpo,/await dormir\(2400\)/,'429 exige recuo de frequencia');
+    assert.match(corpo,/resultadoDoFreio==='adiar'\|\|falhasConsecutivas>=3/);
+    assert.match(corpo,/orcamento\.encerrar\(/);
+    assert.match(corpo,/proximoAte=de-1;[\s\S]*?await salvar\(\)/);
+    assert.ok(corpo.indexOf('freio.passou()')<corpo.indexOf('freio.recusou(ultimaRecusa)'));
 });
