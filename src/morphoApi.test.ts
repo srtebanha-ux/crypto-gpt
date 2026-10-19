@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import {
     enumerarMercados, enumerarDevedores, lerPaginaDeMercados, lerUmMercado, lerLltv,
-    soOsQuePagam, lerIdToMarketParams, lerPosition, lerMarket, sharesParaAtivos,
+    soOsQuePagam, mercadosParaSondagem, lerIdToMarketParams, lerPosition, lerMarket, sharesParaAtivos,
     apiConfereComACorrente, codificarIdToMarketParams, codificarPosition, codificarMarket,
     consultaDeDevedores, lerDevedores, paraCache, doCache, idadeDoIndice, comoLerADescoberta,
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
@@ -659,4 +659,17 @@ test('Morpho: mercado e devedor prioritarios estaveis, cauda rotativa e leitura 
  assert.deepEqual(borrowers.slice(0,2),[0,1]);
  assert.deepEqual(selecionarDevedoresParaConferir([],5,7),[]);
  assert.deepEqual(selecionarMercadosParaDevedores(universe,8,-1),[]);
+});
+
+test('Morpho: mercados com LLTV 94,5% e bonus positivo podem entrar na TRIAGEM, nao no envio',()=>{
+    const mercados=lerPaginaDeMercados(JSON.parse(pagina([1,2,3,4,5,6]))).itens;
+    const bonusAlto=soOsQuePagam(mercados);
+    const candidatos=mercadosParaSondagem(mercados);
+    assert.ok(bonusAlto.length<candidatos.length,'antes >77% era excluido, agora entra na triagem');
+    assert.ok(candidatos.some(x=>x.lltv.eq('0.945')),'inclui mercado 94,5% observado no censo');
+    assert.ok(candidatos.every(x=>x.bonusPct!==null&&x.bonusPct.gt(0)));
+    assert.ok(candidatos.every(x=>x.confirmadoNaCorrente===false),
+      'nenhuma cotacao da API torna o mercado comprovado na Base');
+    assert.equal(mercadosParaSondagem([{...mercados[0]!,lltv:new Decimal(1)}]).length,0);
+    assert.equal(mercadosParaSondagem([{...mercados[0]!,bonusPct:null}]).length,0);
 });
