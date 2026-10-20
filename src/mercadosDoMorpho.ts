@@ -96,7 +96,7 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
 import {
     enumerarMercados, enumerarDevedores, soOsQuePagam, mercadosParaSondagem, soDaBase, codificarIdToMarketParams,
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
-    selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
+    selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,selecionarDevedoresPorRisco,
     codificarPosition, codificarMarket, lerMarket, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
@@ -680,7 +680,7 @@ export async function descobrirMorphoPorApi(
         // Multicall3 faz ate 60 verificacoes de devedor num UNICO eth_call
         // no mesmo bloco do preco do oracle e dos totais. Antes isto eram
         // dezenas de round trips e a fila parava no primeiro HTTP 429.
-        const candidatos=selecionarDevedoresParaConferir(r.devedores,tetoPosicoes,rodada);
+        const candidatos=selecionarDevedoresPorRisco(r.devedores,m.lltv,tetoPosicoes,rodada);
         const dadosLote=candidatos.length>0
             ?await chamarRpc(codificarAggregate3(candidatos.map(d=>({
                 alvo:morpho,dados:codificarPosition(m.id,d.endereco),
