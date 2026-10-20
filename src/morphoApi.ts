@@ -853,11 +853,47 @@ export function selecionarDevedoresParaConferir<T>(
 ):T[]{
     return selecionarMercadosParaDevedores(devedores,limite,rodada);
 }
+
+/**
+ * Prioriza quem esta perto de LLTV (somente DADO API para ordenacao).
+ * O scanner onchain CONTINUA conferindo shares, colateral e oracle no mesmo
+ * bloco. Uma classificacao API errada nunca autoriza um tiro.
+ *
+ * Preserva metade da capacidade para a ordem rotativa original: pequenos
+ * devedores e posicoes sem valor USD ainda entram no scanner.
+ */
+export function selecionarDevedoresPorRisco(
+    devedores:readonly DevedorDaApi[],lltv:Decimal,limite:number,rodada:number,
+):DevedorDaApi[]{
+    if(!Number.isSafeInteger(limite)||limite<=0
+      ||!Number.isSafeInteger(rodada)||rodada<0)return [];
+    if(devedores.length<=limite)return [...devedores];
+    const medidos=devedores.map(d=>{
+        let hf:Decimal|null=null;
+        try{
+            if(d.borrowAssetsUsd!==null&&d.collateralUsd!==null){
+                const debt=new Decimal(d.borrowAssetsUsd);
+                const col=new Decimal(d.collateralUsd);
+                if(debt.isFinite()&&col.isFinite()&&debt.gt(0)&&col.gte(0)&&lltv.gt(0))
+                    hf=col.mul(lltv).div(debt);
+            }
+        }catch{hf=null}
+        return{d,hf};
+    }).filter(x=>x.hf!==null);
+    if(medidos.length===0)return selecionarDevedoresParaConferir(devedores,limite,rodada);
+    medidos.sort((a,b)=>a.hf!.cmp(b.hf!));
+    const metade=Math.ceil(limite/2);
+    const prioritarios=medidos.slice(0,metade).map(x=>x.d);
+    const excluidos=new Set(prioritarios.map(x=>x.endereco.toLowerCase()));
+    const demais=devedores.filter(x=>!excluidos.has(x.endereco.toLowerCase()));
+    const rotativos=selecionarDevedoresParaConferir(demais,limite-prioritarios.length,rodada);
+    return [...prioritarios,...rotativos];
+}
 export function consultaDeDevedores(idDoMercado: string, primeiros: number, pular: number): string {
     return JSON.stringify({
         query: `query($id: String!, $first: Int!, $skip: Int!) {
   marketPositions(where: { marketUniqueKey_in: [$id] }, first: $first, skip: $skip, orderBy: BorrowShares, orderDirection: Desc) {
-    items { user { address } state { borrowShares collateral } }
+    items { user { address } state { borrowShares collateral borrowAssetsUsd collateralUsd } }
   }
 }`,
         variables: { id: idDoMercado, first: primeiros, skip: pular },
@@ -868,6 +904,9 @@ export interface DevedorDaApi {
     endereco: string;
     /** As shares que a API diz. CONFERENCIA, nunca fonte para decidir. */
     borrowSharesDaApi: bigint | null;
+    /** Valores USD da API so para priorizar risco; jamais decidem liquidação. */
+    borrowAssetsUsd: string | null;
+    collateralUsd: string | null;
 }
 
 /** Le a resposta do GraphQL. Item sem endereco nao vira devedor. */
@@ -890,7 +929,16 @@ export function lerDevedores(corpo: unknown): DevedorDaApi[] {
             if (typeof s === 'string' && /^\d+$/.test(s)) shares = BigInt(s);
             else if (typeof s === 'number' && Number.isInteger(s)) shares = BigInt(s);
         } catch { shares = null; }
-        fora.push({ endereco: end, borrowSharesDaApi: shares });
+        const usd=(v:unknown):string|null=>{
+            if(typeof v!=='string'&&typeof v!=='number')return null;
+            try{
+                const n=new Decimal(v);
+                return n.isFinite()&&n.gte(0)?n.toString():null;
+            }catch{return null}
+        };
+        fora.push({ endereco: end, borrowSharesDaApi: shares,
+            borrowAssetsUsd:usd(estado?.borrowAssetsUsd),
+            collateralUsd:usd(estado?.collateralUsd) });
     }
     return fora;
 }
