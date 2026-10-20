@@ -30,6 +30,7 @@
     "morpho": "ts-node src/mercadosDoMorpho.ts",
     "caca:deploy-multihop": "node dist/implantarTitanMultiHop.js",
     "caca:deploy-morpho-v3": "node dist/implantarTitanMorphoV3.js",
+    "caca:deploy-morpho-aero": "node dist/implantarTitanMorphoAero.js",
     "test": "node --require ts-node/register --test src/*.test.ts",
     "leadlag": "ts-node src/leadLagSniffer.ts",
     "leadlag:prod": "node dist/leadLagSniffer.js",
