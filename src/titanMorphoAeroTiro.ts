@@ -187,9 +187,16 @@ export async function avaliarELiquidarMorphoAero(
           const ret=await p.call({to:addr,from:owner,data,blockTag:tag});
           const profit=executorAbi.decodeFunctionResult('liquidar',ret)[0] as bigint;
           if(profit<=1n)continue;
-          const score=await loanValueInWeth(p,params.loanToken,profit);
-          if(score===null||score<=0n)continue;
+          const gross=await loanValueInWeth(p,params.loanToken,profit);
+          if(gross===null||gross<=0n)continue;
           const estimated=await p.estimateGas({to:addr,from:owner,data});
+          // Pick the route by projected NET WETH, not the gross token surplus:
+          // a bigger swap can pay far more gas than a smaller profitable one.
+          const gasLimit=estimated+estimated/5n;
+          if(gasLimit>policy.maxGas)continue;
+          const gasUpper=gasLimit*(block.baseFeePerGas*2n+policy.tipWei);
+          const score=gross-gasUpper;
+          if(score<=0n)continue;
           if(!best||score>best.score)best={data,profit,shares,fee,estimated,score};
         }catch(err){
           const reason=motivoDoRevertMorpho(err);
