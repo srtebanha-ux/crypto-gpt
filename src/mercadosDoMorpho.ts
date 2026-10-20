@@ -639,6 +639,9 @@ export async function descobrirMorphoPorApi(
     let oraculosIndisponiveis = 0;
     const alvosDeRisco: Array<{mercado:string;usuario:string;
         distanciaBps:string;dividaCrua:string;situacao:string}> = [];
+    // Only positions that crossed the onchain-estimated threshold can enter
+    // the V3 execution funnel. The funnel rechecks health and liquidate() itself.
+    const liquidaveisParaPreflight: Array<{mercado:MercadoDaApi;usuario:string}> = [];
     const falhasDeDevedores: string[] = [];
     // Verifica os mercados quentes em TODAS as rodadas e os outros
     // em rodizio. Antes todos os oito mercados eram os primeiros da
@@ -690,7 +693,11 @@ export async function descobrirMorphoPorApi(
                     posicoesAvaliadas+=1;
                     if(risco.situacao==='proxima'||risco.situacao==='cruzou-estimado'){
                         if(risco.situacao==='proxima')pertoDoLimiar+=1;
-                        else cruzaramEstimado+=1;
+                        else {
+                            cruzaramEstimado+=1;
+                            if(m.confirmadoNaCorrente&&liquidaveisParaPreflight.length<3)
+                                liquidaveisParaPreflight.push({mercado:m,usuario:d.endereco});
+                        }
                         if(alvosDeRisco.length<20&&risco.distanciaBps!==null
                             &&risco.dividaCrua!==null)
                             alvosDeRisco.push({
@@ -718,6 +725,33 @@ export async function descobrirMorphoPorApi(
           +'juros, liquidez, saldo, oracle atualizado, swap, nonce e gas '
           +'ainda precisam de eth_call no executor antes de qualquer envio.',
     });
+
+    // Real Morpho V3 bridge. No future hypothetical target is sent. Each
+    // crossed position goes through the whole deployed contract by eth_call,
+    // an onchain loan-token -> WETH fee comparison, fresh gas and strict nonce.
+    // V3 can only sign if Aave signing is OFF (one wallet cannot have two senders).
+    if (process.env.CACA_MORPHO_V3_AVALIAR !== '0') {
+        if (liquidaveisParaPreflight.length === 0) {
+            log.info('[TITAN/MORPHO-V3] Nenhuma posicao cruzou LLTV nesta rodada.', {
+                radar: 'ativo; aguardando posicao onchain verdadeiramente liquidavel',
+                contrato:process.env.CACA_MORPHO_V3_CONTRATO
+                    ? 'informado (imutaveis exigidos no preflight)' : 'NAO IMPLANTADO/CONFIGURADO',
+                modo:'sem posicao liquidavel, nenhum gas gasto',
+            });
+        } else {
+            const {avaliarELiquidarMorphoV3}=await import('./titanMorphoV3Tiro');
+            for(const alvo of liquidaveisParaPreflight){
+                const resultado=await avaliarELiquidarMorphoV3({
+                    mercado:alvo.mercado,usuario:alvo.usuario,rpcUrl:url,
+                });
+                log.warn('[TITAN/MORPHO-V3] Preflight do executor real.',{
+                    mercado:alvo.mercado.id,usuario:alvo.usuario,
+                    resultado,
+                    nota:'so hash+recibo confirma transacao; estimativa nao e lucro',
+                });
+            }
+        }
+    }
 
     let blocoAgora: number | null = null;
     try {
