@@ -135,33 +135,20 @@ async function verificarBlocoMorphoHot():Promise<void>{
      if(emProva>0)continue;
      emProva++;
      aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
-     const {avaliarELiquidarMorphoV3}=await import('./titanMorphoV3Tiro');
-     const entrada={
+     const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
+     const {via,resultado:result,primeiroMotivo}=await avaliarSaidasMorpho({
        mercado:a.mercado,usuario:a.usuario,
        rpcUrl:process.env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org',
-     };
-     const v3=await avaliarELiquidarMorphoV3(entrada);
-     let result=v3;
-     let via='Uniswap V3';
-     // Real backup route for USDe/USDC: Aerodrome stable/volatile pools.
-     // NEVER send twice: try the backup only when the first path returned
-     // an economically rejected or untradeable simulation (no tx/hash).
-     if(v3.status==='inviavel'&&process.env.CACA_MORPHO_AERO_CONTRATO){
-       const {avaliarELiquidarMorphoAero}=await import('./titanMorphoAeroTiro');
-       result=await avaliarELiquidarMorphoAero(entrada);
-       via='Aerodrome stable/volatile';
-       if(v3.motivo.includes('sem pool V3 comprovada')
-         &&result.motivo.includes('sem pool Aerodrome comprovada')){
-         // No trusted exit venue for this asset. Keep sampling market in
-         // discovery, but do not let untradeable dust monopolize 24 hot slots.
-         alvos.delete(chave(a));
-         aguardando.set(chave(a),Date.now()+30*60_000);
-       }
+     });
+     if(primeiroMotivo?.includes('sem pool V3 comprovada')
+       &&result.motivo.includes('sem pool Aerodrome comprovada')){
+       alvos.delete(chave(a));
+       aguardando.set(chave(a),Date.now()+30*60_000);
      }
      log.warn('[TITAN/MORPHO-HOT/TIRO] Posicao cruzou em bloco novo, executor avaliado.',{
        bloco:block,mercado:a.mercado.id,usuario:a.usuario,
        via,resultado:result,
-       primeiroV3:via==='Uniswap V3'?undefined:v3.motivo,
+       primeiroV3:primeiroMotivo,
      });
      if(['enviada','confirmada','desconhecida'].includes(result.status)){
        // Reconciliation must happen before any attempt against same target.
