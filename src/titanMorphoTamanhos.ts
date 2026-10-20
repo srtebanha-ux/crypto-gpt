@@ -7,7 +7,7 @@
  */
 const WAD=10n**18n;
 const ORACLE_SCALE=10n**36n;
-const DIVIDERS=[64n,32n,16n,8n,4n,2n,1n] as const;
+const DIVIDERS=[10000n,1000n,100n,64n,32n,16n,8n,4n,2n,1n] as const;
 type Inputs=Readonly<{
   borrowShares:bigint; collateral:bigint; estimatedDebtAssets:bigint;
   oraclePrice:bigint; lltvWad:bigint;
