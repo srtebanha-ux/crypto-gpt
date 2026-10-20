@@ -20,7 +20,7 @@ import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
 import {FABRICA_V3_BASE,MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 import {COFRE_ESPERADO} from './caca';
 import {motivoDoRevertMorpho,resumoRevertsMorpho} from './titanMorphoRevert';
-import {tamanhosDeLiquidacaoMorpho} from './titanMorphoTamanhos';
+import {tamanhosDeLiquidacaoMorpho,pontuacaoLiquidaMorpho} from './titanMorphoTamanhos';
 
 const WETH='0x4200000000000000000000000000000000000006';
 const AERO_ROUTER='0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43';
@@ -190,13 +190,10 @@ export async function avaliarELiquidarMorphoAero(
           const gross=await loanValueInWeth(p,params.loanToken,profit);
           if(gross===null||gross<=0n)continue;
           const estimated=await p.estimateGas({to:addr,from:owner,data});
-          // Pick the route by projected NET WETH, not the gross token surplus:
-          // a bigger swap can pay far more gas than a smaller profitable one.
-          const gasLimit=estimated+estimated/5n;
-          if(gasLimit>policy.maxGas)continue;
-          const gasUpper=gasLimit*(block.baseFeePerGas*2n+policy.tipWei);
-          const score=gross-gasUpper;
-          if(score<=0n)continue;
+          // Rank by conservative WETH NET, not the gross surplus.
+          const score=pontuacaoLiquidaMorpho(gross,estimated,
+            block.baseFeePerGas,policy.tipWei,policy.maxGas);
+          if(score===null||score<=0n)continue;
           if(!best||score>best.score)best={data,profit,shares,fee,estimated,score};
         }catch(err){
           const reason=motivoDoRevertMorpho(err);
