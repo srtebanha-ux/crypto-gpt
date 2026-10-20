@@ -20,7 +20,7 @@ const multicall=new Interface([
 ]);
 type Alvo={mercado:MercadoDaApi;usuario:string;distanciaBps:bigint;atualizadoEm:number};
 const alvos=new Map<string,Alvo>();
-const MAX_QUENTES=12;
+const MAX_QUENTES=24;
 const TTL_MS=25*60_000;
 const INT_MS=2_250;
 const EXCLUIR_TEMP_MS=45_000;
