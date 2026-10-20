@@ -65,8 +65,26 @@ test('HOT keeps scarce slots across markets, not 24 borrowers from one illiquid 
    registrarQuenteMorpho(marketB,'0x'+(700+i).toString(16).padStart(40,'0'),BigInt(40+i),now);
  }
  const snap=resumoQuentesMorpho(now);
- assert.equal(snap.posicoes,16);
+ assert.equal(snap.posicoes,24); // 8+8 reserved, 8 spare filled by A
+ assert.equal(snap.mercados,2);
+ assert.equal(snap.maiorMercado,16); // B retains all eight reserved slots
+ assert.equal(snap.vagasLivres,0);
  assert.equal(snap.maisProximaBps,'1');
+ limparQuentesMorpho(now+26*60_000);
+});
+test('HOT uses all 22 slots when 22 near-liquidatable borrowers come from one market',()=>{
+ const now=block+60*60_000;
+ limparQuentesMorpho(now);
+ const m=mercado(true,'0x'+'e1'.repeat(32));
+ for(let i=0;i<22;i++){
+   assert.equal(registrarQuenteMorpho(m,
+     '0x'+(900+i).toString(16).padStart(40,'0'),BigInt(20+i),now),true);
+ }
+ const state=resumoQuentesMorpho(now);
+ assert.equal(state.posicoes,22);
+ assert.equal(state.mercados,1);
+ assert.equal(state.maiorMercado,22);
+ assert.equal(state.vagasLivres,2);
  limparQuentesMorpho(now+26*60_000);
 });
 test('HOT suppresses an entire market without canonical DEX exit instead of retrying borrowers',()=>{

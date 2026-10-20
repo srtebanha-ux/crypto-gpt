@@ -60,22 +60,40 @@ export function limparQuentesMorpho(agora=Date.now()):number{
    a.distanciaBps<b.distanciaBps?-1:a.distanciaBps>b.distanciaBps?1:b.atualizadoEm-a.atualizadoEm);
  const keep=new Set<string>();
  const counts=new Map<string,number>();
+ // First reserve up to 8 slots for EVERY discovered market. This stops a
+ // large illiquid book from pushing different markets out of the queue.
  for(const a of sorted){
    const id=a.mercado.id.toLowerCase();
    if((counts.get(id)??0)>=8||keep.size>=MAX_QUENTES)continue;
    keep.add(chave(a));
    counts.set(id,(counts.get(id)??0)+1);
  }
+ // Then fill unused capacity with remaining near-liquidation borrowers.
+ // Previously 22 real near borrowers in one market became only 8 monitored,
+ // wasting 16 out of 24 available block-level slots.
+ for(const a of sorted){
+   if(keep.size>=MAX_QUENTES)break;
+   keep.add(chave(a));
+ }
  for(const k of alvos.keys())if(!keep.has(k))alvos.delete(k);
  return alvos.size;
 }
 /** Public observability without leak of secrets, clients or keys. */
 export function resumoQuentesMorpho(agora=Date.now()):{
- posicoes:number;maisProximaBps:string|null;idadeMaisAntigaMs:number;
+ posicoes:number;mercados:number;vagasLivres:number;maiorMercado:number;
+ maisProximaBps:string|null;idadeMaisAntigaMs:number;
 }{
  limparQuentesMorpho(agora);
  const a=[...alvos.values()];
+ const porMercado=new Map<string,number>();
+ for(const x of a){
+   const id=x.mercado.id.toLowerCase();
+   porMercado.set(id,(porMercado.get(id)??0)+1);
+ }
  return {posicoes:a.length,
+   mercados:porMercado.size,
+   vagasLivres:MAX_QUENTES-a.length,
+   maiorMercado:Math.max(0,...porMercado.values()),
    maisProximaBps:a.length?a.reduce((n,x)=>x.distanciaBps<n?x.distanciaBps:n,a[0]!.distanciaBps).toString():null,
    idadeMaisAntigaMs:a.length?Math.max(...a.map(x=>agora-x.atualizadoEm)):0};
 }
