@@ -80,14 +80,20 @@ export function limparQuentesMorpho(agora=Date.now()):number{
 }
 /** Public observability without leak of secrets, clients or keys. */
 export function resumoQuentesMorpho(agora=Date.now()):{
- posicoes:number;mercados:number;vagasLivres:number;
+ posicoes:number;mercados:number;vagasLivres:number;maiorMercado:number;
  maisProximaBps:string|null;idadeMaisAntigaMs:number;
 }{
  limparQuentesMorpho(agora);
  const a=[...alvos.values()];
+ const porMercado=new Map<string,number>();
+ for(const x of a){
+   const id=x.mercado.id.toLowerCase();
+   porMercado.set(id,(porMercado.get(id)??0)+1);
+ }
  return {posicoes:a.length,
-   mercados:new Set(a.map(x=>x.mercado.id.toLowerCase())).size,
+   mercados:porMercado.size,
    vagasLivres:MAX_QUENTES-a.length,
+   maiorMercado:Math.max(0,...porMercado.values()),
    maisProximaBps:a.length?a.reduce((n,x)=>x.distanciaBps<n?x.distanciaBps:n,a[0]!.distanciaBps).toString():null,
    idadeMaisAntigaMs:a.length?Math.max(...a.map(x=>agora-x.atualizadoEm)):0};
 }
