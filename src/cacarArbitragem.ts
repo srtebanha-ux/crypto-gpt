@@ -53,7 +53,7 @@ import { detectarRebotesAave, detectarRebotesMorpho, RadarDeRebotes, priorizarRe
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
 import { executarFlashArbV2, diagnosticarFlashArbV2 } from './titanV2Execucao';
-import { selecionarProximaProvaV2 } from './titanV2Selecao';
+import { selecionarProximaProvaV2, reprovacaoDePoolTravadoV2 } from './titanV2Selecao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
     type PoolMisto, type CandidataMista, type LeiturasDoEstado, type PernaDescrita,
@@ -2169,6 +2169,9 @@ async function principal(): Promise<void> {
     // Gas-free V2 checks are limited and diverse. Never hammer a toxic
     // token/pool or mistake an old estimate for a current arbitrage.
     const ultimaProvaV2=new Map<string,number>();
+    // Um pool que reverteu UniswapV2: LOCKED durante callback atomico nao deve
+    // monopolizar uma prova a cada quatro minutos. Outras rotas ganham chance.
+    const bloqueiosV2Ate=new Map<string,number>();
     let ultimoEnsaioV2Em=0;
     const tetoCotarRotas = Number(process.env.ARB_COTAR_MAX_ROTAS ?? 12);
     const tetoTentativasCru = Number(process.env.TITAN_TX_POR_SESSAO ?? 1);
@@ -3042,7 +3045,12 @@ async function principal(): Promise<void> {
         const aprovadas = decisoes.filter((d) => d.aprovado);
         if(process.env.TITAN_V2_SONDA==='1' && aprovadas.length>0
             &&Date.now()-ultimoEnsaioV2Em>=25_000){
-            const proximo=selecionarProximaProvaV2(aprovadas,ultimaProvaV2);
+            const agoraV2=Date.now();
+            for(const [rota,expira] of bloqueiosV2Ate){
+                if(expira<=agoraV2)bloqueiosV2Ate.delete(rota);
+            }
+            const proximo=selecionarProximaProvaV2(
+                aprovadas,ultimaProvaV2,agoraV2,240_000,bloqueiosV2Ate);
             const pendente=proximo.oportunidade;
             if(pendente){
                 const k=pendente.candidato.emprestimo.endereco+'>'+
@@ -3051,6 +3059,15 @@ async function principal(): Promise<void> {
                 ultimoEnsaioV2Em=Date.now();
                 const prova=await provarV2Atomico(pendente.candidato,
                     process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                if(prova.estado==='inviavel'&&reprovacaoDePoolTravadoV2(prova.motivo)){
+                    const bloqueadoAte=Date.now()+30*60_000;
+                    bloqueiosV2Ate.set(k,bloqueadoAte);
+                    log.warn('[TITAN/V2-LOCK] Rota V2 reprovada por lock atomico; teste outra.',{
+                        rota:k,bloqueadoAte:new Date(bloqueadoAte).toISOString(),
+                        motivo:prova.motivo,
+                        nota:'bloqueio temporario so para esta rota; nenhuma transacao paga',
+                    });
+                }
                 eventoTitan('prova',
                     prova.estado === 'executavel-em-override'
                         ? 'Prova V2 passou' : 'Prova V2 recusada',
