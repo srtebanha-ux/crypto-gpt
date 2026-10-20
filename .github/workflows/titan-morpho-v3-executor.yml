@@ -1,0 +1,31 @@
+name: TITAN Morpho V3 atomic paid-executor gate
+on:
+  push:
+    branches:
+      - feat/titan-morpho-v3-executor-20261020
+  pull_request:
+    branches:
+      - feat/caca-integracao-multihop-ativa
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Build all production modules
+        run: npm run build
+      - name: Check all types and gate tests
+        run: |
+          npm run typecheck
+          node --require ts-node/register --test src/titanMorphoV3Gate.test.ts src/titanMorphoRadar.test.ts src/morphoApi.test.ts
+      - name: Prove Morpho V3 callback repays entire loan, leaves initial balances, rejects bad routes
+        run: |
+          npx hardhat compile --config hardhat.morpho-local.cjs
+          npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanMorphoV3Local.js

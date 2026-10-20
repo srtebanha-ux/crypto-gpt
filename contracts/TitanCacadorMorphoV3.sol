@@ -21,7 +21,7 @@ interface ITitanMorphoBlueV3 {
     function liquidate(
         TitanMorphoParamsV3 calldata params,
         address borrower,uint256 seizedAssets,uint256 repaidShares,bytes calldata data
-    ) external returns (uint256 assetsRepaid,uint256 sharesRepaid);
+    ) external returns (uint256 assetsSeized,uint256 assetsRepaid);
 }
 interface ITitanTokenV3 {
     function balanceOf(address) external view returns (uint256);
@@ -133,7 +133,7 @@ contract TitanCacadorMorphoV3 {
             lucroMinimoDivida:pisoLucroDivida,ativa:true,callbackExecutado:false
         });
         bytes32 marketId=keccak256(abi.encode(mercado));
-        (uint256 paid,)=morpho.liquidate(mercado,devedor,seizedAssets,repaidShares,abi.encode(devedor));
+        (,uint256 paid)=morpho.liquidate(mercado,devedor,seizedAssets,repaidShares,abi.encode(devedor));
         if(!contexto.callbackExecutado)revert CallbackNaoAutorizado();
         uint256 afterBalance=ITitanTokenV3(mercado.loanToken).balanceOf(address(this));
         if(afterBalance<contexto.saldoInicialDivida)revert SemLucroNovo();
