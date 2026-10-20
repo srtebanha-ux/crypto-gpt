@@ -28,8 +28,8 @@ const aguardando=new Map<string,number>();
 // Assets without any verified direct V3 or Aerodrome exit cannot repay the
 // Morpho debt. Block the WHOLE market temporarily, not just one borrower.
 const mercadosSemSaida=new Map<string,number>();
-export function bloquearMercadoSemSaida(marketId:string,agora=Date.now()):number{
- const until=agora+30*60_000;
+export function bloquearMercadoSemSaida(marketId:string,agora=Date.now(),duracaoMs=30*60_000):number{
+ const until=agora+duracaoMs;
  mercadosSemSaida.set(marketId.toLowerCase(),until);
  for(const [k,a] of alvos)if(a.mercado.id.toLowerCase()===marketId.toLowerCase())alvos.delete(k);
  return until;
@@ -155,6 +155,21 @@ async function verificarBlocoMorphoHot():Promise<void>{
        mercado:a.mercado,usuario:a.usuario,
        rpcUrl:process.env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org',
      });
+     // An existent pool is not liquid. If ALL executor sizes reverted from
+     // the canonical DEX output floor, give its market a short cooling period.
+     // The slow radar keeps discovering other users/markets as usual.
+     const semLiquidezDeSaida=primeiroMotivo?.includes('nenhuma rota passou')
+       &&result.motivo.includes('nenhuma rota passou')
+       &&(result.motivo.includes('0x42301c23')
+           ||result.motivo.includes('InsufficientOutputAmount'));
+     if(semLiquidezDeSaida){
+       bloquearMercadoSemSaida(a.mercado.id,Date.now(),10*60_000);
+       aguardando.set(chave(a),Date.now()+10*60_000);
+       log.warn('[TITAN/MORPHO-HOT] Mercado com saida DEX insuficiente; rotacionar.',{
+         mercado:a.mercado.id,motivo:'todos eth_call falharam por output insuficiente',
+         pausaMinutos:10,
+       });
+     }
      if(primeiroMotivo?.includes('sem pool V3 comprovada')
        &&result.motivo.includes('sem pool Aerodrome comprovada')){
        bloquearMercadoSemSaida(a.mercado.id);
