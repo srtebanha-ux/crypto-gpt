@@ -3,6 +3,9 @@ on:
   push:
     branches:
       - audit/titan-morpho-live-revert-20261020
+  pull_request:
+    branches:
+      - feat/caca-integracao-multihop-ativa
 permissions:
   contents: read
 jobs:
