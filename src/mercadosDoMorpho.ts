@@ -24,6 +24,7 @@
 // (a chave fica na variavel de ambiente; ela nao vai para log nenhum — o unico
 // lugar onde o endereco do RPC aparece e o host, sem o caminho.)
 import { Decimal } from 'decimal.js';
+import { examinarSaudeMorpho } from './titanMorphoRadar';
 import { id, AbiCoder } from 'ethers';
 import { ProxyAgent, fetch } from 'undici';
 import { createLogger } from './logger';
@@ -95,7 +96,7 @@ import {
     enumerarMercados, enumerarDevedores, soOsQuePagam, mercadosParaSondagem, soDaBase, codificarIdToMarketParams,
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
     selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
-    codificarPosition, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
+    codificarPosition, codificarMarket, lerMarket, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
 import {
@@ -517,7 +518,11 @@ export async function descobrirMorphoPorApi(
     const morpho = (process.env.MORPHO_CANDIDATOS
         ?? '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb').split(',')[0]!.trim();
     let chamadasRpc = 0;
-    const chamarRpc = async (data: string): Promise<string | null> => {
+    // A same-block snapshot prevents mixing market balances, collateral
+    // and oracle prices across different blocks. If unavailable, the radar
+    // returns no candidates rather than treating unpinned quotes as facts.
+    let blocoDoRadar: string | null = null;
+    const chamarRpc = async (data: string, alvo: string = morpho): Promise<string | null> => {
         chamadasRpc += 1;
         opcoes.contarRpc?.('eth_call');
         try {
@@ -527,7 +532,7 @@ export async function descobrirMorphoPorApi(
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({
                     jsonrpc: '2.0', id: 1, method: 'eth_call',
-                    params: [{ to: morpho, data }, 'latest'],
+                    params: [{ to: alvo, data }, blocoDoRadar ?? 'latest'],
                 }),
             } as Parameters<typeof fetch>[1]);
             const j = await r.json() as { result?: string; error?: unknown };
@@ -592,6 +597,18 @@ export async function descobrirMorphoPorApi(
         });
     }
 
+    // Fix the read snapshot BEFORE retrieving market / oracle / user state.
+    // API market discovery remains independent of this RPC call.
+    try {
+        const r = await fetch(url, {
+            ...(agente ? { dispatcher: agente } : {}),
+            method:'POST',headers:{'content-type':'application/json'},
+            body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_blockNumber',params:[]}),
+        } as Parameters<typeof fetch>[1]);
+        const j=await r.json() as {result?:string};
+        if(typeof j.result==='string'&&/^0x[0-9a-fA-F]+$/.test(j.result))
+            blocoDoRadar=j.result;
+    } catch { blocoDoRadar=null; }
     let confirmados = 0;
     const recusados: string[] = [];
     for (const m of rpcMudo ? [] : escolhidos) {
@@ -607,6 +624,14 @@ export async function descobrirMorphoPorApi(
     let devedores = 0;
     let validados = 0;
     let reqGraph = 0;
+    // Risk radar is read-only, strictly lower priority than CACA hot-path.
+    // Protocol liquidation is NOT proved by this health estimate.
+    let posicoesAvaliadas = 0;
+    let pertoDoLimiar = 0;
+    let cruzaramEstimado = 0;
+    let oraculosIndisponiveis = 0;
+    const alvosDeRisco: Array<{mercado:string;usuario:string;
+        distanciaBps:string;dividaCrua:string;situacao:string}> = [];
     const falhasDeDevedores: string[] = [];
     // Verifica os mercados quentes em TODAS as rodadas e os outros
     // em rodizio. Antes todos os oito mercados eram os primeiros da
@@ -615,6 +640,23 @@ export async function descobrirMorphoPorApi(
     const mercadosComDevedores=selecionarMercadosParaDevedores(
         escolhidos.filter(x=>x.confirmadoNaCorrente),tetoDev,rodada);
     for (const m of mercadosComDevedores) {
+        let totais = null as ReturnType<typeof lerMarket>;
+        let precoOracle: bigint | null = null;
+        // Same-block full position valuation, not merely "borrowShares>0".
+        // Only the market whose FIVE identity fields were confirmed onchain
+        // can be used. Oracle address is from those confirmed parameters.
+        if(blocoDoRadar !== null) {
+            const estado=await chamarRpc(codificarMarket(m.id));
+            totais=estado===null?null:lerMarket(estado);
+            if(/^0x[0-9a-fA-F]{40}$/.test(m.oracle)
+                && !/^0x0{40}$/i.test(m.oracle)){
+                const preco=await chamarRpc(id('price()').slice(0,10),m.oracle);
+                if(preco!==null&&/^0x[0-9a-fA-F]{64}$/.test(preco)){
+                    try { precoOracle=BigInt(preco); } catch {precoOracle=null;}
+                }
+            }
+        }
+        if(precoOracle===null || precoOracle<=0n)oraculosIndisponiveis+=1;
         // Tres paginas no maximo por mercado: consulta os maiores por
         // BorrowShares antes do prazo do job. COMPLETA=false caso sobrem
         // paginas, sem declarar que os demais devedores nao existem.
@@ -627,9 +669,47 @@ export async function descobrirMorphoPorApi(
         for (const d of selecionarDevedoresParaConferir(r.devedores,5,rodada)) {
             const cru = await chamarRpc(codificarPosition(m.id, d.endereco));
             const p = cru === null ? null : lerPosition(cru);
-            if (p !== null && p.borrowShares > 0n) validados += 1;
+            if (p !== null && p.borrowShares > 0n) {
+                validados += 1;
+                if(totais!==null&&precoOracle!==null&&precoOracle>0n) {
+                    const lltvCru=BigInt(m.lltv.mul('1000000000000000000')
+                        .floor().toFixed(0));
+                    const risco=examinarSaudeMorpho({
+                        borrowShares:p.borrowShares,collateral:p.collateral,
+                        totalBorrowAssets:totais.totalBorrowAssets,
+                        totalBorrowShares:totais.totalBorrowShares,
+                        precoOracle,lltvWad:lltvCru,
+                    });
+                    posicoesAvaliadas+=1;
+                    if(risco.situacao==='proxima'||risco.situacao==='cruzou-estimado'){
+                        if(risco.situacao==='proxima')pertoDoLimiar+=1;
+                        else cruzaramEstimado+=1;
+                        if(alvosDeRisco.length<20&&risco.distanciaBps!==null
+                            &&risco.dividaCrua!==null)
+                            alvosDeRisco.push({
+                                mercado:m.id,usuario:d.endereco,
+                                distanciaBps:risco.distanciaBps.toString(),
+                                dividaCrua:risco.dividaCrua.toString(),
+                                situacao:risco.situacao,
+                            });
+                    }
+                }
+            }
         }
     }
+    log.info('[MORPHO/RADAR] Posições avaliadas com preço e LLTV da Base.', {
+        bloco:blocoDoRadar??'DESCONHECIDO: sem avaliação econômica',
+        mercadosComDevedores:mercadosComDevedores.length,
+        posicoesComDividaValidadas:validados,
+        saudesCalculadas:posicoesAvaliadas,
+        proximas:pertoDoLimiar,
+        cruzadasEstimadas:cruzaramEstimado,
+        oraculosSemLeitura:oraculosIndisponiveis,
+        candidatos:alvosDeRisco,
+        aviso:'SOMENTE TRIAGEM: nao e comprovacao de que liquidate passara; '
+          +'juros, liquidez, saldo, oracle atualizado, swap, nonce e gas '
+          +'ainda precisam de eth_call no executor antes de qualquer envio.',
+    });
 
     let blocoAgora: number | null = null;
     try {
