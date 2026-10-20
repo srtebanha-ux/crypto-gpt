@@ -20,6 +20,7 @@ import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
 import {FABRICA_V3_BASE,MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 import {COFRE_ESPERADO} from './caca';
 import {motivoDoRevertMorpho,resumoRevertsMorpho} from './titanMorphoRevert';
+import {tamanhosDeLiquidacaoMorpho} from './titanMorphoTamanhos';
 
 const WETH='0x4200000000000000000000000000000000000006';
 const AERO_ROUTER='0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43';
@@ -171,12 +172,14 @@ export async function avaliarELiquidarMorphoAero(
     if(fees.length===0)return{status:'inviavel',motivo:'sem pool Aerodrome comprovada garantia -> divida'};
     let best:{data:string;profit:bigint;shares:bigint;fee:boolean;estimated:bigint;score:bigint}|null=null;
     const falhas=new Map<string,number>();
-    const cuts=[4n,2n,1n,10n];
-    const tested=new Set<string>();
-    for(const divider of cuts){
-      const shares=divider===1n?pos.borrowShares:pos.borrowShares/divider;
-      if(shares===0n||tested.has(shares.toString()))continue;
-      tested.add(shares.toString());
+    const amounts=tamanhosDeLiquidacaoMorpho({
+      borrowShares:pos.borrowShares,collateral:pos.collateral,
+      estimatedDebtAssets:risk.dividaCrua??0n,oraclePrice:price,
+      lltvWad:BigInt(params.lltv.mul('1e18').toFixed(0)),
+    });
+    if(amounts.length===0)return{status:'inviavel',
+      motivo:'garantia insuficiente para qualquer parcela segura de divida'};
+    for(const shares of amounts){
       for(const fee of fees){
         const data=executorAbi.encodeFunctionData('liquidar',[
           marketTuple,user,0n,shares,fee,1n,BigInt(block.timestamp+90)]);
