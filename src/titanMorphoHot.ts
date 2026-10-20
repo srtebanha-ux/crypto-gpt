@@ -25,6 +25,15 @@ const TTL_MS=25*60_000;
 const INT_MS=2_250;
 const EXCLUIR_TEMP_MS=45_000;
 const aguardando=new Map<string,number>();
+// Assets without any verified direct V3 or Aerodrome exit cannot repay the
+// Morpho debt. Block the WHOLE market temporarily, not just one borrower.
+const mercadosSemSaida=new Map<string,number>();
+export function bloquearMercadoSemSaida(marketId:string,agora=Date.now()):number{
+ const until=agora+30*60_000;
+ mercadosSemSaida.set(marketId.toLowerCase(),until);
+ for(const [k,a] of alvos)if(a.mercado.id.toLowerCase()===marketId.toLowerCase())alvos.delete(k);
+ return until;
+}
 let iniciado=false;
 let emCurso=false;
 let ultimoBloco=0;
@@ -35,7 +44,8 @@ function chave(a:Alvo):string {return a.mercado.id.toLowerCase()+'|'+a.usuario.t
 export function registrarQuenteMorpho(
  mercado:MercadoDaApi,usuario:string,distanciaBps:bigint,agora=Date.now(),
 ):boolean{
- if(!mercado.confirmadoNaCorrente||distanciaBps>500n||!/^0x[a-fA-F0-9]{40}$/.test(usuario))
+ if(!mercado.confirmadoNaCorrente||distanciaBps>500n||!/^0x[a-fA-F0-9]{40}$/.test(usuario)
+   ||(mercadosSemSaida.get(mercado.id.toLowerCase())??0)>agora)
    return false;
  const a:Alvo={mercado,usuario,distanciaBps,atualizadoEm:agora};
  alvos.set(chave(a),a);
@@ -142,7 +152,7 @@ async function verificarBlocoMorphoHot():Promise<void>{
      });
      if(primeiroMotivo?.includes('sem pool V3 comprovada')
        &&result.motivo.includes('sem pool Aerodrome comprovada')){
-       alvos.delete(chave(a));
+       bloquearMercadoSemSaida(a.mercado.id);
        aguardando.set(chave(a),Date.now()+30*60_000);
      }
      log.warn('[TITAN/MORPHO-HOT/TIRO] Posicao cruzou em bloco novo, executor avaliado.',{
