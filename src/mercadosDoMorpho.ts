@@ -26,6 +26,7 @@
 import { Decimal } from 'decimal.js';
 import { examinarSaudeMorpho } from './titanMorphoRadar';
 import { id, AbiCoder } from 'ethers';
+import { MULTICALL3, codificarAggregate3, decodificarAggregate3Rapido } from './multicall';
 import { ProxyAgent, fetch } from 'undici';
 import { createLogger } from './logger';
 import { faixasDeBlocos, RPCS_PARA_TENTAR } from './liquidacoes';
@@ -676,8 +677,30 @@ export async function descobrirMorphoPorApi(
         if (r.falha !== null) falhasDeDevedores.push(`${m.id.slice(0, 10)}…: ${r.falha}`);
         // Metade dos cinco maiores mantida; a outra metade visita
         // devedores diferentes, sempre conferidos por position() onchain.
-        for (const d of selecionarDevedoresParaConferir(r.devedores,tetoPosicoes,rodada)) {
-            const cru = await chamarRpc(codificarPosition(m.id, d.endereco));
+        // Multicall3 faz ate 60 verificacoes de devedor num UNICO eth_call
+        // no mesmo bloco do preco do oracle e dos totais. Antes isto eram
+        // dezenas de round trips e a fila parava no primeiro HTTP 429.
+        const candidatos=selecionarDevedoresParaConferir(r.devedores,tetoPosicoes,rodada);
+        const dadosLote=candidatos.length>0
+            ?await chamarRpc(codificarAggregate3(candidatos.map(d=>({
+                alvo:morpho,dados:codificarPosition(m.id,d.endereco),
+            }))),MULTICALL3)
+            :null;
+        const respostas=dadosLote===null?[]:decodificarAggregate3Rapido(dadosLote);
+        if(candidatos.length>0&&respostas.length!==candidatos.length){
+            log.warn('[MORPHO/RADAR-LOTE] Multicall3 incompleto: fail closed neste mercado.',{
+                mercado:m.id,esperadas:candidatos.length,recebidas:respostas.length,
+                fallback:'maximo 5 leituras diretas para nao matar a rodada',
+            });
+        }
+        for (const [indice,d] of candidatos.entries()) {
+            const resposta=respostas[indice];
+            // A resposta que reverteu nao vira um borrower saudavel. Quando a
+            // leitura em lote falha inteira, garantimos uma pequena amostra
+            // direta, sempre no bloco ancorado desta rodada.
+            const cru=resposta?.ok?resposta.dados:
+                (respostas.length!==candidatos.length&&indice<5
+                    ?await chamarRpc(codificarPosition(m.id,d.endereco)):null);
             const p = cru === null ? null : lerPosition(cru);
             if (p !== null && p.borrowShares > 0n) {
                 validados += 1;
