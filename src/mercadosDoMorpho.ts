@@ -768,9 +768,9 @@ export async function descobrirMorphoPorApi(
                 modo:'sem posicao liquidavel, nenhum gas gasto',
             });
         } else {
-            const {avaliarELiquidarMorphoV3}=await import('./titanMorphoV3Tiro');
+            const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
             for(const alvo of liquidaveisParaPreflight){
-                const resultado=await avaliarELiquidarMorphoV3({
+                const {via,resultado}=await avaliarSaidasMorpho({
                     mercado:alvo.mercado,usuario:alvo.usuario,
                     // PublicNode pode devolver 403 no preflight/transmissao;
                     // o executor nao herda o RPC do censo por acidente.
@@ -778,7 +778,7 @@ export async function descobrirMorphoPorApi(
                 });
                 log.warn('[TITAN/MORPHO-V3] Preflight do executor real.',{
                     mercado:alvo.mercado.id,usuario:alvo.usuario,
-                    resultado,
+                    via,resultado,
                     nota:'so hash+recibo confirma transacao; estimativa nao e lucro',
                 });
             }

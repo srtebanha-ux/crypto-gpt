@@ -135,14 +135,20 @@ async function verificarBlocoMorphoHot():Promise<void>{
      if(emProva>0)continue;
      emProva++;
      aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
-     const {avaliarELiquidarMorphoV3}=await import('./titanMorphoV3Tiro');
-     const result=await avaliarELiquidarMorphoV3({
+     const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
+     const {via,resultado:result,primeiroMotivo}=await avaliarSaidasMorpho({
        mercado:a.mercado,usuario:a.usuario,
        rpcUrl:process.env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org',
      });
+     if(primeiroMotivo?.includes('sem pool V3 comprovada')
+       &&result.motivo.includes('sem pool Aerodrome comprovada')){
+       alvos.delete(chave(a));
+       aguardando.set(chave(a),Date.now()+30*60_000);
+     }
      log.warn('[TITAN/MORPHO-HOT/TIRO] Posicao cruzou em bloco novo, executor avaliado.',{
        bloco:block,mercado:a.mercado.id,usuario:a.usuario,
-       resultado:result,
+       via,resultado:result,
+       primeiroV3:primeiroMotivo,
      });
      if(['enviada','confirmada','desconhecida'].includes(result.status)){
        // Reconciliation must happen before any attempt against same target.
