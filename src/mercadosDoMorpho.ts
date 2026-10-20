@@ -350,6 +350,10 @@ export async function descobrirMorphoPorApi(
         tetoDeValidacoes?: number;
         /** Quantos mercados consultar devedores. Cada um e uma requisicao. */
         tetoDeMercadosComDevedores?: number;
+        /** Numero de posicoes efetivamente lidas onchain em cada mercado selecionado. */
+        tetoDePosicoesPorMercado?: number;
+        /** Rotacao alinhada ao intervalo real do servico, nao a 15 minutos fixos. */
+        indiceDaRodada?: number;
         caminhoDoCache?: string;
         /**
          * O estado da infraestrutura, para a decisao de CANAL.
@@ -386,6 +390,7 @@ export async function descobrirMorphoPorApi(
         ?? '/app/data/mercadosMorpho.json';
     const tetoValid = opcoes.tetoDeValidacoes ?? 24;
     const tetoDev = opcoes.tetoDeMercadosComDevedores ?? 8;
+    const tetoPosicoes = opcoes.tetoDePosicoesPorMercado ?? 5;
     const infra: EstadoDaInfra = opcoes.infra
         ?? { provedoresEsgotados: [], noFallback: false };
 
@@ -482,7 +487,7 @@ export async function descobrirMorphoPorApi(
     // Antes a escolha era IDENTICA em todo boot e nao cobria o universo.
     // Usamos hora UTC em fatias de 15min: recomecar o processo nao
     // causa um viés para os primeiros 24 mercados.
-    const rodada=Math.floor(Date.now()/900_000);
+    const rodada=opcoes.indiceDaRodada ?? Math.floor(Date.now()/900_000);
     const escolhidos=priorizarMercadosDaLista(candidatosParaSondagem,rankingDeDividas,tetoValid,rodada);
     log.info('[MORPHO/API] Selecao de mercados para conferir na Base.',{
         mercadosEnumerados:candidatosParaSondagem.length,
@@ -490,6 +495,8 @@ export async function descobrirMorphoPorApi(
         llTvMaisAltoTambemElegivelASondagem:candidatosParaSondagem.length>quePagam.length,
         rankingComDivida:rankingDeDividas?.length??null,
         candidatosParaProva:escolhidos.length,
+        posicoesOnchainPorMercado:tetoPosicoes,
+        mercadosComDevedoresPorRodada:tetoDev,
         rodada,
         fixosDeAltaDivida:rankingDeDividas===null?0:Math.floor(tetoValid/3),
         politica:rankingDeDividas===null
@@ -666,7 +673,7 @@ export async function descobrirMorphoPorApi(
         if (r.falha !== null) falhasDeDevedores.push(`${m.id.slice(0, 10)}…: ${r.falha}`);
         // Metade dos cinco maiores mantida; a outra metade visita
         // devedores diferentes, sempre conferidos por position() onchain.
-        for (const d of selecionarDevedoresParaConferir(r.devedores,5,rodada)) {
+        for (const d of selecionarDevedoresParaConferir(r.devedores,tetoPosicoes,rodada)) {
             const cru = await chamarRpc(codificarPosition(m.id, d.endereco));
             const p = cru === null ? null : lerPosition(cru);
             if (p !== null && p.borrowShares > 0n) {
@@ -701,6 +708,7 @@ export async function descobrirMorphoPorApi(
         bloco:blocoDoRadar??'DESCONHECIDO: sem avaliação econômica',
         mercadosComDevedores:mercadosComDevedores.length,
         posicoesComDividaValidadas:validados,
+        maximoDePosicoesOnchain:tetoPosicoes*mercadosComDevedores.length,
         saudesCalculadas:posicoesAvaliadas,
         proximas:pertoDoLimiar,
         cruzadasEstimadas:cruzaramEstimado,

@@ -8,6 +8,7 @@ import { iniciarObservadorFlashblocks } from './titanFlashblocks';
 import { triarLeilaoSvr } from './titanSvrTriagem';
 import { iniciarMonitorProntidaoSvr } from './titanSvrDiagnostico';
 import { iniciarRadarMorphoMultirrede } from './titanRadarMorphoMultirrede';
+import { politicaDeCoberturaMorpho, indiceDeRodadaMorpho } from './titanMorphoCobertura';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
@@ -3057,10 +3058,8 @@ async function principal(): Promise<'parar' | void> {
         // mercados/devedores. O rodizio usa fatias de 15min, mas um processo
         // que fica no ar nao rodava a proxima fatia: 1300+ mercados ficavam
         // fora da validacao indefinidamente. Novo ciclo limitado, sem carteira.
-        const intervaloSolicitado = numeroDoAmbiente(
-            'CACA_MORPHO_INTERVALO_MS', process.env.CACA_MORPHO_INTERVALO_MS, 900_000);
-        const intervaloMorpho = Math.max(300_000, Math.min(3_600_000,
-            Math.trunc(intervaloSolicitado)));
+        const politicaMorpho = politicaDeCoberturaMorpho(process.env);
+        const intervaloMorpho = politicaMorpho.intervaloMs;
         let emCursoMorpho = false;
         let rodadaMorpho = 0;
         const atualizarMorpho = async (): Promise<void> => {
@@ -3075,15 +3074,20 @@ async function principal(): Promise<'parar' | void> {
                 await descobrirMorphoPorApi({
                     infra: infraAgora,
                     // Orcamentos por rodada; HTTP nao e CU de RPC.
-                    tetoDeRequisicoes: 65, tetoDeMs: 45_000,
-                    tetoDeValidacoes: 24, tetoDeMercadosComDevedores: 8,
+                    tetoDeRequisicoes: politicaMorpho.requisicoesHttp,
+                    tetoDeMs: politicaMorpho.prazoMs,
+                    tetoDeValidacoes: politicaMorpho.mercadosPorRodada,
+                    tetoDeMercadosComDevedores: politicaMorpho.mercadosComDevedores,
+                    tetoDePosicoesPorMercado: politicaMorpho.posicoesPorMercado,
+                    indiceDaRodada: indiceDeRodadaMorpho(Date.now(), intervaloMorpho),
                     contarHttp: (host) => INVENTARIO.contarHttp('morpho', host),
                     contarRpc: (metodo) => INVENTARIO.contar('morpho', metodo),
                 });
                 MEMORIA_MORPHO = await lerMemoriaDoDisco();
                 log.info('[MORPHO/RADAR] Rodada concluida, sem tocar nonce/carteira.', {
                     rodada:rodadaMorpho,proximaEmMs:intervaloMorpho,
-                    limiteMercadosPorRodada:24,
+                    limiteMercadosPorRodada:politicaMorpho.mercadosPorRodada,
+                    limitePosicoesPorMercado:politicaMorpho.posicoesPorMercado,
                     observacao:'risco estimado nao e liquidacao autorizada',
                 });
             } catch (e) {
@@ -3095,7 +3099,11 @@ async function principal(): Promise<'parar' | void> {
         };
         log.info('[MORPHO/RADAR] Descoberta recorrente habilitada.', {
             intervaloMs:intervaloMorpho,
-            mercadoPorRodada:24,
+            mercadosPorRodada:politicaMorpho.mercadosPorRodada,
+            mercadosComDevedores:politicaMorpho.mercadosComDevedores,
+            posicoesPorMercado:politicaMorpho.posicoesPorMercado,
+            limiteRequisicoesHttp:politicaMorpho.requisicoesHttp,
+            limiteTempoMs:politicaMorpho.prazoMs,
             fluxo:'API enumera; cinco parametros, divida, garantia, market e oracle lidos onchain; SEM envio',
         });
         void atualizarMorpho();
