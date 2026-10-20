@@ -3045,6 +3045,14 @@ async function principal(): Promise<'parar' | void> {
     });
 
     if (process.env.CACA_MORPHO_API === '1') {
+        // Este canal HTTP continua INDEPENDENTE da capacidade do RPC.
+        // O scanner onchain usa o RPC somente depois de enumerar.
+        const canal = disponibilidadeDoCanal('apiHttp', infraAgora);
+        if (!canal.pode) {
+            log.warn('[MORPHO/RADAR] API pausada pelo proprio canal HTTP, sem prejudicar o CACA.', {
+                porque:canal.porque,
+            });
+        }
         // Antes a API rodava UMA vez no boot e confirmava sempre poucos
         // mercados/devedores. O rodizio usa fatias de 15min, mas um processo
         // que fica no ar nao rodava a proxima fatia: 1300+ mercados ficavam
