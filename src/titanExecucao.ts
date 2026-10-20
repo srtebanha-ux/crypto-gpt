@@ -32,6 +32,19 @@ const REDE_BASE = 8453n;
 export const MORPHO_BASE_OFICIAL = '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb';
 export const WETH_BASE_TITAN = '0x4200000000000000000000000000000000000006';
 
+/** One address selector for both quote-time EVM simulation and paid sender.
+ * A Morpho flashLoan arbitrage is a separate contract from CacadorV3;
+ * probing the wrong contract fabricated UNKNOWN results and no shots.
+ */
+export function contratoExecutorTitan(env: NodeJS.ProcessEnv): string | null {
+    const origem=env.TITAN_FONTE_CREDITO??'flashswap';
+    if(origem!=='flashswap'&&origem!=='morpho')return null;
+    const escolhido=origem==='morpho'?env.TITAN_CONTRATO_MORPHO:env.TITAN_CONTRATO;
+    if(!escolhido)return null;
+    try { return getAddress(escolhido); }
+    catch { return null; }
+}
+
 export interface PlanoTitan {
     rota: PernaMista[];
     quantia: bigint;
@@ -124,7 +137,7 @@ export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv):
             return 'emprestimo Morpho requer base WETH para contabilizar gas';
         }
     }
-    if (!ambiente.TITAN_CONTRATO || !ambiente.TITAN_CHAVE_PRIVADA || !ambiente.TITAN_COFRE) {
+    if (!contratoExecutorTitan(ambiente) || !ambiente.TITAN_CHAVE_PRIVADA || !ambiente.TITAN_COFRE) {
         return 'contrato, chave privada ou cofre nao configurado';
     }
     const orcamento = ambiente.TITAN_ORCAMENTO_GAS_WEI;
@@ -193,9 +206,9 @@ export async function executarTitan(
     let cofre: string;
     let carteira: Wallet;
     try {
-        contrato = getAddress(ambiente.TITAN_FONTE_CREDITO === 'morpho'
-            ? ambiente.TITAN_CONTRATO_MORPHO!
-            : ambiente.TITAN_CONTRATO!);
+        const escolhido=contratoExecutorTitan(ambiente);
+        if(!escolhido)throw Error('endereco do executor correspondente a fonte invalido');
+        contrato=escolhido;
         cofre = getAddress(ambiente.TITAN_COFRE!);
         carteira = new Wallet(ambiente.TITAN_CHAVE_PRIVADA!);
     } catch {
@@ -502,13 +515,13 @@ export async function simularTitanAoVivo(
         ||plano.rota.length<2||plano.rota.length>4
         ||plano.quantia<=0n)
         return{situacao:'desconhecido',motivo:'rota nao validada pelo observador',bloco:null};
-    if(!ambiente.TITAN_CONTRATO || !ambiente.TITAN_COFRE)
-        return{situacao:'desconhecido',motivo:'executor/cofre da arbitragem nao configurado',bloco:null};
+    if(!contratoExecutorTitan(ambiente) || !ambiente.TITAN_COFRE)
+        return{situacao:'desconhecido',motivo:'executor correto para fonte de credito nao configurado',bloco:null};
     if(plano.rota[0]?.tokenEntra.toLowerCase()!==WETH_BASE_TITAN.toLowerCase())
         return{situacao:'desconhecido',motivo:'lucro e custo precisam da mesma unidade WETH',bloco:null};
     let contrato:string,cofre:string,from:string|undefined;
     try{
-        contrato=getAddress(ambiente.TITAN_CONTRATO);
+        contrato=contratoExecutorTitan(ambiente)!;
         cofre=getAddress(ambiente.TITAN_COFRE);
         from=ambiente.TITAN_CHAVE_PRIVADA
             ? new Wallet(ambiente.TITAN_CHAVE_PRIVADA).address
@@ -526,6 +539,12 @@ export async function simularTitanAoVivo(
         };
         if((await get('cofre'))!==cofre)throw Error('cofre do executor diverge');
         if(from && (await get('dono'))!==from)throw Error('carteira nao e proprietaria do executor');
+        if(ambiente.TITAN_FONTE_CREDITO==='morpho'){
+            const cru=await rpc.call({to:contrato,data:ABI_TITAN.encodeFunctionData('morpho')});
+            const configurado=getAddress(ABI_TITAN.decodeFunctionResult('morpho',cru)[0] as string);
+            if(configurado!==getAddress(MORPHO_BASE_OFICIAL))
+                throw Error('executor de arbitragem Morpho nao referencia o singleton da Base');
+        }
         const block=await rpc.getBlock('latest');
         if(!block?.baseFeePerGas || block.baseFeePerGas<=0n)throw Error('baseFee indisponivel');
         bloco=block.number;
