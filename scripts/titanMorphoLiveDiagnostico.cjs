@@ -23,6 +23,21 @@ const brief=e=>({selector:(typeof e.data==='string'?e.data:null)?.slice(0,10)??n
  try{
   const b=await p.getBlock('latest');
   console.log('BLOCK',b?.number,'BASEFEE',String(b?.baseFeePerGas));
+  const vault='0x3dffA934170bdD491724747Be2c4F56E3f1512A7';
+  const erc20=new Interface(['function balanceOf(address) view returns(uint256)']);
+  const tokens=[
+    ['USDC','0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',6],
+    ['WETH','0x4200000000000000000000000000000000000006',18],
+  ];
+  const balances={};
+  for(const [name,addr,dec] of tokens){
+    const raw=await p.call({to:addr,data:erc20.encodeFunctionData('balanceOf',[vault])});
+    balances[name]=require('ethers').formatUnits(erc20.decodeFunctionResult('balanceOf',raw)[0],dec);
+  }
+  console.log('VAULT_BALANCES',JSON.stringify({
+    vault,eth:require('ethers').formatEther(await p.getBalance(vault)),
+    balances,ownerNonce:await p.getTransactionCount(OWNER,'latest'),
+  }));
   for(const t of targets){
    try{
     const raw=await p.call({to:MORPHO,data:mk.encodeFunctionData('idToMarketParams',[t.id])});
