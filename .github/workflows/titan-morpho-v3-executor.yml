@@ -29,3 +29,12 @@ jobs:
         run: |
           npx hardhat compile --config hardhat.morpho-local.cjs
           npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanMorphoV3Local.js
+      - name: Production image contains V3 deployment artifact and executable
+        run: |
+          docker build -t titan-morpho-v3:ci .
+          docker run --rm --entrypoint sh titan-morpho-v3:ci -ec '
+            test -s dist/implantarTitanMorphoV3.js
+            test -s dist/titanMorphoV3Tiro.js
+            test -s .tmp/artifacts/contracts/TitanCacadorMorphoV3.sol/TitanCacadorMorphoV3.json
+            node -e "const a=require(\"./.tmp/artifacts/contracts/TitanCacadorMorphoV3.sol/TitanCacadorMorphoV3.json\"); if(!a.bytecode || a.bytecode.length < 500) process.exit(1)"
+          '
