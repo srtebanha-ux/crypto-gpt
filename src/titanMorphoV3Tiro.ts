@@ -20,7 +20,7 @@ import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
 import {FABRICA_V3_BASE,MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 import {COFRE_ESPERADO} from './caca';
 import {motivoDoRevertMorpho,resumoRevertsMorpho} from './titanMorphoRevert';
-import {tamanhosDeLiquidacaoMorpho} from './titanMorphoTamanhos';
+import {tamanhosDeLiquidacaoMorpho,pontuacaoLiquidaMorpho} from './titanMorphoTamanhos';
 
 const WETH='0x4200000000000000000000000000000000000006';
 const ROUTER='0x2626664c2603336E57B271c5C0b26F421741e481';
@@ -185,9 +185,13 @@ export async function avaliarELiquidarMorphoV3(
           const ret=await p.call({to:addr,from:owner,data,blockTag:tag});
           const profit=executorAbi.decodeFunctionResult('liquidar',ret)[0] as bigint;
           if(profit<=1n)continue;
-          const score=await loanValueInWeth(p,params.loanToken,profit);
-          if(score===null||score<=0n)continue;
+          const gross=await loanValueInWeth(p,params.loanToken,profit);
+          if(gross===null||gross<=0n)continue;
           const estimated=await p.estimateGas({to:addr,from:owner,data});
+          // Rank by conservative WETH NET, not the gross surplus.
+          const score=pontuacaoLiquidaMorpho(gross,estimated,
+            block.baseFeePerGas,policy.tipWei,policy.maxGas);
+          if(score===null||score<=0n)continue;
           if(!best||score>best.score)best={data,profit,shares,fee,estimated,score};
         }catch(err){
           const reason=motivoDoRevertMorpho(err);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {tamanhosDeLiquidacaoMorpho} from './titanMorphoTamanhos';
+import {tamanhosDeLiquidacaoMorpho,pontuacaoLiquidaMorpho} from './titanMorphoTamanhos';
 const basic={
   borrowShares:276866893263507n,
   collateral:2288517006804982611n,
@@ -33,4 +33,19 @@ test('ceil and virtual share approximations leave safety margin for small loans'
     estimatedDebtAssets:9n,oraclePrice:10n**36n,lltvWad:860000000000000000n});
  assert.ok(small.every(n=>n>0n&&n<=8n));
  assert.equal(new Set(small.map(n=>n.toString())).size,small.length);
+});
+
+test('micro-liquidations cover 0.01%, 0.1% and 1% of very large debt',()=>{
+ const arr=tamanhosDeLiquidacaoMorpho(basic);
+ assert.ok(arr.length>=8);
+ assert.ok(arr[0]!<basic.borrowShares/1000n);
+ assert.ok(arr[1]!>arr[0]!);
+ assert.ok(arr.every(x=>x>0n&&x<basic.borrowShares));
+});
+test('larger gross return can lose after L2 gas while smaller shot wins',()=>{
+ const smaller=pontuacaoLiquidaMorpho(5000n,300n,5n,2n,1200n);
+ const bigger=pontuacaoLiquidaMorpho(5800n,600n,5n,2n,1200n);
+ assert.ok(smaller!==null&&bigger!==null&&smaller>0n&&smaller>bigger);
+ assert.equal(pontuacaoLiquidaMorpho(5800n,1200n,5n,2n,1200n),null);
+ assert.equal(pontuacaoLiquidaMorpho(0n,300n,5n,2n,1200n),null);
 });
