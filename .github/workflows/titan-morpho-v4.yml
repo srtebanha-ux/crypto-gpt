@@ -1,0 +1,23 @@
+name: TITAN Morpho V4 two-hop atomic test
+on:
+  push:
+    branches: [feat/morpho-twohop-liquidator-20261020]
+  pull_request:
+    branches: [feat/caca-integracao-multihop-ativa]
+permissions:
+  contents: read
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npx hardhat compile --config hardhat.morpho-local.cjs
+      - run: npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanMorphoV3Local.js forkTests/titanMorphoV4Local.js
