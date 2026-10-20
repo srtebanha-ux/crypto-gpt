@@ -2973,6 +2973,13 @@ async function principal(): Promise<'parar' | void> {
     iniciarMonitorProntidaoSvr(log,leitor,donoCarteira);
     // Monitor Morpho across EVM networks; READ ONLY and independent of the Base sender.
     iniciarRadarMorphoMultirrede(log);
+    // Executor Morpho quente acompanha novos blocos independentemente do
+    // censo REST de tres minutos. Usa a lista validada pelo radar e multicall.
+    void import('./titanMorphoHot').then(({iniciarGatilhoQuenteMorpho})=>{
+        iniciarGatilhoQuenteMorpho(process.env);
+    }).catch(e=>log.error('[TITAN/MORPHO-HOT] Nao iniciei o gatilho.',{
+        erro:e instanceof Error?e.message:String(e),
+    }));
 
     // OS BOTÕES, NO BOOT. Uma linha, sempre.
     //
