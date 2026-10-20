@@ -43,6 +43,16 @@ test('HOT upserts market/user and builds one market + oracle per group',()=>{
   assert.equal(b.indices.get(m.id.toLowerCase()+'|'+user2.toLowerCase())?.position,3);
   assert.ok(b.calls.every(c=>c.allowFailure));
 });
+test('HOT retains nearest 24 targets and evicts distant targets to bound block calls',()=>{
+ const base=block+1000;
+ for(let i=0;i<30;i++){
+   const user='0x'+(100+i).toString(16).padStart(40,'0');
+   const id='0x'+(100+i).toString(16).padStart(64,'0');
+   registrarQuenteMorpho(mercado(true,id),user,BigInt(i+1),base);
+ }
+ assert.equal(resumoQuentesMorpho(base).posicoes,24);
+ assert.equal(resumoQuentesMorpho(base).maisProximaBps,'1');
+});
 test('HOT forgets old debtors rather than treating stale API as an actionable target',()=>{
   assert.equal(limparQuentesMorpho(block+26*60_000),0);
 });
