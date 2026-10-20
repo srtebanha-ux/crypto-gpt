@@ -121,9 +121,12 @@ export async function avaliarELiquidarMorphoV3(
   const policy=politicaMorphoV3(env);
   if(!e.mercado.confirmadoNaCorrente)return{status:'descartada',motivo:'mercado sem identidade onchain confirmada'};
   const contrato=env.CACA_MORPHO_V3_CONTRATO;
-  const dono=env.CACA_ENDERECO_PUBLICO;
+  // Production CACA has a private key, but historically no public address env.
+  // Derive the public address LOCALLY from the existing key; never log the key.
+  const chave=env.CACA_CHAVE_PRIVADA;
+  const dono=env.CACA_ENDERECO_PUBLICO??(chave?new Wallet(chave).address:undefined);
   if(!contrato||!dono)
-    return{status:'descartada',motivo:'executor V3 nao implantado/configurado ou endereco publico ausente'};
+    return{status:'descartada',motivo:'executor V3, carteira ou identificacao publica indisponivel'};
   const p=new JsonRpcProvider(e.rpcUrl,8453,{staticNetwork:true});
   let hash:string|undefined;
   try{
@@ -210,8 +213,8 @@ export async function avaliarELiquidarMorphoV3(
       return{status:'descartada',motivo:'bloco mudou depois do preflight final'};
     if(!policy.armed)return{status:'aprovada-simulada',
       motivo:'callback V3+lucro e gas verificados; falta autorizacao exclusiva de envio'};
-    if(!env.CACA_CHAVE_PRIVADA)throw Error('chave do CACA indisponivel');
-    const wallet=new Wallet(env.CACA_CHAVE_PRIVADA,p);
+    if(!chave)throw Error('chave do CACA indisponivel');
+    const wallet=new Wallet(chave,p);
     if(!same(wallet.address,owner))throw Error('signer difere de owner');
     const latest=await p.getTransactionCount(owner,'latest');
     const pending=await p.getTransactionCount(owner,'pending');

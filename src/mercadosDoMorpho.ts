@@ -692,6 +692,12 @@ export async function descobrirMorphoPorApi(
                     });
                     posicoesAvaliadas+=1;
                     if(risco.situacao==='proxima'||risco.situacao==='cruzou-estimado'){
+                        // Feed the per-block Morpho executor with actually confirmed
+                        // borrowers, not only 3-minute API radar logs.
+                        if(m.confirmadoNaCorrente&&risco.distanciaBps!==null) {
+                            const {registrarQuenteMorpho}=await import('./titanMorphoHot');
+                            registrarQuenteMorpho(m,d.endereco,risco.distanciaBps);
+                        }
                         if(risco.situacao==='proxima')pertoDoLimiar+=1;
                         else {
                             cruzaramEstimado+=1;
