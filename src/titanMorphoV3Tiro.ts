@@ -19,6 +19,7 @@ import {politicaMorphoV3,candidatoElegivelV3,custoConservadorMorphoV3,
 import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
 import {FABRICA_V3_BASE,MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 import {COFRE_ESPERADO} from './caca';
+import {motivoDoRevertMorpho,resumoRevertsMorpho} from './titanMorphoRevert';
 
 const WETH='0x4200000000000000000000000000000000000006';
 const ROUTER='0x2626664c2603336E57B271c5C0b26F421741e481';
@@ -167,6 +168,7 @@ export async function avaliarELiquidarMorphoV3(
     }
     if(fees.length===0)return{status:'inviavel',motivo:'sem pool V3 comprovada garantia -> divida'};
     let best:{data:string;profit:bigint;shares:bigint;fee:number;estimated:bigint;score:bigint}|null=null;
+    const falhas=new Map<string,number>();
     const cuts=[4n,2n,1n,10n];
     const tested=new Set<string>();
     for(const divider of cuts){
@@ -184,11 +186,15 @@ export async function avaliarELiquidarMorphoV3(
           if(score===null||score<=0n)continue;
           const estimated=await p.estimateGas({to:addr,from:owner,data});
           if(!best||score>best.score)best={data,profit,shares,fee,estimated,score};
-        }catch{/* callback, liquidate, pool or funding reverted; never send */ }
+        }catch(err){
+          const reason=motivoDoRevertMorpho(err);
+          falhas.set(reason,(falhas.get(reason)??0)+1);
+          // A reversao de eth_call nao autoriza transacao paga.
+        }
       }
     }
     if(!best){mark(key,60_000);
-      return{status:'inviavel',motivo:'nenhuma rota passou no liquidar() integral do executor (eth_call)'};}
+      return{status:'inviavel',motivo:'nenhuma rota passou no liquidar() integral do executor (eth_call): '+resumoRevertsMorpho(falhas)};}
     const len=Math.ceil((best.data.length-2)/2);
     const l1=BigInt(await p.call({to:ORACULO_DE_GAS_L1,data:codificarTetoDeL1(len)}));
     const pricedBlock=await p.getBlock('latest');
