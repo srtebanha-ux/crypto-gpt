@@ -7,7 +7,7 @@ test('Morpho: revisita mercados e mais posicoes por rodada, sem mudar sender',()
  assert.equal(x.intervaloMs,180_000);
  assert.equal(x.mercadosPorRodada,36);
  assert.equal(x.mercadosComDevedores,12);
- assert.equal(x.posicoesPorMercado,10);
+ assert.equal(x.posicoesPorMercado,36);
  assert.equal(x.requisicoesHttp,95);
  assert.equal(x.prazoMs,75_000);
  assert.equal(Object.keys(x).some(k=>/enviar|wallet|nonce|chave/i.test(k)),false);
@@ -25,7 +25,7 @@ test('Morpho: orcamentos invalidos usam default, valores extremos sao limitados'
  assert.equal(x.intervaloMs,120_000);
  assert.equal(x.mercadosPorRodada,12);
  assert.equal(x.mercadosComDevedores,12);
- assert.equal(x.posicoesPorMercado,20);
+ assert.equal(x.posicoesPorMercado,60);
  assert.equal(x.requisicoesHttp,95);
  assert.equal(x.prazoMs,75_000);
 });
