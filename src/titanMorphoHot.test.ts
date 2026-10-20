@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
@@ -52,6 +52,18 @@ test('HOT retains nearest 24 targets and evicts distant targets to bound block c
  }
  assert.equal(resumoQuentesMorpho(base).posicoes,24);
  assert.equal(resumoQuentesMorpho(base).maisProximaBps,'1');
+});
+test('HOT suppresses an entire market without canonical DEX exit instead of retrying borrowers',()=>{
+ const id='0x'+'aa'.repeat(32);
+ const other='0x'+'bb'.repeat(32);
+ const a=block+1;
+ assert.equal(registrarQuenteMorpho(mercado(true,id),user1,5n,a),true);
+ assert.equal(registrarQuenteMorpho(mercado(true,id),user2,9n,a),true);
+ assert.equal(registrarQuenteMorpho(mercado(true,other),user1,6n,a),true);
+ bloquearMercadoSemSaida(id,a+10);
+ assert.equal(registrarQuenteMorpho(mercado(true,id),user1,1n,a+11),false);
+ assert.equal(registrarQuenteMorpho(mercado(true,other),user2,7n,a+11),true);
+ assert.equal(registrarQuenteMorpho(mercado(true,id),user1,1n,a+31*60_000),true);
 });
 test('HOT forgets old debtors rather than treating stale API as an actionable target',()=>{
   assert.equal(limparQuentesMorpho(block+26*60_000),0);
