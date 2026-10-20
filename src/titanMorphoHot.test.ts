@@ -82,6 +82,17 @@ test('HOT suppresses an entire market without canonical DEX exit instead of retr
  assert.equal(registrarQuenteMorpho(mercado(true,id),user1,1n,a+31*60_000),true);
  limparQuentesMorpho(a+60*60_000); // reset registry for other tests
 });
+test('illiquid market can be rotated for 10 minutes without blocking others',()=>{
+ const marketId='0x'+'cc'.repeat(32);
+ const other='0x'+'dd'.repeat(32);
+ const now=block+6*60*60_000;
+ assert.equal(registrarQuenteMorpho(mercado(true,marketId),user1,5n,now),true);
+ bloquearMercadoSemSaida(marketId,now,10*60_000);
+ assert.equal(registrarQuenteMorpho(mercado(true,marketId),user2,2n,now+9*60_000),false);
+ assert.equal(registrarQuenteMorpho(mercado(true,other),user1,5n,now+9*60_000),true);
+ assert.equal(registrarQuenteMorpho(mercado(true,marketId),user1,1n,now+11*60_000),true);
+ limparQuentesMorpho(now+40*60_000);
+});
 test('HOT forgets old debtors rather than treating stale API as an actionable target',()=>{
   assert.equal(limparQuentesMorpho(block+26*60_000),0);
 });
