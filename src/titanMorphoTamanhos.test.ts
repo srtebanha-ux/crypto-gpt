@@ -5,7 +5,7 @@ const basic={
   borrowShares:276866893263507n,
   collateral:2288517006804982611n,
   estimatedDebtAssets:276866893263507n,
-  oraclePrice:1n*10n**36n,
+  oraclePrice:120n*10n**30n,
   lltvWad:860000000000000000n,
 };
 test('liquidation full 100% never probed; tries incremental smaller shares first',()=>{
