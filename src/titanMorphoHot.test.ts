@@ -54,7 +54,8 @@ test('HOT retains nearest 24 targets and evicts distant targets to bound block c
  assert.equal(resumoQuentesMorpho(base).maisProximaBps,'1');
 });
 test('HOT keeps scarce slots across markets, not 24 borrowers from one illiquid market',()=>{
- const now=block+2000;
+ const now=block+30*60_000;
+ limparQuentesMorpho(now);
  const marketA=mercado(true,'0x'+'d1'.repeat(32));
  const marketB=mercado(true,'0x'+'d2'.repeat(32));
  for(let i=0;i<24;i++){
