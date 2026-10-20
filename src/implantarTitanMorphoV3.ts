@@ -14,7 +14,7 @@ const marker='/app/data/titanMorphoV3Deploy.json';
 const abi=new Interface(['function dono() view returns(address)','function cofre() view returns(address)',
  'function morpho() view returns(address)','function fabricaV3() view returns(address)',
  'function routerV3() view returns(address)']);
-const no=(m:string):never=>{throw Error(m);};
+function no(m:string):never { throw Error(m); }
 async function deployedInvariants(p:JsonRpcProvider,at:string,owner:string){
  if(await p.getCode(at)==='0x')no('deployed address has no code');
  for(const [method,expected] of Object.entries({dono:owner,cofre:COFRE_ESPERADO,
