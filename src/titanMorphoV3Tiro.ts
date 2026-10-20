@@ -188,7 +188,10 @@ export async function avaliarELiquidarMorphoV3(
       return{status:'inviavel',motivo:'nenhuma rota passou no liquidar() integral do executor (eth_call)'};}
     const len=Math.ceil((best.data.length-2)/2);
     const l1=BigInt(await p.call({to:ORACULO_DE_GAS_L1,data:codificarTetoDeL1(len)}));
-    const feePlan=custoConservadorMorphoV3(best.estimated,block.baseFeePerGas,
+    const pricedBlock=await p.getBlock('latest');
+    if(!pricedBlock?.baseFeePerGas||pricedBlock.baseFeePerGas<=0n)
+      throw Error('baseFee faltou antes da avaliacao economica');
+    const feePlan=custoConservadorMorphoV3(best.estimated,pricedBlock.baseFeePerGas,
       policy.tipWei,l1,policy);
     const minimumToken=(best.profit*80n)/100n;
     const floorEth=await loanValueInWeth(p,params.loanToken,minimumToken);
@@ -196,12 +199,15 @@ export async function avaliarELiquidarMorphoV3(
     if(!economic.aprovado){mark(key,30_000);
       return{status:'inviavel',motivo:'piso de lucro nao cobre gas L1+L2 com margem em WETH'};}
     const finalData=executorAbi.encodeFunctionData('liquidar',[
-      marketTuple,user,0n,best.shares,best.fee,economic.pisoToken,BigInt(block.timestamp+90)]);
+      marketTuple,user,0n,best.shares,best.fee,economic.pisoToken,BigInt(pricedBlock.timestamp+90)]);
     // The enforceable floor itself must also pass, not just floor=1.
     await p.call({to:addr,from:owner,data:finalData});
+    // A long multifee search can span many two-second Base blocks. The final
+    // proof is against LATEST, so its freshness is measured from pricedBlock,
+    // not from the older pinned discovery snapshot.
     const nowBlock=await p.getBlockNumber();
-    if(nowBlock>tag+policy.maxAgeBlocks)
-      return{status:'descartada',motivo:'bloco mudou: oportunidade obsoleta'};
+    if(nowBlock>pricedBlock.number+policy.maxAgeBlocks)
+      return{status:'descartada',motivo:'bloco mudou depois do preflight final'};
     if(!policy.armed)return{status:'aprovada-simulada',
       motivo:'callback V3+lucro e gas verificados; falta autorizacao exclusiva de envio'};
     if(!env.CACA_CHAVE_PRIVADA)throw Error('chave do CACA indisponivel');
@@ -213,7 +219,8 @@ export async function avaliarELiquidarMorphoV3(
     if(await p.getBalance(owner)<feePlan.custo)throw Error('saldo insuficiente para pior gas');
     // Revalidate exact transaction and current nonce before signing.
     const blk2=await p.getBlock('latest');
-    if(!blk2||blk2.number!==nowBlock||blk2.number>tag+policy.maxAgeBlocks)
+    if(!blk2||blk2.number!==nowBlock||blk2.number>pricedBlock.number+policy.maxAgeBlocks
+      ||!blk2.baseFeePerGas||blk2.baseFeePerGas>pricedBlock.baseFeePerGas)
       throw Error('bloco trocou antes do tiro');
     await p.call({to:addr,from:owner,data:finalData});
     if(await p.getTransactionCount(owner,'pending')!==pending)
