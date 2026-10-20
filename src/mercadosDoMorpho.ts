@@ -742,7 +742,10 @@ export async function descobrirMorphoPorApi(
             const {avaliarELiquidarMorphoV3}=await import('./titanMorphoV3Tiro');
             for(const alvo of liquidaveisParaPreflight){
                 const resultado=await avaliarELiquidarMorphoV3({
-                    mercado:alvo.mercado,usuario:alvo.usuario,rpcUrl:url,
+                    mercado:alvo.mercado,usuario:alvo.usuario,
+                    // PublicNode pode devolver 403 no preflight/transmissao;
+                    // o executor nao herda o RPC do censo por acidente.
+                    rpcUrl:process.env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org',
                 });
                 log.warn('[TITAN/MORPHO-V3] Preflight do executor real.',{
                     mercado:alvo.mercado.id,usuario:alvo.usuario,
