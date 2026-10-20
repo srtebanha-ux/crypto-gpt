@@ -41,3 +41,19 @@ export function tamanhosDeLiquidacaoMorpho(x:Inputs):bigint[]{
   }
   return result;
 }
+
+/**
+ * Conservative WETH surplus after worst EIP-1559 gas estimate for a candidate.
+ * Negative and zero are rejected; final path also checks L1, profit floor
+ * and freshness before any transaction can be signed.
+ */
+export function pontuacaoLiquidaMorpho(
+ grossWeth:bigint,estimatedGas:bigint,baseFee:bigint,
+ priorityFee:bigint,maximumGas:bigint,
+):bigint|null{
+ if(grossWeth<=0n||estimatedGas<=0n||baseFee<=0n
+    ||priorityFee<=0n||maximumGas<=0n)return null;
+ const limit=estimatedGas+estimatedGas/5n;
+ if(limit>maximumGas)return null;
+ return grossWeth-limit*(baseFee*2n+priorityFee);
+}
