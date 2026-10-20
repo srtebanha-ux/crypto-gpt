@@ -64,6 +64,7 @@ test('HOT suppresses an entire market without canonical DEX exit instead of retr
  assert.equal(registrarQuenteMorpho(mercado(true,id),user1,1n,a+11),false);
  assert.equal(registrarQuenteMorpho(mercado(true,other),user2,7n,a+11),true);
  assert.equal(registrarQuenteMorpho(mercado(true,id),user1,1n,a+31*60_000),true);
+ limparQuentesMorpho(a+60*60_000); // reset registry for other tests
 });
 test('HOT forgets old debtors rather than treating stale API as an actionable target',()=>{
   assert.equal(limparQuentesMorpho(block+26*60_000),0);
