@@ -3,6 +3,7 @@
 const STANDARD={
  '0x08c379a0':'Error(string)',
  '0x4e487b71':'Panic(uint256)',
+ '0x42301c23':'InsufficientOutputAmount()',
 } as const;
 export function motivoDoRevertMorpho(err:unknown):string{
  const root=err&&typeof err==='object'?err as Record<string,unknown>:{};
