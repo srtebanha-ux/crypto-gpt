@@ -28,6 +28,7 @@ jobs:
             src/titanMorphoHot.test.ts \
             src/titanMorphoRadar.test.ts \
             src/titanMorphoRevert.test.ts \
+            src/titanMorphoTamanhos.test.ts \
             src/titanMorphoV3Gate.test.ts \
             src/titanMorphoCobertura.test.ts \
             src/multicall.test.ts \
