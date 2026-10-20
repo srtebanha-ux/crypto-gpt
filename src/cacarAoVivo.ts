@@ -3045,46 +3045,56 @@ async function principal(): Promise<'parar' | void> {
     });
 
     if (process.env.CACA_MORPHO_API === '1') {
-        // A DESCOBERTA SEM `eth_getLogs`: a API enumera, a corrente valida.
-        // Roda desgrudada do laco, igual a varredura por evento.
-        //
-        // E NAO E GATEADA PELO ESTADO DO RPC. `disponibilidadeDoCanal('apiHttp')`
-        // nao le nenhum campo de RPC, de proposito, e um teste exige isso em
-        // todas as combinacoes de estado.
-        const canal = disponibilidadeDoCanal('apiHttp', infraAgora);
-        log.warn('[MORPHO/API] FLAG RECONHECIDA. Vou descobrir mercados pela API, UMA vez, em paralelo.', {
-            flag: 'CACA_MORPHO_API=1',
-            canal: canal.pode ? 'apiHttp LIVRE' : 'apiHttp PAUSADO',
-            porqueOCanal: canal.porque,
-            rpcEsgotado: infraAgora.provedoresEsgotados.length > 0
-                ? `SIM (${infraAgora.provedoresEsgotados.join(', ')}) — e isto NÃO bloqueia este canal`
-                : 'não',
-            depois: 'apague CACA_MORPHO_API quando a linha [MORPHO/API] Descoberta sair',
-        });
-        void (async () => {
+        // Antes a API rodava UMA vez no boot e confirmava sempre poucos
+        // mercados/devedores. O rodizio usa fatias de 15min, mas um processo
+        // que fica no ar nao rodava a proxima fatia: 1300+ mercados ficavam
+        // fora da validacao indefinidamente. Novo ciclo limitado, sem carteira.
+        const intervaloSolicitado = numeroDoAmbiente(
+            'CACA_MORPHO_INTERVALO_MS', process.env.CACA_MORPHO_INTERVALO_MS, 900_000);
+        const intervaloMorpho = Math.max(300_000, Math.min(3_600_000,
+            Math.trunc(intervaloSolicitado)));
+        let emCursoMorpho = false;
+        let rodadaMorpho = 0;
+        const atualizarMorpho = async (): Promise<void> => {
+            if (emCursoMorpho) {
+                log.warn('[MORPHO/RADAR] Rodada anterior continua; nao duplico API nem RPC.');
+                return;
+            }
+            emCursoMorpho = true;
+            rodadaMorpho++;
             try {
                 const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
                 await descobrirMorphoPorApi({
                     infra: infraAgora,
-                    // O INVENTARIO VE A DESCOBERTA. Antes ela usava `fetch` cru e
-                    // o consumo dela era invisivel — entao a ausencia dela no
-                    // `porTarefaEMetodo` nao provava nem que rodou nem que nao.
-                    // HTTP e RPC entram separados: HTTP nao consome CU.
+                    // Orcamentos por rodada; HTTP nao e CU de RPC.
+                    tetoDeRequisicoes: 65, tetoDeMs: 45_000,
+                    tetoDeValidacoes: 24, tetoDeMercadosComDevedores: 8,
                     contarHttp: (host) => INVENTARIO.contarHttp('morpho', host),
                     contarRpc: (metodo) => INVENTARIO.contar('morpho', metodo),
                 });
-                // Reler para o `[BLOCO]` passar a publicar o resultado desta
-                // volta sem esperar o proximo boot.
                 MEMORIA_MORPHO = await lerMemoriaDoDisco();
-            } catch (e) {
-                log.error('[MORPHO/API] A descoberta falhou, e o bot segue caçando.', {
-                    erro: e instanceof Error ? e.message : String(e),
-                    oQueIssoNaoE: 'não é "a API retornou vazio" nem "os mercados não passaram na '
-                        + 'validação": é a tarefa estourando. Ver [MORPHO/API] Descoberta, que '
-                        + 'não saiu',
+                log.info('[MORPHO/RADAR] Rodada concluida, sem tocar nonce/carteira.', {
+                    rodada:rodadaMorpho,proximaEmMs:intervaloMorpho,
+                    limiteMercadosPorRodada:24,
+                    observacao:'risco estimado nao e liquidacao autorizada',
                 });
-            }
-        })();
+            } catch (e) {
+                log.error('[MORPHO/RADAR] Rodada falhou, CACA continua.', {
+                    rodada:rodadaMorpho,
+                    erro: e instanceof Error ? e.message : String(e),
+                });
+            } finally { emCursoMorpho = false; }
+        };
+        log.info('[MORPHO/RADAR] Descoberta recorrente habilitada.', {
+            intervaloMs:intervaloMorpho,
+            mercadoPorRodada:24,
+            fluxo:'API enumera; cinco parametros, divida, garantia, market e oracle lidos onchain; SEM envio',
+        });
+        void atualizarMorpho();
+        const relogioMorpho = setInterval(() => {
+            void atualizarMorpho();
+        }, intervaloMorpho);
+        relogioMorpho.unref?.();
     }
 
     if (process.env.CACA_MERCADOS_MORPHO === '1'
