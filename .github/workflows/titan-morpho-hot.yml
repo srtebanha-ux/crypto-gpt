@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - feat/titan-morpho-hot-executor-20261020
+      - feat/titan-morpho-wide-batch-20261020
   pull_request:
     branches:
       - feat/caca-integracao-multihop-ativa
@@ -27,7 +28,9 @@ jobs:
             src/titanMorphoHot.test.ts \
             src/titanMorphoRadar.test.ts \
             src/titanMorphoV3Gate.test.ts \
-            src/titanMorphoCobertura.test.ts
+            src/titanMorphoCobertura.test.ts \
+            src/multicall.test.ts \
+            src/mercadosDoMorpho.test.ts
       - name: Validate existing Morpho V3 atomic callback in local EVM
         run: |
           npx hardhat compile --config hardhat.morpho-local.cjs
