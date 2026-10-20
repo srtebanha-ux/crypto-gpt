@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calcularPisoTitan, motivoDaRecusaTitan, avaliarEnsaioTitan, blocoValidoParaProvaAtomica, type PlanoTitan } from './titanExecucao';
+import { calcularPisoTitan, motivoDaRecusaTitan, contratoExecutorTitan, avaliarEnsaioTitan, blocoValidoParaProvaAtomica, type PlanoTitan } from './titanExecucao';
 import { avaliarLimitesDiariosTitan } from './titanAutorizacaoContinua';
 
 const END_A = '0x0000000000000000000000000000000000000011';
@@ -200,4 +200,32 @@ test('prova atomica pode medir estado latest mesmo que a cotacao tenha atravessa
     assert.equal(blocoValidoParaProvaAtomica(100,99),false);
     assert.equal(blocoValidoParaProvaAtomica(0,120),false);
     assert.equal(blocoValidoParaProvaAtomica(NaN,120),false);
+});
+
+test('Morpho flashLoan arbitrage resolves its OWN contract in proof and paid path',()=>{
+ const env=ambiente();
+ env.TITAN_FONTE_CREDITO='morpho';
+ env.TITAN_CONTRATO_MORPHO=END_B;
+ delete env.TITAN_CONTRATO;
+ assert.equal(contratoExecutorTitan(env),END_B);
+ assert.equal(motivoDaRecusaTitan(plano(),env),null);
+ env.TITAN_CONTRATO=END_A;
+ assert.equal(contratoExecutorTitan(env),END_B);
+ env.TITAN_FONTE_CREDITO='flashswap';
+ assert.equal(contratoExecutorTitan(env),END_A);
+ delete env.TITAN_CONTRATO;
+ assert.equal(contratoExecutorTitan(env),null);
+});
+test('unrecognized source, malformed and missing Morpho address never become proof',()=>{
+ const env=ambiente();
+ env.TITAN_FONTE_CREDITO='morpho';
+ delete env.TITAN_CONTRATO;
+ delete env.TITAN_CONTRATO_MORPHO;
+ assert.equal(contratoExecutorTitan(env),null);
+ assert.match(motivoDaRecusaTitan(plano(),env)!,/contrato Morpho da arbitragem nao implantado/);
+ env.TITAN_CONTRATO_MORPHO='0xwrong';
+ assert.equal(contratoExecutorTitan(env),null);
+ assert.match(motivoDaRecusaTitan(plano(),env)!,/contrato/);
+ env.TITAN_FONTE_CREDITO='imaginary';
+ assert.equal(contratoExecutorTitan(env),null);
 });
