@@ -15,6 +15,9 @@ export type RadarMorpho={
 };
 export const WAD_MORPHO=10n**18n;
 export const ORACLE_SCALE_MORPHO=10n**36n;
+// Official Morpho Blue SharesMathLib: 1e6 virtual shares and one virtual asset.
+export const VIRTUAL_SHARES_MORPHO=1_000_000n;
+export const VIRTUAL_ASSETS_MORPHO=1n;
 function divCeil(n:bigint,d:bigint):bigint{
  if(n<0n||d<=0n)throw Error('unidades invalidas');
  return (n+d-1n)/d;
@@ -37,7 +40,11 @@ export function examinarSaudeMorpho(e:{
   return unknown('oraculo ou LLTV invalido');
  if(collateral===0n)
   return {situacao:'sem-garantia',dividaCrua:null,distanciaBps:null,motivo:'sem garantia: liquidacao normal nao demonstrada'};
- const divida=divCeil(borrowShares*totalBorrowAssets,totalBorrowShares);
+ // Morpho Blue SharesMathLib.toAssetsUp, including virtual shares/assets.
+ const divida=divCeil(
+  borrowShares*(totalBorrowAssets+VIRTUAL_ASSETS_MORPHO),
+  totalBorrowShares+VIRTUAL_SHARES_MORPHO,
+ );
  if(divida===0n)return unknown('divida convertida em zero');
  const limiteNumerador=collateral*precoOracle*lltvWad;
  const dividaNumerador=divida*ORACLE_SCALE_MORPHO*WAD_MORPHO;
