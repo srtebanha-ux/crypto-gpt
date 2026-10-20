@@ -41,7 +41,7 @@ const brief=e=>({selector:(typeof e.data==='string'?e.data:null)?.slice(0,10)??n
     const factor=estDebt>0n?(pos.collateral*pr*m.lltv*10000n/(estDebt*10n**54n)):0n;
     console.log('MARKET',JSON.stringify({id:t.id,user:t.user,loan:m.loanToken,col:m.collateralToken,shares:String(borrow),collateral:String(pos.collateral),ltv:String(m.lltv),healthBps:String(factor),estimatedCrossed:factor<=10000n}));
     if(borrow===0n)continue;
-    const sizes=[borrow/100n,borrow/50n,borrow/20n,borrow/10n,borrow/4n].filter(x=>x>0n);
+    const sizes=[borrow/10000n,borrow/1000n,borrow/500n,borrow/100n].filter(x=>x>0n);
     for(const fee of [100,500,3000,10000]){
      const pool=pools.decodeFunctionResult('getPool',await p.call({to:FACTORY,data:pools.encodeFunctionData('getPool',[m.collateralToken,m.loanToken,fee])}))[0];
      if(pool===ZeroAddress)continue;
