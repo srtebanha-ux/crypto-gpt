@@ -53,6 +53,22 @@ test('HOT retains nearest 24 targets and evicts distant targets to bound block c
  assert.equal(resumoQuentesMorpho(base).posicoes,24);
  assert.equal(resumoQuentesMorpho(base).maisProximaBps,'1');
 });
+test('HOT keeps scarce slots across markets, not 24 borrowers from one illiquid market',()=>{
+ const now=block+30*60_000;
+ limparQuentesMorpho(now);
+ const marketA=mercado(true,'0x'+'d1'.repeat(32));
+ const marketB=mercado(true,'0x'+'d2'.repeat(32));
+ for(let i=0;i<24;i++){
+   registrarQuenteMorpho(marketA,'0x'+(500+i).toString(16).padStart(40,'0'),BigInt(1+i),now);
+ }
+ for(let i=0;i<12;i++){
+   registrarQuenteMorpho(marketB,'0x'+(700+i).toString(16).padStart(40,'0'),BigInt(40+i),now);
+ }
+ const snap=resumoQuentesMorpho(now);
+ assert.equal(snap.posicoes,16);
+ assert.equal(snap.maisProximaBps,'1');
+ limparQuentesMorpho(now+26*60_000);
+});
 test('HOT suppresses an entire market without canonical DEX exit instead of retrying borrowers',()=>{
  const id='0x'+'aa'.repeat(32);
  const other='0x'+'bb'.repeat(32);

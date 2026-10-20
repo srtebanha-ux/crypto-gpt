@@ -56,12 +56,17 @@ export function limparQuentesMorpho(agora=Date.now()):number{
  for(const [k,a] of alvos){
    if(agora-a.atualizadoEm>TTL_MS)alvos.delete(k);
  }
- if(alvos.size>MAX_QUENTES){
-   const sorted=[...alvos.values()].sort((a,b)=>
-     a.distanciaBps<b.distanciaBps?-1:a.distanciaBps>b.distanciaBps?1:b.atualizadoEm-a.atualizadoEm);
-   const keep=new Set(sorted.slice(0,MAX_QUENTES).map(chave));
-   for(const k of alvos.keys())if(!keep.has(k))alvos.delete(k);
+ const sorted=[...alvos.values()].sort((a,b)=>
+   a.distanciaBps<b.distanciaBps?-1:a.distanciaBps>b.distanciaBps?1:b.atualizadoEm-a.atualizadoEm);
+ const keep=new Set<string>();
+ const counts=new Map<string,number>();
+ for(const a of sorted){
+   const id=a.mercado.id.toLowerCase();
+   if((counts.get(id)??0)>=8||keep.size>=MAX_QUENTES)continue;
+   keep.add(chave(a));
+   counts.set(id,(counts.get(id)??0)+1);
  }
+ for(const k of alvos.keys())if(!keep.has(k))alvos.delete(k);
  return alvos.size;
 }
 /** Public observability without leak of secrets, clients or keys. */
