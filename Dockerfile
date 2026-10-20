@@ -21,6 +21,9 @@ RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 # Executor isolado do CACA, usado somente no deploy expresso da mesma carteira.
 COPY --from=build /app/.tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json ./.tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json
+# A nova executora Morpho V3 precisa do bytecode no container de producao
+# para o deploy unico; o build ja o compila na etapa anterior.
+COPY --from=build /app/.tmp/artifacts/contracts/TitanCacadorMorphoV3.sol/TitanCacadorMorphoV3.json ./.tmp/artifacts/contracts/TitanCacadorMorphoV3.sol/TitanCacadorMorphoV3.json
 
 # Processo de longa duração (worker 24/7) — sem porta HTTP exposta.
 #
