@@ -6,7 +6,7 @@
 // milissegundos que decidem a liquidação em cima de uma resposta que já veio.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EscadaDeRpc, ehFalhaDeTransporte, escadaDeRpcs, listaDeRpcs, porQueNaoServe, logsComRpcHistorico, faixaHistoricaReversa } from './escadaDeRpc';
+import { EscadaDeRpc, ehFalhaDeTransporte, escadaDeRpcs, listaDeRpcs, porQueNaoServe, logsComRpcHistorico, faixaHistoricaReversa, classificarFalhaHistorica } from './escadaDeRpc';
 
 const A = 'https://a.exemplo/v2/k';
 const B = 'https://b.exemplo';
@@ -284,4 +284,29 @@ test('censo da Base: paginação reversa 9 dias sem buracos, inclusive com ajust
     assert.deepEqual(faixaHistoricaReversa(50,49,1800),{de:49,ate:50,proximoAte:48});
     assert.throws(()=>faixaHistoricaReversa(48,49,100),/invalida/);
     assert.throws(()=>faixaHistoricaReversa(100,0,0),/invalida/);
+});
+
+test('censo historico: nao reduz faixa por 429, 403, timeout ou erro de rede',()=>{
+    for(const msg of [
+        'historico indisponivel: secundario=HTTP 429',
+        'too many requests',
+        'rate limit exceeded',
+    ])assert.equal(classificarFalhaHistorica(msg),'frequencia',msg);
+    for(const msg of [
+        'historico indisponivel: secundario=HTTP 403',
+        'unauthorized archive requires subscription',
+    ])assert.equal(classificarFalhaHistorica(msg),'acesso',msg);
+    for(const msg of [
+        'fetch failed',
+        'operation aborted due to timeout',
+        'HTTP 503 Service Unavailable',
+    ])assert.equal(classificarFalhaHistorica(msg),'transitoria',msg);
+});
+test('censo historico: reduz faixa APENAS quando o provedor nega tamanho da consulta',()=>{
+    for(const msg of [
+        'block range exceeds limit of 1000 blocks',
+        'query returned more than 10000 results',
+        'response size exceeded',
+        'block range too large',
+    ])assert.equal(classificarFalhaHistorica(msg),'faixa',msg);
 });
