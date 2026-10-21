@@ -53,7 +53,7 @@ import {
     gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
     creditoMaximoComResiduoUsdc,
 } from './titanPonteMultiHop';
-import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte, logsComRpcHistorico, faixaHistoricaReversa } from './escadaDeRpc';
+import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte, logsComRpcHistorico, faixaHistoricaReversa, classificarFalhaHistorica } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
@@ -4926,7 +4926,8 @@ async function principal(): Promise<'parar' | void> {
                 // HTTP 429 is a request-rate throttle, NOT a range-size limit.
                 // Reducing from 1800 to 50 blocks after 429 wastes thousands
                 // of requests. Keep the range, respect a cooldown and retry.
-                if(/HTTP 429|too many requests|rate.limit/i.test(ultimaRecusa)){
+                const tipoDeFalha=classificarFalhaHistorica(ultimaRecusa);
+                if(tipoDeFalha==='frequencia'){
                     const resultadoDoFreio=freio.recusou(ultimaRecusa);
                     log.warn('[MERCADO/CENSO] RPC historico aplicou 429; recuando sem reduzir faixa.',{
                         proximoAte,faixaTentada:tamanho,recuoMs:2400,
@@ -4939,13 +4940,24 @@ async function principal(): Promise<'parar' | void> {
                     }
                     continue;
                 }
-                if(tamanho>PASSO_MINIMO){
+                // Somente um erro DE FAIXA justifica dividir os blocos.
+                // 403, timeout e falhas de transporte nao melhoram com 900, 450,
+                // 225, 112 blocos: repetir so gasta cota e cega o radar.
+                if(tipoDeFalha==='faixa'&&tamanho>PASSO_MINIMO){
                     tamanho=Math.max(PASSO_MINIMO,Math.floor(tamanho/2));
                     log.warn('[MERCADO/CENSO] RPC historico recusou faixa; reduzindo, sem pular blocos.',{
                         proxAte:proximoAte,novoTamanho:tamanho,
                         veredito:'nenhum bloco perdido nem contado como zero',
                     });
                     continue;
+                }
+                if(tipoDeFalha==='acesso'){
+                    log.warn('[MERCADO/CENSO] RPC historico negou acesso; checkpoint preservado.',{
+                        proximoAte,faixaTentada:tamanho,
+                        diagnostico:'permissao/archive no provedor: trocar endpoint historico',
+                    });
+                    orcamento.encerrar('RPC historico: 401/403, nao reduzir faixa nem avancar checkpoint');
+                    break;
                 }
                 const acao=freio.recusou(ultimaRecusa);
                 if(acao==='adiar'||falhasConsecutivas>=3){
@@ -4958,6 +4970,8 @@ async function principal(): Promise<'parar' | void> {
                     });
                     break;
                 }
+                // Erro transitorio: uma pausa curta evita bombardear RPC falho.
+                await dormir(1250);
             }
         }
         const blocosLidos=topo-proximoAte;
