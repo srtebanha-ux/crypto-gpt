@@ -237,7 +237,7 @@ export function classificarFalhaHistorica(mensagem:string):
         return 'frequencia';
     if(/\\b403\\b|\\b401\\b|forbidden|unauthori[sz]ed|access denied|archive (?:not available|requires|unavailable)/.test(m))
         return 'acesso';
-    if(/(?:block|query|log|response|result).{0,45}(?:range|span|size|limit|too large|too many|exceed)|(?:range|span).{0,45}(?:too large|exceed|limit|maximum)|(?:limit|max(?:imum)?).{0,30}\\d+.{0,15}blocks/.test(m))
+    if(/(?:block|query|log|response|result).{0,45}(?:range|span|size|limit|too large|too many|exceed)|(?:range|span).{0,45}(?:too large|exceed|limit|maximum)|(?:limit|max(?:imum)?).{0,30}\\d+.{0,15}blocks|(?:query|log|result).{0,45}(?:returned more than|too many)|(?:returned more than|too many).{0,24}(?:results|logs)/.test(m))
         return 'faixa';
     return 'transitoria';
 }
