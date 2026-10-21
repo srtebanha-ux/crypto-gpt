@@ -6,7 +6,7 @@ test('Morpho: revisita mercados e mais posicoes por rodada, sem mudar sender',()
  const x=politicaDeCoberturaMorpho({});
  assert.equal(x.intervaloMs,180_000);
  assert.equal(x.mercadosPorRodada,36);
- assert.equal(x.mercadosComDevedores,12);
+ assert.equal(x.mercadosComDevedores,20);
  assert.equal(x.posicoesPorMercado,36);
  assert.equal(x.requisicoesHttp,95);
  assert.equal(x.prazoMs,75_000);
