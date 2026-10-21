@@ -33,7 +33,7 @@ export function politicaDeCoberturaMorpho(
             env.CACA_MORPHO_INTERVALO_MS,180_000,120_000,3_600_000),
         mercadosPorRodada,
         mercadosComDevedores:Math.min(mercadosPorRodada,numeroLimitado(
-            env.CACA_MORPHO_MERCADOS_COM_DEVEDORES,12,1,24)),
+            env.CACA_MORPHO_MERCADOS_COM_DEVEDORES,20,1,36)),
         posicoesPorMercado:numeroLimitado(
             env.CACA_MORPHO_POSICOES_POR_MERCADO,36,1,60),
         requisicoesHttp:numeroLimitado(
