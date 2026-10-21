@@ -225,6 +225,23 @@ export class EscadaDeRpc {
     }
 }
 
+/**
+ * Distingue limite de frequencia, limite de tamanho e recusas permanentes.
+ * Nao reduzir uma faixa de blocos para um HTTP 403/429 ou timeout: nenhuma
+ * dessas respostas demonstra que a quantidade de blocos seja o problema.
+ */
+export function classificarFalhaHistorica(mensagem:string):
+    'frequencia'|'faixa'|'acesso'|'transitoria'{
+    const m=mensagem.toLowerCase();
+    if(/\\b429\\b|too many requests|rate[ -]?limit|rate exceeded|throttl/.test(m))
+        return 'frequencia';
+    if(/\\b403\\b|\\b401\\b|forbidden|unauthori[sz]ed|access denied|archive (?:not available|requires|unavailable)/.test(m))
+        return 'acesso';
+    if(/(?:block|query|log|response|result).{0,45}(?:range|span|size|limit|too large|too many|exceed)|(?:range|span).{0,45}(?:too large|exceed|limit|maximum)|(?:limit|max(?:imum)?).{0,30}\\d+.{0,15}blocks/.test(m))
+        return 'faixa';
+    return 'transitoria';
+}
+
 // Consultas historicas devem ter limite de tempo separado das decisoes urgentes.
 
 /**
