@@ -19,13 +19,44 @@ function resolveMinLevel(): number {
 }
 const minLevel = resolveMinLevel();
 
+/** Scrub configured credentials from messages as well as nested JSON fields. */
+export function ocultarSegredos(text: string, env: NodeJS.ProcessEnv = process.env): string {
+    const secrets = new Set<string>();
+    for (const [name, value] of Object.entries(env)) {
+        if (!value || value.length < 8) continue;
+        if (/(?:CHAVE_PRIVADA|PRIVATE_KEY|API_KEY|SECRET|PASSWORD|ACCESS_TOKEN|AUTH_TOKEN)/i.test(name)
+            || /(?:RPC.*URL|URL.*RPC)/i.test(name)) {
+            secrets.add(value);
+            if (/^0x[0-9a-f]{64}$/i.test(value)) secrets.add(value.slice(2));
+            else if (/^[0-9a-f]{64}$/i.test(value)) secrets.add('0x' + value);
+            // Errors may serialize quoted strings with JSON escapes.
+            secrets.add(JSON.stringify(value).slice(1, -1));
+        }
+    }
+    for (const value of [...secrets].sort((a, b) => b.length - a.length)) {
+        text = text.split(value).join('[REDACTED]');
+    }
+    return text;
+}
+
 function formatFields(fields: LogFields): string {
     if (!fields || Object.keys(fields).length === 0) return '';
-    return ' ' + JSON.stringify(fields, (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
+    const seen = new WeakSet<object>();
+    return ' ' + JSON.stringify(fields, (key, value) => {
+        if (/^(?:privateKey|private_key|chavePrivada|chave_privada|apiKey|api_key|secret|password|accessToken|authToken)$/i.test(key))
+            return '[REDACTED]';
+        if (typeof value === 'bigint') return value.toString();
+        if (value && typeof value === 'object') {
+            if (seen.has(value)) return '[Circular]';
+            seen.add(value);
+            if (value instanceof Error) return { name: value.name, message: value.message };
+        }
+        return value;
+    });
 }
 
 function line(level: string, scope: string, message: string, fields: LogFields): string {
-    return `${new Date().toISOString()} [${level}] [${scope}] ${message}${formatFields(fields)}`;
+    return ocultarSegredos(`${new Date().toISOString()} [${level}] [${scope}] ${message}${formatFields(fields)}`);
 }
 
 export interface Logger {
