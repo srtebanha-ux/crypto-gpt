@@ -1,0 +1,27 @@
+name: Study Base top Morpho liquidator receipts
+on:
+  push:
+    branches:
+      - feat/inspecao-liquidadores-base-20261018
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  receipts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Decode successful batch liquidations and linked swaps
+        run: node scripts/analisarOperadorLiderMorpho.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: base-liquidator-reverse-engineering
+          path: .tmp/liderMorphoBase.json
+          retention-days: 14

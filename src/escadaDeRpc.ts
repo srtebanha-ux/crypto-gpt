@@ -224,3 +224,89 @@ export class EscadaDeRpc {
         this.degraus[0]!.caiuEm = 0;
     }
 }
+
+/**
+ * Distingue limite de frequencia, limite de tamanho e recusas permanentes.
+ * Nao reduzir uma faixa de blocos para um HTTP 403/429 ou timeout: nenhuma
+ * dessas respostas demonstra que a quantidade de blocos seja o problema.
+ */
+export function classificarFalhaHistorica(mensagem:string):
+    'frequencia'|'faixa'|'acesso'|'transitoria'{
+    const m=mensagem.toLowerCase();
+    if(/\b429\b|too many requests|rate[ -]?limit|rate exceeded|throttl/.test(m))
+        return 'frequencia';
+    if(/\b403\b|\b401\b|forbidden|unauthori[sz]ed|access denied|archive (?:not available|requires|unavailable)/.test(m))
+        return 'acesso';
+    if(/(?:block|query|log|response|result).{0,45}(?:range|span|size|limit|too large|too many|exceed)|(?:range|span).{0,45}(?:too large|exceed|limit|maximum)|(?:limit|max(?:imum)?).{0,30}\d+.{0,15}blocks|(?:query|log|result).{0,45}(?:returned more than|too many)|(?:returned more than|too many).{0,24}(?:results|logs)/.test(m))
+        return 'faixa';
+    return 'transitoria';
+}
+
+// Consultas historicas devem ter limite de tempo separado das decisoes urgentes.
+
+/**
+ * Historical log lookup is READ ONLY and isolated from the urgent trading RPC.
+ * A 403/archive restriction on the primary must not make the competitor ledger
+ * permanently blind when another Base node can answer. Neither path signs or
+ * sends a transaction, and a second failure is NEVER treated as an empty log.
+ *
+ * The configured URL remains private: callers receive only its hostname.
+ * A one-off fallback gets a strict deadline to protect block processing.
+ */
+export async function logsComRpcHistorico<T>(
+    consultarPrimario: () => Promise<T[]>,
+    filtro: {address:string;fromBlock:string;toBlock:string;topics:string[]},
+    opcoes: {
+        urlSecundaria?:string;
+        buscar?:typeof fetch;
+        tempoLimiteMs?:number;
+    } = {},
+):Promise<{logs:T[];origem:'primario'|'secundario';provedor:string}> {
+    try {
+        const logs=await consultarPrimario();
+        if(!Array.isArray(logs)) throw new Error('resposta do RPC principal nao e lista');
+        return {logs,origem:'primario',provedor:'principal'};
+    }catch(erroPrincipal) {
+        const url=opcoes.urlSecundaria?.trim()||'https://mainnet.base.org';
+        const problema=porQueNaoServe(url);
+        if(problema!==null||new URL(url).protocol!=='https:')
+            throw new Error('RPC historico secundario invalido (exige HTTPS)');
+        const abortar=new AbortController();
+        const limite=Math.max(500,Math.min(opcoes.tempoLimiteMs??5000,10000));
+        const timeout=setTimeout(()=>abortar.abort(),limite);
+        try {
+            const resposta=await (opcoes.buscar??fetch)(url,{
+                method:'POST',
+                headers:{'content-type':'application/json'},
+                body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_getLogs',params:[filtro]}),
+                signal:abortar.signal,
+            });
+            if(!resposta.ok)throw new Error('HTTP '+resposta.status);
+            const corpo:unknown=await resposta.json();
+            if(!corpo||typeof corpo!=='object'
+                ||('error' in corpo&&Boolean(corpo.error))
+                ||!('result' in corpo)||!Array.isArray(corpo.result))
+                throw new Error('JSON-RPC historico sem lista de logs valida');
+            return {logs:corpo.result as T[],origem:'secundario',
+                provedor:new URL(url).hostname};
+        }catch(erroSecundario){
+            const p=erroPrincipal instanceof Error?erroPrincipal.message:String(erroPrincipal);
+            const s=erroSecundario instanceof Error?erroSecundario.message:String(erroSecundario);
+            // No URLs from the original error are printed: API keys can be in paths.
+            throw new Error('historico indisponivel em ambos RPCs: primario='
+                +(p.includes('403')||/archive/i.test(p)?'arquivo/403':'indisponivel')
+                +'; secundario='+(/abort/i.test(s)?'timeout':s.replace(/https?:\/\/\S+/g,'[url]').slice(0,95)));
+        }finally{clearTimeout(timeout)}
+    }
+}
+
+/** Inclusive historical ranges, scanned backwards with no overlap or gaps. */
+export function faixaHistoricaReversa(ate:number,inicio:number,tamanho:number):{
+    de:number;ate:number;proximoAte:number;
+}{
+    if(![ate,inicio,tamanho].every(Number.isSafeInteger)
+        ||inicio<0||ate<inicio||tamanho<1)
+        throw new Error('faixa historica invalida');
+    const de=Math.max(inicio,ate-tamanho+1);
+    return {de,ate,proximoAte:de-1};
+}

@@ -43,11 +43,12 @@ export const POR_PAGINA = 100;
 /**
  * O teto de paginas por varredura.
  *
- * Existe para a paginacao nao virar laco infinito quando a API devolver sempre
- * a mesma pagina — defeito que eu nao posso descartar sem ter testado contra o
- * servico real. Vinte paginas sao 2.000 mercados: muito acima do que a Base tem.
+ * A Base devolveu mais de 2.000 mercados em producao, e o limite anterior
+ * cortava toda varredura na pagina 20 (a API ainda oferecia cursor).
+ * O teto maior continua sujeito ao OrcamentoHttp de chamadas e tempo e
+ * encerra de forma INCOMPLETA quando nao for possivel finalizar.
  */
-export const TETO_DE_PAGINAS = 20;
+export const TETO_DE_PAGINAS = 40;
 
 /** Espera entre paginas, para respeitar o limite de requisicoes da API. */
 export const ENTRE_PAGINAS_MS = 250;
@@ -607,6 +608,22 @@ export function soOsQuePagam(ms: MercadoDaApi[]): MercadoDaApi[] {
     return ms.filter((m) => m.lltv.lessThanOrEqualTo(LLTV_MAXIMO_QUE_PAGA));
 }
 
+/**
+ * Universo para TRIAGEM, nao para envio. O corte de 77% mede onde o bonus
+ * teorico supera o caso Aave de referencia, NAO se a liquidacao pode
+ * pagar gas. O proprio censo real encontrou bonus positivo em LLTV
+ * 86%, 91,5%, 94,5% e 96,5%. Excluir esses mercados impedia a validacao
+ * onchain de posicoes grandes que podem ser economicamente interessantes.
+ *
+ * Nao autoriza transacao: nem a API nem o incentivo teorico provam HF<1,
+ * saldo, liquidez de swap ou lucro apos gas. O portao economico continua
+ * dentro da simulacao atomica do executor.
+ */
+export function mercadosParaSondagem(ms: readonly MercadoDaApi[]): MercadoDaApi[] {
+    return ms.filter(m=>m.lltv.isFinite()&&m.lltv.gt(0)&&m.lltv.lt(1)
+        &&m.bonusPct!==null&&m.bonusPct.isFinite()&&m.bonusPct.gt(0));
+}
+
 // ---------------------------------------------------------------------------
 // A VALIDACAO NA CORRENTE. E ela que autoriza, nao a API.
 // ---------------------------------------------------------------------------
@@ -727,11 +744,156 @@ export function apiConfereComACorrente(
 // ---------------------------------------------------------------------------
 
 /** A consulta. `first`/`skip` porque e o que a API documenta para paginar. */
+/**
+ * O GraphQL documenta a ordenação por BorrowAssetsUsd para ordenar
+ * os mercados da Base que têm empréstimos relevantes. Só PRIORIZA
+ * o trabalho; jamais substitui a validação dos parâmetros onchain.
+ */
+export function consultaMercadosMorphoComDivida():string {
+    return JSON.stringify({
+        query: `query {
+            markets(first: 100, orderBy: BorrowAssetsUsd, orderDirection: Desc,
+              where: { chainId_in: [8453] }) {
+                items { marketId }
+            }
+        }`,
+    });
+}
+export function lerRankingMercadosMorpho(corpo:unknown):string[]|null {
+    if(!corpo||typeof corpo!=='object')return null;
+    const o=corpo as Record<string,unknown>;
+    if(Array.isArray(o.errors)&&o.errors.length>0)return null;
+    const data=o.data as Record<string,unknown>|undefined;
+    const markets=data?.markets as Record<string,unknown>|undefined;
+    if(!Array.isArray(markets?.items))return null;
+    const vistos=new Set<string>();
+    for(const raw of markets.items) {
+        if(!raw||typeof raw!=='object')continue;
+        const marketId=(raw as Record<string,unknown>).marketId;
+        if(typeof marketId!=='string'||!/^0x[0-9a-fA-F]{64}$/.test(marketId))continue;
+        vistos.add(marketId.toLowerCase());
+    }
+    return [...vistos];
+}
+/** Cobre dezenas de posições na fila em vez de sempre os primeiros 12
+ * mercados descobertos. O ranking ajuda, mas não concede autorização.
+ */
+/**
+ * Seleciona ate `quantidade` mercados; 1/3 de alta divida sao fixos,
+ * 2/3 circulam no universo restante a cada rodada. Sem esta rotacao, a
+ * descoberta confirmava os MESMOS 24 mercados para sempre e 1.300+
+ * mercados elegiveis nao chegavam ao eth_call. Isso ainda NAO e sinal de
+ * liquidacao: ranking apenas altera prioridade de validacao.
+ *
+ * `rodada=0` conserva a ordem de preferencia inicial e serve aos testes.
+ * Em producao o numero de rodada vem do relogio UTC dividido em fatias;
+ * a rotacao nunca ultrapassa o numero de validacoes no RPC.
+ */
+export function priorizarMercadosDaLista(
+    elegiveis:readonly MercadoDaApi[],ranking:readonly string[]|null,
+    quantidade:number,rodada=0,
+):MercadoDaApi[] {
+    if(!Number.isSafeInteger(quantidade)||quantidade<=0
+       ||!Number.isSafeInteger(rodada)||rodada<0)return[];
+    const disponiveis=new Map(elegiveis.map(m=>[m.id.toLowerCase(),m]));
+    const ordenar:MercadoDaApi[]=[];
+    for(const id of ranking??[]) {
+        const m=disponiveis.get(id.toLowerCase());
+        if(!m)continue;
+        ordenar.push(m);disponiveis.delete(id.toLowerCase());
+    }
+    // Mantem um grupo fixo para as posicoes com mais divida, se houver
+    // ranking confiavel. Sem ranking distribui a busca por TODO o universo.
+    const fixos=ranking===null?0:Math.min(
+        Math.floor(quantidade/3),ordenar.length);
+    const selecao=ordenar.slice(0,fixos);
+    const restantes=[...ordenar.slice(fixos),...disponiveis.values()];
+    const vagas=Math.min(quantidade-selecao.length,restantes.length);
+    if(vagas===0)return selecao;
+    // Mantem a amostragem DISTRIBUIDA usada antes da rotacao. A rodada
+    // altera o indice dentro de cada segmento, evitando que os mesmos
+    // 16 ids monopolizem a capacidade entre ciclos.
+    for(let i=0;i<vagas;i++){
+        const inicio=Math.floor(i*restantes.length/vagas);
+        const fim=Math.floor((i+1)*restantes.length/vagas);
+        const largura=Math.max(1,fim-inicio);
+        const indice=inicio+((rodada+Math.floor(largura/2))%largura);
+        selecao.push(restantes[indice]!);
+    }
+    return selecao;
+}
+/** Entre mercados confirmados, preserva os de maior divida e visita
+ * mercados diferentes a cada rodada. Nunca aumenta a cota HTTP/RPC.
+ */
+export function selecionarMercadosParaDevedores<T>(
+    mercados: readonly T[],quantidade:number,rodada:number,
+):T[]{
+    if(!Number.isSafeInteger(quantidade)||quantidade<=0
+       ||!Number.isSafeInteger(rodada)||rodada<0)return [];
+    if(mercados.length<=quantidade)return [...mercados];
+    const fixos=Math.max(1,Math.floor(quantidade/2));
+    const resultado=mercados.slice(0,fixos);
+    const outros=mercados.slice(fixos);
+    const vagas=quantidade-fixos;
+    const indices=new Set<number>();
+    for(let i=0;i<vagas;i++){
+        const inicio=Math.floor(i*outros.length/vagas);
+        const fim=Math.floor((i+1)*outros.length/vagas);
+        const largura=Math.max(1,fim-inicio);
+        const idx=inicio+(rodada%largura);
+        indices.add(idx);
+    }
+    for(const idx of indices)resultado.push(outros[idx]!);
+    return resultado;
+}
+
+/** Mantem maiores devedores e alterna os demais, sem confiar em API para tiro. */
+export function selecionarDevedoresParaConferir<T>(
+    devedores:readonly T[],limite:number,rodada:number,
+):T[]{
+    return selecionarMercadosParaDevedores(devedores,limite,rodada);
+}
+
+/**
+ * Prioriza quem esta perto de LLTV (somente DADO API para ordenacao).
+ * O scanner onchain CONTINUA conferindo shares, colateral e oracle no mesmo
+ * bloco. Uma classificacao API errada nunca autoriza um tiro.
+ *
+ * Preserva metade da capacidade para a ordem rotativa original: pequenos
+ * devedores e posicoes sem valor USD ainda entram no scanner.
+ */
+export function selecionarDevedoresPorRisco(
+    devedores:readonly DevedorDaApi[],lltv:Decimal,limite:number,rodada:number,
+):DevedorDaApi[]{
+    if(!Number.isSafeInteger(limite)||limite<=0
+      ||!Number.isSafeInteger(rodada)||rodada<0)return [];
+    if(devedores.length<=limite)return [...devedores];
+    const medidos=devedores.map(d=>{
+        let hf:Decimal|null=null;
+        try{
+            if(d.borrowAssetsUsd!==null&&d.collateralUsd!==null){
+                const debt=new Decimal(d.borrowAssetsUsd);
+                const col=new Decimal(d.collateralUsd);
+                if(debt.isFinite()&&col.isFinite()&&debt.gt(0)&&col.gte(0)&&lltv.gt(0))
+                    hf=col.mul(lltv).div(debt);
+            }
+        }catch{hf=null}
+        return{d,hf};
+    }).filter(x=>x.hf!==null);
+    if(medidos.length===0)return selecionarDevedoresParaConferir(devedores,limite,rodada);
+    medidos.sort((a,b)=>a.hf!.cmp(b.hf!));
+    const metade=Math.ceil(limite/2);
+    const prioritarios=medidos.slice(0,metade).map(x=>x.d);
+    const excluidos=new Set(prioritarios.map(x=>x.endereco.toLowerCase()));
+    const demais=devedores.filter(x=>!excluidos.has(x.endereco.toLowerCase()));
+    const rotativos=selecionarDevedoresParaConferir(demais,limite-prioritarios.length,rodada);
+    return [...prioritarios,...rotativos];
+}
 export function consultaDeDevedores(idDoMercado: string, primeiros: number, pular: number): string {
     return JSON.stringify({
         query: `query($id: String!, $first: Int!, $skip: Int!) {
-  marketPositions(where: { marketUniqueKey_in: [$id] }, first: $first, skip: $skip) {
-    items { user { address } state { borrowShares collateral } }
+  marketPositions(where: { marketUniqueKey_in: [$id] }, first: $first, skip: $skip, orderBy: BorrowShares, orderDirection: Desc) {
+    items { user { address } state { borrowShares collateral borrowAssetsUsd collateralUsd } }
   }
 }`,
         variables: { id: idDoMercado, first: primeiros, skip: pular },
@@ -742,6 +904,9 @@ export interface DevedorDaApi {
     endereco: string;
     /** As shares que a API diz. CONFERENCIA, nunca fonte para decidir. */
     borrowSharesDaApi: bigint | null;
+    /** Valores USD da API so para priorizar risco; jamais decidem liquidação. */
+    borrowAssetsUsd: string | null;
+    collateralUsd: string | null;
 }
 
 /** Le a resposta do GraphQL. Item sem endereco nao vira devedor. */
@@ -764,7 +929,16 @@ export function lerDevedores(corpo: unknown): DevedorDaApi[] {
             if (typeof s === 'string' && /^\d+$/.test(s)) shares = BigInt(s);
             else if (typeof s === 'number' && Number.isInteger(s)) shares = BigInt(s);
         } catch { shares = null; }
-        fora.push({ endereco: end, borrowSharesDaApi: shares });
+        const usd=(v:unknown):string|null=>{
+            if(typeof v!=='string'&&typeof v!=='number')return null;
+            try{
+                const n=new Decimal(v);
+                return n.isFinite()&&n.gte(0)?n.toString():null;
+            }catch{return null}
+        };
+        fora.push({ endereco: end, borrowSharesDaApi: shares,
+            borrowAssetsUsd:usd(estado?.borrowAssetsUsd),
+            collateralUsd:usd(estado?.collateralUsd) });
     }
     return fora;
 }
@@ -810,6 +984,17 @@ export async function enumerarDevedores(
         try { corpo = JSON.parse(cru); } catch {
             return { devedores, requisicoes, completa: false,
                 falha: `o GraphQL respondeu NÃO-JSON: "${sanitizar(cru.slice(0, 50))}"` };
+        }
+        // A API pode responder HTTP 200 com erros GraphQL. Antes isso
+        // virava 0 devedores com completa=true, escondendo falha de schema.
+        const envelope=(corpo&&typeof corpo==='object')?
+            corpo as Record<string,unknown>:null;
+        if(!envelope||!envelope.data||typeof envelope.data!=='object'
+          ||Array.isArray(envelope.errors)&&envelope.errors.length>0
+          ||!((envelope.data as Record<string,unknown>).marketPositions as
+            Record<string,unknown>|undefined)?.items) {
+            return {devedores,requisicoes,completa:false,
+                falha:'GraphQL HTTP 200 sem marketPositions.items valido ou com errors'};
         }
         const lidos = lerDevedores(corpo);
         let novos = 0;

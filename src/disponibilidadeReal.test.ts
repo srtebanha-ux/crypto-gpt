@@ -200,35 +200,31 @@ test('10. o monitoramento NUNCA passa pelo portão das secundárias', () => {
     }).pode, true);
 });
 
-test('o portão do histórico olha o provedor ATIVO, não "algum esgotado"', () => {
-    // LÊ O CÓDIGO. Era `CAPACIDADE.esgotados().length > 0` — e esse predicado é
-    // justamente o que o log de 2026-10-14 provou errado. Um teste de valor não
-    // pega um portão que consulta a fonte errada.
-    const fonte = readFileSync(join(__dirname, 'cacarAoVivo.ts'), 'utf8');
-    const i = fonte.indexOf('async function lerFaixaPartindoSePreciso');
-    assert.ok(i > 0);
-    const corpo = fonte.slice(i, i + 3000);
-    assert.ok(
-        !/if \(VAZAO\.estaEmRecuo\(\) \|\| CAPACIDADE\.esgotados\(\)\.length > 0\)/.test(corpo),
-        'o portão do histórico voltou a olhar "algum provedor esgotado"',
-    );
-    assert.ok(
-        corpo.includes("DISPONIBILIDADE.veredicto(aqui, 'eth_getLogs')"),
-        'o portão do histórico não consulta o veredicto do provedor ativo',
-    );
-    // E o censo tem de passar por `autorizarVarredura`, que é quem junta
-    // disponibilidade COM orçamento.
-    assert.ok(
-        fonte.includes('autorizarVarredura({'),
-        'o censo não passa por autorizarVarredura: disponibilidade sem orçamento é o defeito oposto',
-    );
-    // O contador morto saiu.
-    assert.ok(
-        !/ADIADAS\s*=\s*\{[^}]*morpho/.test(fonte),
-        'ADIADAS.morpho voltou, e nada o incrementa: é zero por construção',
-    );
+test('o historico protege o provedor ativo e o censo dedicado respeita orçamento e checkpoint',()=>{
+    // A varredura de DEVEDORES utiliza o RPC do monitoramento: seu veredicto
+    // deve ser por metodo e pelo provedor ATIVO, nao por outro esgotado.
+    const fonte=readFileSync(join(__dirname,'cacarAoVivo.ts'),'utf8');
+    const i=fonte.indexOf('async function lerFaixaPartindoSePreciso');
+    assert.ok(i>0);
+    const corpo=fonte.slice(i,i+3200);
+    assert.ok(!/if \(VAZAO\.estaEmRecuo\(\) \|\| CAPACIDADE\.esgotados\(\)\.length > 0\)/.test(corpo));
+    assert.ok(corpo.includes("DISPONIBILIDADE.veredicto(aqui, 'eth_getLogs')"),
+      'devedores usam veredicto do RPC ativo');
+    // O CENSO de nove dias passou para outro RPC, de proposito.
+    // Verificar antigo autorizarVarredura seria forçar esse trafego pesado
+    // novamente no monitoramento do Caçador.
+    const j=fonte.indexOf('async function quandoFoiAUltimaLiquidacao');
+    assert.ok(j>i);
+    const censo=fonte.slice(j,j+11500);
+    assert.match(censo,/new OrcamentoDaTarefa\('historico'/);
+    assert.match(censo,/while\s*\(proximoAte>=menorBloco[\s\S]*?orcamento\.pedir\(\)\)/);
+    assert.match(censo,/logsComRpcHistorico<LogRPC>/);
+    assert.match(censo,/urlSecundaria:process\.env\.CACA_HISTORICO_RPC_URL/);
+    assert.match(censo,/if\(proximoAte>=menorBloco\)[\s\S]*?return;/,
+      'censo incompleto nao declara ausencia de liquidacoes');
+    assert.match(censo,/proximoAte=de-1/,'falhas nunca pulam blocos no cursor');
+    assert.ok(!/ADIADAS\s*=\s*\{[^}]*morpho/.test(fonte));
 });
-
 test('o inventário separa HTTP de RPC e NÃO cobra CU de HTTP', () => {
     // *"Não contabilize chamadas HTTP como unidades de consumo RPC."*
     const inv = new Inventario();

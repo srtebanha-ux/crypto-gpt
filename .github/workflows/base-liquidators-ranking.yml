@@ -1,0 +1,36 @@
+name: Base Liquidator Leaderboard / Read-only
+
+on:
+  push:
+    branches:
+      - feat/ranking-liquidadores-base-20261018
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Test event attribution before counting
+        run: node --test scripts/rankearLiquidadoresBase.test.cjs
+      - name: Scan 7 days of Base Aave and Morpho liquidations
+        env:
+          RANK_DAYS: '7'
+          RANK_CHUNK: '800'
+        run: node scripts/rankearLiquidadoresBase.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: base-liquidators-ranking
+          path: .tmp/rankingLiquidadoresBase.json
+          if-no-files-found: warn
+          retention-days: 14

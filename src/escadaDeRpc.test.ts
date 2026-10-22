@@ -6,7 +6,7 @@
 // milissegundos que decidem a liquidação em cima de uma resposta que já veio.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EscadaDeRpc, ehFalhaDeTransporte, escadaDeRpcs, listaDeRpcs, porQueNaoServe } from './escadaDeRpc';
+import { EscadaDeRpc, ehFalhaDeTransporte, escadaDeRpcs, listaDeRpcs, porQueNaoServe, logsComRpcHistorico, faixaHistoricaReversa, classificarFalhaHistorica } from './escadaDeRpc';
 
 const A = 'https://a.exemplo/v2/k';
 const B = 'https://b.exemplo';
@@ -214,4 +214,99 @@ test('URL quebrada NÃO é degrau — o caso real do log de 2026-10-09', () => {
         listaDeRpcs({ CACA_RPC_URLS: `${colada},https://mainnet.base.org` }, []),
         ['https://mainnet.base.org'],
     );
+});
+
+
+const FILTRO_HISTORICO={
+    address:'0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
+    fromBlock:'0x123',toBlock:'0x124',topics:['0xdead'],
+};
+test('historico: quando principal responde, nao usa segundo RPC',async()=>{
+    let fallbackChamado=0;
+    const resultado=await logsComRpcHistorico(async()=>[{blockNumber:'0x123'}],
+        FILTRO_HISTORICO,{buscar:async()=>{fallbackChamado++;throw Error('nao deveria ser chamado')}});
+    assert.equal(resultado.origem,'primario');
+    assert.equal(resultado.logs.length,1);
+    assert.equal(fallbackChamado,0);
+});
+test('historico: archive 403 usa somente eth_getLogs read-only no RPC secundario',async()=>{
+    const pedidos:Record<string,unknown>[]=[];
+    const resultado=await logsComRpcHistorico<{blockNumber:string}>(
+        async()=>{throw Error('HTTP 403 archive requires token')},FILTRO_HISTORICO,{
+            urlSecundaria:'https://mainnet.base.org',
+            buscar:async(_url,init)=>{
+                pedidos.push(JSON.parse(String(init?.body)) as Record<string,unknown>);
+                return {ok:true,json:async()=>({jsonrpc:'2.0',id:1,
+                    result:[{blockNumber:'0x124'}]})} as Response;
+            },
+        });
+    assert.equal(resultado.origem,'secundario');
+    assert.equal(resultado.provedor,'mainnet.base.org');
+    assert.equal(resultado.logs[0]?.blockNumber,'0x124');
+    assert.equal(pedidos[0]?.method,'eth_getLogs');
+    assert.deepEqual(pedidos[0]?.params,[FILTRO_HISTORICO]);
+});
+test('historico: 403 dos dois RPCs nunca se torna zero liquidacoes',async()=>{
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('403 archive')},
+        FILTRO_HISTORICO,{buscar:async()=>({ok:false,status:403}) as Response}),
+        /historico indisponivel em ambos RPCs/);
+});
+test('historico: resposta malformada nao significa lista vazia',async()=>{
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('archive')},
+        FILTRO_HISTORICO,{buscar:async()=>({ok:true,json:async()=>({result:null})}) as Response}),
+        /sem lista de logs valida/);
+});
+test('historico: RPC secundario aceita apenas HTTPS valido',async()=>{
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('archive')},
+        FILTRO_HISTORICO,{urlSecundaria:'http://exemplo.org'}),
+        /invalido/);
+});
+
+test('censo da Base: paginação reversa 9 dias sem buracos, inclusive com ajuste de tamanho',()=>{
+    const inicio=100000;
+    const topo=inicio+388799;
+    const vistos=new Set<number>();
+    let ate=topo,contagem=0;
+    while(ate>=inicio){
+        const tamanho=contagem%3===0?1800:contagem%3===1?900:50;
+        const f=faixaHistoricaReversa(ate,inicio,tamanho);
+        assert.equal(f.ate,ate);
+        assert.equal(f.proximoAte,f.de-1);
+        for(let n=f.de;n<=f.ate;n++){
+            assert.equal(vistos.has(n),false,'releitura desnecessária ou faixa sobreposta');
+            vistos.add(n);
+        }
+        ate=f.proximoAte;
+        contagem++;
+    }
+    assert.equal(vistos.size,388800);
+    assert.equal(ate,inicio-1);
+    assert.deepEqual(faixaHistoricaReversa(50,49,1800),{de:49,ate:50,proximoAte:48});
+    assert.throws(()=>faixaHistoricaReversa(48,49,100),/invalida/);
+    assert.throws(()=>faixaHistoricaReversa(100,0,0),/invalida/);
+});
+
+test('censo historico: nao reduz faixa por 429, 403, timeout ou erro de rede',()=>{
+    for(const msg of [
+        'historico indisponivel: secundario=HTTP 429',
+        'too many requests',
+        'rate limit exceeded',
+    ])assert.equal(classificarFalhaHistorica(msg),'frequencia',msg);
+    for(const msg of [
+        'historico indisponivel: secundario=HTTP 403',
+        'unauthorized archive requires subscription',
+    ])assert.equal(classificarFalhaHistorica(msg),'acesso',msg);
+    for(const msg of [
+        'fetch failed',
+        'operation aborted due to timeout',
+        'HTTP 503 Service Unavailable',
+    ])assert.equal(classificarFalhaHistorica(msg),'transitoria',msg);
+});
+test('censo historico: reduz faixa APENAS quando o provedor nega tamanho da consulta',()=>{
+    for(const msg of [
+        'block range exceeds limit of 1000 blocks',
+        'query returned more than 10000 results',
+        'response size exceeded',
+        'block range too large',
+    ])assert.equal(classificarFalhaHistorica(msg),'faixa',msg);
 });

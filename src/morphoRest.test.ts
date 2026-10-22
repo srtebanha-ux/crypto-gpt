@@ -421,10 +421,10 @@ test('falha de RPC DEPOIS de enumeração boa preserva os mercados como NÃO CON
     }
 });
 
-test('o filtro que não seleciona ninguém NÃO lê como ausência de mercado', async () => {
-    // *"Filtros que não selecionam nenhum mercado."* Os mercados existem; a
-    // faixa é escolha nossa, e dizer "a Base não tem mercado" aqui seria a
-    // conclusão mais caposa possível pelo motivo mais barato.
+test('mercados LLTV 94,5% e 96,5% entram na sondagem mas NAO sao validados so pela API', async () => {
+    // Mercados 94,5/96,5% pagam incentivo positivo observado no censo real.
+    // Eles entram na sondagem, mas sem a identidade confirmada na corrente
+    // continuam FORA de qualquer decisao de envio.
     const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
     const { lerMemoria } = await import('./memoriaDaDescoberta');
     const { mkdtemp, readFile } = await import('fs/promises');
@@ -437,7 +437,7 @@ test('o filtro que não seleciona ninguém NÃO lê como ausência de mercado', 
         infra: { provedoresEsgotados: [], noFallback: false },
         buscar: async () => ({
             status: 200,
-            // Todos de LLTV alto: decodificam, e nenhum está na faixa.
+            // Ambos de LLTV > 77%: identificados mas nao confirmados por API.
             text: async () => corpoRest([
                 itemRest(1, '945000000000000000'),
                 itemRest(2, '965000000000000000'),
@@ -450,10 +450,10 @@ test('o filtro que não seleciona ninguém NÃO lê como ausência de mercado', 
 
     const t = lerMemoria(JSON.parse(await readFile(memoria, 'utf8'))).ultimaTentativa!;
     assert.equal(t.mercadosEnumerados, 2, 'os mercados fora da faixa desapareceram da contagem');
-    assert.equal(t.mercadosQuePagam, 0);
-    // O desfecho gravado é o TOKEN, e isso é de propósito: ele é estável e
-    // comparável entre versões, enquanto a prosa muda. A prosa sai no log, via
-    // `comoLerODesfecho`.
-    assert.equal(t.desfecho, 'foraDaFaixa');
-    assert.match(comoLerODesfecho('foraDaFaixa'), /o filtro é que não selecionou/);
+    assert.equal(t.mercadosQuePagam, 0,'a faixa historica de bonus alto permanece separada');
+    // A API de terceiro nao prova parametros: a tentativa deve reprovar
+    // por RPC inacessivel ou porque eth_call nao confirmou a identidade.
+    assert.ok(['validacaoRecusou','rpcIndisponivel'].includes(t.desfecho),
+       'mercados que nao passaram na prova nao sao automaticamente elegiveis');
+    assert.equal(t.mercadosConfirmados,0,'ranking e indice nao comprovam mercado');
 });

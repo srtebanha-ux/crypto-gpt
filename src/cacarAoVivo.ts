@@ -2,6 +2,13 @@
 import { Decimal } from 'decimal.js';
 import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
 import { createLogger } from './logger';
+import { configurarRadarCaca, atualizarRadarCaca, registrarAlvoCaca, registrarTiroCaca, registrarPlacarCaca } from './cacaTelemetria';
+import { iniciarObservadorSvr } from './titanSvrObservador';
+import { iniciarObservadorFlashblocks } from './titanFlashblocks';
+import { triarLeilaoSvr } from './titanSvrTriagem';
+import { iniciarMonitorProntidaoSvr } from './titanSvrDiagnostico';
+import { iniciarRadarMorphoMultirrede } from './titanRadarMorphoMultirrede';
+import { politicaDeCoberturaMorpho, indiceDeRodadaMorpho } from './titanMorphoCobertura';
 import { exigirAtivacao } from './ativacao';
 import { REDES, RPCS_PARA_TENTAR, SELETOR_GET_RESERVES_LIST, decodificarListaDeEnderecos, faixasDeBlocos, TOPIC_LIQUIDATION_CALL, decodificarLiquidacao } from './liquidacoes';
 import { contarPorEndereco, quemTemDono, comoLerAContagem, repartirPorFaixa } from './concentracao';
@@ -22,17 +29,40 @@ import {
 import { esperarBlocoOuTempo, OuvinteDeBlocos, enderecoDeBlocos, negociarWs, comoLerANegociacao } from './gatilhoDeBloco';
 import { registrar as registrarDeriva, blocosAteCruzar, esquecerQuemSaiu, oQueVemPorAi, projetar, emQuantoTempo, type Amostra } from './deriva';
 import { SELETOR_SYMBOL, lerSymbol, simboloDaBinance, cotacoesDeQualquerFonte, quedaDoMercado } from './precoDeMercado';
+import { OracleShadow } from './oracleShadow';
 import { abrirConexoes, buscar, CONEXOES_POR_SERVIDOR } from './conexoes';
 import { TOPIC_BORROW, devedoresDosEventos, SELETOR_CONTA_DO_USUARIO, decodificarContaDoUsuario, quedaAteLiquidar } from './posicoes';
 import { CHAMADAS_POR_MULTICALL, MULTICALL3, codificarAggregate3, decodificarAggregate3, decodificarAggregate3Rapido, partirEmPedacos } from './multicall';
 import { naoCruzouAinda, codificarUserReserveData, decodificarUserReserveData, COBRIR_O_MAXIMO, ehLimiteDoProvedor } from './liquidar';
 import { enderecoDaResposta, escolherParPorValor, type SaldoNaMoeda } from './reservas';
 import { codificarCacaV1, codificarCacaV2, lerRespostaDaCaca, pisoNoContrato, PISO_IMPOSSIVEL, isDevedorIgnorado, julgarCofre, podeCacarComDinheiroReal, SELETOR_COFRE, SELETOR_DONO, COFRE_ESPERADO } from './caca';
-import { POOLS } from './contratos';
-import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte } from './escadaDeRpc';
+import { POOLS, AERODROME } from './contratos';
+import { dadosGetPoolAerodrome, lerPoolAerodrome, classificarRota } from './cacaRotaAerodrome';
+import { quantiaParaCotacaoUsd, encodeQuoteAerodrome, decodeQuoteAerodrome, usdDoToken } from './cacaQuoteAerodrome';
+import { EURC_BASE, USDC_BASE, POOL_CANDIDATO, FABRICA_SLIPSTREAM, QUOTER_SLIPSTREAM,
+    dadoPool, dadoFabricar, dadoQuoteSlipstream, decodificarMeta,
+    decodificarPoolConfirmado, validaPoolSlipstream, decodificarQuoteSlipstream
+} from './cacaSlipstream';
+import { modosV2ParaSimular, type PoolsAerodromeConfirmados } from './cacaModosV2';
+import { permiteV1NaPoolPadrao } from './cacaV1Pool';
+import { custoMaximoMultiDentroDoTeto, reservarUmEnvioMulti } from './titanCanary';
+import { reservarGasCompartilhado, conciliarGasCompartilhado, pontuacaoDeLiquidez } from './cacaDuasRotas';
+import { conferirJanelaDeNonce } from './janelaDeNonce';
+import {
+    prepararOfertaMulti, revalidarOfertaMulti, poolsDoCaca, FABRICA_V3_BASE, tetoL1PeloCaca,
+    gasEmTokenDaDivida, lucroConfirmadoPorEventoMulti, type OfertaMulti,
+    creditoMaximoComResiduoUsdc,
+} from './titanPonteMultiHop';
+import { EscadaDeRpc, listaDeRpcs, escadaDeRpcs, ehFalhaDeTransporte, logsComRpcHistorico, faixaHistoricaReversa, classificarFalhaHistorica } from './escadaDeRpc';
 import { oQueFazerComOEnvio } from './degrauFinal';
 import { LivroDeEpisodios, comoLerOsEpisodios, gravarLivro, lerLivro, FAIXAS_DE_DISTANCIA, type EstadoDoEpisodio } from './episodios';
 import { coberturaQuePassa, comoLerOTamanho, comoEstaASaudeDoAlvo } from './residuo';
+import { coberturaPrioritariaPequena, enderecosPrioritarios } from './cacaFechamentoPequenos';
+import { reservarAlvosNaBrasa, acordarPorBlocoSeAlvoCritico } from './cacaPrioridadeBrasa';
+import { ordenarCaidosPorPremio } from './cacaOrdenarCaidos';
+import { dadosDaFonteNoAaveOracle, lerFonteDoAaveOracle } from './cacaFeedDaAave';
+import { calldataDaConta, lerEModeUsuario, lerPalavraDeConta, resumirReservas,
+    SELETOR_CONFIG_USUARIO, SELETOR_EMODE_USUARIO } from './cacaRaioXConta';
 import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type AvaliacaoEmCurso } from './cronometro';
 import { esperarOProximoCiclo } from './despertar';
 import {
@@ -869,6 +899,10 @@ const SELETOR_BLOCO_DO_MULTICALL = '0x42cbb15c';
 const REDE_ESCOLHIDA = (process.env.CACA_REDE ?? 'base').toLowerCase();
 const REDE = REDES[REDE_ESCOLHIDA] ?? REDES.base;
 const ENVIAR = process.env.CACA_ENVIAR === '1';
+/** Modo de capital protegido: somente o executor Morpho Multi-Hop ja liquidavel. */
+const SOMENTE_MULTIHOP = process.env.CACA_SOMENTE_MULTIHOP === '1';
+/** Os DOIS caminhos concorrem com o MESMO nonce, somente sobre posicao ja liquidavel. */
+const COMBINADO_SEGURO = process.env.CACA_COMBINADO_SEGURO === '1';
 // A janela do PRIMEIRO boot, quando ainda não existe cache: 30 dias, para o bot
 // começar a caçar em minutos em vez de em duas horas.
 //
@@ -2252,6 +2286,8 @@ function desligarTudo(): void {
     }
 }
 
+// Uma tentativa anterior de boot nao pode manter sockets e listeners vivos.
+let oracleShadowDaSessao: OracleShadow | null = null;
 async function principal(): Promise<'parar' | void> {
     // O laco externo recria principal() a cada tropeco. Sem isto, cada
     // reinicio abandonava um WebSocket vivo com cadeia de reconexao eterna:
@@ -2520,6 +2556,22 @@ async function principal(): Promise<'parar' | void> {
         log.warn('Não consegui ler os símbolos das moedas; sigo sem preço de mercado.', { erro: (e as Error).message });
     }
     const paresDaBinance = [...new Set(parPorToken.values())];
+    // Pre-aquecimento Oracle Shadow: dados de Binance/Coinbase via WebSocket
+    // sao APENAS gatilho de leitura. Aave e o contrato executor sempre
+    // confirmam liquidabilidade e lucro com dados reais da Base.
+    // Desligar explicitamente via CACA_ORACLE_SHADOW=0, sem reconfigurar chaves.
+    // Reboots internos nao podem acumular dois observers e duas conexoes WS.
+    oracleShadowDaSessao?.parar();
+    const oracleShadow = process.env.CACA_ORACLE_SHADOW === '0'
+        ? null : new OracleShadow(paresDaBinance,(mensagem)=>
+            log.info('[ORACLE-SHADOW/WS] '+mensagem));
+    oracleShadowDaSessao=oracleShadow;
+    oracleShadow?.iniciar();
+    log.info('[ORACLE-SHADOW] Monitor de precos em tempo real.',{
+        habilitado:oracleShadow!==null,pares:paresDaBinance,
+        acesso:'somente leitura; nunca assina, nunca dispara',
+        fallback:'REST das tres casas quando websocket nao tem todas as cotacoes',
+    });
     log.info('Olho no mercado, fora da blockchain (custo zero em CU).', {
         pares: paresDaBinance,
         moedasAcompanhadas: parPorToken.size,
@@ -2566,6 +2618,9 @@ async function principal(): Promise<'parar' | void> {
     let quentes: string[] = [];
     /** Os mais frageis de todos: viajam de graca no multicall dos precos. */
     let brasa: string[] = [];
+    // Atualizado SOMENTE pelas leituras onchain do multicall da brasa.
+    let menorPrioritarioAoVivo: Decimal | null = null;
+    let despertaPorAlvo = false;
     /**
      * A saude de cada um da brasa ao longo do tempo.
      *
@@ -2896,6 +2951,36 @@ async function principal(): Promise<'parar' | void> {
     // Uma politica, lida uma vez. Antes cada montagem relia o ambiente por
     // conta propria, e foi assim que uma delas ficou com cinco campos de nove.
     const POLITICA = politicaDoTiro();
+    // Flashblocks via RPC WSS compativel: somente observador, opt-in.
+    // Nao toca nonce, carteira, gas nem executa liquidacoes, e cai para
+    // newHeads se o provedor descontinuar newFlashblocks (Denim).
+    iniciarObservadorFlashblocks(log);
+    // Independente do caminho Aave e Morpho. Somente assiste leiloes Atlas,
+    // sem chaves, sem novas transacoes e sem aguardar RPC nem bloquear tiros.
+    // Ativado apenas com TITAN_SVR_OBSERVAR=1.
+    iniciarObservadorSvr(log,(auction)=>{
+        const triagem=triarLeilaoSvr(auction,process.env);
+        log.info('[TITAN/SVR-TRIAGEM] Preco futuro e bloqueios financeiros.',{
+            auctionId:auction.id,agregador:auction.precoPrevisto?.aggregador??null,
+            novoPreco:auction.precoPrevisto?.medianPrice.toString()??null,
+            dapp:auction.dapp??null,
+            prontoParaEnviar:triagem.prontoParaEnviar,
+            bloqueios:triagem.bloqueios,
+            nota:'Triagem de hints nao substitui posicao onchain, simulacao ou recibo'
+        });
+    });
+    // Leitura publica do Atlas: bond + bytecode do executor, sem envio nem assinatura.
+    iniciarMonitorProntidaoSvr(log,leitor,donoCarteira);
+    // Monitor Morpho across EVM networks; READ ONLY and independent of the Base sender.
+    iniciarRadarMorphoMultirrede(log);
+    // Executor Morpho quente acompanha novos blocos independentemente do
+    // censo REST de tres minutos. Usa a lista validada pelo radar e multicall.
+    void import('./titanMorphoHot').then(({iniciarGatilhoQuenteMorpho})=>{
+        iniciarGatilhoQuenteMorpho(process.env);
+    }).catch(e=>log.error('[TITAN/MORPHO-HOT] Nao iniciei o gatilho.',{
+        erro:e instanceof Error?e.message:String(e),
+    }));
+
     // OS BOTÕES, NO BOOT. Uma linha, sempre.
     //
     // `comoLerAPolitica` existia desde 2026-09-28, mas só saía dentro do
@@ -2968,46 +3053,71 @@ async function principal(): Promise<'parar' | void> {
     });
 
     if (process.env.CACA_MORPHO_API === '1') {
-        // A DESCOBERTA SEM `eth_getLogs`: a API enumera, a corrente valida.
-        // Roda desgrudada do laco, igual a varredura por evento.
-        //
-        // E NAO E GATEADA PELO ESTADO DO RPC. `disponibilidadeDoCanal('apiHttp')`
-        // nao le nenhum campo de RPC, de proposito, e um teste exige isso em
-        // todas as combinacoes de estado.
+        // Este canal HTTP continua INDEPENDENTE da capacidade do RPC.
+        // O scanner onchain usa o RPC somente depois de enumerar.
         const canal = disponibilidadeDoCanal('apiHttp', infraAgora);
-        log.warn('[MORPHO/API] FLAG RECONHECIDA. Vou descobrir mercados pela API, UMA vez, em paralelo.', {
-            flag: 'CACA_MORPHO_API=1',
-            canal: canal.pode ? 'apiHttp LIVRE' : 'apiHttp PAUSADO',
-            porqueOCanal: canal.porque,
-            rpcEsgotado: infraAgora.provedoresEsgotados.length > 0
-                ? `SIM (${infraAgora.provedoresEsgotados.join(', ')}) — e isto NÃO bloqueia este canal`
-                : 'não',
-            depois: 'apague CACA_MORPHO_API quando a linha [MORPHO/API] Descoberta sair',
-        });
-        void (async () => {
+        if (!canal.pode) {
+            log.warn('[MORPHO/RADAR] API pausada pelo proprio canal HTTP, sem prejudicar o CACA.', {
+                porque:canal.porque,
+            });
+        }
+        // Antes a API rodava UMA vez no boot e confirmava sempre poucos
+        // mercados/devedores. O rodizio usa fatias de 15min, mas um processo
+        // que fica no ar nao rodava a proxima fatia: 1300+ mercados ficavam
+        // fora da validacao indefinidamente. Novo ciclo limitado, sem carteira.
+        const politicaMorpho = politicaDeCoberturaMorpho(process.env);
+        const intervaloMorpho = politicaMorpho.intervaloMs;
+        let emCursoMorpho = false;
+        let rodadaMorpho = 0;
+        const atualizarMorpho = async (): Promise<void> => {
+            if (emCursoMorpho) {
+                log.warn('[MORPHO/RADAR] Rodada anterior continua; nao duplico API nem RPC.');
+                return;
+            }
+            emCursoMorpho = true;
+            rodadaMorpho++;
             try {
                 const { descobrirMorphoPorApi } = await import('./mercadosDoMorpho');
                 await descobrirMorphoPorApi({
                     infra: infraAgora,
-                    // O INVENTARIO VE A DESCOBERTA. Antes ela usava `fetch` cru e
-                    // o consumo dela era invisivel — entao a ausencia dela no
-                    // `porTarefaEMetodo` nao provava nem que rodou nem que nao.
-                    // HTTP e RPC entram separados: HTTP nao consome CU.
+                    // Orcamentos por rodada; HTTP nao e CU de RPC.
+                    tetoDeRequisicoes: politicaMorpho.requisicoesHttp,
+                    tetoDeMs: politicaMorpho.prazoMs,
+                    tetoDeValidacoes: politicaMorpho.mercadosPorRodada,
+                    tetoDeMercadosComDevedores: politicaMorpho.mercadosComDevedores,
+                    tetoDePosicoesPorMercado: politicaMorpho.posicoesPorMercado,
+                    indiceDaRodada: indiceDeRodadaMorpho(Date.now(), intervaloMorpho),
                     contarHttp: (host) => INVENTARIO.contarHttp('morpho', host),
                     contarRpc: (metodo) => INVENTARIO.contar('morpho', metodo),
                 });
-                // Reler para o `[BLOCO]` passar a publicar o resultado desta
-                // volta sem esperar o proximo boot.
                 MEMORIA_MORPHO = await lerMemoriaDoDisco();
-            } catch (e) {
-                log.error('[MORPHO/API] A descoberta falhou, e o bot segue caçando.', {
-                    erro: e instanceof Error ? e.message : String(e),
-                    oQueIssoNaoE: 'não é "a API retornou vazio" nem "os mercados não passaram na '
-                        + 'validação": é a tarefa estourando. Ver [MORPHO/API] Descoberta, que '
-                        + 'não saiu',
+                log.info('[MORPHO/RADAR] Rodada concluida, sem tocar nonce/carteira.', {
+                    rodada:rodadaMorpho,proximaEmMs:intervaloMorpho,
+                    limiteMercadosPorRodada:politicaMorpho.mercadosPorRodada,
+                    limitePosicoesPorMercado:politicaMorpho.posicoesPorMercado,
+                    observacao:'risco estimado nao e liquidacao autorizada',
                 });
-            }
-        })();
+            } catch (e) {
+                log.error('[MORPHO/RADAR] Rodada falhou, CACA continua.', {
+                    rodada:rodadaMorpho,
+                    erro: e instanceof Error ? e.message : String(e),
+                });
+            } finally { emCursoMorpho = false; }
+        };
+        log.info('[MORPHO/RADAR] Descoberta recorrente habilitada.', {
+            intervaloMs:intervaloMorpho,
+            mercadosPorRodada:politicaMorpho.mercadosPorRodada,
+            mercadosComDevedores:politicaMorpho.mercadosComDevedores,
+            posicoesPorMercado:politicaMorpho.posicoesPorMercado,
+            limiteRequisicoesHttp:politicaMorpho.requisicoesHttp,
+            limiteTempoMs:politicaMorpho.prazoMs,
+            fluxo:'API enumera; cinco parametros, divida, garantia, market e oracle lidos onchain; SEM envio',
+        });
+        void atualizarMorpho();
+        const relogioMorpho = setInterval(() => {
+            void atualizarMorpho();
+        }, intervaloMorpho);
+        relogioMorpho.unref?.();
     }
 
     if (process.env.CACA_MERCADOS_MORPHO === '1'
@@ -3307,6 +3417,175 @@ async function principal(): Promise<'parar' | void> {
     let tentouArmarEm = 0;
     /** Impede armar em cima de armar: `void armar()` nao espera o anterior. */
     let armando = false;
+    // O raio-X nao interfere no prearmamento: chamadas de leitura separadas,
+    // so na PRIMEIRA descoberta do par de um alvo priorizado por este boot.
+    const paresAnunciados = new Set<string>();
+    const fontesConsultadas = new Set<string>();
+    const rotasEmLeitura = new Set<string>();
+    const rotasConfirmadas = new Map<string,PoolsAerodromeConfirmados>();
+    const chaveDeRota=(g:string,d:string)=>g.toLowerCase()+'/'+d.toLowerCase();
+    async function descobrirRota(g:string,d:string):Promise<void>{
+        if(g.toLowerCase()===d.toLowerCase())return;
+        const chave=chaveDeRota(g,d);
+        if(rotasEmLeitura.has(chave)||rotasConfirmadas.has(chave))return;
+        rotasEmLeitura.add(chave);
+        try{
+            const fabrica=AERODROME.factory.endereco;
+            const ler=async(stable:boolean):Promise<{ok:boolean;pool:string|null}>=>{
+                try{
+                    const raw=await chamar<string>('eth_call',[{
+                        to:fabrica,data:dadosGetPoolAerodrome(g,d,stable),
+                    },'latest']);
+                    if(!/^0x[0-9a-fA-F]{64}$/.test(raw))return {ok:false,pool:null};
+                    return {ok:true,pool:lerPoolAerodrome(raw)};
+                }catch{return {ok:false,pool:null};}
+            };
+            const [estavel,volatil]=await Promise.all([ler(true),ler(false)]);
+            if(estavel.ok&&volatil.ok){
+                rotasConfirmadas.set(chave,{estavel:estavel.pool,volatil:volatil.pool});
+            }
+            log.info('[CACA/ROTA-REAL] Pools Aerodrome verificadas on-chain.',{
+                garantia:g,divida:d,estavel:estavel.pool,volatil:volatil.pool,
+                respostaCompleta:estavel.ok&&volatil.ok,
+                diagnostico:estavel.ok&&volatil.ok
+                  ? classificarRota(estavel.pool,volatil.pool):'inconclusivo',
+                criterio:'cada candidato passa no eth_call integral antes de reservar nonce',
+            });
+            // Pre-quote de verdade, em lote e sem gasto de gas. Para cada par
+            // priorizado, simular venda de 1k, 10k e 40k USD-equivalentes de
+            // GARANTIA. O AaveOracle fornece o preco do token em 8 casas.
+            // Nao presumir que cbBTC tenha 6 decimais nem que EURC vale USD1.
+            // Estas cotacoes so diagnosticam profundidade: nao substituem
+            // a liquidacao completa, nem entram na decisao de nonce/gorjeta.
+            if(estavel.ok&&volatil.ok&&(estavel.pool||volatil.pool)){
+                const decGarantia=casas.get(g.toLowerCase());
+                const decDivida=casas.get(d.toLowerCase());
+                const precoGarantia=precos.get(g.toLowerCase());
+                const precoDivida=precos.get(d.toLowerCase());
+                const faixas=[1000,10000,40000].map(usd=>({
+                    usd,cru:quantiaParaCotacaoUsd(new Decimal(usd),precoGarantia,decGarantia),
+                })).filter((x):x is {usd:number;cru:bigint}=>x.cru!==null);
+                const modos:{modo:'estavel'|'volatil';stable:boolean}[]=[];
+                if(estavel.pool)modos.push({modo:'estavel',stable:true});
+                if(volatil.pool)modos.push({modo:'volatil',stable:false});
+                if(faixas.length>0){
+                    try{
+                        const consultas=faixas.flatMap(f=>modos.map(m=>({
+                            alvo:AERODROME.router.endereco,
+                            dados:encodeQuoteAerodrome(f.cru,g,d,AERODROME.factory.endereco,m.stable),
+                        })));
+                        const respostas=(await lerEmLote(consultas,'pares')).dados;
+                        let indice=0;
+                        for(const faixa of faixas){
+                            const cotacoes=modos.map(m=>{
+                                const saida=decodeQuoteAerodrome(respostas[indice++]??null,faixa.cru);
+                                const usdSaida=saida===null?null:usdDoToken(saida,precoDivida,decDivida);
+                                return {modo:m.modo,
+                                    saidaCrua:saida?.toString()??null,
+                                    saidaUsd:usdSaida?.toFixed(2)??null};
+                            });
+                            const validas=cotacoes.filter(q=>q.saidaCrua!==null);
+                            const melhor=validas.length===0?null:
+                                validas.reduce((a,b)=>BigInt(b.saidaCrua!)>BigInt(a.saidaCrua!)?b:a).modo;
+                            log.info('[CACA/COTACAO-REAL] Router Aerodrome por tamanho e modo.',{
+                                garantia:g,divida:d,entradaUsdReferencia:faixa.usd,
+                                entradaCrua:faixa.cru.toString(),cotacoes,melhor,
+                                limite:'cotacao do momento, SEM premio Aave, flash loan, gas, taxa L1, slippage futuro ou E-Mode',
+                                efeitoNoEnvio:'nenhum: so diagnostico para escolher a proxima melhoria',
+                            });
+                        }
+                    }catch(e){
+                        log.warn('[CACA/COTACAO-REAL] Nao obtive quote confiavel; nao inferir liquidez.',{
+                            garantia:g,divida:d,motivo:e instanceof Error?e.message:String(e),
+                        });
+                    }
+                }else{
+                    log.warn('[CACA/COTACAO-REAL] Preco/decimais do colateral indisponiveis.',{
+                        garantia:g,divida:d,
+                    });
+                }
+            }
+        }finally{rotasEmLeitura.delete(chave);}
+    }
+    // Descoberta separada do executor: o quoter CL e uma CONTRAPROVA de
+    // profundidade, mas V1/V2 nao sabem trocar numa piscina Slipstream.
+    // Contrato de envio, nonce e gorjeta ficam INTACTOS.
+    let slipstreamConsultada=false;
+    async function avaliarSlipstream(g:string,d:string):Promise<void>{
+        if(slipstreamConsultada||g.toLowerCase()!==EURC_BASE.toLowerCase()
+          ||d.toLowerCase()!==USDC_BASE.toLowerCase())return;
+        slipstreamConsultada=true;
+        try{
+            const campos:['token0','token1','factory','tickSpacing']=
+                ['token0','token1','factory','tickSpacing'];
+            const metadados=(await lerEmLote(campos.map(c=>({
+                alvo:POOL_CANDIDATO,dados:dadoPool(c),
+            })),'pares')).dados;
+            const meta=campos.map((nome,i)=>decodificarMeta(nome,metadados[i]??null));
+            const espaco=typeof meta[3]==='number'?meta[3]:null;
+            const fabr=meta[2]===null?null:String(meta[2]);
+            let confirmado:string|null=null;
+            let fabricaDoQuoter:string|null=null;
+            if(espaco!==null&&fabr?.toLowerCase()===FABRICA_SLIPSTREAM.toLowerCase()){
+                const consulta=await chamar<string>('eth_call',[{
+                    to:FABRICA_SLIPSTREAM,data:dadoFabricar(espaco),
+                },'latest']);
+                confirmado=decodificarPoolConfirmado(consulta);
+                const rawQuoterFactory=await chamar<string>('eth_call',[{
+                    to:QUOTER_SLIPSTREAM,data:dadoPool('factory'),
+                },'latest']);
+                fabricaDoQuoter=decodificarMeta('factory',rawQuoterFactory) as string|null;
+            }
+            const valido=validaPoolSlipstream({
+                token0:typeof meta[0]==='string'?meta[0]:null,
+                token1:typeof meta[1]==='string'?meta[1]:null,
+                fabrica:fabr,espaco,confirmado,
+            })&&fabricaDoQuoter?.toLowerCase()===FABRICA_SLIPSTREAM.toLowerCase();
+            log.info('[CACA/SLIPSTREAM] Pool concentrado candidato validado na Base.',{
+                par:'EURC/USDC',pool:POOL_CANDIDATO,
+                tokens:[meta[0],meta[1]],espaco,fabrica:fabr,
+                confirmadoPelaFactory:confirmado,
+                fabricaDoQuoter,verificado:valido,
+                soDiagnostico:true,
+                executorMultiHopConfigurado:/^0x[0-9a-fA-F]{40}$/.test(process.env.CACA_MULTIHOP_CONTRATO??''),
+                multiHopAvaliacaoLigada:process.env.CACA_MULTIHOP_AVALIAR==='1',
+                slipstreamHabilitada:process.env.CACA_MULTIHOP_SLIPSTREAM==='1',
+                observacao:'Esta funcao so valida cotacao; o MultiHop confere contrato e lucro em rotina separada',
+            });
+            if(!valido)return;
+            const faixas=[1000,10000,40000].map(usd=>({
+                usd,cru:quantiaParaCotacaoUsd(new Decimal(usd),
+                    precos.get(EURC_BASE.toLowerCase()),casas.get(EURC_BASE.toLowerCase())),
+            })).filter((x):x is {usd:number;cru:bigint}=>x.cru!==null);
+            for(const f of faixas){
+                try{
+                    const ret=await chamar<string>('eth_call',[{
+                        to:QUOTER_SLIPSTREAM,
+                        data:dadoQuoteSlipstream(f.cru,espaco!),
+                    },'latest']);
+                    const q=decodificarQuoteSlipstream(ret);
+                    const usd=q?usdDoToken(q.saida,
+                        precos.get(USDC_BASE.toLowerCase()),casas.get(USDC_BASE.toLowerCase())):null;
+                    log.info('[CACA/SLIPSTREAM-QUOTE] Preco onchain EURC/USDC do quoter concentrado.',{
+                        entradaUsdReferencia:f.usd,entradaCrua:f.cru.toString(),
+                        saidaCrua:q?.saida.toString()??null,saidaUsd:usd?.toFixed(2)??null,
+                        gasEstimadoDaTroca:q?.gasEstimate.toString()??null,
+                        pool:POOL_CANDIDATO,verificado:true,
+                        nota:'cota so a troca: sem bonus Aave, custo do flash, L1/L2 e gas total; V2 NAO executa nesta pool',
+                    });
+                }catch(e){
+                    log.warn('[CACA/SLIPSTREAM-QUOTE] Sem cotacao validada; nao inferir lucro.',{
+                        entradaUsdReferencia:f.usd,
+                        motivo:e instanceof Error?e.message:String(e),
+                    });
+                }
+            }
+        }catch(e){
+            log.warn('[CACA/SLIPSTREAM] Nao consegui confirmar candidato onchain; sem usar no envio.',{
+                motivo:e instanceof Error?e.message:String(e),
+            });
+        }
+    }
     // Base faz um bloco a cada 2 segundos. E daqui que sai "em quantos blocos".
     const MS_POR_BLOCO = numeroDoAmbiente('CACA_MS_POR_BLOCO', process.env.CACA_MS_POR_BLOCO, 2000);
     // Com quantos blocos de antecedencia mandar. Dois blocos sao 4 segundos: o
@@ -3330,6 +3609,49 @@ async function principal(): Promise<'parar' | void> {
         try {
             const prontos = await montarAlvos(quem, moedas, dataProvider!, precos, casas);
             for (const a of prontos) lembrarAVia(a.devedor, viaDeQuebra(a.garantia, a.divida));
+            // Descobre o collateral/debt dos cinco enderecos em producao,
+            // sem assumir BTC, ETH ou Chainlink antes de LER o AaveOracle.
+            for (const a of prontos) {
+                const devedor=a.devedor.toLowerCase();
+                if(!enderecosFechamento.has(devedor))continue;
+                if(!paresAnunciados.has(devedor)){
+                    paresAnunciados.add(devedor);
+                    log.info('[CACA/RAIO-X] Par real do alvo priorizado.',{
+                        devedor,garantia:a.garantia,divida:a.divida,
+                        fonte:'getUserReserveData em montarAlvos',
+                        criterio:'nao substitui Health Factor, pool, cotacao ou simulacao',
+                    });
+                }
+                // Fonte onchain e independente da heuristica Binance/Coinbase.
+                // Nao aguardamos este RPC: prearmamento e envio nunca podem
+                // esperar por um diagnostico do feed.
+                // Preaquecer pools sem esperar as consultas no caminho critico.
+                void descobrirRota(a.garantia,a.divida);
+                void avaliarSlipstream(a.garantia,a.divida);
+                const aaveOracle=oraculo;
+                if(aaveOracle){
+                    for(const token of [a.garantia,a.divida]){
+                        const chave=token.toLowerCase();
+                        if(fontesConsultadas.has(chave))continue;
+                        fontesConsultadas.add(chave);
+                        void (async()=>{
+                            try{
+                                const raw=await chamar<string>('eth_call',[{
+                                    to:aaveOracle,data:dadosDaFonteNoAaveOracle(token),
+                                },'latest']);
+                                log.info('[CACA/RAIO-X] Fonte real do preco Aave.',{
+                                    token,fonte:lerFonteDoAaveOracle(raw)??'nao retornada',
+                                    aaveOracle,naoPresumir:'pode ser Chainlink, adaptador ou outra fonte aprovada',
+                                });
+                            }catch(e){
+                                log.warn('[CACA/RAIO-X] Fonte nao legivel; sem inferir endereco.',{
+                                    token,motivo:e instanceof Error?e.message:String(e),
+                                });
+                            }
+                        })();
+                    }
+                }
+            }
             alvosArmados.clear();
             for (const a of prontos) alvosArmados.set(a.devedor.toLowerCase(), a);
             armadoEm = Date.now();
@@ -3446,6 +3768,7 @@ async function principal(): Promise<'parar' | void> {
     // boot de agora, com cara de resposta sobre o passado inteiro.
     if (estadoDoCache.usavel && estadoDoCache.cache.placar !== undefined) {
         tiros = placarDoCache(estadoDoCache.cache.placar);
+        registrarPlacarCaca(tiros.disparados,tiros.acertou,tiros.reverteu,tiros.sumiu);
         log.info('[CACHE] O placar dos tiros que sobreviveu ao deploy.', {
             // O nonce é a conferência DE FORA: ele conta transações saídas da
             // carteira e não volta para trás, então discordar dele é a única
@@ -3797,7 +4120,22 @@ async function principal(): Promise<'parar' | void> {
     }
 
     log.info('Operação Elite Iniciada. Patrulhando blocos com suborno dinâmico ligado.', { alvosRegistados: devedores.length });
-    void quandoFoiAUltimaLiquidacao(topo);
+    let censoHistoricoRodando=false;
+    const executarCensoHistorico=async():Promise<void>=>{
+        if(censoHistoricoRodando)return;
+        censoHistoricoRodando=true;
+        try{
+            const blocoAtual=await leitor.getBlockNumber();
+            await quandoFoiAUltimaLiquidacao(blocoAtual);
+        }catch(e){
+            log.warn('[MERCADO/CENSO] Falha controlada; monitoramento ao vivo intacto.',{
+                causa:e instanceof Error?sanitizar(e.message):'desconhecida',
+            });
+        }finally{censoHistoricoRodando=false}
+    };
+    void executarCensoHistorico();
+    const intervaloCenso=setInterval(()=>{void executarCensoHistorico()},60_000);
+    intervaloCenso.unref();
     // O tiro em seco NAO pode sair daqui: a brasa so existe depois da primeira
     // varredura completa, e chamado aqui ele achava a lista vazia e desistia
     // dois segundos antes de ela ser preenchida.
@@ -3823,8 +4161,110 @@ async function principal(): Promise<'parar' | void> {
      * seis lugares para esquecer o teto da fatia em um deles — exatamente o
      * tipo de coisa que passa em teste e falha no dia do tiro.
      */
+    // Posições explicitamente priorizadas: o modo de fechamento usa a regra
+    // Aave V3.3 para dividas < US$ 2.000. Nao antecipa liquidacao.
+    // O enderecamento valida-se fora, e cada candidato passa no eth_call.
+    const enderecosFechamento=enderecosPrioritarios(process.env.CACA_ALVOS_PRIORITARIOS);
+    configurarRadarCaca(enderecosFechamento,ENVIAR);
+    log.info('[CACA/ALVOS-PRIORITARIOS] Preparacao de cobertura integral de dividas pequenas.',{
+        quantidade:enderecosFechamento.size,
+        somenteNaLiquidacao:true,
+        confirmacao:'eth_call e decisao de lucro + gas antes do envio real',
+    });
+    // Raio-X uma vez por ciclo completo (normalmente 15 min), mas fora
+    // do caminho de disparo. Nunca altera elegibilidade do Pool nem nonce.
+    let raioXDisparadoEm = 0;
+    let raioXEmAndamento = false;
+    async function raioXAlvosPrioritarios():Promise<void>{
+        if(raioXEmAndamento || !dataProvider || enderecosFechamento.size===0) return;
+        if(Date.now()-raioXDisparadoEm<10*60_000)return;
+        raioXEmAndamento=true;
+        raioXDisparadoEm=Date.now();
+        const devedores=[...enderecosFechamento];
+        try{
+            const contas=devedores.flatMap(d=>[
+                {alvo:REDE.pool,dados:calldataDaConta(SELETOR_EMODE_USUARIO,d)},
+                {alvo:REDE.pool,dados:calldataDaConta(SELETOR_CONFIG_USUARIO,d)},
+            ]);
+            const contaResp=(await lerEmLote(contas,'pares')).dados;
+            const reservas=devedores.flatMap(d=>
+                moedas.map(m=>({alvo:dataProvider!,dados:codificarUserReserveData(m,d)})));
+            const saldos=(await lerEmLote(reservas,'pares')).dados;
+            // Reutiliza as respostas ja lidas: diagnostico dos pares reais
+            // nao adiciona um unico RPC de reserva ao prearmamento.
+            const paresReais=await montarAlvos(
+                devedores,moedas,dataProvider!,precos,casas,async()=>saldos,
+            );
+            for(const par of paresReais){
+                void descobrirRota(par.garantia,par.divida);
+                // A cotacao Slipstream nao precisa aguardar o proximo pre-armamento:
+                // o raio-X ja identificou o par real sem uma leitura extra.
+                void avaliarSlipstream(par.garantia,par.divida);
+            }
+            const tokensVistos=new Set<string>();
+            for(let i=0;i<devedores.length;i++){
+                const eMode=lerEModeUsuario(contaResp[2*i]??null);
+                const mapaCru=lerPalavraDeConta(contaResp[2*i+1]??null);
+                const r=[];
+                let lidas=0;
+                for(let j=0;j<moedas.length;j++){
+                    const bruto=saldos[i*moedas.length+j];
+                    if(!bruto)continue;
+                    try{
+                        const saldo=decodificarUserReserveData(bruto);
+                        lidas++;
+                        r.push({
+                            token:moedas[j]!,
+                            saldoDeAToken:saldo.garantiaCrua,
+                            dividaVariavel:saldo.dividaCrua,
+                            garantiaHabilitada:saldo.usadaComoGarantia,
+                        });
+                    }catch{}
+                }
+                const resumo=resumirReservas(r);
+                for(const token of [...resumo.garantias,...resumo.devedores])tokensVistos.add(token);
+                log.info('[CACA/RAIO-X-EMODE] Diagnostico exato do Pool e DataProvider.',{
+                    devedor:devedores[i],eMode,
+                    eModeLido:eMode!==null,
+                    bitmapLido:mapaCru!==null,
+                    bitmap:mapaCru?.toString()??null,
+                    tokensConsultados:moedas.length,tokensLidos:lidas,
+                    garantiasHabilitadas:resumo.garantias,
+                    dividasVariaveis:resumo.devedores,
+                    depositosSemUsoComoGarantia:resumo.depositadosSemGarantia,
+                    observacao:'nao deduzi reserve ID pela ordem compactada da lista; saldo/deposito vem do DataProvider',
+                });
+            }
+            // Feed de preco realmente CONSUMIDO pelo AaveOracle, sem
+            // pressupor proxy Chainlink. Este raio-X tambem detecta se uma
+            // fonte foi alterada desde o ciclo anterior.
+            if(oraculo && tokensVistos.size>0){
+                const listaTokens=[...tokensVistos].slice(0,25);
+                const origens=(await lerEmLote(listaTokens.map(token=>({
+                    alvo:oraculo!,dados:dadosDaFonteNoAaveOracle(token),
+                })),'pares')).dados;
+                for(let j=0;j<listaTokens.length;j++)
+                    log.info('[CACA/RAIO-X-FONTE] Feed configurado na Aave.',{
+                        token:listaTokens[j],
+                        fonte:origens[j]?lerFonteDoAaveOracle(origens[j]!)??'nao identificada':'sem leitura',
+                        nota:'informativo; transacao precisa passar no oraculo onchain e simular lucro',
+                    });
+            }
+        }catch(e){
+            log.warn('[CACA/RAIO-X-EMODE] Leitura incompleta. Nao inferi reservas nem E-Mode.',{
+                motivo:e instanceof Error?e.message:String(e),
+            });
+        }finally{raioXEmAndamento=false;}
+    }
     function cobrir(alvo: Alvo): bigint {
-        return quantoPedirEmprestado(alvo.dividaCrua!, alvo.dividaUsd, coberturaOtima());
+        const padrao=quantoPedirEmprestado(alvo.dividaCrua!, alvo.dividaUsd, coberturaOtima());
+        return coberturaPrioritariaPequena({
+            endereco:alvo.devedor,
+            dividaCrua:alvo.dividaCrua??0n,
+            dividaUsd:alvo.dividaUsd,
+            tamanhoBase:padrao,
+            enderecos:enderecosFechamento,
+        });
     }
 
     /**
@@ -4356,156 +4796,209 @@ async function principal(): Promise<'parar' | void> {
      * Roda em segundo plano, uma vez por boot, uns 3.000 CUs — 0,03% do teto.
      */
     async function quandoFoiAUltimaLiquidacao(topo: number): Promise<void> {
-        const PASSO = PEDACO * 5;      // ~5,5 horas de blocos por consulta
-        const ATE_ONDE_OLHAR = 40;     // ~9 dias para tras
-
-        // ANTES esta funcao parava na PRIMEIRA janela com liquidacao e jogava
-        // todo o resto fora. Ela respondia "ha quanto tempo foi a ultima" e mais
-        // nada — e a pergunta que decide a estrategia e outra: nos ultimos nove
-        // dias, quantas migalhas passaram DENTRO da minha faixa, e valendo
-        // quanto?
-        //
-        // Essa resposta existe no historico da rede, sem esperar ninguem cair e
-        // sem mandar transacao nenhuma. Custa uns 3.000 CUs uma vez por boot —
-        // 0,008% do teto do mes.
-        const achadas: Array<{ bloco: number; ativo: string; cru: bigint | Decimal; hash: string; liquidante: string }> = [];
+        // Nine days of historical Base blocks, independently of the live RPC.
+        // Archive gateways differ on eth_getLogs ranges, so we shrink the
+        // *same* interval on errors and never skip a block.
+        const PASSO_MAXIMO = 1800;
+        const PASSO_MINIMO = 50;
+        const NOVE_DIAS_EM_BLOCOS = 9 * 24 * 3600 / 2;
+        const inicio = Math.max(0, topo - NOVE_DIAS_EM_BLOCOS + 1);
+        const caminho = process.env.CACA_CENSO_ESTADO
+            ?? '/app/data/censoAaveBaseHistorico.json';
+        // Run bounded background reads frequently until the entire historical
+        // snapshot is complete. Requests are paced and 429s back off; live
+        // block processing and wallet traffic never use this RPC.
+        const limite = 110; // 9-day backfill; max requests in each round
+        const orcamento = new OrcamentoDaTarefa('historico', limite, 100_000);
+        const freio = new FreioDeRecusas();
+        type Achado = {
+            bloco:number; ativo:string; cru:bigint | Decimal;
+            hash:string; liquidante:string;
+        };
+        type AchadoSerial = {
+            bloco:number; ativo:string; cru:string;
+            hash:string; liquidante:string;
+        };
+        const achadas: Achado[] = [];
+        let proximoAte = topo;
         let janelasLidas = 0;
         let janelasQueFalharam = 0;
-        let blocoMaisAntigoOlhado = topo;
-        /** A ultima recusa, para o diagnostico dizer o que ela comprova. */
+        let falhasConsecutivas = 0; // sucesso zera: 429 esporadico nao interrompe o censo
         let ultimaRecusa: string | null = null;
+        let tamanho = PASSO_MAXIMO;
+        let ultimoSalvoEm = 0;
+        const fs = await import('node:fs/promises');
+        const path = await import('node:path');
 
-        // O ORCAMENTO DA TAREFA INTEIRA: janelas E retentativas no mesmo bolso.
-        //
-        // Antes o laco rodava as 40 janelas sempre, e cada `chamar` repetia ate
-        // 4 vezes por conta — ate 160 `eth_getLogs` contra um provedor que
-        // recusava tudo, que e o que o log de 21:14:45 mostrou. Agora cada
-        // tentativa sai do orcamento, e `chamar` recebe `tentativas: 1` para
-        // nao multiplicar por fora dele.
-        const orcamento = new OrcamentoDaTarefa('historico', ATE_ONDE_OLHAR + 10, 60_000);
-        // O TETO GLOBAL NAO BASTA. Medido em 2026-10-11: 40 falhas em 40
-        // tentativas dentro de um orcamento de 50 — o teto limitou o total e nao
-        // impediu percorrer todas as janelas. O freio pergunta outra coisa:
-        // "ja falhei 3 vezes seguidas pela MESMA razao, vale a proxima?".
-        const freio = new FreioDeRecusas();
-        for (let i = 0; i < ATE_ONDE_OLHAR; i += 1) {
-            const ate = topo - i * PASSO;
-            const de = Math.max(0, ate - PASSO + 1);
-            if (ate <= 0) break;
-            if (!orcamento.pedir()) break;
-            // AS TRES CONDICOES JUNTAS, a cada janela e nao uma vez no comeco.
-            //
-            // A condicao dela: *"não transforme a recuperação parcial do
-            // eth_getLogs em autorização para consumir RPC indiscriminadamente"*.
-            // `autorizarVarredura` exige veredicto do provedor ATIVO para ESTE
-            // metodo, orcamento restante E teto de blocos MEDIDO — e um teto que
-            // passou numa consulta nao autoriza todas as consultas daquele
-            // tamanho, entao sem teto medido a resposta e sondar, nao varrer.
-            //
-            // Reavaliado por janela porque o provedor pode trocar no meio: a
-            // escada muda `rpc` sob os pes do laco.
-            const aqui = hostDoRpc(rpc);
-            const permissao = autorizarVarredura({
-                veredicto: DISPONIBILIDADE.veredicto(aqui, 'eth_getLogs'),
-                requisicoesRestantes: orcamento.restamTentativas(),
-                msRestantes: orcamento.restamMs(),
-                blocosDesejados: PASSO,
-            });
-            if (!permissao.pode) {
-                janelasQueFalharam += 1;
-                ADIADAS.historico += 1;
-                if (i === 0) {
-                    log.warn('[MERCADO] NÃO varro o histórico agora, e o motivo está medido.', {
-                        provedor: aqui,
-                        veredicto: DISPONIBILIDADE.comoLer(aqui, 'eth_getLogs'),
-                        porque: permissao.porque,
-                        oQueIssoNaoE: 'não é "não houve liquidação": é "não li". O monitoramento '
-                            + 'não é afetado — ele não passa por este portão',
-                    });
-                }
-                break;
-            }
-            try {
-                const logs = await chamar<Array<{ address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string }>>('eth_getLogs', [{
-                    address: REDE.pool,
-                    fromBlock: `0x${de.toString(16)}`,
-                    toBlock: `0x${Math.min(ate, de + (permissao.blocosPorChamada ?? PASSO) - 1).toString(16)}`,
-                    topics: [TOPIC_LIQUIDATION_CALL],
-                }], 1, 'demorada', 'historico');
-                janelasLidas += 1;
-                blocoMaisAntigoOlhado = de;
-                // SUCESSO SOLTA O FREIO — inclusive sucesso PARCIAL: uma janela
-                // lida prova que o provedor nao esta recusando tudo.
-                freio.passou();
-                for (const cru of logs) {
-                    try {
-                        const l = decodificarLiquidacao(cru);
-                        achadas.push({ bloco: l.bloco, ativo: l.ativoDaDivida, cru: l.dividaCrua, hash: cru.transactionHash, liquidante: l.liquidante });
-                    } catch { /* um log estranho nao invalida o censo */ }
-                }
-            } catch (e) {
-                // Uma janela que falha nao invalida a busca, mas ENTRA NA CONTA:
-                // um censo com buracos que se apresenta como completo seria
-                // ausencia com cara de resposta.
-                janelasQueFalharam += 1;
-                const msg = e instanceof Error ? e.message : String(e);
-                const d = decidirSobreRecusa({ mensagem: msg, ehTransporte: ehFalhaDeTransporte(msg) });
-                // COTA ENCERRA A TAREFA NA HORA: insistir nas 39 janelas
-                // restantes gasta o que sobrou para receber a mesma resposta.
-                if (d.marcarEsgotado) {
-                    orcamento.encerrar(`o provedor recusou por capacidade: ${sanitizar(msg)}`);
-                    break;
-                }
-                ultimaRecusa = msg;
-                const oQueFazer = freio.recusou(msg);
-                if (oQueFazer === 'adiar') {
-                    orcamento.encerrar(
-                        `${freio.seguidasAgora()} recusas equivalentes seguidas: adiei a tarefa `
-                        + 'em vez de percorrer as janelas restantes',
-                    );
-                    break;
-                }
-                if (oQueFazer === 'recuarESondar') {
-                    // RECUA UMA VEZ e deixa a janela seguinte servir de
-                    // sondagem: se ela passar, `freio.passou()` solta tudo.
-                    const recuo = VAZAO.recuar(2000);
-                    log.warn('[CENSO] Recuando: recusas equivalentes seguidas.', {
-                        freio: freio.comoLer(),
-                        recuandoMs: recuo,
-                        orcamento: orcamento.comoLer(),
-                        oQueVemAgora: 'a próxima janela vale como sondagem. Se ela passar, sigo; '
-                            + 'se as recusas continuarem, adio a tarefa',
-                    });
-                    await dormir(recuo);
+        try {
+            const dado = JSON.parse(await fs.readFile(caminho,'utf8')) as {
+                versao?:number; topo?:number; inicio?:number;
+                proximoAte?:number; lidas?:number;
+                achadas?:AchadoSerial[]; atualizadoEm?:number;
+            };
+            const valido=dado.versao===1
+                && Number.isSafeInteger(dado.topo)
+                && Number.isSafeInteger(dado.proximoAte)
+                && Number.isSafeInteger(dado.inicio)
+                && dado.inicio===Math.max(0,dado.topo!-NOVE_DIAS_EM_BLOCOS+1)
+                && dado.topo!<=topo && topo-dado.topo!<=NOVE_DIAS_EM_BLOCOS
+                && dado.proximoAte!>=dado.inicio!-1
+                && dado.proximoAte!<=dado.topo!
+                && Array.isArray(dado.achadas)
+                && dado.achadas.length<5000
+                && Number.isSafeInteger(dado.lidas) && dado.lidas!>=0;
+            if(valido){
+                const terminou=dado.proximoAte!<dado.inicio!;
+                // Completed censuses are refreshed daily. Incomplete censuses
+                // resume from the EXACT first unread block after a restart.
+                if(!terminou || Date.now()-(dado.atualizadoEm??0)<86_400_000){
+                    proximoAte=dado.proximoAte!;
+                    janelasLidas=dado.lidas!;
+                    ultimoSalvoEm=dado.atualizadoEm??0;
+                    for(const a of dado.achadas!){
+                        if(Number.isSafeInteger(a.bloco) && typeof a.cru==='string'
+                            && /^\d+$/.test(a.cru))
+                            achadas.push({...a,cru:BigInt(a.cru)});
+                    }
+                    // The snapshot must keep its original upper block.
+                    topo=dado.topo!;
                 }
             }
-            await dormir(200);
-        }
+        }catch{ /* no checkpoint yet: start from current head */ }
 
-        const diasOlhados = ((topo - blocoMaisAntigoOlhado) * 2) / 86400;
-
-        const veredicto = veredictoDaVarredura({
-            lidas: janelasLidas, falharam: janelasQueFalharam, achados: achadas.length,
-        });
-        if (!veredicto.disponivel) {
-            // ZERO JANELAS LIDAS -> HISTORICO INDISPONIVEL, e nao "nenhuma
-            // liquidacao". A frase antiga publicava "a Aave da Base sem liquidar
-            // ninguem ha mais de uma semana" sobre 40 janelas que falharam, e a
-            // ressalva usava `janelasLidas / 4` como denominador: com zero
-            // lidas, `40 > 0` dava "um quarto das janelas falhou".
-            log.error('[MERCADO] HISTÓRICO INDISPONÍVEL — não concluo nada sobre o mercado.', {
-                veredicto: veredicto.frase,
-                orcamento: orcamento.comoLer(),
-                freio: freio.comoLer(),
-                diagnostico: ultimaRecusa === null
-                    ? 'nenhuma recusa registrada'
-                    : comoLerODiagnosticoDeLogs(diagnosticarRecusaDeLogs(ultimaRecusa)),
-                oQueFicaValendo: 'o censo anterior, se houver, com a idade dele. Esta volta não '
-                    + 'mede nada e não sobrescreve nada',
-                oQueIssoNaoE: 'não é "não houve liquidação": é "não consegui ler"',
+        const menorBloco = Math.max(0, topo-NOVE_DIAS_EM_BLOCOS+1);
+        const salvar = async():Promise<void>=>{
+            await fs.mkdir(path.dirname(caminho),{recursive:true});
+            const temporario=caminho+'.tmp';
+            await fs.writeFile(temporario,JSON.stringify({
+                versao:1,topo,inicio:menorBloco,proximoAte,lidas:janelasLidas,
+                atualizadoEm:Date.now(),
+                achadas:achadas.map(a=>({...a,cru:a.cru.toString()})),
+            }),'utf8');
+            await fs.rename(temporario,caminho);
+        };
+        if(proximoAte<menorBloco && Date.now()-ultimoSalvoEm<86_400_000){
+            log.info('[MERCADO/CENSO] Nove dias com cobertura completa; checkpoint ainda atualizado.',{
+                topo,blocoMaisAntigo:menorBloco,lidas:janelasLidas,eventos:achadas.length,
             });
             return;
         }
+
+        let tentativas=0;
+        while(proximoAte>=menorBloco && tentativas<limite && orcamento.pedir()){
+            const {de,ate}=faixaHistoricaReversa(proximoAte,menorBloco,tamanho);
+            const filtro={
+                address:REDE.pool,
+                fromBlock:'0x'+de.toString(16),
+                toBlock:'0x'+ate.toString(16),
+                topics:[TOPIC_LIQUIDATION_CALL],
+            };
+            tentativas+=1;
+            try{
+                type LogRPC = {address:string;topics:string[];data:string;
+                    blockNumber:string;transactionHash:string};
+                const resultado=await logsComRpcHistorico<LogRPC>(
+                    async()=>{throw new Error('censo dedicado: usar apenas RPC historico');},
+                    filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
+                        tempoLimiteMs:6000},
+                );
+                for(const cru of resultado.logs){
+                    try{
+                        const l=decodificarLiquidacao(cru);
+                        achadas.push({bloco:l.bloco,ativo:l.ativoDaDivida,
+                            cru:l.dividaCrua,hash:cru.transactionHash,
+                            liquidante:l.liquidante});
+                    }catch{ /* invalid event is ignored, not a missing block */ }
+                }
+                janelasLidas+=1;
+                falhasConsecutivas=0;
+                proximoAte=de-1; // inclusive intervals: never a gap
+                ultimaRecusa=null;
+                freio.passou();
+                await salvar(); // checkpoint advances ONLY after a successful read
+                // Keyless archive gateway: max 2 RPC/s; never burst so quickly
+                // that subsequent eth_getLogs receive HTTP 429.
+                await dormir(650);
+            }catch(e){
+                janelasQueFalharam+=1;
+                falhasConsecutivas+=1;
+                ultimaRecusa=e instanceof Error?e.message:String(e);
+                // HTTP 429 is a request-rate throttle, NOT a range-size limit.
+                // Reducing from 1800 to 50 blocks after 429 wastes thousands
+                // of requests. Keep the range, respect a cooldown and retry.
+                const tipoDeFalha=classificarFalhaHistorica(ultimaRecusa);
+                if(tipoDeFalha==='frequencia'){
+                    const resultadoDoFreio=freio.recusou(ultimaRecusa);
+                    log.warn('[MERCADO/CENSO] RPC historico aplicou 429; recuando sem reduzir faixa.',{
+                        proximoAte,faixaTentada:tamanho,recuoMs:2400,
+                        diagnostico:'limite de frequencia; nao e prova de limite de tamanho',
+                    });
+                    await dormir(2400);
+                    if(resultadoDoFreio==='adiar'||falhasConsecutivas>=3){
+                        orcamento.encerrar('RPC historico: 429 persistente, pausa segura sem avancar checkpoint');
+                        break;
+                    }
+                    continue;
+                }
+                // Somente um erro DE FAIXA justifica dividir os blocos.
+                // 403, timeout e falhas de transporte nao melhoram com 900, 450,
+                // 225, 112 blocos: repetir so gasta cota e cega o radar.
+                if(tipoDeFalha==='faixa'&&tamanho>PASSO_MINIMO){
+                    tamanho=Math.max(PASSO_MINIMO,Math.floor(tamanho/2));
+                    log.warn('[MERCADO/CENSO] RPC historico recusou faixa; reduzindo, sem pular blocos.',{
+                        proxAte:proximoAte,novoTamanho:tamanho,
+                        veredito:'nenhum bloco perdido nem contado como zero',
+                    });
+                    continue;
+                }
+                if(tipoDeFalha==='acesso'){
+                    log.warn('[MERCADO/CENSO] RPC historico negou acesso; checkpoint preservado.',{
+                        proximoAte,faixaTentada:tamanho,
+                        diagnostico:'permissao/archive no provedor: trocar endpoint historico',
+                    });
+                    orcamento.encerrar('RPC historico: 401/403, nao reduzir faixa nem avancar checkpoint');
+                    break;
+                }
+                const acao=freio.recusou(ultimaRecusa);
+                if(acao==='adiar'||falhasConsecutivas>=3){
+                    log.warn('[MERCADO/CENSO] RPC historico indisponivel; checkpoint conservado.',{
+                        proximoAte,blocosRestantes:proximoAte-menorBloco+1,
+                        host:hostDoRpc(process.env.CACA_HISTORICO_RPC_URL
+                            ?? 'https://mainnet.base.org'),
+                        tentativas,porque:comoLerODiagnosticoDeLogs(
+                            diagnosticarRecusaDeLogs(ultimaRecusa)),
+                    });
+                    break;
+                }
+                // Erro transitorio: uma pausa curta evita bombardear RPC falho.
+                await dormir(1250);
+            }
+        }
+        const blocosLidos=topo-proximoAte;
+        const totalBlocos=topo-menorBloco+1;
+        const diasOlhados=blocosLidos*2/86400;
+        if(proximoAte>=menorBloco){
+            // PARTIAL reads must NEVER conclude there were no liquidations.
+            log.info('[MERCADO/CENSO_PROGRESSO] Varredura historica em andamento.',{
+                origem:'RPC historico independente',janelasLidas,
+                janelasQueFalharam,blocosLidos,totalBlocos,
+                percentual:Number((blocosLidos/totalBlocos*100).toFixed(2)),
+                eventosConfirmadosNaFaixaLida:achadas.length,
+                proximoBloco:proximoAte,
+                nota:'amostra INCOMPLETA, nao extrapolar para nove dias',
+            });
+            return;
+        }
+        // All blocks were eventually read; earlier retried range errors no
+        // longer imply missing coverage.
+        janelasQueFalharam=0;
+        const veredicto=veredictoDaVarredura({
+            lidas:janelasLidas, falharam:0, achados:achadas.length,
+        });
+        log.info('[MERCADO/CENSO_COMPLETO] Os nove dias foram lidos sem lacunas.',{
+            topo,blocoMaisAntigo:menorBloco,blocosLidos,totalBlocos,
+            janelasLidas,achados:achadas.length,
+        });
         if (achadas.length === 0) {
             log.warn('[MERCADO] NENHUMA liquidação encontrada para trás.', {
                 olheiPara: `${diasOlhados.toFixed(1)} dias`,
@@ -4767,12 +5260,21 @@ async function principal(): Promise<'parar' | void> {
         const de = ultimoBlocoPerdidas + 1;
         let logs: Array<{ address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string }>;
         try {
-            logs = await chamar('eth_getLogs', [{
+            const filtro = {
                 address: REDE.pool,
                 fromBlock: `0x${de.toString(16)}`,
                 toBlock: `0x${ate.toString(16)}`,
                 topics: [TOPIC_LIQUIDATION_CALL],
-            }]);
+            };
+            const resposta = await logsComRpcHistorico(
+                () => chamar<typeof logs>('eth_getLogs',[filtro],1,'demorada','historico'),
+                filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL},
+            );
+            logs=resposta.logs;
+            if(resposta.origem==='secundario')log.info('[PLACAR/RPC] Recuperado por RPC historico independente.',{
+                host:resposta.provedor,faixa:`${de}–${ate}`,
+                observacao:'etapa de auditoria read-only; nao altera RPC de envio',
+            });
         } catch (e) {
             // Falhar aqui nao pode parar a cacada: isto e placar, nao motor.
             log.warn('Não consegui contar as liquidações que passaram.', { erro: (e as Error).message });
@@ -4895,7 +5397,13 @@ async function principal(): Promise<'parar' | void> {
      */
     async function olharMercado(): Promise<boolean> {
         if (paresDaBinance.length === 0) return false;
-        const { precos: doMercado, fonte } = await cotacoesDeQualquerFonte(paresDaBinance);
+        const ws=oracleShadow?.retrato();
+        // Nao misturar snapshots incompletos: o REST ja faz fallback de
+        // Binance para Coinbase e Kraken, e continua funcionando sem WS.
+        const merc=ws && ws.precos.size===paresDaBinance.length
+            ? {precos:ws.precos,fonte:'shadow:'+ws.origem}
+            : await cotacoesDeQualquerFonte(paresDaBinance);
+        const {precos:doMercado,fonte}=merc;
         if (fonte !== fonteDoPreco && doMercado.size > 0) {
             // Fonte que troca sozinha em silencio e a armadilha de sempre:
             // funciona, e ninguem sabe como.
@@ -5199,6 +5707,7 @@ async function principal(): Promise<'parar' | void> {
             // o minimo global esta dentro dela entre varreduras — e um numero
             // de 8 segundos e melhor que um de 15 minutos em qualquer direcao.
             let menorAoVivo: Decimal | null = null;
+            let menorPrioritarioNesteCiclo: Decimal | null = null;
             /** O que a brasa mediu NESTE ciclo, para o livro dos episodios. */
             const medidosDaBrasa: Medida[] = [];
             const inicioDaBrasa = moedas.length + 2;
@@ -5208,8 +5717,22 @@ async function principal(): Promise<'parar' | void> {
                 try {
                     const conta = decodificarContaDoUsuario(dadoConta);
                     const saude = conta.saude;
+                    const faltaParaCaçar=quedaAteLiquidar(saude);
+                    registrarAlvoCaca(
+                        brasa[i]!,saude.dividedBy(1e18).toNumber(),
+                        faltaParaCaçar===null?null:faltaParaCaçar.toNumber(),blocoAtual,
+                    );
                     registrarDeriva(historicoDeSaude, brasa[i]!, saude, Date.now());
                     const queda = quedaAteLiquidar(saude);
+                    // Sem chamada nova: aproveita a saúde onchain ja presente.
+                    // Nenhum atalho para liquidar: apenas acelera o despertar
+                    // quando um dos DOIS escolhidos esta perto de HF=1.
+                    if (queda !== null && enderecosFechamento.has(brasa[i]!.toLowerCase())
+                        && conta.dividaBase.greaterThan(0)
+                        && (menorPrioritarioNesteCiclo === null
+                            || queda.lessThan(menorPrioritarioNesteCiclo))) {
+                        menorPrioritarioNesteCiclo = queda;
+                    }
                     if (queda !== null) {
                         medidosDaBrasa.push({
                             devedor: brasa[i]!, queda,
@@ -5355,6 +5878,10 @@ async function principal(): Promise<'parar' | void> {
                     }
                 } catch {}
             }
+
+            menorPrioritarioAoVivo = menorPrioritarioNesteCiclo;
+            // Telemetria, não participa de decisões nem entra no caminho de RPC.
+            atualizarRadarCaca(blocoAtual,medidosDaBrasa.length,caidos.length);
 
             // O LIVRO, a cada ciclo: e aqui que o tempo efetivo se acumula.
             // Fora do `if` do log de proposito — a disponibilidade nao pode
@@ -5833,8 +6360,68 @@ async function principal(): Promise<'parar' | void> {
                         const camadas = repartirPorFragilidade(
                             medidos, vagasNaBrasa, MARGEM_QUENTE, pisoDeDivida, 0,
                         );
-                        brasa = camadas.brasa;
-                        quentes = camadas.quentes;
+                        // Os dois enderecos escolhidos nao perdem o lugar no multicall
+                        // nem nos primeiros QUANTOS_ARMAR quando outros candidatos
+                        // sobem no ranking. Sem eth_call novo, sem aumentar vagas.
+                        // So vale para posicoes com MEDICAO valida, divida que
+                        // cobre gas e risco real de liquidacao (<= 5%).
+                        const prioridade = reservarAlvosNaBrasa({
+                            brasa:camadas.brasa,quentes:camadas.quentes,medidos,
+                            prioritarios:enderecosFechamento,vagas:vagasNaBrasa,
+                            pisoUsd:pisoDeDivida,limiteQuedaPct:5,
+                        });
+                        brasa = prioridade.brasa;
+                        quentes = prioridade.quentes;
+                        // RELATORIO DE LEITURA, SEM TRANSMISSAO: exporta TODAS as
+                        // 233 contas ja medidas, usando apenas informacao que a
+                        // varredura pagou para ler. Nunca altera selecao ou tiro.
+                        // Emitimos 20 linhas por lote para nao truncar os logs.
+                        if (process.env.CACA_RADAR_GAS !== '0') {
+                            const porEndereco = new Map(medidos.map(m=>[m.devedor.toLowerCase(),m]));
+                            const registros = brasa.map((devedor,indice)=>{
+                                const m=porEndereco.get(devedor.toLowerCase());
+                                const divida=m?.dividaUsd??null;
+                                const lucro=divida===null?null:lucroEstimado(divida);
+                                return {
+                                    n:indice+1,a:devedor.toLowerCase(),
+                                    q:m?.queda.toFixed(4)??null,
+                                    d:divida?.toFixed(2)??null,
+                                    v:m?.via??'?',
+                                    l:lucro?.toFixed(2)??null,
+                                    idade:m?.lidoEm===undefined?null:
+                                        Math.round((Date.now()-m.lidoEm)/1000),
+                                };
+                            });
+                            const lote=20;
+                            for(let i=0;i<registros.length;i+=lote){
+                                log.info('[CACA/RADAR-GAS] Carteiras em brasa, leitura sem broadcast.',{
+                                    bloco:blocoAtual, total:registros.length,
+                                    inicio:i+1, fim:Math.min(i+lote,registros.length),
+                                    saldoGasEth:saldoLidoEm===0?null:
+                                        new Decimal(saldoDeGasWei.toString()).dividedBy(1e18).toFixed(6),
+                                    saldoLidoHaSegundos:saldoLidoEm===0?null:
+                                        Math.round((Date.now()-saldoLidoEm)/1000),
+                                    baseFeeGwei:baseFeeAtual===null?null:
+                                        new Decimal(baseFeeAtual.toString()).dividedBy(1e9).toFixed(4),
+                                    modelo:'lucro usa AGIO 5%, 50% da divida, custo medio e gas '+
+                                        'aproximado; NAO e simulacao nem promessa de ganho',
+                                    lista:registros.slice(i,i+lote),
+                                });
+                            }
+                        }
+                        if (enderecosFechamento.size > 0) {
+                            log.info('[CACA/ALVOS-PRIORITARIOS] Reserva confirmada no multicall.', {
+                                alvos: prioridade.incluidos,
+                                movidosDeOutraCamada: prioridade.movidos,
+                                semMedicaoElegivel: prioridade.semMedicao,
+                                vagasUsadas: brasa.length, teto:vagasNaBrasa,
+                                primeirosDoPreArmamento:brasa.slice(0,QUANTOS_ARMAR),
+                                criterio:'nao burla o Health Factor, o eth_call nem o lucro liquido',
+                            });
+                        }
+                        // Agendado apos reservar as vagas, sem segurar
+                        // as leituras da BRASA nem a decisao de envio.
+                        void raioXAlvosPrioritarios();
                         // EM QUE CAMADA O ALVO PROCURADO ESTA, AGORA.
                         //
                         // A primeira versao do `[PROCURA]` respondia "esta na
@@ -6060,6 +6647,33 @@ async function principal(): Promise<'parar' | void> {
             }
 
             if (caidos.length === 0) continue;
+            // A escolha de nonce acontece adiante. Se dois alvos ficam
+            // liquidaveis JUNTOS, o pequeno nao deve ocupar o nonce na frente
+            // do de maior premio. A ordem de observacao da BRASA nao muda;
+            // somente os candidatos ja caidos sao reordenados, pelo valor
+            // estimado de quem a dona explicitamente priorizou.
+            //
+            // Esta pontuacao nao autoriza envio: a simulacao, custo real,
+            // reserva de gas e margem continuam sendo os mesmos portoes.
+            if (caidos.length > 1 && enderecosFechamento.size > 0) {
+                const premioPorConta = new Map<string,Decimal>(
+                    medidosDaBrasa
+                        .filter(m=>enderecosFechamento.has(m.devedor.toLowerCase())
+                            && m.dividaUsd !== null)
+                        .map(m=>[m.devedor.toLowerCase(),lucroEstimado(m.dividaUsd!)]),
+                );
+                const ordenados = ordenarCaidosPorPremio({
+                    caidos,prioritarios:enderecosFechamento,premiosUsd:premioPorConta,
+                });
+                if (ordenados.some((d,i)=>d!==caidos[i])) {
+                    log.info('[CACA/ALVOS-PRIORITARIOS] Ordem de execucao das posicoes caidas.',{
+                        bloco:blocoAtual,
+                        ordem:ordenados,
+                        nota:'valor do radar so ordena; simulacao integral e margem continuam obrigatorias',
+                    });
+                }
+                caidos.splice(0,caidos.length,...ordenados);
+            }
 
             // Quem ja estava armado nao precisa de ida a rede nenhuma agora.
             // Alvo armado tem PRAZO, e a validade so era conferida na hora de
@@ -6091,6 +6705,10 @@ async function principal(): Promise<'parar' | void> {
             }
 
             for (const alvo of alvos) {
+                if (COMBINADO_SEGURO && vaoCruzar.has(alvo.devedor.toLowerCase())) {
+                    // Nao gastar com transacoes antes da escrita do oraculo.
+                    continue;
+                }
                 // O CORTE POR FALHA VEM ANTES DE MEDIR.
                 //
                 // MEDIDO no log de 2026-10-07 12:44: `[PULEI] tentativas: 4`
@@ -6130,8 +6748,45 @@ async function principal(): Promise<'parar' | void> {
                 // ganhado.
                 //
                 // Fase 1: medir todos (eth_call custa CU, nao gas).
-                const medicoes: Array<{ contrato: typeof contratos[number]; lucroCru: bigint }> = [];
+                // O terceiro candidato nao altera o cadastro dos contratos antigos.
+                // So participa da escolha quando tem quote atomica comprovada.
+                let medicoes: Array<{
+                    contrato: typeof contratos[number] | {nome:string;endereco:string;tipo:'MH'};
+                    lucroCru: bigint;
+                    envioMulti?: string;
+                    pontuacaoLiquida?: bigint;
+                    modoEstavelV2?: boolean;
+                }> = [];
+                let ofertaMulti: OfertaMulti | null = null;
                 for (const contrato of contratos) {
+                    // Modo live seguro: nunca incluir candidatos V1/V2 ou tiros
+                    // na escrita do oraculo, mesmo que CACA_ENVIAR=1.
+                    if (SOMENTE_MULTIHOP) break;
+                    // Evita uma simulacao sabidamente impossivel: V1 default
+                    // vende SOMENTE WETH/USDC. EURC e cbBTC nao cabem no par.
+                    // Pool customizada permanece liberada para simulacao.
+                    if(contrato.tipo==='V1'&&!permiteV1NaPoolPadrao(
+                        alvo.garantia,alvo.divida,poolDeVendaV1,POOLS.aerodrome.endereco,
+                    )){
+                        log.info('[CACA/ROTA-REAL] V1 incompativel com garantia; economizei simulacao.',{
+                            devedor:alvo.devedor,garantia:alvo.garantia,
+                            divida:alvo.divida,par:'WETH/USDC',
+                        });
+                        continue;
+                    }
+                    const chaveRota=chaveDeRota(alvo.garantia,alvo.divida);
+                    const modos=contrato.tipo==='V2'
+                        ? modosV2ParaSimular(
+                            rotasConfirmadas.get(chaveRota)??null,
+                            alvo.garantia.toLowerCase()===alvo.divida.toLowerCase(),
+                          )
+                        : [false];
+                    if(contrato.tipo==='V2'&&modos.length===0){
+                        log.info('[CACA/ROTA-REAL] V2 sem pool para o par; evito revert.',{
+                            garantia:alvo.garantia,divida:alvo.divida,
+                        });
+                    }
+                    for(const modoEstavel of modos){
                     const dados = contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
@@ -6146,7 +6801,7 @@ async function principal(): Promise<'parar' | void> {
                             divida: alvo.divida,
                             devedor: alvo.devedor,
                             quantoCobrir: cobrir(alvo),
-                            isStablePool: false,
+                            isStablePool: modoEstavel,
                             // O V2 NAO pode ser medido com piso impossivel.
                             // Medido em 2026-09-28 com o oraculo forcado: ele
                             // empurra `aDevolver + minProfit` como
@@ -6203,7 +6858,8 @@ async function principal(): Promise<'parar' | void> {
                     // Quem julga o numero e `decidirTiro`, num lugar so. Aqui so
                     // se pergunta se houve medicao.
                     if (leitura.desfecho === 'mediu' && leitura.lucroCru !== undefined) {
-                        medicoes.push({ contrato, lucroCru: leitura.lucroCru });
+                        medicoes.push({ contrato, lucroCru: leitura.lucroCru,
+                            modoEstavelV2: contrato.tipo==='V2'?modoEstavel:undefined });
                     } else if (vaoCruzar.has(alvo.devedor.toLowerCase())
                         && leitura.desfecho === 'revertido'
                         // Os DADOS crus vao junto: a identidade do erro está no
@@ -6226,7 +6882,8 @@ async function principal(): Promise<'parar' | void> {
                             erro: leitura.erro ?? '—',
                             oQueIssoQuerDizer: 'a posição ainda não cruzou; mando mirando o bloco em que ela cruza',
                         });
-                        medicoes.push({ contrato, lucroCru: 0n });
+                        medicoes.push({ contrato, lucroCru: 0n,
+                            modoEstavelV2: contrato.tipo==='V2'?modoEstavel:undefined });
                     } else if (vaoCruzar.has(alvo.devedor.toLowerCase())) {
                         // Estava escolhido para atirar antes, mas a medicao NAO
                         // reverteu por "ainda nao cruzou". Pode ser falha de rede
@@ -6244,6 +6901,103 @@ async function principal(): Promise<'parar' | void> {
                             oQueIssoQuerDizer: leitura.desfecho === 'falhaDeRede'
                                 ? 'a rede falhou, não a Aave. Mandar aqui seria atirar no escuro'
                                 : 'a reversão não foi "ainda não cruzou" — pode ser configuração quebrada',
+                        });
+                    }
+                    } // modos das piscinas do mesmo contrato
+                }
+
+                // TITAN MULTI-HOP: plano REAL -> eth_call do contrato IMPLANTADO.
+                // Nao entra em tiros especulativos: o contrato exige HF < 1.
+                // Na ausencia de endereco, pool, preço ou credito: o V1/V2 segue intocado.
+                if (process.env.CACA_MULTIHOP_AVALIAR === '1'
+                    && REDE_ESCOLHIDA === 'base'
+                    && !vaoCruzar.has(alvo.devedor.toLowerCase())
+                    && donoCarteira && alvo.dividaCrua && alvo.dividaCrua > 0n
+                    && alvo.dividaUsd && alvo.dividaUsd.greaterThan(0)
+                    && precoDoEth() && baseFeeAtual && baseFeeAtual > 0n) {
+                    try {
+                        const contratoMulti = process.env.CACA_MULTIHOP_CONTRATO ?? '';
+                        const fabrica = FABRICA_V3_BASE;
+                        const reservaBase = await tetoL1PeloCaca(leitor);
+                        const reservaOpcional = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const reserva = reservaOpcional > reservaBase ? reservaOpcional : reservaBase;
+                        const gasMax = BigInt(process.env.CACA_MULTIHOP_GAS_MAX ?? '1500000');
+                        // Residuo minimo de divida USDC e uma regra da Aave,
+                        // nao uma propriedade do colateral cbBTC. Aplica o
+                        // limite conservador tambem para EURC/USDC e outras
+                        // garantias; somente a simulacao atomica integral
+                        // prova o resultado em cada posicao multi-ativo.
+                        const dividaEhUsdc =
+                            alvo.divida.toLowerCase()==='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'
+                            && alvo.garantia.toLowerCase()!==alvo.divida.toLowerCase();
+                        const creditoInicial=cobrir(alvo);
+                        const creditoSeguro=dividaEhUsdc
+                            ? creditoMaximoComResiduoUsdc(
+                                alvo.dividaCrua,alvo.dividaUsd,creditoInicial)
+                            : creditoInicial;
+                        if(creditoSeguro<=0n) {
+                            log.info('[MULTIHOP/RESIDUO] Pulo posicao sem cobertura parcial segura.',{
+                                devedor:alvo.devedor,dividaUsd:alvo.dividaUsd.toFixed(2),
+                                creditoOriginal:creditoInicial.toString(),
+                            });
+                            continue;
+                        }
+                        if(creditoSeguro<creditoInicial){
+                            log.info('[MULTIHOP/RESIDUO] Credito reduzido antes de simular.',{
+                                devedor:alvo.devedor,creditoOriginal:creditoInicial.toString(),
+                                creditoMaximo:creditoSeguro.toString(),
+                                nota:'residuo conservador medido em fork; sucesso exige eth_call completo',
+                            });
+                        }
+                        ofertaMulti = await prepararOfertaMulti(leitor, {
+                            usuario: alvo.devedor,
+                            garantia: alvo.garantia,
+                            divida: alvo.divida,
+                            dividaCrua: alvo.dividaCrua,
+                            dividaUsd: alvo.dividaUsd,
+                            creditoMaximo: creditoSeguro,
+                            ethUsd: precoDoEth()!,
+                            dono: donoCarteira,
+                            contrato: contratoMulti,
+                            cofre: COFRE_ESPERADO,
+                            aave: REDE.pool,
+                            fabricaV3: fabrica,
+                            pools: poolsDoCaca(process.env.CACA_MULTIHOP_POOLS_JSON),
+                            maxFeePerGas: 3n * baseFeeAtual + 20_000_000n,
+                            reservaL1Wei: reserva,
+                            gasMax,
+                            maxCotacoes: 32,
+                        });
+                        if (ofertaMulti) {
+                            // Dois consentimentos: o CACA original e a permissao
+                            // ESPECIFICA da nova ABI, sem autoativacao apos deploy.
+                            const liberar = process.env.CACA_MULTIHOP_ENVIAR === '1'
+                                && process.env.CACA_MULTIHOP_CONFIRMAR === 'OPERAR_BASE_REAL';
+                            const candidatoObservavel = SOMENTE_MULTIHOP && !ENVIAR;
+                            // O mesmo caminho de decisao e montado no ensaio.
+                            // A assinatura so ocorre no degrau final se ENVIAR.
+                            const incluirCandidato = liberar || candidatoObservavel;
+                            // Mesma carteira e mesmo LocalNonceManager do CACA.
+                            // NAO criar segundo processo de assinatura ou concorrente de nonce.
+                            log.info('[MULTIHOP] Plano simulado contra contrato real.', {
+                                devedor:alvo.devedor, bloco:ofertaMulti.bloco,
+                                saltos:ofertaMulti.rota.pernas.length,
+                                credito:ofertaMulti.cobrir.toString(),
+                                lucroCru:ofertaMulti.lucroCru.toString(),
+                                lucroLiquidoEstimadoCru:ofertaMulti.liquidoCru.toString(),
+                                situacao: liberar && ENVIAR ? 'execucao liberada' : 'somente observacao',
+                            });
+                            if (incluirCandidato) {
+                                medicoes.push({
+                                    contrato:{nome:'Multi-Hop Morpho',endereco:ofertaMulti.contrato,tipo:'MH'},
+                                    lucroCru:ofertaMulti.liquidoCru,
+                                    envioMulti:ofertaMulti.envio,
+                                });
+                            }
+                        }
+                    } catch(e) {
+                        log.warn('[MULTIHOP] Nao elegivel; mantenho V1/V2.', {
+                            motivo:e instanceof Error?e.message:'erro inesperado',
                         });
                     }
                 }
@@ -6317,10 +7071,44 @@ async function principal(): Promise<'parar' | void> {
                     });
                     continue;
                 }
-                medicoes.sort((a, b) => (b.lucroCru > a.lucroCru ? 1 : b.lucroCru < a.lucroCru ? -1 : 0));
+                if (COMBINADO_SEGURO && medicoes.length>0) {
+                    const precoEthAgora = precoDoEth();
+                    if (!baseFeeAtual || baseFeeAtual<=0n || !precoEthAgora
+                        || !alvo.dividaCrua || !alvo.dividaUsd) {
+                        log.warn('[DUAS ROTAS] Nao comparo lucro sem preco e unidades verificadas.');
+                        continue;
+                    }
+                    let reservaL1:bigint;
+                    try { reservaL1=await tetoL1PeloCaca(leitor); }
+                    catch { log.warn('[DUAS ROTAS] Oraculo L1 indisponivel.');continue; }
+                    const custoLegadoCru = gasEmTokenDaDivida(
+                        1_500_000n,3n*baseFeeAtual+20_000_000n,reservaL1,
+                        alvo.dividaCrua,alvo.dividaUsd,precoEthAgora
+                    );
+                    // CACA original retorna lucro BRUTO; o Multi-Hop ja retorna
+                    // o LIQUIDO estimado. Comparar brutos privilegiaria o legado.
+                    for (const m of medicoes)
+                        m.pontuacaoLiquida=pontuacaoDeLiquidez(m.contrato.tipo,
+                            m.lucroCru,custoLegadoCru);
+                    medicoes=medicoes.filter(m=>m.pontuacaoLiquida!==undefined
+                        && m.pontuacaoLiquida>0n);
+                    if(medicoes.length===0)continue;
+                    medicoes.sort((a,b)=>(b.pontuacaoLiquida!>a.pontuacaoLiquida! ? 1
+                        : b.pontuacaoLiquida!<a.pontuacaoLiquida! ? -1 : 0));
+                } else {
+                    medicoes.sort((a,b)=>(b.lucroCru>a.lucroCru ? 1
+                        : b.lucroCru<a.lucroCru ? -1 : 0));
+                }
                 const escolhida = medicoes[0];
                 const contrato = escolhida.contrato;
-                const lucroCruValido = escolhida.lucroCru;
+                // Um segundo portao protege o dinheiro mesmo com configuracao
+                // acidental das flags historicas do CACA.
+                if (SOMENTE_MULTIHOP && contrato.tipo !== 'MH') {
+                    log.error('[MULTIHOP-ONLY] Impedi contrato legado em modo protegido.');
+                    continue;
+                }
+                const lucroCruValido = contrato.tipo === 'MH' && ofertaMulti
+                    ? ofertaMulti.lucroCru : escolhida.lucroCru;
                 if (medicoes.length > 1) {
                     log.info('[ESCOLHA] Dois contratos mediram; atiro só no melhor.', {
                         devedor: alvo.devedor,
@@ -6365,9 +7153,13 @@ async function principal(): Promise<'parar' | void> {
                     //
                     // `pisoNoContrato` nunca devolve zero com cobertura
                     // positiva: sem medicao, o piso sai da divida coberta.
-                    const piso = pisoNoContrato(cobrir(alvo), lucroCruValido > 0n ? lucroCruValido : null);
+                    const piso = contrato.tipo === 'MH' && ofertaMulti
+                        ? ofertaMulti.piso
+                        : pisoNoContrato(cobrir(alvo), lucroCruValido > 0n ? lucroCruValido : null);
 
-                    const envio = contrato.tipo === 'V1'
+                    const envio = contrato.tipo === 'MH'
+                        ? (escolhida.envioMulti ?? '')
+                        : contrato.tipo === 'V1'
                         ? codificarCacaV1({
                             garantia: alvo.garantia,
                             divida: alvo.divida,
@@ -6381,7 +7173,7 @@ async function principal(): Promise<'parar' | void> {
                             divida: alvo.divida,
                             devedor: alvo.devedor,
                             quantoCobrir: cobrir(alvo),
-                            isStablePool: false,
+                            isStablePool: escolhida.modoEstavelV2??false,
                             lucroMinimo: piso,
                           });
                 
@@ -6435,6 +7227,7 @@ async function principal(): Promise<'parar' | void> {
                      * sobrevivencia, nao um dado de conveniencia.
                      */
                     const especulativo = vaoCruzar.has(alvo.devedor.toLowerCase());
+                    if(COMBINADO_SEGURO && especulativo)continue;
                     // O SALDO VAI DE CARONA NA ESTIMATIVA, pedido dela em
                     // 2026-10-03: "ler o saldo atual de ETH da carteira do
                     // enviador ANTES de construir o tiro".
@@ -6508,6 +7301,20 @@ async function principal(): Promise<'parar' | void> {
                         continue;
                     }
                     const limiteGas = doGas.limite;
+                    // Multi-Hop ja precisa ter simulado estimateGas no ABI novo.
+                    // Nunca usar fallback alto sem estimativa ou limite abaixo
+                    // da operacao observada, nem arriscar GAS insuficiente.
+                    if (contrato.tipo === 'MH' && (
+                        !ofertaMulti || estimado === null ||
+                        limiteGas < ofertaMulti.gasEstimado + ofertaMulti.gasEstimado/5n
+                    )) {
+                        log.warn('[MULTIHOP] Gas estimado nao cabe com 20% de folga; sem envio.', {
+                            estimado:estimado?.toString() ?? 'ausente',
+                            limite:limiteGas.toString(),
+                            custoDaRota:ofertaMulti?.gasEstimado.toString() ?? 'sem quote',
+                        });
+                        continue;
+                    }
                     const medido = emDolar(
                         lucroCruValido,
                         casas.get(alvo.divida.toLowerCase()),
@@ -6846,6 +7653,141 @@ async function principal(): Promise<'parar' | void> {
                         });
                         continue;
                     }
+                    if (SOMENTE_MULTIHOP
+                        && (contrato.tipo !== 'MH'
+                            || process.env.CACA_MULTIHOP_ENVIAR !== '1'
+                            || process.env.CACA_MULTIHOP_CONFIRMAR !== 'OPERAR_BASE_REAL')) {
+                        log.error('[MULTIHOP-ONLY] A assinatura foi bloqueada por flag ou executor incorreto.');
+                        continue;
+                    }
+                    // O piso em token da divida cobre o CUSTO MAXIMO do lance REAL,
+                    // nao a fee provisoria da fase de planejamento.
+                    if (contrato.tipo === 'MH' && ofertaMulti) {
+                        const ethAgora = precoDoEth();
+                        if (!ethAgora || !alvo.dividaCrua || !alvo.dividaUsd) {
+                            log.warn('[MULTIHOP] Sem preco de gas/divida para validar o lance real.');
+                            continue;
+                        }
+                        const l1Atual = await tetoL1PeloCaca(leitor);
+                        const l1Opcional = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const reservaNoEnvio = l1Opcional > l1Atual ? l1Opcional : l1Atual;
+                        const custoNoLance = gasEmTokenDaDivida(
+                            limiteGas, maxFee, reservaNoEnvio,
+                            alvo.dividaCrua, alvo.dividaUsd, ethAgora,
+                        );
+                        if (custoNoLance >= ofertaMulti.piso) {
+                            log.warn('[MULTIHOP] Fee real ultrapassou o lucro minimo garantido.', {
+                                devedor: alvo.devedor,
+                                custoEstimadoCru: custoNoLance.toString(),
+                                pisoDoContrato: ofertaMulti.piso.toString(),
+                            });
+                            continue;
+                        }
+                    }
+                    // Confirma o MESMO calldata novamente antes de reservar nonce.
+                    // A cotacao envelhece em poucos blocos; jamais operar com HF velho.
+                    if (contrato.tipo === 'MH'
+                        && (!ofertaMulti || !await revalidarOfertaMulti(leitor, ofertaMulti, donoCarteira))) {
+                        log.warn('[MULTIHOP] Quote expirou/reverteu antes de assinar. Sem envio.', {
+                            devedor:alvo.devedor,
+                        });
+                        continue;
+                    }
+                    if (contrato.tipo === 'MH') {
+                        const custoL1Wei = await tetoL1PeloCaca(leitor);
+                        const extraL1 = BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI ?? '0');
+                        const custoL1Usado = extraL1 > custoL1Wei ? extraL1 : custoL1Wei;
+                        // 0.00065 ETH: teto conservador do canary por tentativa.
+                        // Limite ajustavel para BAIXO em Railway, nunca para cima sem deploy novo.
+                        const tetoPadrao = 650_000_000_000_000n;
+                        const variavel = BigInt(process.env.CACA_MULTIHOP_GASTO_MAX_WEI ?? tetoPadrao.toString());
+                        const teto = variavel < tetoPadrao ? variavel : tetoPadrao;
+                        if (!custoMaximoMultiDentroDoTeto(limiteGas,maxFee,custoL1Usado,teto)) {
+                            log.error('[MULTIHOP/CANARY] Lance acima do teto de perda por tentativa. Sem envio.', {
+                                limiteGas:limiteGas.toString(),
+                                maxFeeWei:maxFee.toString(),
+                                l1:custoL1Usado.toString(),
+                                tetoWei:teto.toString(),
+                            });
+                            continue;
+                        }
+                        if (!COMBINADO_SEGURO && process.env.CACA_MULTIHOP_CANARY_UM_TIRO !== '0') {
+                            const reserva = reservarUmEnvioMulti({
+                                carteira:donoCarteira, devedor:alvo.devedor,
+                                contrato:contrato.endereco,bloco:blocoAtual,
+                            });
+                            if (!reserva.liberado) {
+                                log.error('[MULTIHOP/CANARY] Primeiro envio ja reservado ou volume indisponivel.', {
+                                    porque:reserva.motivo,
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                    // A exclusividade com TITAN agora e real, nao somente uma
+                    // flag: papel determinado pelo timestamp de blocos Base
+                    // verificado por DOIS provedores, com 5min de guarda.
+                    if (process.env.TITAN_JANELAS_EXCLUSIVAS === '1') {
+                        const janela = await conferirJanelaDeNonce(leitor,donoCarteira,'CACA');
+                        if (!janela.pode) {
+                            log.info('[CACA/TITAN] Minha janela de assinatura fechada.', {
+                                motivo:janela.motivo, papel:'CACA',
+                            });
+                            continue;
+                        }
+                    } else if (COMBINADO_SEGURO) {
+                        log.error('[CACA/TITAN] Negociação bloqueada: falta exclusividade temporal.');
+                        continue;
+                    }
+                    let reservaCompartilhadaId:string|null=null;
+                    if (COMBINADO_SEGURO) {
+                        // Reserva ao VALOR MAXIMO cobravel pelo gas, nao a media.
+                        let l1:bigint;
+                        try { l1=await tetoL1PeloCaca(leitor); }
+                        catch {log.warn('[DUAS ROTAS] Nao consigo certificar custo L1.');continue;}
+                        const adicional=BigInt(process.env.CACA_MULTIHOP_L1_RESERVA_WEI??'0');
+                        if(adicional>l1)l1=adicional;
+                        const maxPorTx=650_000_000_000_000n; // 0.00065 ETH por tentativa
+                        const maxPorDia=650_000_000_000_000n; // 0.00065 ETH/dia CACA; TITAN tem budget separado
+                        const maxCusto=limiteGas*maxFee+l1;
+                        if (!custoMaximoMultiDentroDoTeto(limiteGas,maxFee,l1,maxPorTx)) {
+                            log.warn('[DUAS ROTAS] Custo maximo ultrapassa teto por tentativa.');
+                            continue;
+                        }
+                        if (contrato.tipo !== 'MH') {
+                            if (estimado===null || especulativo || !alvo.dividaCrua
+                                || !alvo.dividaUsd || !precoDoEth()) {
+                                log.warn('[DUAS ROTAS] Legado sem estimativa de gas ou mercado verificado.');
+                                continue;
+                            }
+                            const custoEmDivida=gasEmTokenDaDivida(
+                                limiteGas,maxFee,l1,alvo.dividaCrua,alvo.dividaUsd,precoDoEth()!
+                            );
+                            if (lucroCruValido<=2n*custoEmDivida) {
+                                log.warn('[DUAS ROTAS] Legado nao paga 2x pior custo de gas.');
+                                continue;
+                            }
+                            // Revalidar CALldata final, piso inclusive, antes de gastar nonce.
+                            const checagem=await chamarCruComPaciencia([{
+                                from:donoCarteira,to:contrato.endereco,data:envio
+                            },'latest']);
+                            if(!checagem.ok) {
+                                log.warn('[DUAS ROTAS] Legado reverte na chamada final; nao envio.',{
+                                    contrato:contrato.nome
+                                }); continue;
+                            }
+                        }
+                        const reserva=reservarGasCompartilhado({
+                            tipo:contrato.tipo,alvo:alvo.devedor,maxCostWei:maxCusto,
+                            maxPerTxWei:maxPorTx,maxDailyWei:maxPorDia,maxTxDia:1
+                        });
+                        if(!reserva.id) {
+                            log.warn('[DUAS ROTAS] Disjuntor do orcamento compartilhado.',{
+                                porque:reserva.reason
+                            });continue;
+                        }
+                        reservaCompartilhadaId=reserva.id;
+                    }
                     const nonceAtual = await nonceManager.getNextNonce();
                     const msDoTiro = Date.now() - inicioDoCiclo;
                     enviados += 1;
@@ -6864,6 +7806,7 @@ async function principal(): Promise<'parar' | void> {
                         // recibo volta: o recibo leva segundos e o bloco dura
                         // 2s — esperar por ele deixaria o segundo tiro passar,
                         // que e exatamente o que a trava existe para impedir.
+                        registrarTiroCaca(tx.hash,blocoAtual,'enviado');
                         ultimoTiroNoBloco.set(chaveBloco, blocoAtual);
                         log.info(`[TIRO SAIU] (${contrato.nome}) — ainda NÃO é acerto.`, {
                             bloco: blocoAtual,
@@ -6935,11 +7878,40 @@ async function principal(): Promise<'parar' | void> {
                         const hashDoTiro = tx.hash;
                         const chaveDoTiro = chaveAlvo;
                         const devedorDoTiro = alvo.devedor;
-                        const lucroDoTiro = lucroUsd;
+                        let lucroDoTiro = lucroUsd;
                         void (async () => {
                             let desfecho: ReturnType<typeof lerRecibo>;
+                            let comprovacaoEconomicaAusente=false;
                             try {
-                                desfecho = lerRecibo(await tx.wait(1, 120_000));
+                                const reciboFinal = await tx.wait(1, 120_000);
+                                desfecho = lerRecibo(reciboFinal);
+                                if (contrato.tipo === 'MH') {
+                                    const pago = reciboFinal && ofertaMulti
+                                        ? lucroConfirmadoPorEventoMulti(
+                                            reciboFinal.logs, contrato.endereco,
+                                            devedorDoTiro, ofertaMulti.cobrir,
+                                        ) : null;
+                                    if (desfecho === 'acertou' && pago !== null) {
+                                        const convertido = emDolar(pago,
+                                            casas.get(alvo.divida.toLowerCase()),
+                                            precos.get(alvo.divida.toLowerCase()));
+                                        lucroDoTiro = convertido;
+                                        log.info('[MULTIHOP NO COFRE] Evento confirma pagamento bruto.', {
+                                            hash:tx.hash, lucroBrutoCru:pago.toString(),
+                                            lucroBrutoUsdNaCotacao:convertido?.toFixed(2) ?? 'sem preco',
+                                            gasL2Wei:reciboFinal ? (reciboFinal.gasUsed * reciboFinal.gasPrice).toString() : 'indisponivel',
+                                            observacao:'descontar gas L1 e operacao para calcular lucro liquido real',
+                                        });
+                                    } else {
+                                        lucroDoTiro = null;
+                                        if (desfecho === 'acertou') {
+                                            comprovacaoEconomicaAusente=true;
+                                            log.error('[MULTIHOP SEM PROVA] Recibo status=1, mas pagamento nao verificado.', {
+                                                hash:tx.hash, acao:'conferir logs e saldo do cofre na Base',
+                                            });
+                                        }
+                                    }
+                                }
                             } catch (e) {
                                 // O ethers REJEITA quando `status === 0`, e o
                                 // recibo vem dentro do erro. Sem isto, todo
@@ -6961,7 +7933,21 @@ async function principal(): Promise<'parar' | void> {
                                     desfecho = erro?.receipt ? lerRecibo(erro.receipt) : 'sumiu';
                                 }
                             }
+                            if (reservaCompartilhadaId) {
+                                const reconciliado=conciliarGasCompartilhado(
+                                    reservaCompartilhadaId,
+                                    comprovacaoEconomicaAusente ? 'sumiu' : desfecho,hashDoTiro
+                                );
+                                if(!reconciliado)
+                                    log.error('[DUAS ROTAS] Recibo nao gravado no diario: BLOQUEIO de novos envios.');
+                            }
+                            registrarTiroCaca(
+                                hashDoTiro,blocoAtual,
+                                desfecho==='acertou'?'confirmado'
+                                    :desfecho==='reverteu'?'revertido':'desconhecido',
+                            );
                             tiros = contarTiro(tiros, desfecho, lucroDoTiro, especulativo);
+                            registrarPlacarCaca(tiros.disparados,tiros.acertou,tiros.reverteu,tiros.sumiu);
                             // AO DISCO AGORA, e não na próxima coleta.
                             //
                             // A primeira versão da persistência da bússola
@@ -7101,6 +8087,18 @@ async function principal(): Promise<'parar' | void> {
             await olharMercado();
             const ritmo = ritmoDaPostura(posturaAgora(), INTERVALO_MS);
             const resta = ritmo - (Date.now() - inicioDoCiclo);
+            const alvoCritico = acordarPorBlocoSeAlvoCritico(menorPrioritarioAoVivo);
+            if (alvoCritico !== despertaPorAlvo) {
+                despertaPorAlvo = alvoCritico;
+                log.info('[CACA/ALVOS-PRIORITARIOS] Despertar seletivo por bloco.', {
+                    ligado:alvoCritico,
+                    distancia:menorPrioritarioAoVivo === null
+                        ? 'sem leitura nesta rodada'
+                        : `${menorPrioritarioAoVivo.toFixed(4)}%`,
+                    politica:'somente leitura e simulacao; tiro segue seus portoes',
+                    custo:'aumenta RPC apenas quando um alvo prioritario entra em <=0.75%',
+                });
+            }
             // Com o dedo no gatilho o ciclo quase sempre passa dos 200ms — a
             // ida ao mercado sozinha leva mais que isso. Condicionar a espera a
             // `resta > 0` fazia o galho do WebSocket ser codigo morto
@@ -7118,7 +8116,7 @@ async function principal(): Promise<'parar' | void> {
                 {
                     ouvinte: ouvinte === null ? null
                         : { vivo: ouvinte.vivo, assinar: (f) => ouvinte.assinar(f) },
-                    acordaPorBloco: ACORDA_POR_BLOCO,
+                    acordaPorBloco: ACORDA_POR_BLOCO || alvoCritico,
                     dormir: async (ms) => { await dormir(ms); },
                     dormirDeOlho: (total, fatia) => dormirDeOlho(total, fatia, olharMercado,
                         async (ms) => { await dormir(ms); }),

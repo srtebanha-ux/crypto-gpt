@@ -1,0 +1,64 @@
+name: CACA + Multi-Hop mesma carteira
+
+on:
+  push:
+    branches:
+      - feat/caca-integracao-multihop-ativa
+      - feat/slipstream-liquidator-20261017
+  pull_request:
+    branches:
+      - feat/caca-integracao-multihop-ativa
+      - claude/hft-triangular-arbitrage-jsq4i4
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integrated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Compilar o proprio CACA com rota adicional
+        run: npm run build
+      - name: Validar tipos e barreiras de seguranca do executor de arbitragem
+        run: |
+          npm run typecheck
+          node --require ts-node/register --test src/flashArbExecutor.test.ts src/flashArbRpc.test.ts src/titanCpammSniffer.test.ts src/titanTamanhoCpamm.test.ts src/morphoApi.test.ts src/titanPonteMultiHop.test.ts
+      - name: Suite TypeScript completa - inclui regressao do censo historico
+        run: node --require ts-node/register --test src/*.test.ts
+      - name: Compilar o contrato multi-hop
+        run: npx hardhat compile
+      - name: Testar executora Morpho e seguranca dos saldos na EVM local
+        run: npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/morphoAuditoriaLocal.js
+      - name: Validar novo executor Morpho Uniswap V3 apenas em EVM local
+        run: npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanMorphoV3Local.js
+      - name: Validar roteamento, nonce unico e contrato
+        run: node --require ts-node/register --test src/titanPonteMultiHop.test.ts src/titanPonteMultiHopIntegration.test.ts src/implantarTitanMultiHop.test.ts src/titanCanary.test.ts src/cacaDuasRotas.test.ts src/janelaDeNonce.test.ts src/escadaDeRpc.test.ts src/observadorMultirrede.test.ts src/titanSvr.test.ts src/titanSvrTriagem.test.ts src/titanTamanhoCpamm.test.ts src/titanFlashblocks.test.ts src/titanOtimizadorTamanho.test.ts
+      - name: Testar carteira unica sem enviar transacao na Base (fork)
+        env:
+          ARB_BLOCO: "52418045"
+        run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanMultiHopBaseFork.js
+      - name: Testar Aave/Morpho/Slipstream EURC em fork isolado da Base
+        env:
+          ARB_BLOCO: "52745456"
+        run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanSlipstreamBaseFork.js
+      - name: Testar alvo cbBTC real em fork Base (sem broadcast)
+        env:
+          ARB_BLOCO: "52746275"
+        run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanCbBtcBaseFork.js
+      - name: Confirmar imagem do CACA inclui bytecode sem private key
+        run: |
+          docker build -t caca-multihop:test .
+          docker run --rm --entrypoint sh caca-multihop:test -ec '
+            test -s dist/cacarAoVivo.js
+            test -s dist/implantarTitanMultiHop.js
+            test -s .tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json
+            node -e "const a=require(\"./.tmp/artifacts/contracts/CacadorAaveMultiHopMorpho.sol/CacadorAaveMultiHopMorpho.json\");if(!a.bytecode||a.bytecode.length<200)process.exit(1)"
+          '

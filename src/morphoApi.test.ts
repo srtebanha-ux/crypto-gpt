@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import {
     enumerarMercados, enumerarDevedores, lerPaginaDeMercados, lerUmMercado, lerLltv,
-    soOsQuePagam, lerIdToMarketParams, lerPosition, lerMarket, sharesParaAtivos,
+    soOsQuePagam, mercadosParaSondagem, lerIdToMarketParams, lerPosition, lerMarket, sharesParaAtivos,
     apiConfereComACorrente, codificarIdToMarketParams, codificarPosition, codificarMarket,
     consultaDeDevedores, lerDevedores, paraCache, doCache, idadeDoIndice, comoLerADescoberta,
+    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
+    selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
     CHAIN_ID_DA_BASE, POR_PAGINA, TETO_DE_PAGINAS, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
 import { OrcamentoHttp } from './canais';
@@ -567,4 +569,107 @@ test('8. memória corrompida no disco não impede a descoberta nem lança', asyn
     // Não lançou (chegamos aqui) e a memória foi REESCRITA com algo legível.
     const m = lerMemoria(JSON.parse(await readFile(memoria, 'utf8')));
     assert.notEqual(m.ultimaTentativa, null, 'a memória torta impediu a gravação nova');
+});
+
+
+test('mercados Morpho com divida ativa sao priorizados mas validados depois na corrente',()=>{
+ const mercados=lerPaginaDeMercados(JSON.parse(pagina(Array.from({length:32},(_,i)=>i+1)))).itens;
+ assert.equal(mercados.length,32);
+ const rankingIds=[mercados[21]!.id, mercados[4]!.id];
+ const ranking=lerRankingMercadosMorpho({
+  data:{markets:{items:rankingIds.map(marketId=>({marketId}))}},
+ });
+ assert.deepEqual(ranking,rankingIds);
+ const selection=priorizarMercadosDaLista(mercados,ranking,12);
+ assert.equal(selection.length,12);
+ assert.equal(selection[0]!.id,rankingIds[0]);
+ assert.equal(selection[1]!.id,rankingIds[1]);
+ assert.equal(new Set(selection.map(m=>m.id)).size,12);
+ assert.ok(selection.slice(2).some(m=>m.id===mercados[30]!.id
+  ||Number.parseInt(m.id.slice(-2),16)>24),
+  'fallback precisa amostrar tambem mercados do FIM da enumeracao');
+ assert.ok(selection.every(m=>!m.confirmadoNaCorrente),
+  'ranking de terceiros nunca pode se declarar confirmado');
+ assert.match(JSON.parse(consultaMercadosMorphoComDivida()).query,/BorrowAssetsUsd/);
+ assert.equal(lerRankingMercadosMorpho({data:{markets:{items:[]}},errors:[{message:'schema changed'}]}),null);
+ assert.equal(lerRankingMercadosMorpho({data:{wrong:[]}}),null);
+});
+
+test('Morpho GraphQL: erro em HTTP 200 nao vira ausencia de devedores',async()=>{
+ const mock=fingir([{status:200,corpo:JSON.stringify({
+   errors:[{message:'Query field deprecated'}],data:null,
+ })}]);
+ const r=await enumerarDevedores(mock.buscar,'0x'+'1'.repeat(64),{
+   dormir:semSono,tetoDePaginas:2,
+ });
+ assert.equal(r.devedores.length,0);
+ assert.equal(r.completa,false);
+ assert.match(r.falha??'',/GraphQL/);
+ const query=JSON.parse(consultaDeDevedores('0x'+'1'.repeat(64),25,0)).query;
+ assert.match(query,/orderBy: BorrowShares/);
+ assert.match(query,/orderDirection: Desc/);
+});
+
+test('Morpho: a varredura consegue atravessar mais de 20 paginas distintas sem declarar cobertura falsa',async()=>{
+ const resps=Array.from({length:25},(_,i)=>({
+  status:200,corpo:pagina([i+1],{},i<24?'cursor-'+(i+1):undefined),
+ }));
+ const fake=fingir(resps);
+ const result=await enumerarMercados(fake.buscar,{dormir:semSono});
+ assert.ok(TETO_DE_PAGINAS>=25,'teto antigo de 20 perdia mercados reais');
+ assert.equal(result.paginas,25);
+ assert.equal(result.completa,true);
+ assert.equal(result.mercados.length,25);
+ assert.ok(fake.urls[24]!.includes('cursor=cursor-24'));
+});
+
+test('Morpho: o mesmo grupo de 24 cotacoes cobre outros mercados em rodadas diferentes',()=>{
+ const m=lerPaginaDeMercados(JSON.parse(pagina(
+  Array.from({length:120},(_,i)=>i+1)))).itens;
+ const ranking=[m[1]!.id,m[20]!.id,m[41]!.id,m[60]!.id,m[90]!.id];
+ const cobertos=new Set<string>();
+ const primeiro=priorizarMercadosDaLista(m,ranking,24,0);
+ assert.equal(primeiro.length,24);
+ for(let rodada=0;rodada<11;rodada++){
+  const lote=priorizarMercadosDaLista(m,ranking,24,rodada);
+  assert.equal(lote.length,24,'o teto de validacao RPC nunca aumenta');
+  assert.equal(new Set(lote.map(x=>x.id)).size,24,'sem IDs duplicados');
+  assert.equal(lote[0]!.id,ranking[0]);
+  for(const market of lote)cobertos.add(market.id);
+ }
+ assert.ok(cobertos.size>=60,'a selecao nao pode repetir sempre os mesmos 24 mercados');
+ assert.equal(m.filter(x=>x.confirmadoNaCorrente).length,0,
+  'rotacao da API nao autoriza liquidacao sem eth_call');
+ assert.deepEqual(priorizarMercadosDaLista(m,ranking,24,-1),[]);
+});
+
+test('Morpho: mercado e devedor prioritarios estaveis, cauda rotativa e leitura limitada',()=>{
+ const universe=Array.from({length:40},(_,i)=>i);
+ const seen=new Set<number>();
+ for(let step=0;step<8;step++){
+  const sample=selecionarMercadosParaDevedores(universe,8,step);
+  assert.equal(sample.length,8);
+  assert.deepEqual(sample.slice(0,4),[0,1,2,3]);
+  for(const value of sample)seen.add(value);
+  assert.equal(new Set(sample).size,8);
+ }
+ assert.ok(seen.size>8,'nao verificar os mesmos oito mercados para sempre');
+ const borrowers=selecionarDevedoresParaConferir(universe,5,7);
+ assert.equal(borrowers.length,5,'quantidade de eth_call nao aumenta');
+ assert.deepEqual(borrowers.slice(0,2),[0,1]);
+ assert.deepEqual(selecionarDevedoresParaConferir([],5,7),[]);
+ assert.deepEqual(selecionarMercadosParaDevedores(universe,8,-1),[]);
+});
+
+test('Morpho: mercados com LLTV 94,5% e bonus positivo podem entrar na TRIAGEM, nao no envio',()=>{
+    const mercados=lerPaginaDeMercados(JSON.parse(pagina([1,2,3,4,5,6]))).itens;
+    const bonusAlto=soOsQuePagam(mercados);
+    const candidatos=mercadosParaSondagem(mercados);
+    assert.ok(bonusAlto.length<candidatos.length,'antes >77% era excluido, agora entra na triagem');
+    assert.ok(candidatos.some(x=>x.lltv.eq('0.945')),'inclui mercado 94,5% observado no censo');
+    assert.ok(candidatos.every(x=>x.bonusPct!==null&&x.bonusPct.gt(0)));
+    assert.ok(candidatos.every(x=>x.confirmadoNaCorrente===false),
+      'nenhuma cotacao da API torna o mercado comprovado na Base');
+    assert.equal(mercadosParaSondagem([{...mercados[0]!,lltv:new Decimal(1)}]).length,0);
+    assert.equal(mercadosParaSondagem([{...mercados[0]!,bonusPct:null}]).length,0);
 });

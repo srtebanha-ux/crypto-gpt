@@ -20,7 +20,10 @@ module.exports = {
     paths: { sources: './contracts', tests: './forkTests', cache: './.tmp/hhcache', artifacts: './.tmp/artifacts' },
     networks: {
         hardhat: {
-            forking: { url: 'https://mainnet.base.org' },
+            forking: {
+                url: 'https://mainnet.base.org',
+                ...(process.env.ARB_BLOCO ? { blockNumber: Number(process.env.ARB_BLOCO) } : {}),
+            },
             chainId: 8453,
             // O Hardhat nao conhece a historia de hardforks da Base e recusa
             // qualquer chamada em bloco "historico" (o do proprio fork, inclusive).

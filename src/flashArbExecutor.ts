@@ -34,6 +34,7 @@ export const FLASH_ARB_SELECTORS = {
     executarArbitragem: '0xa7e42d50',
     sacar: '0xb319041e',
     balanceOf: '0x70a08231',
+    owner: '0x8da5cb5b',
 } as const;
 
 /** Erros que o FlashArb.sol pode reverter, por seletor. */
@@ -139,6 +140,12 @@ export interface EntradaDoPlano {
  */
 export function planejarExecucao(entrada: EntradaDoPlano): PlanoDeExecucao | Recusa {
     const { cycle, hops, evaluation } = entrada;
+    if (!entrada.margemDeSeguranca.isFinite() || entrada.margemDeSeguranca.lte(0)
+        || entrada.margemDeSeguranca.gt(1) || entrada.saldoAtualDoLucro < 0n
+        || !evaluation.gasCost.isFinite() || evaluation.gasCost.lt(0)
+        || !evaluation.netProfit.isFinite()) {
+        return { motivo: 'Margem, saldo ou custo de gás inválido; execução recusada.' };
+    }
     if (cycle.pools.length !== 2) {
         return {
             motivo:
@@ -171,8 +178,13 @@ export function planejarExecucao(entrada: EntradaDoPlano): PlanoDeExecucao | Rec
     const quantidade = paraUnidadesCruas(quantidadeAlt, decimaisAlt);
     if (quantidade <= 0n) return { motivo: 'Quantidade emprestada arredondou para zero nas unidades do token.' };
 
-    const lucroExigido = evaluation.netProfit.mul(entrada.margemDeSeguranca);
-    const lucroMinimo = entrada.saldoAtualDoLucro + paraUnidadesCruas(lucroExigido, decimaisBase);
+    // O contrato mede saldo de tokens, mas o gás sai da carteira. Reservar
+    // somente uma fração do lucro líquido permitiria um saldo menor que o gás.
+    // Arredondar o piso PARA CIMA evita apagar a margem em tokens de 6 casas.
+    const lucroExigido = evaluation.gasCost.plus(evaluation.netProfit.mul(entrada.margemDeSeguranca));
+    const piso = paraUnidadesCruas(new Decimal(lucroExigido.toFixed(decimaisBase, Decimal.ROUND_UP)), decimaisBase);
+    if (piso <= 0n) return { motivo: 'Piso de lucro não positivo nas unidades do token.' };
+    const lucroMinimo = entrada.saldoAtualDoLucro + piso;
 
     return {
         poolEmprestimo: cycle.pools[0].address,
@@ -275,20 +287,42 @@ export async function ensaiarExecucao(
     dono: string,
     calldata: string,
 ): Promise<ResultadoDoEnsaio> {
+    const codigo = await chamarRpc(rpcUrl, 'eth_getCode', [contrato, 'latest']);
+    if (codigo.error || typeof codigo.result !== 'string' || !/^0x(?:[0-9a-fA-F]{2})+$/.test(codigo.result)) {
+        return { ok: false, motivo: 'Executor sem bytecode verificável; ensaio recusado.' };
+    }
     const resposta = await chamarRpc(rpcUrl, 'eth_call', [{ from: dono, to: contrato, data: calldata }, 'latest']);
     if (resposta.error) {
         return { ok: false, motivo: interpretarReversao(extrairDadoDeReversao(resposta.error)) };
     }
+    // executarArbitragem não retorna dados. Resposta ausente/malformada não
+    // comprova sucesso, mesmo quando o servidor não informou error.
+    if (resposta.result !== '0x') {
+        return { ok: false, motivo: 'Resposta inválida ao ensaio de executarArbitragem.' };
+    }
     return { ok: true };
+}
+
+/** Proprietário autorizado por apenasDono; modo de ensaio não precisa de chave. */
+export async function lerDonoDoContrato(rpcUrl: string, contrato: string): Promise<string> {
+    const resposta = await chamarRpc(rpcUrl, 'eth_call', [{ to: contrato, data: FLASH_ARB_SELECTORS.owner }, 'latest']);
+    if (resposta.error || typeof resposta.result !== 'string'
+        || !/^0x0{24}[0-9a-fA-F]{40}$/.test(resposta.result)
+        || BigInt(resposta.result) === 0n) {
+        throw new Error('Não foi possível verificar owner() do executor.');
+    }
+    return '0x' + resposta.result.slice(-40);
 }
 
 /** `balanceOf(contrato)` de um token, em unidades cruas. */
 export async function lerSaldoDoContrato(rpcUrl: string, token: string, contrato: string): Promise<bigint> {
     const data = FLASH_ARB_SELECTORS.balanceOf + encodeAddress(contrato);
     const resposta = await chamarRpc(rpcUrl, 'eth_call', [{ to: token, data }, 'latest']);
-    if (resposta.error || typeof resposta.result !== 'string') return 0n;
-    const hex = resposta.result;
-    return hex === '0x' ? 0n : BigInt(hex);
+    if (resposta.error || typeof resposta.result !== 'string'
+        || !/^0x[0-9a-fA-F]{64}$/.test(resposta.result)) {
+        throw new Error('Saldo do contrato não verificado; execução recusada para preservar o piso de lucro.');
+    }
+    return BigInt(resposta.result);
 }
 
 /**
@@ -308,6 +342,12 @@ export async function enviarExecucao(opcoes: {
     const { JsonRpcProvider, Wallet } = await import('ethers');
     const provider = new JsonRpcProvider(opcoes.rpcUrl);
     const carteira = new Wallet(opcoes.chavePrivada, provider);
+    const dono = await lerDonoDoContrato(opcoes.rpcUrl, opcoes.contrato);
+    if (dono.toLowerCase() !== carteira.address.toLowerCase()) {
+        throw new Error('Carteira não corresponde ao owner() do executor.');
+    }
+    const ensaio = await ensaiarExecucao(opcoes.rpcUrl, opcoes.contrato, carteira.address, opcoes.calldata);
+    if (!ensaio.ok) throw new Error(`Envio recusado: ${ensaio.motivo}`);
     const tx = await carteira.sendTransaction({
         to: opcoes.contrato,
         data: opcoes.calldata,
