@@ -109,3 +109,35 @@ test('LOG_LEVEL=debug faz o detalhe aparecer, marcado como DEBUG', () => {
     assert.match(logLines[0], /\[DEBUG\]/);
     assert.match(logLines[1], /\[INFO\]/);
 });
+
+
+test('redacts configured secrets in message, serialized errors and nested fields', () => {
+    const { createLogger } = freshLoggerModule(undefined);
+    const secret = 'fixture-secret-never-a-production-key';
+    process.env.MEGAZORD_CHAVE_PRIVADA = secret;
+    try {
+        const {errorLines} = captureConsole(() => createLogger('test').error(
+            'library rejected ' + secret,
+            {error: new Error('invalid value=' + secret), nested: {privateKey: 'unknown-secret'}, gas: 42n},
+        ));
+        assert.ok(!errorLines[0].includes(secret));
+        assert.ok(!errorLines[0].includes('unknown-secret'));
+        assert.match(errorLines[0], /REDACTED/);
+        assert.match(errorLines[0], /"gas":"42"/);
+        assert.match(errorLines[0], /invalid value=/);
+    } finally { delete process.env.MEGAZORD_CHAVE_PRIVADA; }
+});
+test('scrubs RPC credential URLs and key prefix variants without hiding transaction hashes', () => {
+    const {ocultarSegredos} = freshLoggerModule(undefined);
+    const key = 'a'.repeat(64), hash = '0x' + 'b'.repeat(64);
+    const result = ocultarSegredos('0x' + key + ' https://rpc.test/private-path ' + hash,
+        {BOT_PRIVATE_KEY: key, ARB_RPC_URL: 'https://rpc.test/private-path'});
+    assert.ok(!result.includes(key));assert.ok(!result.includes('private-path'));
+    assert.ok(result.includes(hash));
+});
+test('circular diagnostic data does not crash the logger', () => {
+    const {createLogger} = freshLoggerModule(undefined);
+    const data:Record<string,unknown> = {count: 1};data.self = data;
+    const {warnLines} = captureConsole(() => createLogger('test').warn('diagnostic', data));
+    assert.match(warnLines[0], /Circular/);
+});
