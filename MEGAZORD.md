@@ -57,3 +57,12 @@ consolidados. Cotas RPC continuam independentes. Nao existe ranking financeiro
 comum entre tokens. Os PRs Morpho #88 e #89 nao foram incorporados automaticamente.
 Os testes do coordenador usam rede simulada e assinaturas reais de chave de
 teste, sem fundos. Validacao em rede e implantacao permanecem pendentes.
+
+## Teste EVM local reproduzivel
+
+Executar `npm run megazord:test-local`. A configuracao isolada nao usa fork,
+RPC publico ou carteira de producao. O teste transmite e minera tres
+transacoes assinadas para um contrato minimo: duas estrategias concorrentes
+e o adaptador de carteira usado pelo Aave. Confere nonces 0/1/2, estado do
+contrato, recibos e diario. O custo L1 e simulado. Este teste valida o
+transporte e a coordenacao, nao a economia nem os contratos dos protocolos.

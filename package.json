@@ -48,7 +48,8 @@
     "achar-pool:prod": "node dist/acharPool.js",
     "caca": "ts-node src/cacarAoVivo.ts",
     "caca:prod": "node dist/cacarAoVivo.js",
-    "observador:multirrede": "node dist/observadorMultirrede.js"
+    "observador:multirrede": "node dist/observadorMultirrede.js",
+    "megazord:test-local": "hardhat test --no-compile --config hardhat.megazord.config.cjs forkTests/megazordExecutor.local.cjs"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",
