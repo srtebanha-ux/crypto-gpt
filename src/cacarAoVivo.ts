@@ -2073,6 +2073,11 @@ async function lerFaixaPartindoSePreciso(
         const v = DISPONIBILIDADE.veredicto(aqui, 'eth_getLogs');
         if (VAZAO.estaEmRecuo() || !v.podeVarrer) {
             ADIADAS.historico += 1;
+            if (ADIADAS.historico === 1) log.warn('[HISTORICO] Faixa adiada antes de consultar o RPC.', {
+                de:a, ate:b, provedor:aqui, disponibilidade:v.estado,
+                motivo:v.porque, vazao:VAZAO.estado(),
+                nota:'adiamento nao e resposta vazia e nao comprova faixa lida',
+            });
             return { lidas: [], falhas: 1 };
         }
         // A TAREFA vai NA CHAMADA: sobrevive as tentativas e ao fallback, e
@@ -2101,7 +2106,7 @@ async function lerFaixaPartindoSePreciso(
     }
 }
 
-async function varrerDevedores(
+export async function varrerDevedores(
     topo: number,
     blocoInicial?: number,
     opcoes: {
@@ -2177,9 +2182,19 @@ async function varrerDevedores(
         }
 
         lidas += lote.length;
+        if (resultados.every(r => r.lidas.length === 0)) {
+            log.warn('[HISTORICO] Lote sem nenhuma faixa lida; interrompo esta rodada.', {
+                faixasTentadas:lidas, faixasLidas:faixasLidas.length,
+                faixasQueFalharam:falhas, faixasAindaNaoTentadas:faixas.length-lidas,
+                nota:'cache e cursor usam somente as faixas realmente lidas; zero devedores nao comprova ausencia',
+            });
+            break;
+        }
         if (faixas.length > 10 && !opcoes.calada && (lidas % (CONCORRENCIA * 5) === 0 || lidas === faixas.length)) {
             log.info('Progresso da varredura acelerada.', {
-                lidas: `${lidas} de ${faixas.length}`,
+                faixasTentadas: `${lidas} de ${faixas.length}`,
+                faixasRealmenteLidas: faixasLidas.length,
+                faixasQueFalharam: falhas,
                 devedoresAteAgora: vistos.size,
                 decorrido: `${((Date.now() - comecouEm) / 1000).toFixed(0)}s`,
             });
