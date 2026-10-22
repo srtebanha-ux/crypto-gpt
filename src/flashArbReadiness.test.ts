@@ -33,7 +33,7 @@ test('all four guards must be present for real execution',()=>{
   assert.equal(d.envioAutorizado,true);
   assert.deepEqual(d.bloqueios,[]);
   for(const absent of ['FLASH_ARB_CONTRACT','FLASH_ARB_LIVE','FLASH_ARB_CONFIRM','FLASH_ARB_PRIVATE_KEY'] as const){
-    const bad={...armado};
+    const bad: NodeJS.ProcessEnv={...armado};
     delete bad[absent];
     const got=diagnosticarFlashArb(bad);
     assert.equal(got.envioAutorizado,false,absent);
@@ -42,8 +42,7 @@ test('all four guards must be present for real execution',()=>{
 });
 
 test('diagnostic contains no private key, wallet address or confirmation values',()=>{
-  const {FLASH_ARB_PRIVATE_KEY,...masked}=armado;
-  const bad=diagnosticarFlashArb({...masked,FLASH_ARB_LIVE:'true',FLASH_ARB_PRIVATE_KEY:segredo});
+  const bad=diagnosticarFlashArb(armado);
   assert.equal(JSON.stringify(bad).includes(segredo),false);
   assert.equal(JSON.stringify(bad).includes(contrato),false);
 });
