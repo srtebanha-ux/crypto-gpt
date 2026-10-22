@@ -60,11 +60,19 @@ export function limparQuentesMorpho(agora=Date.now()):number{
    a.distanciaBps<b.distanciaBps?-1:a.distanciaBps>b.distanciaBps?1:b.atualizadoEm-a.atualizadoEm);
  const keep=new Set<string>();
  const counts=new Map<string,number>();
- // First reserve up to 8 slots for EVERY discovered market. This stops a
- // large illiquid book from pushing different markets out of the queue.
+ // Admit one borrower per market BEFORE filling the eight-slot allowance.
+ // Otherwise three nearer books fill 24 slots and a fourth market never
+ // reaches the block trigger, even when it has a verified exit route.
  for(const a of sorted){
    const id=a.mercado.id.toLowerCase();
-   if((counts.get(id)??0)>=8||keep.size>=MAX_QUENTES)continue;
+   if(counts.has(id)||keep.size>=MAX_QUENTES)continue;
+   keep.add(chave(a));
+   counts.set(id,1);
+ }
+ // Reserve remaining slots up to eight per represented market.
+ for(const a of sorted){
+   const id=a.mercado.id.toLowerCase();
+   if(keep.has(chave(a))||(counts.get(id)??0)>=8||keep.size>=MAX_QUENTES)continue;
    keep.add(chave(a));
    counts.set(id,(counts.get(id)??0)+1);
  }
