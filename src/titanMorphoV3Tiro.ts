@@ -8,6 +8,7 @@
  * mere health estimate or quoter value.
  */
 import fs from 'node:fs';
+import {sondarMorphoEmLotes} from './titanMorphoSondas';
 import path from 'node:path';
 import {Interface,JsonRpcProvider,Wallet,getAddress,keccak256,ZeroAddress} from 'ethers';
 import type {MercadoDaApi} from './morphoApi';
@@ -139,6 +140,7 @@ export async function avaliarELiquidarMorphoV3(
     const block=await p.getBlock('latest');
     if(!block?.baseFeePerGas||block.baseFeePerGas<=0n)throw Error('baseFee nao mensuravel');
     const tag=block.number;
+    const baseFee=block.baseFeePerGas;
     const raw=await p.call({to:MORPHO_FLASH_BASE,data:codificarIdToMarketParams(e.mercado.id),blockTag:tag});
     const params=lerIdToMarketParams(raw);
     if(!apiConfereComACorrente(e.mercado,params).confere||!params)
@@ -168,7 +170,8 @@ export async function avaliarELiquidarMorphoV3(
       if(!same(pool,ZeroAddress)&&await p.getCode(pool)!=='0x')fees.push(f);
     }
     if(fees.length===0)return{status:'inviavel',motivo:'sem pool V3 comprovada garantia -> divida'};
-    let best:{data:string;profit:bigint;shares:bigint;fee:number;estimated:bigint;score:bigint}|null=null;
+    type Sonda={data:string;profit:bigint;shares:bigint;fee:number;estimated:bigint;score:bigint};
+    let best:Sonda|null=null;
     const falhas=new Map<string,number>();
     const amounts=tamanhosDeLiquidacaoMorpho({
       borrowShares:pos.borrowShares,collateral:pos.collateral,
@@ -177,28 +180,35 @@ export async function avaliarELiquidarMorphoV3(
     });
     if(amounts.length===0)return{status:'inviavel',
       motivo:'garantia insuficiente para qualquer parcela segura de divida'};
-    for(const shares of amounts){
-      for(const fee of fees){
+    const combinacoes=amounts.flatMap(shares=>fees.map(fee=>({shares,fee})));
+    const sondas=await sondarMorphoEmLotes(combinacoes,async({shares,fee}):Promise<Sonda|null>=>{
         const data=executorAbi.encodeFunctionData('liquidar',[
           marketTuple,user,0n,shares,fee,1n,BigInt(block.timestamp+90)]);
         try{
           const ret=await p.call({to:addr,from:owner,data,blockTag:tag});
           const profit=executorAbi.decodeFunctionResult('liquidar',ret)[0] as bigint;
-          if(profit<=1n)continue;
+          if(profit<=1n)return null;
           const gross=await loanValueInWeth(p,params.loanToken,profit);
-          if(gross===null||gross<=0n)continue;
+          if(gross===null||gross<=0n)return null;
           const estimated=await p.estimateGas({to:addr,from:owner,data});
           // Rank by conservative WETH NET, not the gross surplus.
           const score=pontuacaoLiquidaMorpho(gross,estimated,
-            block.baseFeePerGas,policy.tipWei,policy.maxGas);
-          if(score===null||score<=0n)continue;
-          if(!best||score>best.score)best={data,profit,shares,fee,estimated,score};
+            baseFee,policy.tipWei,policy.maxGas);
+          if(score===null||score<=0n)return null;
+          return {data,profit,shares,fee,estimated,score};
         }catch(err){
           const reason=motivoDoRevertMorpho(err);
           falhas.set(reason,(falhas.get(reason)??0)+1);
           // A reversao de eth_call nao autoriza transacao paga.
+          return null;
         }
-      }
+    });
+    // Deterministic selection after every read-only probe has settled. The
+    // existing single-signer director and final proof still govern the shot.
+    for(const sonda of sondas){
+      if(sonda.status!=='fulfilled'||!sonda.value)continue;
+      const candidate=sonda.value;
+      if(!best||candidate.score>best.score)best=candidate;
     }
     if(!best){mark(key,60_000);
       return{status:'inviavel',motivo:'nenhuma rota passou no liquidar() integral do executor (eth_call): '+resumoRevertsMorpho(falhas)};}

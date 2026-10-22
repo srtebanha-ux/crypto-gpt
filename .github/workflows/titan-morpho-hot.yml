@@ -26,6 +26,7 @@ jobs:
         run: |
           node --require ts-node/register --test \
             src/titanMorphoHot.test.ts \
+            src/titanMorphoSondas.test.ts \
             src/titanMorphoRadar.test.ts \
             src/titanMorphoRevert.test.ts \
             src/titanMorphoTamanhos.test.ts \
