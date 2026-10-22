@@ -1,0 +1,27 @@
+name: TITAN flash arbitrage readiness
+on:
+  push:
+    branches:
+      - codex/titan-arb-readiness-20261022
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Flash arb armament and execution regressions
+        run: |
+          node --require ts-node/register --test \
+            src/flashArbReadiness.test.ts \
+            src/flashArbExecutor.test.ts \
+            src/dexArbitrageSniffer.test.ts
