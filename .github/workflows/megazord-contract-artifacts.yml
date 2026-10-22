@@ -40,6 +40,7 @@ jobs:
           node --require ts-node/register --test \
             src/titanV2Prova.test.ts \
             src/titanV2Modo.test.ts \
+            src/titanV2Identidade.test.ts \
             src/cotarMista.test.ts
       - name: Docker image must contain both artifacts
         run: docker build --progress=plain -t megazord-artifacts-ci .
