@@ -27,6 +27,7 @@ import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
 import { cycleSpotRatio, type CycleEvaluation, type Hop } from './ammMath';
 import { avaliarCicloComSementeCpamm } from './titanCpammSniffer';
+import { diagnosticarFlashArb } from './flashArbReadiness';
 import { findTriangularCycles, findTwoPoolCycles, hopsForCycle, type Cycle, type PoolInfo } from './dexGraph';
 import {
     ensaiarExecucao,
@@ -752,6 +753,17 @@ async function main() {
     const contratoFlash = process.env.FLASH_ARB_CONTRACT?.trim();
     const chavePrivada = process.env.FLASH_ARB_PRIVATE_KEY?.trim();
     const flashLive = process.env.FLASH_ARB_LIVE === 'true';
+    // The scanner formerly returned silently from tentarExecutar when no
+    // contract was set. Report that blocker once at startup, before any
+    // theoretical opportunity is displayed as if it could become an order.
+    const prontidao = diagnosticarFlashArb();
+    log[prontidao.envioAutorizado ? 'info' : 'warn']('[TITAN/FLASH-ARB] Prontidao do executor (sem segredos).', {
+        modo: prontidao.modo,
+        preflightDisponivel: prontidao.preflightDisponivel,
+        envioAutorizado: prontidao.envioAutorizado,
+        bloqueios: prontidao.bloqueios,
+    });
+
     // Abaixo de 1 de propósito: as reservas mudam entre a leitura e a
     // execução, e exigir on-chain o lucro inteiro estimado faria a transação
     // reverter a qualquer movimento a favor de outro participante — gás
