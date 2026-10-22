@@ -87,6 +87,22 @@ test('HOT uses all 22 slots when 22 near-liquidatable borrowers come from one ma
  assert.equal(state.vagasLivres,2);
  limparQuentesMorpho(now+26*60_000);
 });
+test('HOT admits a fourth market even when three nearer books already fill every slot',()=>{
+ const now=block+120*60_000;
+ limparQuentesMorpho(now);
+ for(let m=0;m<3;m++)for(let i=0;i<8;i++){
+   registrarQuenteMorpho(mercado(true,'0x'+(300+m).toString(16).padStart(64,'0')),
+     '0x'+(3000+m*100+i).toString(16).padStart(40,'0'),BigInt(1+m*10+i),now);
+ }
+ assert.equal(resumoQuentesMorpho(now).mercados,3);
+ registrarQuenteMorpho(mercado(true,'0x'+(303).toString(16).padStart(64,'0')),
+   user1,100n,now);
+ const state=resumoQuentesMorpho(now);
+ assert.equal(state.mercados,4);
+ assert.equal(state.posicoes,24);
+ assert.equal(state.vagasLivres,0);
+ limparQuentesMorpho(now+26*60_000);
+});
 test('HOT suppresses an entire market without canonical DEX exit instead of retrying borrowers',()=>{
  const id='0x'+'aa'.repeat(32);
  const other='0x'+'bb'.repeat(32);
