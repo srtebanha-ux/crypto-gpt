@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {conferirModoMegazord,iniciarMegazord} from './megazord';
+import {conferirModoMegazord,iniciarMegazord,manterLiquidanteMegazord} from './megazord';
 test('refuses inherited financial authorization before engine loading',async()=>{
  for(const key of ['CACA_ENVIAR','TITAN_ENVIAR','TITAN_V2_ENVIAR',
    'CACA_MORPHO_V3_ENVIAR','CACA_MULTIHOP_ENVIAR','ARB_ENVIAR']){
@@ -29,4 +29,15 @@ test('propagates engine error instead of reporting both healthy',async()=>{
    liquidacoes:()=>new Promise<void>(()=>{}),
    arbitragem:async()=>{throw Error('rpc offline');},
  })),/rpc offline/);
+});
+
+test('liquidator transient boot returns and RPC errors retry without restarting arbitrage',async()=>{
+ let calls=0,waits=0;
+ const result=await manterLiquidanteMegazord(async()=>{
+   calls++;
+   if(calls===1)return;
+   if(calls===2)throw Error('temporary RPC outage');
+   return 'parar';
+ },async()=>{waits++;});
+ assert.equal(result,'parar');assert.equal(calls,3);assert.equal(waits,2);
 });

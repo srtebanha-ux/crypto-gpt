@@ -21,6 +21,20 @@ export function conferirModoMegazord(env:NodeJS.ProcessEnv):void{
  if(armed.length)throw Error('Megazord de observacao recusa envio habilitado: '+armed.join(', '));
 }
 
+/** Preserve the liquidator's standalone retry lifecycle inside the combined process. */
+export async function manterLiquidanteMegazord(
+ iniciar:()=>Promise<'parar'|void>,
+ esperar:()=>Promise<void>=()=>new Promise(r=>setTimeout(r,1000)),
+):Promise<'parar'>{
+ for(;;){
+   try{if(await iniciar()==='parar')return 'parar';}
+   catch(e){log.warn('Liquidante vai tentar novamente.',{
+     motivo:e instanceof Error?e.message:'falha de inicializacao',
+   });}
+   await esperar();
+ }
+}
+
 export async function iniciarMegazord(
  env:NodeJS.ProcessEnv,
  carregar:()=>Promise<MotoresMegazord>,
@@ -51,7 +65,7 @@ if(require.main===module){
      motores:['Aave/Morpho','arbitragem Base'],modo:process.env.MEGAZORD_MODO,
      executorFinanceiroUnificado:process.env.MEGAZORD_MODO==='execucao',
    });
-   return {liquidacoes:caca.iniciarLiquidante,arbitragem:arb.iniciarArbitragem};
+   return {liquidacoes:()=>manterLiquidanteMegazord(caca.iniciarLiquidante),arbitragem:arb.iniciarArbitragem};
  }).catch(e=>{
    log.error('Megazord interrompido.',{motivo:e instanceof Error?e.message:'falha'});
    // Stop both engines and their timers after failure; do not run degraded.
