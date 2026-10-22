@@ -11,9 +11,11 @@ import { Interface } from 'ethers';
 const erros=new Interface([
   'error PagamentoCurto(uint256 tem,uint256 devido)',
   'error LucroInsuficiente(uint256 obtido,uint256 minimo)',
+  'error NaoEDono()',
 ]);
 
 export type DiagnosticoEconomicoTitan=
+  | {tipo:'nao-e-dono'}
   | {tipo:'pagamento-curto';tem:bigint;devido:bigint;deficit:bigint;deficitBps:bigint}
   | {tipo:'lucro-insuficiente';obtido:bigint;minimo:bigint;deficit:bigint};
 
@@ -38,6 +40,7 @@ export function diagnosticarReversaoTitan(error:unknown):DiagnosticoEconomicoTit
     try{
       const analisado=erros.parseError(data);
       if(!analisado)continue;
+      if(analisado.name==='NaoEDono')return {tipo:'nao-e-dono'};
       if(analisado.name==='PagamentoCurto'){
         const tem=BigInt(analisado.args[0]);
         const devido=BigInt(analisado.args[1]);

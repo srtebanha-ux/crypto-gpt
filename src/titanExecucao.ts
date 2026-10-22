@@ -12,6 +12,7 @@ import { conferirJanelaDeNonce } from './janelaDeNonce';
 import { decidirGasSnowball } from './titanGasSnowball';
 import { reinvestirLucroTitan, type ReinvestimentoTitan } from './titanReinvestimento';
 import { diagnosticarReversaoTitan } from './titanTaticas';
+import {remetenteDaSondaTitan} from './titanIdentidadeSonda';
 import {
     impedimentoTitanContinuo, parametrosTitanContinuo,
     reservarTitanContinuo, fecharTitanContinuo,
@@ -465,7 +466,8 @@ export type EnsaioAtomicoTitan = {
     motivo:string; bloco:number|null; brutoWei?:string; custoMaximoWei?:string;
     margemMinimaWei?:string; liquidoConservadorWei?:string;
     gasEstimado?:string; gasLimite?:string; contrato?:string;
-    erroContrato?:'pagamento-curto'|'lucro-insuficiente';
+    identidadeDaSonda?:string;
+    erroContrato?:'pagamento-curto'|'lucro-insuficiente'|'nao-e-dono';
     deficitUnidades?:string; deficitBps?:string;
 };
 
@@ -520,14 +522,11 @@ export async function simularTitanAoVivo(
         return{situacao:'desconhecido',motivo:'executor correto para fonte de credito nao configurado',bloco:null};
     if(plano.rota[0]?.tokenEntra.toLowerCase()!==WETH_BASE_TITAN.toLowerCase())
         return{situacao:'desconhecido',motivo:'lucro e custo precisam da mesma unidade WETH',bloco:null};
-    let contrato:string,cofre:string,from:string|undefined;
+    let contrato:string,cofre:string;
     try{
         contrato=contratoExecutorTitan(ambiente)!;
         cofre=getAddress(ambiente.TITAN_COFRE);
-        from=ambiente.TITAN_CHAVE_PRIVADA
-            ? new Wallet(ambiente.TITAN_CHAVE_PRIVADA).address
-            : undefined;
-    }catch{return{situacao:'desconhecido',motivo:'enderecos/identidade da carteira invalidos',bloco:null};}
+    }catch{return{situacao:'desconhecido',motivo:'enderecos do contrato/cofre invalidos',bloco:null};}
     const rpc=new JsonRpcProvider(rpcUrl,Number(REDE_BASE),{staticNetwork:true});
     let bloco:number|null=null;
     try{
@@ -539,12 +538,15 @@ export async function simularTitanAoVivo(
         // suas latencias antes de cada prova atomica.
         const [chainId,bytecode,cofreAtual,donoAtual]=await Promise.all([
             rpc.send('eth_chainId',[]),rpc.getCode(contrato),get('cofre'),
-            from?get('dono'):Promise.resolve(undefined),
+            get('dono'),
         ]);
         if(BigInt(chainId)!==REDE_BASE)throw Error('RPC nao e Base 8453');
         if(bytecode==='0x')throw Error('executor sem bytecode na Base');
         if(cofreAtual!==cofre)throw Error('cofre do executor diverge');
-        if(from && donoAtual!==from)throw Error('carteira nao e proprietaria do executor');
+        // A sonda do Megazord e somente-leitura; chave privada e removida
+        // intencionalmente. O dono onchain e a unica identidade aceita
+        // como remetente de eth_call/estimateGas. Nao concede assinatura.
+        const {from,identidade}=remetenteDaSondaTitan(donoAtual,ambiente);
         if(ambiente.TITAN_FONTE_CREDITO==='morpho'){
             const cru=await rpc.call({to:contrato,data:ABI_TITAN.encodeFunctionData('morpho')});
             const configurado=getAddress(ABI_TITAN.decodeFunctionResult('morpho',cru)[0] as string);
@@ -559,7 +561,7 @@ export async function simularTitanAoVivo(
         const data=ABI_TITAN.encodeFunctionData('executarRota',[
             plano.rota,plano.quantia,0n
         ]);
-        const tx={...(from?{from}:{}),to:contrato,data};
+        const tx={from,to:contrato,data};
         // Dois metodos distintos: retorno integral e gas do caminho real.
         const [resultado,gasEstimado,l1Retorno]=await Promise.all([
             rpc.call(tx),
@@ -578,9 +580,13 @@ export async function simularTitanAoVivo(
         const atual=await rpc.getBlockNumber();
         if(atual-bloco>2)return{situacao:'desconhecido',
             motivo:'bloco mudou durante a simulacao integral',bloco,contrato};
-        return{...avaliacao,bloco,contrato};
+        return{...avaliacao,bloco,contrato,identidadeDaSonda:identidade};
     }catch(e){
         const causa=diagnosticarReversaoTitan(e);
+        if(causa?.tipo==='nao-e-dono')return{
+            situacao:'desconhecido',bloco,contrato,erroContrato:'nao-e-dono',
+            motivo:'NaoEDono: remetente da simulacao nao e o owner do contrato; nenhuma transacao foi enviada',
+        };
         if(causa?.tipo==='pagamento-curto')return{
             situacao:'inviavel',bloco,contrato,erroContrato:'pagamento-curto',
             motivo:'PagamentoCurto: ciclo nao fecha, sem gasto onchain na simulacao',

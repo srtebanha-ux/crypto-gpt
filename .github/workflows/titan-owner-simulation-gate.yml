@@ -1,0 +1,46 @@
+name: TITAN read-only owner simulation
+on:
+  push:
+    branches:
+      - fix/megazord-titan-readonly-owner-sender-20261022
+  pull_request:
+    branches:
+      - feat/megazord-unified-observation
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Owner-only eth_call simulation tests
+        run: |
+          node --require ts-node/register --test \
+            src/titanIdentidadeSonda.test.ts \
+            src/titanTaticas.test.ts \
+            src/titanExecucao.test.ts \
+            src/megazord.test.ts
+      - name: Guard against implicit RPC sender
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const src=fs.readFileSync('src/titanExecucao.ts','utf8');
+          const idx=src.indexOf('export async function simularTitanAoVivo(');
+          if(idx<0)throw Error('probe not found');
+          const end=src.indexOf('export async function executarTitan(',idx);
+          const probe=src.slice(idx,end);
+          if(!probe.includes('get(\'dono\')')||
+             !probe.includes('remetenteDaSondaTitan(donoAtual,ambiente)')||
+             !probe.includes('const tx={from,to:contrato,data}'))
+             throw Error('TITAN read-only probe lost explicit verified sender');
+          if(probe.includes('...(from?{from}:{})'))
+             throw Error('RPC sender reverted to optional');
+          NODE

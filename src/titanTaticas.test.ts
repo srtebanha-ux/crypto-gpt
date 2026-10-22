@@ -6,6 +6,7 @@ import {diagnosticarReversaoTitan,tamanhosDePrecisaoTitan,retentarTamanhoPorErro
 const abi=new Interface([
   'error PagamentoCurto(uint256 tem,uint256 devido)',
   'error LucroInsuficiente(uint256 obtido,uint256 minimo)',
+  'error NaoEDono()',
 ]);
 
 test('PagamentoCurto aninhado e uma rota economicamente INVIAVEL, nao erro desconhecido',()=>{
@@ -44,4 +45,13 @@ test('resultado de revert near-breakeven autoriza APENAS segunda cotacao offchai
   assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,'lucro-insuficiente','55'),[]);
   assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,undefined,'55'),[]);
   assert.deepEqual(retentarTamanhoPorErroTitan(1_000_000n,'pagamento-curto','ruim'),[]);
+});
+
+test('custom error 0x6c3c96ab e NaoEDono e NAO oportunidade inviavel',()=>{
+    const error=abi.encodeErrorResult('NaoEDono',[]);
+    assert.equal(error,'0x6c3c96ab');
+    assert.deepEqual(diagnosticarReversaoTitan({data:error}),{tipo:'nao-e-dono'});
+    assert.deepEqual(diagnosticarReversaoTitan({info:{error:{data:error}}}),{tipo:'nao-e-dono'});
+    assert.deepEqual(tamanhosDePrecisaoTitan(100n,{tipo:'nao-e-dono'}),[]);
+    assert.deepEqual(retentarTamanhoPorErroTitan(100n,undefined,undefined),[]);
 });
