@@ -52,7 +52,8 @@ import { priorizarCotacoes, MemoriaDeCotacoesNegativas, deveProcessarCotacoes } 
 import { detectarRebotesAave, detectarRebotesMorpho, RadarDeRebotes, priorizarRebotes } from './titanRebote';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
-import { executarFlashArbV2, diagnosticarFlashArbV2 } from './titanV2Execucao';
+import { executarFlashArbV2, diagnosticarFlashArbV2, habilitacaoV2 } from './titanV2Execucao';
+import { politicaDeSondaV2 } from './titanV2Modo';
 import { selecionarProximaProvaV2, reprovacaoDePoolTravadoV2 } from './titanV2Selecao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
@@ -1873,6 +1874,21 @@ async function principal(): Promise<void> {
             + `${process.env.ARB_HTTP_POR_HORA ?? 'sem limite'} HTTP/h`,
     });
 
+    // Solicitar envio V2 automaticamente ativa a PROVA somente leitura.
+    // Antes, TITAN_V2_ENVIAR=1 com TITAN_V2_SONDA=0 nao fazia nada, em silencio.
+    // Isto NAO ignora os gates financeiros, validacao onchain nem o nonce.
+    const politicaV2 = politicaDeSondaV2(process.env);
+    const bloqueioV2 = habilitacaoV2(process.env);
+    if (politicaV2.habilitada || process.env.TITAN_V2_CONTRATO) {
+        log[bloqueioV2 === null ? 'info' : 'warn']('[TITAN/V2-PRONTIDAO] Diagnostico das autorizacoes.', {
+            envioSolicitado: politicaV2.envioSolicitado,
+            sondaAtiva: politicaV2.habilitada,
+            sondaAtivadaAutomaticamente: politicaV2.ativadaPorEnvio,
+            envioProntoPelasVariaveis: bloqueioV2 === null,
+            bloqueio: bloqueioV2 ?? 'nenhum no ambiente; exige prova atomica e verificacao do contrato',
+        });
+    }
+
     // Checagem de implantacao sem assinar ou gastar gas, antes de procurar ordens.
     // A permissao de envio NAO basta quando o deploy manual foi feito por outra conta.
     if (process.env.TITAN_V2_CONTRATO) {
@@ -3048,7 +3064,7 @@ async function principal(): Promise<void> {
         // fazer sem um contrato implantado é `eth_call` do `executarArbitragem`
         // — e isso fica DECLARADO como pendente, não escondido.
         const aprovadas = decisoes.filter((d) => d.aprovado);
-        if(process.env.TITAN_V2_SONDA==='1' && aprovadas.length>0
+        if(politicaV2.habilitada && aprovadas.length>0
             &&Date.now()-ultimoEnsaioV2Em>=25_000){
             const agoraV2=Date.now();
             for(const [rota,expira] of bloqueiosV2Ate){
