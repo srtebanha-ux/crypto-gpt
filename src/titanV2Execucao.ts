@@ -6,7 +6,8 @@ import {comExecutorMegazord,carteiraMegazord,transmitirMegazord,contextoExecutor
  */
 import fs from 'node:fs';
 import {ocultarSegredos} from './logger';
-import {Interface,JsonRpcProvider,Wallet,getAddress,keccak256} from 'ethers';
+import {Interface,JsonRpcProvider,getAddress,keccak256} from 'ethers';
+import {identidadeDeProvaV2} from './titanV2Identidade';
 import {pisoConservadorV2,correspondeFlashArb,WETH_BASE,type CandidatoV2Prova} from './titanV2Prova';
 import {ORACULO_DE_GAS_L1} from './custoDaBase';
 import {conferirJanelaDeNonce} from './janelaDeNonce';
@@ -39,11 +40,12 @@ export function habilitacaoV2(env:NodeJS.ProcessEnv):string|null{
 export async function diagnosticarFlashArbV2(
  rpcUrl:string,env:NodeJS.ProcessEnv=process.env,
 ):Promise<{pronto:boolean;motivo:string}> {
- if(!env.TITAN_V2_CONTRATO||!env.TITAN_CHAVE_PRIVADA)
+ if(!env.TITAN_V2_CONTRATO)
    return {pronto:false,motivo:'contrato ou identidade do executor nao configurados'};
  let rpc:JsonRpcProvider|undefined;
  try {
-   const wallet=new Wallet(env.TITAN_CHAVE_PRIVADA);
+   const identidade=identidadeDeProvaV2(env);
+    if(!identidade)return {pronto:false,motivo:'endereco publico nao configurado'};
    const contrato=getAddress(env.TITAN_V2_CONTRATO);
    const arquivo=JSON.parse(fs.readFileSync('.tmp/artifacts/FlashArbProva.json','utf8')) as Artifact;
    rpc=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true});
@@ -52,12 +54,12 @@ export async function diagnosticarFlashArbV2(
    const codigo=await rpc.getCode(contrato);
    if(codigo==='0x')
      return {pronto:false,motivo:'endereco sem bytecode na Base'};
-   if(!correspondeFlashArb(codigo,arquivo,wallet.address))
+   if(!correspondeFlashArb(codigo,arquivo,identidade))
      return {pronto:false,motivo:'bytecode onchain nao corresponde ao FlashArb do executor'};
    const dono=i.decodeFunctionResult('owner',await rpc.call({
      to:contrato,data:i.encodeFunctionData('owner'),
    }))[0] as string;
-   if(getAddress(dono)!==wallet.address)
+   if(getAddress(dono)!==identidade)
      return {pronto:false,motivo:'owner do contrato e carteira do TITAN sao diferentes'};
    return {pronto:true,motivo:'Base 8453, bytecode exato e owner correspondem; nao e prova de lucro'};
  }catch(e) {
