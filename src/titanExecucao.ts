@@ -6,7 +6,11 @@
 import { Interface, JsonRpcProvider, Wallet, getAddress, keccak256 } from 'ethers';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ORACULO_DE_GAS_L1 } from './custoDaBase';
+import { ORACULO_DE_GAS_L1, codificarTetoDeL1 } from './custoDaBase';
+import { conferirJanelaDeNonce } from './janelaDeNonce';
+import { decidirGasSnowball } from './titanGasSnowball';
+import { reinvestirLucroTitan, type ReinvestimentoTitan } from './titanReinvestimento';
+import { diagnosticarReversaoTitan } from './titanTaticas';
 import {
     impedimentoTitanContinuo, parametrosTitanContinuo,
     reservarTitanContinuo, fecharTitanContinuo,
@@ -27,6 +31,19 @@ const REDE_BASE = 8453n;
 // Um contrato com outro endereco NAO fica habilitado automaticamente.
 export const MORPHO_BASE_OFICIAL = '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb';
 export const WETH_BASE_TITAN = '0x4200000000000000000000000000000000000006';
+
+/** One address selector for both quote-time EVM simulation and paid sender.
+ * A Morpho flashLoan arbitrage is a separate contract from CacadorV3;
+ * probing the wrong contract fabricated UNKNOWN results and no shots.
+ */
+export function contratoExecutorTitan(env: NodeJS.ProcessEnv): string | null {
+    const origem=env.TITAN_FONTE_CREDITO??'flashswap';
+    if(origem!=='flashswap'&&origem!=='morpho')return null;
+    const escolhido=origem==='morpho'?env.TITAN_CONTRATO_MORPHO:env.TITAN_CONTRATO;
+    if(!escolhido)return null;
+    try { return getAddress(escolhido); }
+    catch { return null; }
+}
 
 export interface PlanoTitan {
     rota: PernaMista[];
@@ -49,12 +66,17 @@ export interface ResultadoTitan {
     custoMaximoEstimadoWei?: string;
     margemMinimaWei?: string;
     lucroMinimoBrutoWei?: string;
+    reinvestimento?: ReinvestimentoTitan;
 }
 
 /** Este teste e puro: nao precisa de chave, internet ou contrato. */
 export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv): string | null {
     if (!p.estadoConsistente) return 'estado dos pools nao confirmado';
     if (!Number.isInteger(p.bloco) || p.bloco <= 0) return 'bloco ausente';
+    if (ambiente.TITAN_GAS_SNOWBALL === '1'
+        && p.rota[0]?.tokenEntra.toLowerCase() !== WETH_BASE_TITAN.toLowerCase()) {
+        return 'snowball exige lucro em WETH; nao comparar token arbitrario com gas em ETH';
+    }
     if (p.rota.length < 2 || p.rota.length > 4) return 'o contrato aceita apenas 2 a 4 pernas';
     if (p.quantia <= 0n || p.brutoEstimado <= 0n || p.liquidoEstimado <= 0n) {
         return 'cotacao sem lucro liquido positivo';
@@ -96,6 +118,12 @@ export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv):
         }
         if (fs.existsSync(marcador)) return 'ja houve tentativa de envio para esta autorizacao';
     }
+    // Operador unico: remove somente a restricao de horario.
+    // Nonce pendente, saude de RPC e propriedade do contrato seguem obrigatorios.
+    const somenteTitan = ambiente.TITAN_SOLO_24H === '1';
+    if (!somenteTitan && ambiente.TITAN_JANELAS_EXCLUSIVAS !== '1') {
+        return 'TITAN exige janela exclusiva Base compartilhada com CACA';
+    }
     if (ambiente.TITAN_NONCE_EXCLUSIVO !== '1') {
         return 'sem confirmacao de nonce exclusivo: outro bot pode usar a mesma carteira';
     }
@@ -109,7 +137,7 @@ export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv):
             return 'emprestimo Morpho requer base WETH para contabilizar gas';
         }
     }
-    if (!ambiente.TITAN_CONTRATO || !ambiente.TITAN_CHAVE_PRIVADA || !ambiente.TITAN_COFRE) {
+    if (!contratoExecutorTitan(ambiente) || !ambiente.TITAN_CHAVE_PRIVADA || !ambiente.TITAN_COFRE) {
         return 'contrato, chave privada ou cofre nao configurado';
     }
     const orcamento = ambiente.TITAN_ORCAMENTO_GAS_WEI;
@@ -178,9 +206,9 @@ export async function executarTitan(
     let cofre: string;
     let carteira: Wallet;
     try {
-        contrato = getAddress(ambiente.TITAN_FONTE_CREDITO === 'morpho'
-            ? ambiente.TITAN_CONTRATO_MORPHO!
-            : ambiente.TITAN_CONTRATO!);
+        const escolhido=contratoExecutorTitan(ambiente);
+        if(!escolhido)throw Error('endereco do executor correspondente a fonte invalido');
+        contrato=escolhido;
         cofre = getAddress(ambiente.TITAN_COFRE!);
         carteira = new Wallet(ambiente.TITAN_CHAVE_PRIVADA!);
     } catch {
@@ -218,9 +246,12 @@ export async function executarTitan(
         if (defasagem < 0 || defasagem > 60) {
             throw new Error('sinal de bloco muito antigo ou no futuro');
         }
-        const gorjeta = BigInt(ambiente.TITAN_GORJETA_WEI ?? '20000000');
+        let gorjeta = BigInt(ambiente.TITAN_GORJETA_WEI ?? '20000000');
         if (gorjeta <= 0n) throw new Error('gorjeta invalida');
-        const maxFeePerGas = 2n * ultimo.baseFeePerGas + gorjeta;
+        let maxFeePerGas = 2n * ultimo.baseFeePerGas + gorjeta;
+        const janelaPreflight=await conferirJanelaDeNonce(rpc,carteira.address,ambiente.TITAN_SOLO_24H === '1' ? 'TITAN_SOLO' : 'TITAN');
+        if(!janelaPreflight.pode)
+            return{estado:'recusado',motivo:'janela TITAN fechada: '+janelaPreflight.motivo};
         const nonce = await rpc.getTransactionCount(carteira.address, 'pending');
         const nonceConfirmado = await rpc.getTransactionCount(carteira.address, 'latest');
         if (nonce !== nonceConfirmado) throw new Error('existe transacao pendente nesta carteira');
@@ -255,7 +286,30 @@ export async function executarTitan(
             ABI_ORACULO, 'getL1Fee',
         );
         // O lucro minimo cobre o PIOR preco L2 permitido, L1 conservador e piso adicional.
-        const custoMaximo = limite * maxFeePerGas + feeL1 * 2n;
+        let custoMaximo = limite * maxFeePerGas + feeL1 * 2n;
+        if (ambiente.TITAN_GAS_SNOWBALL === '1') {
+            const saldoAtual = await rpc.getBalance(carteira.address);
+            const snowball = decidirGasSnowball({
+                saldoWei: saldoAtual,
+                gasLimit: limite,
+                baseFeeWei: ultimo.baseFeePerGas,
+                prioridadeDesejadaWei: gorjeta,
+                feeL1Wei: feeL1,
+                lucroBrutoWei: brutoReal,
+                tetoPorTransacaoWei: BigInt(ambiente.TITAN_ORCAMENTO_GAS_WEI!),
+                reservaBps: BigInt(ambiente.TITAN_SNOWBALL_RESERVA_BPS ?? '3000'),
+                riscoPorTentativaBps: BigInt(ambiente.TITAN_SNOWBALL_RISCO_BPS ?? '2000'),
+                gorjetaDoLucroBps: BigInt(ambiente.TITAN_SNOWBALL_GORJETA_LUCRO_BPS ?? '5000'),
+            });
+            if (!snowball.aprovado) {
+                return { estado: 'recusado', motivo: '[SNOWBALL] ' + snowball.motivo,
+                    custoMaximoEstimadoWei: snowball.custoMaximoWei.toString() };
+            }
+            // O teto de taxa sai do saldo ETH REAL, nao do lucro ainda em WETH.
+            gorjeta = snowball.prioridadeWei;
+            maxFeePerGas = snowball.maxFeePerGasWei;
+            custoMaximo = snowball.custoMaximoWei;
+        }
         if ((await rpc.getBalance(carteira.address)) < custoMaximo) {
             return { estado: 'recusado', motivo: 'ETH insuficiente para cobrir o teto total de gas' };
         }
@@ -308,6 +362,12 @@ export async function executarTitan(
                 return { estado: 'recusado', motivo: 'autorizacao expirou durante o preflight' };
             }
         }
+        // A simulacao pode atravessar a janela; conferir de novo ANTES da
+        // reserva duravel/assinatura para nunca concorrer com o CACA.
+        const janelaNoEnvio=await conferirJanelaDeNonce(rpc,carteira.address,ambiente.TITAN_SOLO_24H === '1' ? 'TITAN_SOLO' : 'TITAN');
+        if(!janelaNoEnvio.pode || janelaNoEnvio.nonce!==nonce)
+            return{estado:'recusado',motivo:'exclusividade/nonce mudou no pre-broadcast: '+
+                janelaNoEnvio.motivo};
         // Assina UMA transacao concreta e grava seu hash DETERMINISTICO
         // ANTES de transmitir. Se o RPC receber e der timeout/403 depois,
         // o hash continua recuperavel sem reenviar e sem adivinhar nonce.
@@ -364,8 +424,15 @@ export async function executarTitan(
                 confirmadoEm: new Date().toISOString(),
             }), { mode: 0o600 });
         }
+        // Reinvestir somente o lucro PROVADO no evento; WETH de outro cofre
+        // jamais e movimentado. Falha de unwrap nao muda o status da arbitragem.
+        const reinvestimento = recibo.status === 1 && lucroRealizado !== undefined
+            ? await reinvestirLucroTitan(rpc, carteira, cofre,
+                BigInt(lucroRealizado), hash!, ambiente)
+            : undefined;
         return {
             estado: recibo.status === 1 ? 'confirmado' : 'revertido', hash,
+            reinvestimento,
             gasUsado: recibo.gasUsed.toString(),
             custoGasL2Wei: (recibo.gasUsed * recibo.gasPrice).toString(),
             lucroRealizadoWei: lucroRealizado,
@@ -384,4 +451,148 @@ export async function executarTitan(
     } finally {
         rpc.destroy();
     }
+}
+
+/**
+ * Valida o EXECUTOR REAL da Base sem assinar nem transmitir.
+ * Diferente de uma cotacao de rotas, o eth_call executa TODAS as pernas,
+ * o flash loan/callback e o pagamento final na EVM atual.
+ * Nenhuma oportunidade e marcada como lucro realizado aqui.
+ */
+export type EnsaioAtomicoTitan = {
+    situacao:'executavel'|'inviavel'|'desconhecido';
+    motivo:string; bloco:number|null; brutoWei?:string; custoMaximoWei?:string;
+    margemMinimaWei?:string; liquidoConservadorWei?:string;
+    gasEstimado?:string; gasLimite?:string; contrato?:string;
+    erroContrato?:'pagamento-curto'|'lucro-insuficiente';
+    deficitUnidades?:string; deficitBps?:string;
+};
+
+export function avaliarEnsaioTitan(
+    bruto:bigint,gasEstimado:bigint,baseFee:bigint,gorjeta:bigint,
+    l1Upper:bigint,gasMax:bigint,orcamento:bigint,ambiente:NodeJS.ProcessEnv,
+):Omit<EnsaioAtomicoTitan,'bloco'|'contrato'>{
+    if(bruto<=0n || gasEstimado<=0n || baseFee<=0n || gorjeta<=0n
+        || l1Upper<=0n || gasMax<=0n || orcamento<=0n)
+        return {situacao:'desconhecido',motivo:'gas/preco/custo L1 ou retorno desconhecidos'};
+    const limite=gasEstimado+gasEstimado/5n;
+    if(limite>gasMax)return {situacao:'inviavel',motivo:'gas + 20% excede teto do contrato',
+        brutoWei:bruto.toString(),gasEstimado:gasEstimado.toString(),gasLimite:limite.toString()};
+    const custo=limite*(2n*baseFee+gorjeta)+2n*l1Upper;
+    if(custo>orcamento)return {situacao:'inviavel',
+        motivo:'custo maximo da operacao excede orcamento por transacao',
+        brutoWei:bruto.toString(),custoMaximoWei:custo.toString(),
+        gasEstimado:gasEstimado.toString(),gasLimite:limite.toString()};
+    let piso:{margemWei:bigint;lucroBrutoMinimoWei:bigint};
+    try{piso=calcularPisoTitan(custo,ambiente);}catch{
+        return {situacao:'desconhecido',motivo:'politica de lucro nao configurada'};
+    }
+    const dados={brutoWei:bruto.toString(),custoMaximoWei:custo.toString(),
+        margemMinimaWei:piso.margemWei.toString(),
+        liquidoConservadorWei:(bruto-custo).toString(),
+        gasEstimado:gasEstimado.toString(),gasLimite:limite.toString()};
+    return bruto>=piso.lucroBrutoMinimoWei
+        ? {situacao:'executavel',motivo:'simulacao integral do executor passou com margem minima',...dados}
+        : {situacao:'inviavel',motivo:'lucro bruto simulado menor que gas total e margem',...dados};
+}
+
+/**
+ * A heuristic quote may have been calculated several Base blocks earlier;
+ * the full eth_call is intentionally executed at latest and verifies current
+ * profit instead. This only permits doing that READ-ONLY check, never sending
+ * based on an old quote: executarTitan re-simulates and guards block/nonce.
+ */
+export function blocoValidoParaProvaAtomica(blocoDaCotacao:number,blocoAtual:number):boolean{
+    return Number.isSafeInteger(blocoDaCotacao)&&blocoDaCotacao>0
+        &&Number.isSafeInteger(blocoAtual)&&blocoAtual>=blocoDaCotacao
+        &&blocoAtual-blocoDaCotacao<=20;
+}
+
+export async function simularTitanAoVivo(
+    plano:PlanoTitan,rpcUrl:string,ambiente:NodeJS.ProcessEnv=process.env
+):Promise<EnsaioAtomicoTitan>{
+    if(!plano.estadoConsistente||!Number.isInteger(plano.bloco)
+        ||plano.rota.length<2||plano.rota.length>4
+        ||plano.quantia<=0n)
+        return{situacao:'desconhecido',motivo:'rota nao validada pelo observador',bloco:null};
+    if(!contratoExecutorTitan(ambiente) || !ambiente.TITAN_COFRE)
+        return{situacao:'desconhecido',motivo:'executor correto para fonte de credito nao configurado',bloco:null};
+    if(plano.rota[0]?.tokenEntra.toLowerCase()!==WETH_BASE_TITAN.toLowerCase())
+        return{situacao:'desconhecido',motivo:'lucro e custo precisam da mesma unidade WETH',bloco:null};
+    let contrato:string,cofre:string,from:string|undefined;
+    try{
+        contrato=contratoExecutorTitan(ambiente)!;
+        cofre=getAddress(ambiente.TITAN_COFRE);
+        from=ambiente.TITAN_CHAVE_PRIVADA
+            ? new Wallet(ambiente.TITAN_CHAVE_PRIVADA).address
+            : undefined;
+    }catch{return{situacao:'desconhecido',motivo:'enderecos/identidade da carteira invalidos',bloco:null};}
+    const rpc=new JsonRpcProvider(rpcUrl,Number(REDE_BASE),{staticNetwork:true});
+    let bloco:number|null=null;
+    try{
+        const get=async(nome:'dono'|'cofre')=>{
+            const x=await rpc.call({to:contrato,data:ABI_TITAN.encodeFunctionData(nome)});
+            return getAddress(ABI_TITAN.decodeFunctionResult(nome,x)[0] as string);
+        };
+        // Leituras independentes: conserva todas as verificacoes sem somar
+        // suas latencias antes de cada prova atomica.
+        const [chainId,bytecode,cofreAtual,donoAtual]=await Promise.all([
+            rpc.send('eth_chainId',[]),rpc.getCode(contrato),get('cofre'),
+            from?get('dono'):Promise.resolve(undefined),
+        ]);
+        if(BigInt(chainId)!==REDE_BASE)throw Error('RPC nao e Base 8453');
+        if(bytecode==='0x')throw Error('executor sem bytecode na Base');
+        if(cofreAtual!==cofre)throw Error('cofre do executor diverge');
+        if(from && donoAtual!==from)throw Error('carteira nao e proprietaria do executor');
+        if(ambiente.TITAN_FONTE_CREDITO==='morpho'){
+            const cru=await rpc.call({to:contrato,data:ABI_TITAN.encodeFunctionData('morpho')});
+            const configurado=getAddress(ABI_TITAN.decodeFunctionResult('morpho',cru)[0] as string);
+            if(configurado!==getAddress(MORPHO_BASE_OFICIAL))
+                throw Error('executor de arbitragem Morpho nao referencia o singleton da Base');
+        }
+        const block=await rpc.getBlock('latest');
+        if(!block?.baseFeePerGas || block.baseFeePerGas<=0n)throw Error('baseFee indisponivel');
+        bloco=block.number;
+        if(!blocoValidoParaProvaAtomica(plano.bloco,bloco))
+            return{situacao:'desconhecido',motivo:'cotacao anterior a 20 blocos; prova atomica cancelada',bloco};
+        const data=ABI_TITAN.encodeFunctionData('executarRota',[
+            plano.rota,plano.quantia,0n
+        ]);
+        const tx={...(from?{from}:{}),to:contrato,data};
+        // Dois metodos distintos: retorno integral e gas do caminho real.
+        const [resultado,gasEstimado,l1Retorno]=await Promise.all([
+            rpc.call(tx),
+            rpc.estimateGas(tx),
+            rpc.call({to:ORACULO_DE_GAS_L1,data:codificarTetoDeL1(
+                Math.ceil((data.length-2)/2)+140
+            )}),
+        ]);
+        const bruto=hexDeResultado(resultado,ABI_TITAN,'executarRota');
+        const gorjeta=BigInt(ambiente.TITAN_GORJETA_WEI??'20000000');
+        const gasMax=BigInt(ambiente.TITAN_GAS_MAX??'650000');
+        const orcamento=BigInt(ambiente.TITAN_ORCAMENTO_GAS_WEI??'0');
+        const avaliacao=avaliarEnsaioTitan(bruto,gasEstimado,block.baseFeePerGas,
+            gorjeta,BigInt(l1Retorno),gasMax,orcamento,ambiente);
+        // Quote envelhecida nao vira execucao atestada.
+        const atual=await rpc.getBlockNumber();
+        if(atual-bloco>2)return{situacao:'desconhecido',
+            motivo:'bloco mudou durante a simulacao integral',bloco,contrato};
+        return{...avaliacao,bloco,contrato};
+    }catch(e){
+        const causa=diagnosticarReversaoTitan(e);
+        if(causa?.tipo==='pagamento-curto')return{
+            situacao:'inviavel',bloco,contrato,erroContrato:'pagamento-curto',
+            motivo:'PagamentoCurto: ciclo nao fecha, sem gasto onchain na simulacao',
+            deficitUnidades:causa.deficit.toString(),
+            deficitBps:causa.deficitBps.toString(),
+        };
+        if(causa?.tipo==='lucro-insuficiente')return{
+            situacao:'inviavel',bloco,contrato,erroContrato:'lucro-insuficiente',
+            motivo:'LucroInsuficiente: pagamento fecha, sobra inferior ao minimo',
+            deficitUnidades:causa.deficit.toString(),
+        };
+        return{situacao:'desconhecido',bloco,contrato,
+            motivo:(e instanceof Error?e.message:'falha na simulacao').slice(0,240)};
+    }
+    finally{rpc.destroy();}
 }

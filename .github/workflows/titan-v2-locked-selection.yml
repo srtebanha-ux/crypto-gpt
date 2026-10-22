@@ -1,0 +1,26 @@
+name: TITAN V2 route rejection and fallback
+on:
+  push:
+    branches:
+      - feat/titan-validacao-atomica-live
+      - fix/titan-v2-locked-route-backoff-20261020
+  pull_request:
+    branches:
+      - feat/titan-validacao-atomica-live
+permissions:
+  contents: read
+jobs:
+  locked-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run typecheck
+      - name: V2 selector excludes locked pool only temporarily
+        run: node --require ts-node/register --test src/titanV2Selecao.test.ts src/titanV2Prova.test.ts

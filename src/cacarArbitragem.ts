@@ -25,6 +25,7 @@
 import Decimal from 'decimal.js';
 import { AbiCoder, id } from 'ethers';
 import { createLogger } from './logger';
+import { iniciarPainelTitan, atualizarTitan, progressoTitan, eventoTitan } from './titanPainel';
 import { sobraDoFlashSwap } from './ammMath';
 import {
     OuvinteDeBlocos, wsDoHttp, enderecoDeBlocos, esperarBlocoOuTempo,
@@ -43,11 +44,19 @@ import {
     lerMemoria, gravarMemoria, memoriaVazia, juntar, paraRotas, deDescoberta, comoLerAMemoria,
 } from './memoriaDoUniverso';
 import { pernasDaCandidata } from './rotasMistas';
-import { executarTitan } from './titanExecucao';
-import { priorizarCotacoes } from './titanPriorizacao';
+import { executarTitan, simularTitanAoVivo } from './titanExecucao';
+import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
+import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, sondasTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
+import { retentarTamanhoPorErroTitan } from './titanTaticas';
+import { priorizarCotacoes, MemoriaDeCotacoesNegativas, deveProcessarCotacoes } from './titanPriorizacao';
+import { detectarRebotesAave, detectarRebotesMorpho, RadarDeRebotes, priorizarRebotes } from './titanRebote';
+import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
+import { provarV2Atomico } from './titanV2Prova';
+import { executarFlashArbV2, diagnosticarFlashArbV2 } from './titanV2Execucao';
+import { selecionarProximaProvaV2, reprovacaoDePoolTravadoV2 } from './titanV2Selecao';
 import {
     candidatasMistas, limitacaoDominante, funilVazio, comoLerOFunilMisto, triarCandidatas,
-    type PoolMisto, type CandidataMista, type LeiturasDoEstado,
+    type PoolMisto, type CandidataMista, type LeiturasDoEstado, type PernaDescrita,
 } from './rotasMistas';
 import {
     QUOTER_V2, SELETORES_DA_COTACAO, quoterServeOPool, codificarQuoteV3, codificarGetAmountOut,
@@ -261,7 +270,7 @@ const SELETORES = {
  */
 export async function lerEstadoMisto(
     chamar: Transporte,
-    candidatas: CandidataMista[],
+    candidatas: ReadonlyArray<{pernas:readonly PernaDescrita[]}>,
     bloco: number,
     etiqueta: 'latest' | 'pending' = 'latest',
 ): Promise<LeiturasDoEstado> {
@@ -1312,7 +1321,7 @@ export function decidir(
     // O GAS EM U. Conhecido so quando U e o WETH: para qualquer outro token eu
     // nao sei a conversao sem um preco, e inventa-la seria fabricar o piso
     // economico. Sem conversao o candidato NAO e aprovavel, e o motivo e dito.
-    if (c.U !== WETH_DA_BASE) {
+    if (c.U.toLowerCase() !== WETH_DA_BASE) {
         return {
             candidato: c, aprovado: false, motivo: 'gasDesconhecido',
             custoEmU: null, liquido: null,
@@ -1799,6 +1808,15 @@ export function comoLerOPlacar(): string {
  * roda indefinidamente.
  */
 async function principal(): Promise<void> {
+    // O painel usa os eventos do MESMO motor, sem processo concorrente ou
+    // leitura de logs. Nenhum caminho HTTP permite assinar ou enviar operacoes.
+    iniciarPainelTitan();
+    atualizarTitan({
+        mode: process.env.TITAN_ENVIAR === '1' ? 'Operacao autorizada' : 'Somente leitura',
+        phase: 'Conectando aos mercados',
+        description: 'Aguardando os primeiros blocos e preparando os pools na Base.',
+    });
+    eventoTitan('sistema','Motor TITAN iniciado','Telemetria estruturada, sem acesso a chaves ou funcoes de envio.');
     const rpc = process.env.ARB_RPC_URL ?? process.env.CACA_RPC_URL ?? 'https://mainnet.base.org';
     const tetoPorFabrica = Number(process.env.ARB_POOLS ?? 120);
     const tetoDeCiclos = Number(process.env.ARB_CICLOS ?? 0);
@@ -1854,6 +1872,23 @@ async function principal(): Promise<void> {
         custoRpc: `maximo ${process.env.ARB_HTTP_RPS ?? 'sem limite'} HTTP/s, `
             + `${process.env.ARB_HTTP_POR_HORA ?? 'sem limite'} HTTP/h`,
     });
+
+    // Checagem de implantacao sem assinar ou gastar gas, antes de procurar ordens.
+    // A permissao de envio NAO basta quando o deploy manual foi feito por outra conta.
+    if (process.env.TITAN_V2_CONTRATO) {
+        const diagnostico = await diagnosticarFlashArbV2(
+            process.env.TITAN_EXECUTOR_RPC_URL ?? rpc,
+        );
+        atualizarTitan({ contractReady: diagnostico.pronto });
+        eventoTitan(diagnostico.pronto ? 'sistema' : 'alerta',
+            diagnostico.pronto ? 'Contrato FlashArb verificado' : 'Contrato com pendencia',
+            diagnostico.motivo);
+        if (diagnostico.pronto) {
+            log.info('[TITAN/V2-IMPLANTACAO] Executor V2 confere onchain.', diagnostico);
+        } else {
+            log.warn('[TITAN/V2-IMPLANTACAO] Executor V2 NAO pronto para envio.', diagnostico);
+        }
+    }
 
     // O AVISO DE BLOCO: reusa o ouvinte que já existe, com a mesma política de
     // endereço (CACA_WS_URL, ou derivar só com CACA_WS_DERIVAR=1).
@@ -2016,6 +2051,12 @@ async function principal(): Promise<void> {
         { teto: Number(process.env.ARB_MEMORIA_TETO ?? 5_000) },
     );
     memoria = primeiraJuncao.memoria;
+    atualizarTitan({ phase: 'Universo de mercados atualizado',
+        description: 'Identificando pools por atividade e memoria persistente.',
+        pools: porAtividade.pools.length,
+    });
+    eventoTitan('descoberta','Mercados mapeados',
+        String(porAtividade.pools.length)+' pools V2 conhecidos no inicio da sessao.');
     log.info('[UNIVERSO] A memória dos pools conhecidos.', {
         doDisco: doDisco === null
             ? `NÃO havia memória em ${caminhoDaMemoria} (ou estava torta/de outra rede) — isto `
@@ -2033,7 +2074,29 @@ async function principal(): Promise<void> {
         // este projeto perder tudo o que havia aprendido.
         await gravarMemoria(caminhoDaMemoria, memoria);
     }
+    let ultimoEnsaioAtomicoEm=0;
+    let atomicasExecutaveis=0;
+    let atomicasInviaveis=0;
+    let atomicasDesconhecidas=0;
+    let ultimoTrianguloEm=0;
+    let indiceTriangular=0;
+    let triangulosComSpread=0;
+    let triangulosSemSpread=0;
+    let triangulosAtomicos=0;
+    const exploradorTitan = new ExploradorDeRotasTitan();
     let MISTAS = candidatasMistas(paraRotas(memoria), WETH_DA_BASE);
+    let triangulosConhecidos:TrianguloTitan[]=[];
+    if(process.env.TITAN_EXPLORAR_TRIANGULOS==='1') {
+        const triangulos=explorarTriangulos(paraRotas(memoria),WETH_DA_BASE,2000);
+        triangulosConhecidos=triangulos;
+        log.warn('[TITAN/TRIANGULOS] Descoberta de ciclos de 3 swaps; SOMENTE OBSERVACAO.',{
+            total:triangulos.length,
+            amostras:triangulos.slice(0,3).map(x=>({
+                tokens:x.tokens,pools:x.pools,venues:x.venues,prova:x.prova
+            })),
+            bloqueio:'sem simulador de tres hops no funil atual; NAO enviar',
+        });
+    }
     const FM = funilVazio();
     FM.blocosVarridosParaDescoberta = porAtividade.blocosLidos;
     FM.poolsVistos = {
@@ -2089,6 +2152,28 @@ async function principal(): Promise<void> {
     let tentativasTitan = 0;
     let ultimoEnsaioTitanEm = 0;
     const pendentesCotacao = new Set<string>();
+    let rodadaCotacoes = 0;
+    const radarRebote=new RadarDeRebotes();
+    let ultimoBlocoReboteSolicitado=0;
+    let leituraReboteEmAndamento=false;
+    let falhasRebote=0;
+    let liquidacoesObservadas=0;
+    let poolsVinculadosRebote=0;
+    let liquidacoesMorphoObservadas=0;
+    let liquidacoesViaAtlasObservadas=0;
+    let piscinasMorphoAssociadas=0;
+    let transacoesAtlasObservadas=0;
+    const memoriaDeCotacoesNegativas = new MemoriaDeCotacoesNegativas(
+        Math.max(1_000,Math.min(600_000,
+            Number(process.env.TITAN_RECHECK_NEGATIVAS_MS??120_000)||120_000)),
+    );
+    // Gas-free V2 checks are limited and diverse. Never hammer a toxic
+    // token/pool or mistake an old estimate for a current arbitrage.
+    const ultimaProvaV2=new Map<string,number>();
+    // Um pool que reverteu UniswapV2: LOCKED durante callback atomico nao deve
+    // monopolizar uma prova a cada quatro minutos. Outras rotas ganham chance.
+    const bloqueiosV2Ate=new Map<string,number>();
+    let ultimoEnsaioV2Em=0;
     const tetoCotarRotas = Number(process.env.ARB_COTAR_MAX_ROTAS ?? 12);
     const tetoTentativasCru = Number(process.env.TITAN_TX_POR_SESSAO ?? 1);
     // O modo continuo nao herda o teto de UMA tentativa por sessao:
@@ -2101,6 +2186,12 @@ async function principal(): Promise<void> {
     // rodar, e reler a mesma janela no primeiro ciclo gastaria RPC para receber
     // a resposta que acabou de chegar.
     let ultimaRedescoberta = Date.now();
+    // Busca de pools em paralelo ao loop de cotacao: uma varredura de 150
+    // blocos pode levar > 1 minuto com RPC de 2 requests/s.
+    // O MESMO transporte e orçamento são compartilhados com o scanner.
+    let redescobertaEmAndamento = false;
+    let redescobertaPronta: Awaited<ReturnType<typeof universoPorAtividade>> | null = null;
+    let redescobertaFalha: string | null = null;
 
     // O ORCAMENTO DO EXPERIMENTO, por ordem dela: *"observação em tempo real,
     // sem envios, com orçamento limitado de chamadas RPC e duração máxima de 20
@@ -2174,16 +2265,38 @@ async function principal(): Promise<void> {
         // `eth_blockNumber` + N `eth_getBlockReceipts` (N = ARB_ATIVIDADE_BLOCOS)
         // + ~3 multicalls de token/taxa. `ARB_REDESCOBRIR_MIN=0` desliga.
         const minutosDaRedescoberta = Number(process.env.ARB_REDESCOBRIR_MIN ?? 5);
-        if (minutosDaRedescoberta > 0
+        if (minutosDaRedescoberta > 0 && !redescobertaEmAndamento
             && Date.now() - ultimaRedescoberta >= minutosDaRedescoberta * 60_000) {
             ultimaRedescoberta = Date.now();
+            redescobertaEmAndamento = true;
+            // Sem await: continuar cotando enquanto os logs de swap são lidos.
+            // O mesmo transporte continua impondo o teto global de RPC.
+            void universoPorAtividade(chamar, {
+                blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
+                tetoDePools: Number(process.env.ARB_ATIVIDADE_TETO ?? 300),
+            }).then((nova) => { redescobertaPronta = nova; })
+              .catch((e) => { redescobertaFalha = String(e).slice(0, 160); })
+              .finally(() => { redescobertaEmAndamento = false; });
+            log.info('[UNIVERSO] Redescoberta em paralelo (sem bloquear cotacoes).', {
+                blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
+                observacao: 'sem broadcast e com o mesmo limite RPC',
+            });
+        }
+        if (redescobertaFalha !== null) {
+            log.warn('[UNIVERSO] Redescoberta em paralelo falhou; scanner segue.', {
+                erro: redescobertaFalha,
+            });
+            redescobertaFalha = null;
+        }
+        // A conclusão ocorre em callback assíncrono. A anotação explícita
+        // evita que o fluxo síncrono do TypeScript a estreite para 'never'.
+        const novaPronta = redescobertaPronta as
+            Awaited<ReturnType<typeof universoPorAtividade>> | null;
+        if (novaPronta !== null) {
+            const nova = novaPronta;
+            redescobertaPronta = null;
             const fimRe = av.etapa('leitura');
             try {
-                // eslint-disable-next-line no-await-in-loop
-                const nova = await universoPorAtividade(chamar, {
-                    blocos: Number(process.env.ARB_ATIVIDADE_BLOCOS ?? 30),
-                    tetoDePools: Number(process.env.ARB_ATIVIDADE_TETO ?? 300),
-                });
                 fimRe();
                 if (nova.metodoIndisponivel) {
                     log.warn('[UNIVERSO] Redescoberta NÃO rodou: o nó não tem '
@@ -2193,6 +2306,22 @@ async function principal(): Promise<void> {
                             + 'publicado como ausência',
                     });
                 } else {
+                    // Entra no universo V2 efetivo, nao apenas na memoria dos concentrados.
+                    // Nao presumimos lucro: o scanner e as provas atomicas continuam
+                    // fazendo todas as validacoes economicas antes de qualquer envio.
+                    const novosV2 = nova.pools.filter((pool) => !universo.porFabrica.has(pool));
+                    for (const pool of novosV2) {
+                        const fabrica = nova.porFabrica.get(pool);
+                        if (fabrica === undefined) continue;
+                        universo.pools.push(pool);
+                        universo.porFabrica.set(pool, fabrica);
+                    }
+                    if (novosV2.length > 0) {
+                        log.info('[UNIVERSO/V2] Pools ativos incorporados sem reiniciar.', {
+                            novos: novosV2.length, totalV2: universo.pools.length,
+                            regra: 'somente fabrica reconhecida; nenhuma ordem sem prova atomica',
+                        });
+                    }
                     const antesDeRotas = MISTAS.length;
                     const j = juntar(
                         memoria,
@@ -2206,6 +2335,8 @@ async function principal(): Promise<void> {
                         // triagem e a cotacao do ciclo seguinte ja leem o
                         // estado NOVO — nenhum preco velho atravessa.
                         MISTAS = candidatasMistas(paraRotas(memoria), WETH_DA_BASE);
+                        if(process.env.TITAN_EXPLORAR_TRIANGULOS==='1')
+                            triangulosConhecidos=explorarTriangulos(paraRotas(memoria),WETH_DA_BASE,2000);
                         FM.rotasDistintas = MISTAS.length;
                         // eslint-disable-next-line no-await-in-loop
                         await gravarMemoria(caminhoDaMemoria, memoria);
@@ -2234,6 +2365,66 @@ async function principal(): Promise<void> {
         if (blocoAnterior === null || blocoAgora > blocoAnterior) PLACAR.blocos += 1;
         blocoAnterior = blocoAgora;
 
+        // O rebote nao exige ganhar o leilao da LIQUIDACAO: observa, na
+        // mesma transacao, swaps ligados a uma LiquidationCall da Aave.
+        // Sao recibos CONFIRMADOS e correlacao, nao prova de venda nem lucro.
+        // Uma leitura curta por bloco que o scanner efetivamente alcança.
+        // Nao bloqueia a leitura de reservas e usa o MESMO limite de RPC.
+        if(process.env.TITAN_MONITORAR_REBOTE!=='0'&&blocoAgora>0
+            &&blocoAgora>ultimoBlocoReboteSolicitado&&!leituraReboteEmAndamento){
+            const blocoDoPedido=blocoAgora;
+            ultimoBlocoReboteSolicitado=blocoDoPedido;
+            leituraReboteEmAndamento=true;
+            void chamar('eth_getBlockReceipts',[`0x${blocoDoPedido.toString(16)}`])
+              .then(recibos=>{
+                  if(!Array.isArray(recibos)){falhasRebote++;return;}
+                  const observacao=detectarRebotesAave(recibos);
+                  const morpho=detectarRebotesMorpho(recibos);
+                  // Ambos compartilham EXATAMENTE os mesmos recibos. Nenhum
+                  // RPC extra e nenhum caminho de envio novo.
+                  radarRebote.registrar(blocoDoPedido,{
+                      liquidacoes:observacao.liquidacoes+morpho.liquidacoes,
+                      transacoesComSwaps:observacao.transacoesComSwaps+morpho.transacoesComSwaps,
+                      pools:[...new Set([...observacao.pools,...morpho.pools])],
+                  });
+                  liquidacoesObservadas+=observacao.liquidacoes;
+                  poolsVinculadosRebote+=observacao.pools.length;
+                  liquidacoesMorphoObservadas+=morpho.liquidacoes;
+                  liquidacoesViaAtlasObservadas+=morpho.liquidacoesViaAtlas;
+                  piscinasMorphoAssociadas+=morpho.pools.length;
+                  transacoesAtlasObservadas+=morpho.transacoesAtlas;
+                  if(morpho.liquidacoes>0){
+                      log.info('[TITAN/REBOTE-MORPHO] Liquidacao Morpho confirmada.',{
+                          bloco:blocoDoPedido,
+                          liquidacoes:morpho.liquidacoes,
+                          liquidacoesViaAtlas:morpho.liquidacoesViaAtlas,
+                          transacoesAtlas:morpho.transacoesAtlas,
+                          swapsNaMesmaTransacao:morpho.transacoesComSwaps,
+                          piscinas:morpho.pools,
+                          nota:'observacao onchain; swap correlacionado nao comprova lucro',
+                      });
+                      if(morpho.pools.length>0){
+                          eventoTitan('descoberta','Rebote Morpho identificado',
+                            morpho.liquidacoes+' liquidacao(oes), '
+                            +morpho.pools.length+' pool(s) com Swap na mesma transacao.');
+                      }
+                  }
+                  if(observacao.liquidacoes>0){
+                      log.info('[TITAN/REBOTE] Liquidacao Aave confirmada: swaps da MESMA transacao.',{
+                          bloco:blocoDoPedido,liquidacoes:observacao.liquidacoes,
+                          transacoesComSwap:observacao.transacoesComSwaps,
+                          pools:observacao.pools,
+                          significado:'pista para cotar apos a liquidacao; nenhuma venda ou lucro presumido',
+                      });
+                      eventoTitan('descoberta','Liquidacao Aave detectada',
+                        observacao.pools.length+' piscina(s) com swap na mesma transacao. '
+                        +'Verificando se sobrou diferenca de preco.');
+                  }
+              })
+              .catch(()=>{falhasRebote++;})
+              .finally(()=>{leituraReboteEmAndamento=false;});
+        }
+
         const fimLeitura = av.etapa('leitura');
         const { pools, falhas, vazios } = await lerPools(
             chamar, universo.pools, universo.porFabrica, blocoAgora,
@@ -2257,7 +2448,22 @@ async function principal(): Promise<void> {
         for (const p of pools) anterior.set(p.endereco, p);
 
         const fimDecisao = av.etapa('decisao');
-        const candidatos = montarCandidatos(pools).slice(0, tetoDeRotas);
+        const v2Montadas=montarCandidatos(pools);
+        const custoComparavel=selecionarRotasComGasComparavel(
+            v2Montadas,WETH_DA_BASE,tetoDeRotas);
+        const candidatos=custoComparavel.selecionados;
+        // The old top-50 was sorted by raw numbers across token decimals.
+        // It routinely selected ONLY tokens without any gas conversion.
+        // A candidate whose profit unit is unknown must never be "approved".
+        if(ciclo===1||ciclo%30===0){
+            log.info('[TITAN/GAS-FUNIL] V2 route units verified before profit ranking.',{
+                montadas:v2Montadas.length,
+                comparaveisEmWeth:custoComparavel.comConversao,
+                selecionadas:candidatos.length,
+                semPrecoEmWeth:custoComparavel.semConversao,
+                razao:'semPrecoEmWeth nao e nenhuma oportunidade; rotas seguem sem custo medido',
+            });
+        }
         // O BASEFEE PURO, lido UMA vez, e o preco por gas DERIVADO dele.
         //
         // Antes eu lia `precoDoGasWei` (base + gorjeta) e devolvia o baseFee
@@ -2364,13 +2570,15 @@ async function principal(): Promise<void> {
             // estado. Sem ele nao havia deduplicacao e a corrida gastou 4.598
             // cotacoes em 5 minutos.
             const impressao = impressaoDoEstado(cru);
-            if (impressao === ULTIMA_IMPRESSAO.valor) {
+            const estadoMudou = impressao !== ULTIMA_IMPRESSAO.valor;
+            if (!deveProcessarCotacoes(estadoMudou,tri.valem,pendentesCotacao,
+                memoriaDeCotacoesNegativas,cru,Date.now())) {
                 ULTIMA_IMPRESSAO.repetidas += 1;
                 continue;
             }
-            if (blocoDaAmostra === blocoDaTriagem) INTRABLOCO.detectadas += 1;
+            if (estadoMudou && blocoDaAmostra === blocoDaTriagem) INTRABLOCO.detectadas += 1;
             ULTIMA_IMPRESSAO.valor = impressao;
-            FM.estadosDistintos += 1;
+            if (estadoMudou) FM.estadosDistintos += 1;
             FM.estadosAvaliados = FM.estadosDistintos;
             FM.rotasTriadas += tri.valem.length;
             FM.faltaDeDados += tri.semDados;
@@ -2380,18 +2588,172 @@ async function principal(): Promise<void> {
             const poolsQueMudaram = new Set(ESTADOS_DOS_POOLS.mudaram(cru));
             // Carrega a pequena fila adiada do ciclo anterior: sem isso, uma rota
             // nao selecionada desaparece se os pools nao mudarem novamente.
-            const afetadasPotenciais = tri.valem.filter(
+            const selecionaveisPeloEstado=tri.valem.filter(
                 (c) => pendentesCotacao.has(c.chave)
-                    || c.pernas.some((p) => poolsQueMudaram.has(p.pool.toLowerCase())),
+                    || c.pernas.some((p) => poolsQueMudaram.has(p.pool.toLowerCase()))
+                    || memoriaDeCotacoesNegativas.venceu(c,cru,Date.now()),
             );
+            const afetadasPotenciais=selecionaveisPeloEstado.filter(
+                (c)=>memoriaDeCotacoesNegativas.deveCotar(c,cru,Date.now()),
+            );
+            const repetidasEvitadas=selecionaveisPeloEstado.length-afetadasPotenciais.length;
             const escolha = priorizarCotacoes(
-                afetadasPotenciais, tri, tetoCotarRotas, FM.estadosAvaliados,
+                afetadasPotenciais, tri, tetoCotarRotas, ++rodadaCotacoes,
+                process.env.TITAN_ROTACIONAR_COTACOES!=='0',
             );
-            const afetadas = escolha.selecionadas;
+            const destaqueRebote=radarRebote.ativos(blocoDaAmostra);
+            const afetadas=priorizarRebotes(
+                escolha.selecionadas,afetadasPotenciais,destaqueRebote,
+                Math.max(1,Math.floor(tetoCotarRotas/4)),
+            );
+            const rotasPromovidas=afetadas.filter(
+                r=>!escolha.selecionadas.some(q=>q.chave===r.chave)).length;
+            atualizarTitan({
+                phase: 'Avaliando rotas em tempo real',
+                description: 'O scanner compara precos e custos antes da simulacao completa.',
+                block: blocoDaAmostra, quotes: afetadas.length,
+                queue: escolha.adiadas, mixed: MISTAS.length,
+            });
             const escolhidas = new Set(afetadas.map((c) => c.chave));
             pendentesCotacao.clear();
             for (const c of afetadasPotenciais) {
                 if (!escolhidas.has(c.chave)) pendentesCotacao.add(c.chave);
+            }
+
+            // EXPLORACAO TRIANGULAR (3 hops). Nao reutiliza a cotacao de 2
+            // swaps nem seus tamanhos. Cada plano deriva a capacidade do
+            // PROPRIO pool inicial e vai primeiro para o contrato real via
+            // eth_call; so uma simulacao economicamente positiva permite
+            // chamar o executor de transacao (que valida tudo novamente).
+            if(triangulosConhecidos.length>0
+                && process.env.TITAN_EXPLORAR_TRIANGULOS==='1'
+                && Date.now()-ultimoTrianguloEm>=75_000) {
+                ultimoTrianguloEm=Date.now();
+                // Rotacao com limite: nao repetir o mesmo prefixo de 2000
+                // caminhos no boot, nem carregar 2000 pools em cada bloco.
+                const tamanhoAmostra=Number(process.env.TITAN_TRIANGULOS_POR_RODADA??'4');
+                const amostraSegura=Number.isSafeInteger(tamanhoAmostra)
+                    ? Math.max(1,Math.min(8,tamanhoAmostra)):4;
+                const amostra:TrianguloTitan[]=[];
+                for(let k=0;k<Math.min(amostraSegura,triangulosConhecidos.length);k++){
+                    amostra.push(triangulosConhecidos[(indiceTriangular+k)%triangulosConhecidos.length]!);
+                }
+                indiceTriangular=(indiceTriangular+amostra.length)%triangulosConhecidos.length;
+                // O leitor de estado recebe so as pernas tipadas. Para os
+                // triângulos, sao tres em vez das duas de CandidataMista.
+                const lTri=await lerEstadoMisto(chamar,amostra,blocoDaAmostra,etiqueta);
+                const avaliadas=amostra.map(t=>({
+                    t,veredicto:avaliarTetoTriangulo(t,lTri),
+                    liquidez:capacidadePrimeiroPool(t,lTri),
+                }));
+                triangulosSemSpread+=avaliadas.filter(x=>x.veredicto.estado==='sem-spread').length;
+                triangulosComSpread+=avaliadas.filter(x=>x.veredicto.estado==='vale-simular').length;
+                let tentativasTriangulares=0;
+                for(const item of avaliadas) {
+                    if(item.veredicto.estado==='sem-spread')continue;
+                    // Nao abre mao de dados completos. A falta de teto
+                    // economico manda SIMULAR, mas sem capacidade conhecida
+                    // do lender nao inventa tamanho nem dinheiro.
+                    const tamanhos=tamanhosTriangulo(item.liquidez);
+                    // O deficit pode diminuir em OUTRO tamanho, mas isso
+                    // nunca prova lucro. Cada proposta passa no executor real
+                    // por eth_call, sem gas on-chain.
+                    const sondas=sondasTriangulo(tamanhos,indiceTriangular,3);
+                    if(sondas.length===0)continue;
+                    let escolhido:{
+                        tamanho:bigint;
+                        sinal:ReturnType<typeof rotaExecutavelTriangulo> extends infer R
+                            ? {rota:R;quantia:bigint;bloco:number;
+                                brutoEstimado:bigint;liquidoEstimado:bigint;
+                                estadoConsistente:boolean}
+                            : never;
+                        resultado:Awaited<ReturnType<typeof simularTitanAoVivo>>;
+                    }|null=null;
+                    const feitos=new Set<string>();
+                    const testar=async(tamanho:bigint)=>{
+                        if(tamanho<=0n||feitos.has(tamanho.toString()))return null;
+                        feitos.add(tamanho.toString());
+                        const sinal={
+                            rota:rotaExecutavelTriangulo(item.t,tamanho),
+                            quantia:tamanho,bloco:blocoDaAmostra,
+                            brutoEstimado:0n,liquidoEstimado:0n,estadoConsistente:true
+                        };
+                        const resultado=await simularTitanAoVivo(sinal,
+                            process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                        tentativasTriangulares++;
+                        triangulosAtomicos++;
+                        return{tamanho,sinal,resultado};
+                    };
+                    let ultimaSituacao:'executavel'|'inviavel'|'desconhecido'='desconhecido';
+                    // Maximo 3 chamadas completas por triangulo nesta rodada.
+                    // Repete escalas de liquidez DIFERENTES, sem presumir
+                    // monotonicidade da curva entre ticks e DEXs.
+                    for(const tamanho of sondas){
+                        const tentativa=await testar(tamanho);
+                        if(!tentativa)continue;
+                        ultimaSituacao=tentativa.resultado.situacao;
+                        log.info('[TITAN/SONDA] Variacao de tamanho simulada.',{
+                            pools:item.t.pools,
+                            tamanho:tamanho.toString(),
+                            resultado:tentativa.resultado.situacao,
+                            motivo:tentativa.resultado.motivo,
+                            blocoDaProva:tentativa.resultado.bloco,
+                            erro:tentativa.resultado.erroContrato??null,
+                            deficitBps:tentativa.resultado.deficitBps??null,
+                            gasGastoOnchain:'zero: eth_call, sem broadcast',
+                        });
+                        if(tentativa.resultado.situacao==='executavel'){
+                            const atual=BigInt(tentativa.resultado.liquidoConservadorWei??'0');
+                            const melhor=escolhido===null?-1n:
+                                BigInt(escolhido.resultado.liquidoConservadorWei??'0');
+                            if(atual>melhor)escolhido=tentativa;
+                        }
+                    }
+                    log.warn('[TITAN/TRIANGULO-ATOMICO] Busca de tamanhos conferida.',{
+                        pools:item.t.pools,
+                        sondasFeitas:feitos.size,
+                        executavel:escolhido!==null,
+                        melhorTamanho:escolhido?.tamanho.toString()??null,
+                        ultimaSituacao,
+                        razao:item.veredicto.estado,
+                        triados:triangulosComSpread,semSpread:triangulosSemSpread,
+                        simulados:triangulosAtomicos,
+                    });
+                    if(escolhido===null)continue;
+                    const {tamanho,sinal,resultado}=escolhido;
+                    if(resultado.situacao!=='executavel')continue;
+                    if(process.env.TITAN_ENVIAR!=='1'
+                        ||tentativasTitan>=tetoTentativasTitan
+                        ||Date.now()-ultimoEnsaioTitanEm<60_000)continue;
+                    // Somente lucro verificado no executor, nao suposto
+                    // por produto de precos marginais.
+                    const bruto=BigInt(resultado.brutoWei??'0');
+                    const liquido=BigInt(resultado.liquidoConservadorWei??'0');
+                    if(bruto<=0n||liquido<=0n)continue;
+                    ultimoEnsaioTitanEm=Date.now();
+                    const envio=await executarTitan({...sinal,
+                        brutoEstimado:bruto,liquidoEstimado:liquido},
+                        process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                    if(['enviado','confirmado','revertido','desconhecido']
+                        .includes(envio.estado))tentativasTitan++;
+                    eventoTitan('envio','Executor triangular: '+envio.estado,
+                        envio.hash ? 'Transacao '+envio.hash+'; '+envio.motivo : envio.motivo);
+                    log.warn('[TITAN/TRIANGULO-EXECUTOR] Decisao financeira de 3 hops.',{
+                        pools:item.t.pools,tamanho:tamanho.toString(),
+                        resultado:envio,validacao:resultado,
+                        tentativasNestaSessao:tentativasTitan,
+                    });
+                    // Uma unica candidata com potencial de envio por rodada;
+                    // o controle duravel ainda limita 1/dia.
+                    break;
+                }
+                if(tentativasTriangulares===0 && amostra.length>0
+                    && FM.estadosAvaliados%30===0) {
+                    log.info('[TITAN/TRIANGULOS] Nao houve simulacao nesta amostra.',{
+                        analisadas:amostra.length,semSpread:triangulosSemSpread,
+                        capacidadeDesconhecida:avaliadas.filter(x=>x.liquidez===null).length,
+                    });
+                }
             }
 
             // A COTACAO: UM LOTE JSON-RPC POR DEGRAU da escada, com as rotas
@@ -2439,7 +2801,15 @@ async function principal(): Promise<void> {
                     if (rota === undefined) continue;
                     const poolsDaRota = rota.pernas.map((p) => p.pool);
                     const v = compararEstados(cru, cruDepois, poolsDaRota);
-                    if (v === 'CONSISTENTE') { FM.estadosConsistentes += 1; continue; }
+                    if (v === 'CONSISTENTE') {
+                        FM.estadosConsistentes += 1;
+                        if(!sn.motivo.startsWith('EXPIRADO')){
+                            memoriaDeCotacoesNegativas.registrar(
+                                rota,cru,sn.lucroLiquidoEstimado,true,Date.now(),
+                            );
+                        }
+                        continue;
+                    }
                     if (v === 'NAO_VALIDADA') {
                         FM.estadoNaoValidado += 1;
                         sn.motivo = 'ESTADO_NAO_VALIDADO: não li algum pool desta rota na '
@@ -2456,47 +2826,111 @@ async function principal(): Promise<void> {
                     // contar como oportunidade: a conta nao e sobre um estado.
                     sn.lucroLiquidoEstimado = null;
                 }
-                // O executor usa somente SINAL com estado confirmado NA RELEITURA.
-                // Nao reutiliza a estimativa positiva V2: esse contrato aceita V3/Aerodrome,
-                // nao rotas V2. Com TITAN_ENVIAR ausente ou zero nao faz RPC de execucao.
-                const prontas = sinais.filter((sn) => sn.lucroLiquidoEstimado !== null
-                    && sn.lucroLiquidoEstimado > 0n
-                    && sn.lucroBrutoEstimado !== null && sn.lucroBrutoEstimado > 0n
-                    && sn.melhorTamanho !== null && sn.melhorTamanho > 0n
-                    && !sn.motivo.startsWith('ESTADO_'));
-                if (process.env.TITAN_ENVIAR === '1' && prontas.length > 0
-                    && tentativasTitan < tetoTentativasTitan
-                    && Date.now() - ultimoEnsaioTitanEm >= 60_000) {
-                    const vencedora = prontas.reduce((a, b) => (
-                        b.lucroLiquidoEstimado! > a.lucroLiquidoEstimado! ? b : a
-                    ));
-                    const candidata = afetadas.find((c) => c.chave === vencedora.rota);
-                    if (candidata !== undefined) {
-                        // Reserva uma janela de preflight por minuto. Uma recusa
-                        // sem broadcast nao consome a unica tentativa de transacao.
-                        ultimoEnsaioTitanEm = Date.now();
-                        // eslint-disable-next-line no-await-in-loop
-                        const resultado = await executarTitan({
-                            rota: pernasDaCandidata(
-                                candidata, WETH_DA_BASE, vencedora.melhorTamanho!,
-                            ),
-                            quantia: vencedora.melhorTamanho!,
-                            bloco: blocoDaAmostra,
-                            brutoEstimado: vencedora.lucroBrutoEstimado!,
-                            liquidoEstimado: vencedora.lucroLiquidoEstimado!,
-                            estadoConsistente: true,
-                        }, process.env.TITAN_EXECUTOR_RPC_URL ?? rpc);
-                        if (resultado.estado === 'enviado' || resultado.estado === 'confirmado'
-                            || resultado.estado === 'revertido' || resultado.estado === 'desconhecido') {
-                            tentativasTitan += 1;
-                        }
-                        log.warn('[TITAN/EXECUTOR] Decisao sobre sinal cotado.', {
-                            bloco: blocoDaAmostra,
-                            rota: vencedora.rota,
-                            resultado,
-                            tentativasNestaSessao: tentativasTitan,
-                            limite: tetoTentativasTitan,
+                // O executor nunca deve receber apenas o melhor valor da
+                // ESTIMATIVA. Esse foi o funil que gerou falsas oportunidades:
+                // 11 de 11 chamadas atomicas recentes eram inviaveis.
+                // Explorar os 2 melhores por lucro LIQUIDO estimado, com
+                // memoria de recusa e rotas alternativas em lugar de insistir
+                // sempre na mesma rota aparentemente positiva.
+                const validar = process.env.TITAN_VALIDAR_AO_VIVO === '1';
+                const intervaloEnsaio=Math.max(10_000,Math.min(60_000,
+                    Number(process.env.TITAN_ATOMICA_INTERVALO_MS??'20000')||20_000));
+                const chanceDeNovoEnsaio = Date.now()-ultimoEnsaioAtomicoEm>=intervaloEnsaio;
+                if (validar && chanceDeNovoEnsaio) {
+                    const candidatos = exploradorTitan.selecionar(
+                        sinais,afetadas,
+                        limiteAtomicoSeguro(process.env.TITAN_ATOMICA_MAX_CANDIDATAS),
+                        Date.now(),true, // read-only probes may quantify previously unknown gas
+                    );
+                    if(candidatos.length>0) {
+                        log.info('[TITAN/ATOMICA/FILA] Candidatos para prova integral onchain sem broadcast.',{
+                            elegiveis:candidatos.length,
+                            permitiuCustoDesconhecido:true,
+                            teto:limiteAtomicoSeguro(process.env.TITAN_ATOMICA_MAX_CANDIDATAS),
+                            brutosPositivos:sinais.filter(x=>x.lucroBrutoEstimado!==null&&x.lucroBrutoEstimado>0n).length,
+                            custoConhecido:sinais.filter(x=>x.lucroLiquidoEstimado!==null).length,
+                            nota:'nenhum sinal autoriza envio sem lucro real positivo medido em eth_call',
                         });
+                        ultimoEnsaioAtomicoEm=Date.now();
+                        let melhorExecutavel:(typeof candidatos)[number]|null=null;
+                        let melhorGanhoReal:bigint=0n;
+                        let melhorBrutoReal:bigint=0n;
+                        for(const c of candidatos){
+                            const sn=c.sinal;
+                            // Simular separadamente cada rota no executor real,
+                            // SEM transmitir; o RPC pode recusar a chamada, o
+                            // que tambem conta como desconhecido, nao como lucro.
+                            const resultado=await simularTitanAoVivo({
+                                rota:pernasDaCandidata(c.rota,WETH_DA_BASE,sn.melhorTamanho!),
+                                quantia:sn.melhorTamanho!,bloco:blocoDaAmostra,
+                                brutoEstimado:sn.lucroBrutoEstimado!,
+                                // Only for the READ-ONLY eth_call. The real
+                                // profit is independently measured by the
+                                // contract and its L1/L2 gas preflight.
+                                liquidoEstimado:sn.lucroLiquidoEstimado??0n,
+                                estadoConsistente:true,
+                            },process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                            exploradorTitan.registrar(sn.rota,resultado.situacao);
+                            if(resultado.situacao==='executavel'){
+                                atomicasExecutaveis++;
+                                const ganho=BigInt(resultado.liquidoConservadorWei??'0');
+                                if(ganho>melhorGanhoReal){
+                                    melhorGanhoReal=ganho;
+                                    melhorBrutoReal=BigInt(resultado.brutoWei??'0');
+                                    melhorExecutavel=c;
+                                }
+                            }else if(resultado.situacao==='inviavel')atomicasInviaveis++;
+                            else atomicasDesconhecidas++;
+                            log.warn('[TITAN/ATOMICA] Resultado por candidato no executor real.',{
+                                rota:sn.rota,bloco:blocoDaAmostra,resultado,
+                                indiceCandidato:candidatos.indexOf(c)+1,
+                                totalCandidatos:candidatos.length,
+                                nota:'simulacao eth_call; nao e lucro realizado',
+                                contadores:{executaveis:atomicasExecutaveis,
+                                    inviaveis:atomicasInviaveis,
+                                    desconhecidas:atomicasDesconhecidas},
+                            });
+                        }
+                        // Transmitir somente um candidato JA executavel no
+                        // contrato, e REVALIDAR tudo dentro de executarTitan:
+                        // nonce, liquidez, gas, imposto L1, piso e recibo.
+                        // Nunca transmite so por spread ou cotacao de quoter.
+                        if (process.env.TITAN_ENVIAR === '1' && melhorExecutavel
+                            && tentativasTitan<tetoTentativasTitan
+                            && Date.now()-ultimoEnsaioTitanEm>=60_000) {
+                            ultimoEnsaioTitanEm=Date.now();
+                            const sn=melhorExecutavel.sinal;
+                            const resultado=await executarTitan({
+                                rota:pernasDaCandidata(melhorExecutavel.rota,
+                                    WETH_DA_BASE,sn.melhorTamanho!),
+                                quantia:sn.melhorTamanho!,bloco:blocoDaAmostra,
+                                // The only approval comes from the
+                                // complete EVM simulation, NOT from the
+                                // possibly missing gas-aware quote.
+                                brutoEstimado:melhorBrutoReal,
+                                liquidoEstimado:melhorGanhoReal,
+                                estadoConsistente:true,
+                            },process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                            if(['enviado','confirmado','revertido','desconhecido']
+                                .includes(resultado.estado))tentativasTitan++;
+                            eventoTitan('envio','Executor multi-rota: '+resultado.estado,
+                                resultado.hash
+                                    ? 'Transacao '+resultado.hash+'; '+resultado.motivo
+                                    : resultado.motivo);
+                            log.warn('[TITAN/EXECUTOR] So enviou candidata atomica validada.',{
+                                bloco:blocoDaAmostra,rota:sn.rota,resultado,
+                                candidatosExplorados:candidatos.length,
+                                tentativasNestaSessao:tentativasTitan,
+                                limite:tetoTentativasTitan,
+                            });
+                        }
+                    }
+                } else if (process.env.TITAN_ENVIAR === '1' && !validar) {
+                    // Falha fechada: ligar TITAN_ENVIAR sem a certificacao
+                    // integral nunca autoriza uma arbitragem.
+                    if(Date.now()-ultimoEnsaioTitanEm>=60_000){
+                        ultimoEnsaioTitanEm=Date.now();
+                        log.error('[TITAN/EXECUTOR] Envio bloqueado: TITAN_VALIDAR_AO_VIVO nao habilitado.');
                     }
                 }
                 cotadasAgora = sinais.length;
@@ -2530,6 +2964,19 @@ async function principal(): Promise<void> {
                     + 'outras têm os dois pools no MESMO estado já avaliado, e recotar repetiria '
                     + 'a resposta',
                 cotacoesExecutadas: cotadasAgora,
+                repeticoesNegativasEvitadas: repetidasEvitadas,
+                reboteAave:{
+                    liquidacoesObservadas,poolsComSwapAssociado:poolsVinculadosRebote,
+                    poolsAtivos:destaqueRebote.size,rotasPromovidas,leiturasQueFalharam:falhasRebote,
+                    nota:'swaps na mesma tx de liquidacao; spread so existe apos cotacao atual',
+                },
+                reboteMorpho:{
+                    liquidacoesObservadas:liquidacoesMorphoObservadas,
+                    liquidacoesViaAtlas:liquidacoesViaAtlasObservadas,
+                    transacoesAtlasObservadas,
+                    piscinasComSwapNaMesmaTx:piscinasMorphoAssociadas,
+                    regra:'somente eventos em recibo confirmado, sem criar cotacao ficticia',
+                },
                 cotacoesAdiadasPorCapacidade: escolha.adiadas,
                 pendentesCotacao: pendentesCotacao.size,
                 mudancasIntrabloco: `${INTRABLOCO.detectadas} estado(s) novo(s) detectado(s) com `
@@ -2601,6 +3048,58 @@ async function principal(): Promise<void> {
         // fazer sem um contrato implantado é `eth_call` do `executarArbitragem`
         // — e isso fica DECLARADO como pendente, não escondido.
         const aprovadas = decisoes.filter((d) => d.aprovado);
+        if(process.env.TITAN_V2_SONDA==='1' && aprovadas.length>0
+            &&Date.now()-ultimoEnsaioV2Em>=25_000){
+            const agoraV2=Date.now();
+            for(const [rota,expira] of bloqueiosV2Ate){
+                if(expira<=agoraV2)bloqueiosV2Ate.delete(rota);
+            }
+            const proximo=selecionarProximaProvaV2(
+                aprovadas,ultimaProvaV2,agoraV2,240_000,bloqueiosV2Ate);
+            const pendente=proximo.oportunidade;
+            if(pendente){
+                const k=pendente.candidato.emprestimo.endereco+'>'+
+                    pendente.candidato.venda.endereco;
+                ultimaProvaV2.set(k,Date.now());
+                ultimoEnsaioV2Em=Date.now();
+                const prova=await provarV2Atomico(pendente.candidato,
+                    process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                if(prova.estado==='inviavel'&&reprovacaoDePoolTravadoV2(prova.motivo)){
+                    const bloqueadoAte=Date.now()+30*60_000;
+                    bloqueiosV2Ate.set(k,bloqueadoAte);
+                    log.warn('[TITAN/V2-LOCK] Rota V2 reprovada por lock atomico; teste outra.',{
+                        rota:k,bloqueadoAte:new Date(bloqueadoAte).toISOString(),
+                        motivo:prova.motivo,
+                        nota:'bloqueio temporario so para esta rota; nenhuma transacao paga',
+                    });
+                }
+                eventoTitan('prova',
+                    prova.estado === 'executavel-em-override'
+                        ? 'Prova V2 passou' : 'Prova V2 recusada',
+                    'Rota '+k.slice(0,13)+'…: '+String(prova.motivo??prova.estado).slice(0,130));
+                log.warn('[TITAN/V2-PROVA] Flash swap V2 integral sem transacao paga.',{
+                    rota:k,tokenEmprestado:pendente.candidato.T,
+                    quantidade:pendente.candidato.quantia.toString(),
+                    resultado:prova,
+                    decisaoFinanceira:prova.estado==='executavel-em-override'
+                       ? 'prova virtual passou; executor IMPLANTADO deve revalidar tudo'
+                       : 'NAO ENVIAR; sinal teorico nao foi validado',
+                });
+                if(prova.estado==='executavel-em-override'
+                    &&process.env.TITAN_V2_ENVIAR==='1'){
+                    const resultadoPago=await executarFlashArbV2(
+                        pendente.candidato,process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                    eventoTitan('envio','Executor V2: '+resultadoPago.status,
+                        resultadoPago.hash
+                            ? 'Transacao '+resultadoPago.hash+'; '+resultadoPago.motivo
+                            : resultadoPago.motivo);
+                    log.warn('[TITAN/V2-EXECUTOR] Operacao na Base somente apos prova dupla.',{
+                        rota:k,resultado:resultadoPago,
+                        nota:'somente recibo confirma operacao; gas sempre tem risco residual',
+                    });
+                }
+            }
+        }
         for (const d of aprovadas.slice(0, 3)) {
             const fimSim = av.etapa('simulacao');
             const frescos = await lerPools(
@@ -2646,6 +3145,19 @@ async function principal(): Promise<void> {
 
         livro.guardar(av.fechar('ok'));
 
+        atualizarTitan({
+            phase: 'Varredura de oportunidades',
+            description: 'Analisando pools, validando precos e preparando provas atomicas.',
+            block: blocoAgora,cycles: ciclo,
+            routes: PLACAR.avaliados,positives:PLACAR.estimadosPositivos,
+            pools: pools.length,mixed:MISTAS.length,
+        });
+        progressoTitan(ciclo,candidatos.length);
+        if(ciclo===1||ciclo%4===0){
+            eventoTitan('ciclo','Bloco '+blocoAgora+' analisado',
+                candidatos.length+' rotas avaliadas neste ciclo; '
+                +PLACAR.estimadosPositivos+' sinais teóricos desde o inicio.');
+        }
         log.info(`[ARB ${blocoAgora}] ciclo ${ciclo}.`, {
             cobertura: (() => {
                 const total = Math.max(1, universo.pools.length);
@@ -2937,12 +3449,26 @@ export async function universoPorAtividade(
         });
     }
 
-    const fatias = await emLote(candidatos.slice(0, teto * 2), async (pool) => ({
-        pool, fabrica: endDe(await lerComPaciencia(chamar, pool, SELETORES.factory)),
-    }));
-    for (const { pool, fabrica } of fatias) {
+    // Os V2 nao concorrem por posicao com V3/Aerodrome no corte global.
+    // No universo anterior, os concentrados mais ativos podiam consumir
+    // candidatos.slice(0, teto*2) antes de verificar um unico V2.
+    // E factory() passa pelo mesmo MULTICALL que ja le tokens, sem centenas
+    // de eth_call individuais no caminho de descoberta.
+    const ativosV2 = candidatos.filter((pool) => tipoVisto.get(pool) === 'v2')
+        .slice(0, teto * 2);
+    const lidosDaFabrica = await lerEmLote(chamar, ativosV2.map((pool) => ({
+        alvo: pool, dados: SELETORES.factory,
+    })));
+    for (let i = 0; i < ativosV2.length; i += 1) {
+        const pool = ativosV2[i]!;
+        const resposta = lidosDaFabrica[i];
+        if (resposta === undefined || !resposta.ok) { falhas += 1; continue; }
+        const fabrica = endDe(resposta.dados);
         if (fabrica === null) { falhas += 1; continue; }
-        if (!aceitas.has(fabrica)) { recusadosPorFabrica += 1; continue; }
+        if (!aceitas.has(fabrica.toLowerCase())) {
+            recusadosPorFabrica += 1;
+            continue;
+        }
         if (pools.length >= teto) break;
         pools.push(pool);
         porFabrica.set(pool, fabrica);
