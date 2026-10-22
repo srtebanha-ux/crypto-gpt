@@ -1,3 +1,4 @@
+import {comExecutorMegazord,carteiraMegazord,transmitirMegazord,contextoExecutorMegazord} from './megazordExecutor';
 /**
  * FlashArb V2 paid execution. Strictly separate from read-only virtual probes.
  * Activation needs a deployed contract, explicit flags, live EVM profit proof,
@@ -63,7 +64,7 @@ export async function diagnosticarFlashArbV2(
  }finally {rpc?.destroy()}
 }
 
-export async function executarFlashArbV2(
+async function executarFlashArbV2Interno(
  c:CandidatoV2Prova,rpcUrl:string,env:NodeJS.ProcessEnv=process.env,
 ):Promise<ResultadoV2Pago>{
  const recusa=habilitacaoV2(env);
@@ -73,7 +74,7 @@ export async function executarFlashArbV2(
     return{status:'recusado',motivo:'rota V2 nao comparavel em WETH ou invalida'};
  let rpc:JsonRpcProvider|undefined,hash:string|undefined;
  try{
-   const wallet=new Wallet(env.TITAN_CHAVE_PRIVADA!);
+   const wallet=carteiraMegazord(env.TITAN_CHAVE_PRIVADA!);
    const contrato=getAddress(env.TITAN_V2_CONTRATO!);
    const arquivo=JSON.parse(fs.readFileSync('.tmp/artifacts/FlashArbProva.json','utf8')) as Artifact;
    rpc=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true});
@@ -137,7 +138,7 @@ export async function executarFlashArbV2(
    // Reserve BEFORE broadcast. A crash/timeout keeps the hash pending,
    // preventing double transmission and require manual reconciliation.
    reservarTitanContinuo(env,hash,politica.custo);
-   const tx=await rpc.broadcastTransaction(txAssinada);
+   const tx=await transmitirMegazord(rpc,txAssinada);
    if(tx.hash.toLowerCase()!==hash.toLowerCase())
      throw Error('hash de envio nao coincide com assinatura');
    const receipt=await tx.wait(1,60000);
@@ -158,4 +159,8 @@ export async function executarFlashArbV2(
      motivo:hash?'hash reservado ou transmitido: reconciliar, NAO reenviar':
        (e instanceof Error?e.message.slice(0,200):'falha nao identificada')};
  }finally{rpc?.destroy()}
+}
+
+export async function executarFlashArbV2(...args:Parameters<typeof executarFlashArbV2Interno>):ReturnType<typeof executarFlashArbV2Interno>{
+ return comExecutorMegazord('arbitragem-v2',()=>executarFlashArbV2Interno(...args));
 }

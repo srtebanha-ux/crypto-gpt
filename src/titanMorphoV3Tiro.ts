@@ -1,3 +1,4 @@
+import {comExecutorMegazord,carteiraMegazord,transmitirMegazord,contextoExecutorMegazord} from './megazordExecutor';
 /**
  * TITAN Morpho V3: onchain candidate -> complete eth_call -> gas L1/L2 ->
  * enforced profit floor -> one signed tx (when expressly armed).
@@ -115,7 +116,7 @@ async function reserveJournal(
  * It re-reads EVERYTHING onchain, so stale API/shares cannot authorize a tx.
  * Throws are converted into read-only diagnostic; no paid attempt without proof.
  */
-export async function avaliarELiquidarMorphoV3(
+async function avaliarELiquidarMorphoV3Interno(
   e:Entrada, env:NodeJS.ProcessEnv=process.env,
 ):Promise<Resposta>{
   const key=e.mercado.id.toLowerCase()+':'+e.usuario.toLowerCase();
@@ -237,7 +238,7 @@ export async function avaliarELiquidarMorphoV3(
     if(!policy.armed)return{status:'aprovada-simulada',
       motivo:'callback V3+lucro e gas verificados; falta autorizacao exclusiva de envio'};
     if(!chave)throw Error('chave do CACA indisponivel');
-    const wallet=new Wallet(chave,p);
+    const wallet=carteiraMegazord(chave,p);
     if(!same(wallet.address,owner))throw Error('signer difere de owner');
     const latest=await p.getTransactionCount(owner,'latest');
     const pending=await p.getTransactionCount(owner,'pending');
@@ -257,7 +258,7 @@ export async function avaliarELiquidarMorphoV3(
     const signed=await wallet.signTransaction(tx);
     hash=keccak256(signed);
     await reserveJournal(p,journalPath(env),hash,pending);
-    const sent=await p.broadcastTransaction(signed);
+    const sent=await transmitirMegazord(p,signed);
     if(!sameHash(sent.hash,hash))throw Error('broadcast retornou hash divergente');
     const receipt=await sent.wait(1,60_000);
     if(!receipt)return{status:'enviada',hash,motivo:'sem recibo: journal deve reconciliar; nao reenviar'};
@@ -274,3 +275,7 @@ export async function avaliarELiquidarMorphoV3(
   }finally{p.destroy();}
 }
 function sameHash(a:string,b:string){return a.toLowerCase()===b.toLowerCase();}
+
+export async function avaliarELiquidarMorphoV3(...args:Parameters<typeof avaliarELiquidarMorphoV3Interno>):ReturnType<typeof avaliarELiquidarMorphoV3Interno>{
+ return comExecutorMegazord('liquidacao-morpho-v3',()=>avaliarELiquidarMorphoV3Interno(...args));
+}

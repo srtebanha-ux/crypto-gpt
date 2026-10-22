@@ -1,5 +1,6 @@
-/** Combined observation entrypoint. Financial adapters are not unified yet. */
+/** Combined scanners with optional shared financial executor. */
 import {createLogger} from './logger';
+import {instalarExecutorMegazord} from './megazordExecutor';
 const log=createLogger('megazord');
 export type MotoresMegazord={
  liquidacoes:()=>Promise<'parar'|void>;
@@ -7,8 +8,13 @@ export type MotoresMegazord={
 };
 
 export function conferirModoMegazord(env:NodeJS.ProcessEnv):void{
- if(env.MEGAZORD_MODO!=='observacao')
-   throw Error('MEGAZORD_MODO deve ser observacao; executor financeiro conjunto ainda indisponivel');
+ if(env.MEGAZORD_MODO!=='observacao'&&env.MEGAZORD_MODO!=='execucao')
+   throw Error('MEGAZORD_MODO deve ser observacao ou execucao');
+ if(env.MEGAZORD_MODO==='execucao'){
+   if(env.MEGAZORD_CONFIRMAR!=='OPERAR_BASE_REAL'||env.MEGAZORD_EXCLUSIVO!=='1')
+     throw Error('execucao exige confirmacao e exclusividade da carteira');
+   return;
+ }
  // Fail closed rather than silently turning off an existing live service.
  // Run in an isolated service; never change the existing services' flags.
  const armed=Object.entries(env).filter(([k,v])=>k.endsWith('_ENVIAR')&&v==='1').map(([k])=>k);
@@ -33,10 +39,17 @@ export async function iniciarMegazord(
 
 if(require.main===module){
  void iniciarMegazord(process.env,async()=>{
+   if(process.env.MEGAZORD_MODO==='execucao'){
+     instalarExecutorMegazord(process.env);
+     for(const k of ['CACA_CHAVE_PRIVADA','TITAN_CHAVE_PRIVADA']){
+       // Existing aliases remain checked against the single owner's address.
+       if(!process.env[k])process.env[k]=process.env.MEGAZORD_CHAVE_PRIVADA;
+     }
+   }
    const [caca,arb]=await Promise.all([import('./cacarAoVivo'),import('./cacarArbitragem')]);
-   log.info('Motores unidos no mesmo processo; somente observacao e simulacao.',{
-     motores:['Aave/Morpho','arbitragem Base'],envio:false,
-     executorFinanceiroUnificado:'ainda nao implementado',
+   log.info('Motores unidos no mesmo processo.',{
+     motores:['Aave/Morpho','arbitragem Base'],modo:process.env.MEGAZORD_MODO,
+     executorFinanceiroUnificado:process.env.MEGAZORD_MODO==='execucao',
    });
    return {liquidacoes:caca.iniciarLiquidante,arbitragem:arb.iniciarArbitragem};
  }).catch(e=>{

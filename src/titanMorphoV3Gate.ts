@@ -1,3 +1,4 @@
+import {contextoExecutorMegazord} from './megazordExecutor';
 /**
  * Morpho V3 - policy and economic gate. No RPC, keys or side effects.
  * The solver can only spend gas when an entire transaction was simulated.
@@ -21,7 +22,7 @@ export function politicaMorphoV3(
     armed:env.CACA_MORPHO_V3_ENVIAR==='1'
       &&env.CACA_MORPHO_V3_CONFIRMAR==='OPERAR_MORPHO_BASE'
       &&env.CACA_MORPHO_V3_NONCE_EXCLUSIVO==='1'
-      &&env.CACA_ENVIAR!=='1',
+      &&(env.CACA_ENVIAR!=='1'||contextoExecutorMegazord()),
     maxGas:positiveBigInt(env.CACA_MORPHO_V3_GAS_MAX,'1200000',2000000n),
     maxCostWei:positiveBigInt(env.CACA_MORPHO_V3_CUSTO_MAX_WEI,'500000000000000',2000000000000000n),
     tipWei:positiveBigInt(env.CACA_MORPHO_V3_TIP_WEI,'20000000',3000000000n),

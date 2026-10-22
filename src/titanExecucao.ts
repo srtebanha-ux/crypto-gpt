@@ -1,3 +1,4 @@
+import {comExecutorMegazord,carteiraMegazord,transmitirMegazord,contextoExecutorMegazord} from './megazordExecutor';
 /**
  * TITAN — executor opcional de rotas CacadorV3 na Base.
  * Sem efeitos ao importar. Nenhuma transacao sem TODOS os portoes explicitos.
@@ -121,10 +122,10 @@ export function motivoDaRecusaTitan(p: PlanoTitan, ambiente: NodeJS.ProcessEnv):
     // Operador unico: remove somente a restricao de horario.
     // Nonce pendente, saude de RPC e propriedade do contrato seguem obrigatorios.
     const somenteTitan = ambiente.TITAN_SOLO_24H === '1';
-    if (!somenteTitan && ambiente.TITAN_JANELAS_EXCLUSIVAS !== '1') {
+    if (!contextoExecutorMegazord() && !somenteTitan && ambiente.TITAN_JANELAS_EXCLUSIVAS !== '1') {
         return 'TITAN exige janela exclusiva Base compartilhada com CACA';
     }
-    if (ambiente.TITAN_NONCE_EXCLUSIVO !== '1') {
+    if (!contextoExecutorMegazord() && ambiente.TITAN_NONCE_EXCLUSIVO !== '1') {
         return 'sem confirmacao de nonce exclusivo: outro bot pode usar a mesma carteira';
     }
     const fonte = ambiente.TITAN_FONTE_CREDITO ?? 'flashswap';
@@ -196,7 +197,7 @@ function hexDeResultado(data: string, fn: Interface, nome: string): bigint {
  * Revalida o mesmo calldata no contrato IMPLANTADO, nao no endereco de override.
  * O envio usa nonce pendente explicito; ainda exige exclusividade entre servicos.
  */
-export async function executarTitan(
+async function executarTitanInterno(
     plano: PlanoTitan, rpcUrl: string, ambiente: NodeJS.ProcessEnv = process.env,
 ): Promise<ResultadoTitan> {
     const recusa = motivoDaRecusaTitan(plano, ambiente);
@@ -210,7 +211,7 @@ export async function executarTitan(
         if(!escolhido)throw Error('endereco do executor correspondente a fonte invalido');
         contrato=escolhido;
         cofre = getAddress(ambiente.TITAN_COFRE!);
-        carteira = new Wallet(ambiente.TITAN_CHAVE_PRIVADA!);
+        carteira = carteiraMegazord(ambiente.TITAN_CHAVE_PRIVADA!);
     } catch {
         return { estado: 'recusado', motivo: 'chave, contrato ou cofre invalidos' };
     }
@@ -395,7 +396,7 @@ export async function executarTitan(
             } finally { fs.closeSync(fd); }
         }
         hash = hashAssinado;
-        const tx = await rpc.broadcastTransaction(assinadaFinal);
+        const tx = await transmitirMegazord(rpc,assinadaFinal);
         if (tx.hash.toLowerCase() !== hash.toLowerCase()) {
             throw new Error('RPC devolveu hash diferente da transacao assinada');
         }
@@ -595,4 +596,8 @@ export async function simularTitanAoVivo(
             motivo:(e instanceof Error?e.message:'falha na simulacao').slice(0,240)};
     }
     finally{rpc.destroy();}
+}
+
+export async function executarTitan(...args:Parameters<typeof executarTitanInterno>):ReturnType<typeof executarTitanInterno>{
+ return comExecutorMegazord('arbitragem-multihop',()=>executarTitanInterno(...args));
 }

@@ -1,3 +1,4 @@
+import {carteiraMegazord} from './megazordExecutor';
 // Arquivo: src/cacarAoVivo.ts
 import { Decimal } from 'decimal.js';
 import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
@@ -2382,7 +2383,7 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
     let porQueSemAssinador: string | null = chave ? null : 'CACA_CHAVE_PRIVADA ausente';
     if (chave) {
         try {
-            const assinador = new Wallet(chave, leitor);
+            const assinador = carteiraMegazord(chave, leitor);
             // Quem ASSINA decide de onde o gas sai, entao o endereco da chave
             // manda sobre o escrito. Discordar e erro de configuracao e vira
             // linha de log — nunca silencio, e nunca o valor da chave.

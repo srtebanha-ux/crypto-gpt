@@ -1,3 +1,4 @@
+import {executorMegazordInstalado} from './megazordExecutor';
 /**
  * Arbitragem TITAN e CACA partilham a MESMA carteira.
  * Exclusividade temporal cruzada com prova Base em DOIS RPCs independentes.
@@ -43,7 +44,7 @@ export async function conferirJanelaDeNonce(
         const stale=(t:number)=>Math.abs(Math.floor(agoraMs/1000)-t)>20;
         if(stale(a.quando)||stale(b.quando))
             return{pode:false,motivo:'base stale: RPC nao esta acompanhando a corrente'};
-        if(papel!=='TITAN_SOLO' && (papelDaJanela(a.quando)!==papel||papelDaJanela(b.quando)!==papel))
+        if(!executorMegazordInstalado() && papel!=='TITAN_SOLO' && (papelDaJanela(a.quando)!==papel||papelDaJanela(b.quando)!==papel))
             return{pode:false,motivo:'janela de nonce reservada ao outro executor ou intervalo de guarda'};
         if(a.pendente!==a.confirmado||b.pendente!==b.confirmado)
             return{pode:false,motivo:'transacao pendente; nao dividir nonce entre executores'};
