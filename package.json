@@ -49,7 +49,8 @@
     "caca": "ts-node src/cacarAoVivo.ts",
     "caca:prod": "node dist/cacarAoVivo.js",
     "observador:multirrede": "node dist/observadorMultirrede.js",
-    "megazord:test-local": "hardhat test --no-compile --config hardhat.megazord.config.cjs forkTests/megazordExecutor.local.cjs"
+    "megazord:test-local": "hardhat test --no-compile --config hardhat.megazord.config.cjs forkTests/megazordExecutor.local.cjs",
+    "megazord:preflight": "node dist/megazordPreflight.js"
   },
   "dependencies": {
     "decimal.js": "^10.4.3",

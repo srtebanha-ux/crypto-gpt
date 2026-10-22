@@ -66,3 +66,19 @@ transacoes assinadas para um contrato minimo: duas estrategias concorrentes
 e o adaptador de carteira usado pelo Aave. Confere nonces 0/1/2, estado do
 contrato, recibos e diario. O custo L1 e simulado. Este teste valida o
 transporte e a coordenacao, nao a economia nem os contratos dos protocolos.
+
+## Preflight publico antes da implantacao
+
+No Railway, `APP_ENTRY=megazord` seleciona a entrada combinada no Dockerfile
+existente. O default `live` inicia outro motor; nao altera-lo globalmente.
+
+Apos o build, `npm run megazord:preflight` consulta os dois RPCs configurados,
+sem assinatura ou envio. Exige `MEGAZORD_ENDERECO_PUBLICO` (ou
+`CACA_ENDERECO_PUBLICO`) e `MEGAZORD_CONTRATOS`. Confere Base, blocos recentes,
+nonce livre e concordante, saldo positivo de gas e bytecode nos destinos.
+Saldo positivo nao comprova suficiência para uma operacao; bytecode presente
+nao autentica contrato. Os gates das estrategias continuam indispensaveis.
+
+Em 2026-10-22, as tentativas deste ambiente para mainnet.base.org e
+base-rpc.publicnode.com retornaram HTTP 403. A validacao contra a Base
+permanece pendente; os testes EVM locais nao substituem essa verificacao.
