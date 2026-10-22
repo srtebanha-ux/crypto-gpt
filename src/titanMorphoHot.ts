@@ -15,6 +15,9 @@ import {MULTICALL3} from './multicall';
 import {createLogger} from './logger';
 const log=createLogger('morpho-hot');
 const price=new Interface(['function price() view returns(uint256)']);
+const juros=new Interface([
+ 'function accrueInterest((address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) marketParams)'
+]);
 const multicall=new Interface([
  'function aggregate3((address target,bool allowFailure,bytes callData)[] calls) payable returns((bool success,bytes returnData)[] returnData)'
 ]);
@@ -107,20 +110,26 @@ export function resumoQuentesMorpho(agora=Date.now()):{
 }
 type Call={target:string;allowFailure:boolean;callData:string};
 export function montarLoteMorphoHot(ativos:readonly Alvo[]):{
- calls:Call[];indices:Map<string,{market:number;oracle:number;position:number}>;
+ calls:Call[];indices:Map<string,{accrual:number;market:number;oracle:number;position:number}>;
 }{
  const calls:Call[]=[];
- const indices=new Map<string,{market:number;oracle:number;position:number}>();
- const markets=new Map<string,{market:number;oracle:number}>();
+ const indices=new Map<string,{accrual:number;market:number;oracle:number;position:number}>();
+ const markets=new Map<string,{accrual:number;market:number;oracle:number}>();
  for(const a of ativos){
    const id=a.mercado.id.toLowerCase();
    let m=markets.get(id);
    if(!m){
+     // aggregate3 runs ONLY inside eth_call below. Accrued state exists for
+     // the following reads in that simulation and is never persisted onchain.
+     const p=a.mercado;
+     const accrual=calls.push({target:MORPHO_FLASH_BASE,allowFailure:true,
+       callData:juros.encodeFunctionData('accrueInterest',[[p.loanToken,
+         p.collateralToken,p.oracle,p.irm,BigInt(p.lltv.mul('1e18').toFixed(0))]])})-1;
      const market=calls.push({target:MORPHO_FLASH_BASE,allowFailure:true,
        callData:codificarMarket(a.mercado.id)})-1;
      const oracle=calls.push({target:a.mercado.oracle,allowFailure:true,
        callData:price.encodeFunctionData('price')})-1;
-     m={market,oracle};
+     m={accrual,market,oracle};
      markets.set(id,m);
    }
    const position=calls.push({target:MORPHO_FLASH_BASE,allowFailure:true,
@@ -153,6 +162,9 @@ async function verificarBlocoMorphoHot():Promise<void>{
    for(const a of selecionados){
      const idx=lote.indices.get(chave(a));
      if(!idx)continue;
+     // Never classify using stale debt after a failed interest simulation.
+     // Other markets remain usable because every subcall allows failure.
+     if(!decoded[idx.accrual]?.success)continue;
      const mm=decoded[idx.market],oo=decoded[idx.oracle],pp=decoded[idx.position];
      if(!mm?.success||!oo?.success||!pp?.success)continue;
      const market=lerMarket(mm.returnData),pos=lerPosition(pp.returnData);
