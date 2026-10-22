@@ -1,0 +1,23 @@
+name: TITAN live read-only liquidation diagnosis
+on:
+  push:
+    branches:
+      - audit/titan-morpho-live-revert-20261020
+  pull_request:
+    branches:
+      - feat/caca-integracao-multihop-ativa
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Reproduce three live market liquidations by eth_call, no signing
+        run: timeout 140s node scripts/titanMorphoLiveDiagnostico.cjs
