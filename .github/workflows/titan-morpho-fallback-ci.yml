@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - codex/titan-aero-fallback-gate-20261022
+      - codex/titan-armamento-diagnostico-20261022
   workflow_dispatch:
 permissions:
   contents: read
