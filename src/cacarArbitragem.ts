@@ -48,7 +48,7 @@ import { executarTitan, simularTitanAoVivo } from './titanExecucao';
 import { ExploradorDeRotasTitan, limiteAtomicoSeguro } from './titanExplorador';
 import { explorarTriangulos, avaliarTetoTriangulo, capacidadePrimeiroPool, tamanhosTriangulo, sondasTriangulo, rotaExecutavelTriangulo, type TrianguloTitan } from './titanTriangulos';
 import { retentarTamanhoPorErroTitan } from './titanTaticas';
-import { priorizarCotacoes, MemoriaDeCotacoesNegativas } from './titanPriorizacao';
+import { priorizarCotacoes, MemoriaDeCotacoesNegativas, deveProcessarCotacoes } from './titanPriorizacao';
 import { detectarRebotesAave, detectarRebotesMorpho, RadarDeRebotes, priorizarRebotes } from './titanRebote';
 import { selecionarRotasComGasComparavel } from './titanSelecaoGas';
 import { provarV2Atomico } from './titanV2Prova';
@@ -2152,6 +2152,7 @@ async function principal(): Promise<void> {
     let tentativasTitan = 0;
     let ultimoEnsaioTitanEm = 0;
     const pendentesCotacao = new Set<string>();
+    let rodadaCotacoes = 0;
     const radarRebote=new RadarDeRebotes();
     let ultimoBlocoReboteSolicitado=0;
     let leituraReboteEmAndamento=false;
@@ -2569,13 +2570,15 @@ async function principal(): Promise<void> {
             // estado. Sem ele nao havia deduplicacao e a corrida gastou 4.598
             // cotacoes em 5 minutos.
             const impressao = impressaoDoEstado(cru);
-            if (impressao === ULTIMA_IMPRESSAO.valor) {
+            const estadoMudou = impressao !== ULTIMA_IMPRESSAO.valor;
+            if (!deveProcessarCotacoes(estadoMudou,tri.valem,pendentesCotacao,
+                memoriaDeCotacoesNegativas,cru,Date.now())) {
                 ULTIMA_IMPRESSAO.repetidas += 1;
                 continue;
             }
-            if (blocoDaAmostra === blocoDaTriagem) INTRABLOCO.detectadas += 1;
+            if (estadoMudou && blocoDaAmostra === blocoDaTriagem) INTRABLOCO.detectadas += 1;
             ULTIMA_IMPRESSAO.valor = impressao;
-            FM.estadosDistintos += 1;
+            if (estadoMudou) FM.estadosDistintos += 1;
             FM.estadosAvaliados = FM.estadosDistintos;
             FM.rotasTriadas += tri.valem.length;
             FM.faltaDeDados += tri.semDados;
@@ -2595,7 +2598,7 @@ async function principal(): Promise<void> {
             );
             const repetidasEvitadas=selecionaveisPeloEstado.length-afetadasPotenciais.length;
             const escolha = priorizarCotacoes(
-                afetadasPotenciais, tri, tetoCotarRotas, FM.estadosAvaliados,
+                afetadasPotenciais, tri, tetoCotarRotas, ++rodadaCotacoes,
                 process.env.TITAN_ROTACIONAR_COTACOES!=='0',
             );
             const destaqueRebote=radarRebote.ativos(blocoDaAmostra);
