@@ -1,0 +1,27 @@
+name: TITAN Morpho route fallback regression
+on:
+  push:
+    branches:
+      - codex/titan-aero-fallback-gate-20261022
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Morpho route and execution gating regressions
+        run: |
+          node --require ts-node/register --test \
+            src/titanMorphoDiretorDeRota.test.ts \
+            src/titanMorphoV3Gate.test.ts \
+            src/titanMorphoHot.test.ts
