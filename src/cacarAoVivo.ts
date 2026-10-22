@@ -2288,7 +2288,7 @@ function desligarTudo(): void {
 
 // Uma tentativa anterior de boot nao pode manter sockets e listeners vivos.
 let oracleShadowDaSessao: OracleShadow | null = null;
-async function principal(): Promise<'parar' | void> {
+export async function iniciarLiquidante(): Promise<'parar' | void> {
     // O laco externo recria principal() a cada tropeco. Sem isto, cada
     // reinicio abandonava um WebSocket vivo com cadeia de reconexao eterna:
     // em meses, um socket e um relogio a mais por tropeco de rede.
@@ -8145,7 +8145,7 @@ if (require.main === module && exigirAtivacao('cacarAoVivo')) {
     void (async () => {
         for (;;) {
             try {
-                if ((await principal()) === 'parar') {
+                if ((await iniciarLiquidante()) === 'parar') {
                     log.error('Configuração impede rodar. Não reinicio sozinho — corrija e reimplante.');
                     return;
                 }

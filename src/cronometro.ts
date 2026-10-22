@@ -33,6 +33,11 @@ export type Etapa =
     | 'sinal'        // o bloco novo chegou (WebSocket ou pergunta)
     | 'leitura'      // o multicall que le a brasa
     | 'decisao'      // `decidirTiro` e os portoes
+    // O PRE-FILTRO e etapa propria por ordem dela, 2026-10-15: *"Tempo de
+    // pre-filtro. Tempo de cotacao. Tempo de simulacao."* Somar os tres apagaria
+    // a unica comparacao que decide se vale filtrar antes de cotar — medido em
+    // 2026-10-15: 2,2ms de filtro contra 523,3ms de cotacao.
+    | 'prefiltro'    // `triarCandidatas` / `semSpreadEmTamanhoNenhum`
     | 'cotacao'      // preco de mercado / do oraculo
     | 'simulacao'    // o `eth_call` dos contratos
     | 'montagem'     // `codificarCacaV1/V2` + limite de gas + piso
@@ -236,7 +241,10 @@ export class LivroDeTempos {
         oQueIssoNaoMede: string;
     } {
         const minhas = this.avaliacoes.filter((a) => a.cenario === cenario);
-        const etapas: Etapa[] = ['sinal', 'leitura', 'decisao', 'cotacao', 'simulacao', 'montagem', 'transmissao'];
+        const etapas: Etapa[] = [
+            'sinal', 'leitura', 'decisao', 'prefiltro', 'cotacao', 'simulacao', 'montagem',
+            'transmissao',
+        ];
         const porEtapa = etapas.map((e): ResumoDeEtapa => {
             const marcas = minhas.flatMap((a) => a.marcas.filter((m) => m.etapa === e));
             const ms = marcas.map((m) => m.ms);
