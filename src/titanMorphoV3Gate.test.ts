@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {politicaMorphoV3,candidatoElegivelV3,custoConservadorMorphoV3,pisoEconomicoMorphoV3} from './titanMorphoV3Gate';
+import {diagnosticarArmamentoMorphoV3,politicaMorphoV3,candidatoElegivelV3,custoConservadorMorphoV3,pisoEconomicoMorphoV3} from './titanMorphoV3Gate';
 test('Morpho V3 cannot sign when Aave CACA is allowed to sign same wallet',()=>{
  const env={CACA_MORPHO_V3_ENVIAR:'1',CACA_MORPHO_V3_CONFIRMAR:'OPERAR_MORPHO_BASE',
  CACA_MORPHO_V3_NONCE_EXCLUSIVO:'1',CACA_ENVIAR:'1'};
@@ -28,4 +28,24 @@ test('minimum enforceable profit must cover costs after onchain conversion',()=>
  assert.equal(pisoEconomicoMorphoV3(10000000n,100n,100n,p).aprovado,false);
  assert.equal(pisoEconomicoMorphoV3(10000000n,0n,100n,p).aprovado,false);
  assert.equal(pisoEconomicoMorphoV3(0n,200n,100n,p).aprovado,false);
+});
+
+test('startup armament diagnostics match signing policy and expose no secrets',()=>{
+ const valid={CACA_MORPHO_V3_ENVIAR:'1',CACA_MORPHO_V3_CONFIRMAR:'OPERAR_MORPHO_BASE',
+  CACA_MORPHO_V3_NONCE_EXCLUSIVO:'1',CACA_ENVIAR:'0',CACA_CHAVE_PRIVADA:'DO_NOT_LOG_SECRET'};
+ const ready=diagnosticarArmamentoMorphoV3(valid);
+ assert.equal(ready.armado,true);
+ assert.deepEqual(ready.bloqueios,[]);
+ assert.equal(ready.armado,politicaMorphoV3(valid).armed);
+ for(const [key,value] of [
+  ['CACA_MORPHO_V3_ENVIAR','0'],['CACA_MORPHO_V3_CONFIRMAR','NO'],
+  ['CACA_MORPHO_V3_NONCE_EXCLUSIVO','0'],['CACA_ENVIAR','1']
+ ]){
+  const env={...valid,[key]:value};
+  const result=diagnosticarArmamentoMorphoV3(env);
+  assert.equal(result.armado,false,key);
+  assert.equal(result.bloqueios.length,1,key);
+  assert.equal(result.armado,politicaMorphoV3(env).armed);
+  assert.equal(JSON.stringify(result).includes('DO_NOT_LOG_SECRET'),false);
+ }
 });

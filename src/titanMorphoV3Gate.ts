@@ -13,15 +13,25 @@ function positiveBigInt(s:string|undefined,defaultValue:string,max:bigint):bigin
   if(v<=0n||v>max)throw Error('gas policy outside capped range');
   return v;
 }
+/** Redacted startup explanation: names only, never credentials or their values. */
+export function diagnosticarArmamentoMorphoV3(env:NodeJS.ProcessEnv=process.env):
+ {armado:boolean;bloqueios:string[]}{
+ const bloqueios:string[]=[];
+ if(env.CACA_MORPHO_V3_ENVIAR!=='1')bloqueios.push('CACA_MORPHO_V3_ENVIAR deve ser 1');
+ if(env.CACA_MORPHO_V3_CONFIRMAR!=='OPERAR_MORPHO_BASE')
+   bloqueios.push('CACA_MORPHO_V3_CONFIRMAR nao confirma operacao');
+ if(env.CACA_MORPHO_V3_NONCE_EXCLUSIVO!=='1')
+   bloqueios.push('CACA_MORPHO_V3_NONCE_EXCLUSIVO deve ser 1');
+ if(env.CACA_ENVIAR==='1')
+   bloqueios.push('CACA_ENVIAR=1 compete pela mesma carteira/nonce');
+ return {armado:bloqueios.length===0,bloqueios};
+}
 export function politicaMorphoV3(
   env:NodeJS.ProcessEnv=process.env,
 ):MorphoV3Policy{
   return {
     // CACA Aave and Morpho MUST NOT sign simultaneously with one wallet.
-    armed:env.CACA_MORPHO_V3_ENVIAR==='1'
-      &&env.CACA_MORPHO_V3_CONFIRMAR==='OPERAR_MORPHO_BASE'
-      &&env.CACA_MORPHO_V3_NONCE_EXCLUSIVO==='1'
-      &&env.CACA_ENVIAR!=='1',
+    armed:diagnosticarArmamentoMorphoV3(env).armado,
     maxGas:positiveBigInt(env.CACA_MORPHO_V3_GAS_MAX,'1200000',2000000n),
     maxCostWei:positiveBigInt(env.CACA_MORPHO_V3_CUSTO_MAX_WEI,'500000000000000',2000000000000000n),
     tipWei:positiveBigInt(env.CACA_MORPHO_V3_TIP_WEI,'20000000',3000000000n),
