@@ -4,6 +4,7 @@
  * nonce quorum, conservative gas budget and durable one-shot accounting.
  */
 import fs from 'node:fs';
+import {ocultarSegredos} from './logger';
 import {Interface,JsonRpcProvider,Wallet,getAddress,keccak256} from 'ethers';
 import {pisoConservadorV2,correspondeFlashArb,WETH_BASE,type CandidatoV2Prova} from './titanV2Prova';
 import {ORACULO_DE_GAS_L1} from './custoDaBase';
@@ -59,7 +60,7 @@ export async function diagnosticarFlashArbV2(
      return {pronto:false,motivo:'owner do contrato e carteira do TITAN sao diferentes'};
    return {pronto:true,motivo:'Base 8453, bytecode exato e owner correspondem; nao e prova de lucro'};
  }catch(e) {
-   return {pronto:false,motivo:'auditoria de implantacao: '+(e instanceof Error?e.message.slice(0,160):'falha desconhecida')};
+   return {pronto:false,motivo:'auditoria de implantacao: '+ocultarSegredos(e instanceof Error?e.message.slice(0,240):'falha desconhecida',env)};
  }finally {rpc?.destroy()}
 }
 
@@ -156,6 +157,6 @@ export async function executarFlashArbV2(
  }catch(e){
    return{status:hash?'desconhecido':'recusado',hash,
      motivo:hash?'hash reservado ou transmitido: reconciliar, NAO reenviar':
-       (e instanceof Error?e.message.slice(0,200):'falha nao identificada')};
+       ocultarSegredos(e instanceof Error?e.message.slice(0,260):'falha nao identificada',env)};
  }finally{rpc?.destroy()}
 }
