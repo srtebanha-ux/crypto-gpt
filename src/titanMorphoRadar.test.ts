@@ -8,6 +8,29 @@ const base={
  precoOracle:ORACLE_SCALE_MORPHO*12n/10n,
  lltvWad:WAD_MORPHO*8n/10n,
 };
+test('exact LLTV equality and positive sub-bp buffer remain healthy',()=>{
+ const x={...base,borrowShares:100_000_000_000n,
+   totalBorrowAssets:100_000n,totalBorrowShares:100_000_000_000n,
+   collateral:125_000n,precoOracle:ORACLE_SCALE_MORPHO};
+ assert.equal(examinarSaudeMorpho(x).dividaCrua,100_000n);
+ assert.equal(examinarSaudeMorpho(x).distanciaBps,0n);
+ assert.equal(examinarSaudeMorpho(x).situacao,'proxima');
+ const buffer=examinarSaudeMorpho({...x,collateral:125_002n});
+ assert.equal(buffer.distanciaBps,0n);
+ assert.equal(buffer.situacao,'proxima');
+ assert.equal(examinarSaudeMorpho({...x,collateral:124_999n}).situacao,'cruzou-estimado');
+});
+test('oracle conversion rounds down before LLTV multiplication as in Morpho',()=>{
+ const x={...base,borrowShares:1_000_000n,totalBorrowAssets:1n,
+   totalBorrowShares:1_000_000n,collateral:3n,
+   precoOracle:ORACLE_SCALE_MORPHO/2n};
+ // floor(3 * 0.5) = 1; floor(1 * 0.8) = 0 < debt 1.
+ // Multiplying first would incorrectly produce a safe limit of 1.2.
+ const r=examinarSaudeMorpho(x);
+ assert.equal(r.dividaCrua,1n);
+ assert.equal(r.situacao,'cruzou-estimado');
+ assert.equal(r.distanciaBps,-10000n);
+});
 test('detects mathematically crossed LLTV but never returns execution approval',()=>{
  const r=examinarSaudeMorpho(base);
  assert.equal(r.situacao,'cruzou-estimado');

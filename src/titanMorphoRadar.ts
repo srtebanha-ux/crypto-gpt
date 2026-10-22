@@ -46,14 +46,17 @@ export function examinarSaudeMorpho(e:{
   totalBorrowShares+VIRTUAL_SHARES_MORPHO,
  );
  if(divida===0n)return unknown('divida convertida em zero');
- const limiteNumerador=collateral*precoOracle*lltvWad;
- const dividaNumerador=divida*ORACLE_SCALE_MORPHO*WAD_MORPHO;
+ // Match Morpho._isHealthy: floor oracle conversion BEFORE floor LLTV.
+ const garantiaCotada=collateral*precoOracle/ORACLE_SCALE_MORPHO;
+ const maxDivida=garantiaCotada*lltvWad/WAD_MORPHO;
  // Decimal-free bps; no overflow (JS BigInt). Negative means estimated
  // threshold already crossed under the sampled market state.
- const distancia=(limiteNumerador*10000n)/dividaNumerador-10000n;
+ const distancia=maxDivida*10000n/divida-10000n;
  const perto=e.proximoBps??500n;
  if(perto<0n||perto>5000n)return unknown('limiar de proximidade invalido');
- const situacao=distancia<=0n?'cruzou-estimado'
+ // Bps are display/prioritization only: equality is HEALTHY on Morpho,
+ // and a positive sub-bp buffer must not become an unsafe position.
+ const situacao=maxDivida<divida?'cruzou-estimado'
    :distancia<=perto?'proxima':'segura';
  return {situacao,dividaCrua:divida,distanciaBps:distancia,
   motivo:situacao==='cruzou-estimado'
