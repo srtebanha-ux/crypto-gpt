@@ -4,6 +4,7 @@
  * If the node lacks state override or estimateGas override, mark UNKNOWN.
  */
 import fs from 'node:fs';
+import {ocultarSegredos} from './logger';
 import { Interface, JsonRpcProvider, Wallet, getAddress } from 'ethers';
 import { ORACULO_DE_GAS_L1, codificarTetoDeL1 } from './custoDaBase';
 import { calcularPisoTitan } from './titanExecucao';
@@ -90,8 +91,8 @@ function textoReversao(e:unknown):string{
     const x=e as {data?:unknown;error?:{data?:unknown};message?:string};
     const d=typeof x.data==='string'?x.data:
       typeof x.error?.data==='string'?x.error.data:undefined;
-    if(d?.startsWith('0x')&&d.length>=10)return interpretarReversao(d);
-    return (x.message??'RPC sem motivo').slice(0,200);
+    if(d?.startsWith('0x')&&d.length>=10)return ocultarSegredos(interpretarReversao(d));
+    return ocultarSegredos((x.message??'RPC sem motivo').slice(0,240));
 }
 function reverteuContrato(e:unknown):boolean{
     const s=textoReversao(e);
