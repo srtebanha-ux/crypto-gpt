@@ -530,15 +530,20 @@ export async function simularTitanAoVivo(
     const rpc=new JsonRpcProvider(rpcUrl,Number(REDE_BASE),{staticNetwork:true});
     let bloco:number|null=null;
     try{
-        if(BigInt(await rpc.send('eth_chainId',[]))!==REDE_BASE)
-            throw Error('RPC nao e Base 8453');
-        if(await rpc.getCode(contrato)==='0x')throw Error('executor sem bytecode na Base');
         const get=async(nome:'dono'|'cofre')=>{
             const x=await rpc.call({to:contrato,data:ABI_TITAN.encodeFunctionData(nome)});
             return getAddress(ABI_TITAN.decodeFunctionResult(nome,x)[0] as string);
         };
-        if((await get('cofre'))!==cofre)throw Error('cofre do executor diverge');
-        if(from && (await get('dono'))!==from)throw Error('carteira nao e proprietaria do executor');
+        // Leituras independentes: conserva todas as verificacoes sem somar
+        // suas latencias antes de cada prova atomica.
+        const [chainId,bytecode,cofreAtual,donoAtual]=await Promise.all([
+            rpc.send('eth_chainId',[]),rpc.getCode(contrato),get('cofre'),
+            from?get('dono'):Promise.resolve(undefined),
+        ]);
+        if(BigInt(chainId)!==REDE_BASE)throw Error('RPC nao e Base 8453');
+        if(bytecode==='0x')throw Error('executor sem bytecode na Base');
+        if(cofreAtual!==cofre)throw Error('cofre do executor diverge');
+        if(from && donoAtual!==from)throw Error('carteira nao e proprietaria do executor');
         if(ambiente.TITAN_FONTE_CREDITO==='morpho'){
             const cru=await rpc.call({to:contrato,data:ABI_TITAN.encodeFunctionData('morpho')});
             const configurado=getAddress(ABI_TITAN.decodeFunctionResult('morpho',cru)[0] as string);
