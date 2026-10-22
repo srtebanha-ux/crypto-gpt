@@ -1,0 +1,30 @@
+name: TITAN V2 probe gate and secret-safe diagnostics
+on:
+  push:
+    branches:
+      - fix/titan-v2-sonda-prontidao-segredos-20261022
+  pull_request:
+    branches:
+      - feat/titan-validacao-atomica-live
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Testes sem assinatura nem RPC da Base
+        run: |
+          node --require ts-node/register --test \
+            src/titanV2Modo.test.ts \
+            src/titanV2Selecao.test.ts \
+            src/titanV2Prova.test.ts \
+            src/logger.test.ts
