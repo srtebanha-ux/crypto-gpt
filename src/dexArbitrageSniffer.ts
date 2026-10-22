@@ -27,6 +27,7 @@ import { Decimal } from 'decimal.js';
 import { createLogger } from './logger';
 import { cycleSpotRatio, type CycleEvaluation, type Hop } from './ammMath';
 import { avaliarCicloComSementeCpamm } from './titanCpammSniffer';
+import { custosDoFlashSwapV2 } from './flashSwapCosts';
 import { diagnosticarFlashArb } from './flashArbReadiness';
 import { findTriangularCycles, findTwoPoolCycles, hopsForCycle, type Cycle, type PoolInfo } from './dexGraph';
 import {
@@ -667,7 +668,9 @@ async function main() {
         .map((f) => f.trim().toLowerCase())
         .filter((f) => f.length > 0);
     const feeFraction = new Decimal(process.env.DEX_POOL_FEE ?? '0.003');
-    const flashLoanFee = new Decimal(process.env.FLASH_LOAN_FEE ?? '0.0005'); // Aave V3; Balancer = 0
+    // FlashArb.sol borrows from the same V2 pool: the pool fee is ALREADY
+    // included in getAmountOut() for the first hop. No separate Aave loan.
+    const flashLoanFee = custosDoFlashSwapV2(new Decimal(0)).flashLoanFeeFraction;
     const gasUnits = new Decimal(process.env.DEX_GAS_UNITS ?? String(DEFAULT_GAS_UNITS));
 
     if (explicitPools.length === 0 && factories.length === 0 && !seedPool && crossTokens.length === 0) {
@@ -967,8 +970,7 @@ async function main() {
             // demands a current eth_call of the actual onchain executor.
             const tamanho = avaliarCicloComSementeCpamm(
                 cycle, hops, smallestReserveIn.mul(maxFraction), {
-                    flashLoanFeeFraction: flashLoanFee,
-                    gasCostInToken: gasInToken,
+                    ...custosDoFlashSwapV2(gasInToken),
                 }, decimaisPorToken,
             );
             const evaluation = tamanho.evaluation;

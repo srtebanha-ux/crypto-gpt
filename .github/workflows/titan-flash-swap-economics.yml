@@ -1,0 +1,27 @@
+name: TITAN V2 flash swap economics
+on:
+  push:
+    branches:
+      - codex/titan-flash-fee-no-double-charge-20261022
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Native V2 flash swap economics and executor
+        run: |
+          node --require ts-node/register --test \
+            src/flashSwapCosts.test.ts \
+            src/flashArbExecutor.test.ts \
+            src/dexArbitrageSniffer.test.ts
