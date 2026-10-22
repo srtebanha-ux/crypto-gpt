@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
+import {Interface} from 'ethers';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
   montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida} from './titanMorphoHot';
@@ -35,12 +36,21 @@ test('HOT upserts market/user and builds one market + oracle per group',()=>{
     {mercado:m,usuario:user2,distanciaBps:135n,atualizadoEm:block},
   ];
   const b=montarLoteMorphoHot(records);
-  assert.equal(b.calls.length,4); // market,oracle,2 positions; one eth_call
+  assert.equal(b.calls.length,5); // accrue,market,oracle,2 positions; one eth_call
   assert.equal(b.calls[0]?.target,MORPHO_FLASH_BASE);
-  assert.equal(b.calls[1]?.target,oracle);
-  assert.equal(b.calls[2]?.target,MORPHO_FLASH_BASE);
+  assert.equal(b.calls[2]?.target,oracle);
+  assert.equal(b.calls[3]?.target,MORPHO_FLASH_BASE);
   assert.equal(b.indices.size,2);
-  assert.equal(b.indices.get(m.id.toLowerCase()+'|'+user2.toLowerCase())?.position,3);
+  assert.equal(b.indices.get(m.id.toLowerCase()+'|'+user2.toLowerCase())?.position,4);
+  const idx=b.indices.get(m.id.toLowerCase()+'|'+user1.toLowerCase())!;
+  assert.ok(idx.accrual<idx.market&&idx.market<idx.position);
+  const abi=new Interface(['function accrueInterest((address,address,address,address,uint256))']);
+  const decoded=abi.decodeFunctionData('accrueInterest',b.calls[idx.accrual]!.callData)[0];
+  assert.equal(decoded[0].toLowerCase(),m.loanToken);
+  assert.equal(decoded[1].toLowerCase(),m.collateralToken);
+  assert.equal(decoded[2].toLowerCase(),m.oracle);
+  assert.equal(decoded[3].toLowerCase(),m.irm);
+  assert.equal(decoded[4],770000000000000000n);
   assert.ok(b.calls.every(c=>c.allowFailure));
 });
 test('HOT retains nearest 24 targets and evicts distant targets to bound block calls',()=>{
