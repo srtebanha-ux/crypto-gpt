@@ -13,6 +13,7 @@ import {examinarSaudeMorpho} from './titanMorphoRadar';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 import {MULTICALL3} from './multicall';
 import {createLogger} from './logger';
+import {diagnosticarArmamentoMorphoV3} from './titanMorphoV3Gate';
 const log=createLogger('morpho-hot');
 const price=new Interface(['function price() view returns(uint256)']);
 const multicall=new Interface([
@@ -235,7 +236,8 @@ export function iniciarGatilhoQuenteMorpho(env:NodeJS.ProcessEnv=process.env):vo
  rpc=new JsonRpcProvider(url,8453,{staticNetwork:true});
  log.info('[TITAN/MORPHO-HOT] Gatilho de execucao por bloco iniciado.',{
    intervaloMs:INT_MS,maxPosicoes:MAX_QUENTES,ttlMs:TTL_MS,
-   envioConfigurado:env.CACA_MORPHO_V3_ENVIAR==='1',
+   envioConfigurado:diagnosticarArmamentoMorphoV3(env).armado,
+   bloqueiosDoEnvio:diagnosticarArmamentoMorphoV3(env).bloqueios,
    nota:'aguarda lista de mercado onchain do radar; multicall por bloco',
  });
  const t=setInterval(()=>{void verificarBlocoMorphoHot();},INT_MS);
