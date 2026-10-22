@@ -68,7 +68,7 @@ import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type Avalia
 import { esperarOProximoCiclo } from './despertar';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
-    lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
+    lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco, fronteiraRecenteDoPrimeiroBoot,
     juntarDevedoresDoCache, esquecerQuemNaoDeveMais, comoEstaACobertura,
     juntarVias, viasQueAindaImportam,
 } from './cacheDeDevedores';
@@ -3864,7 +3864,12 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
         seOVolumeNaoEstiverMontado: 'cada boot paga tudo de novo — confira o `gravou` abaixo',
     });
 
-    const varrido = await varrerDevedores(topo, comecaEm);
+    // Public RPCs can serve recent logs while refusing archive history.
+    // A cold start must discover the recent borrowers before probing old blocks.
+    const varrido = await varrerDevedores(topo, comecaEm,
+        estadoDoCache.usavel ? {} : {ordem:'tras'});
+    const recente = estadoDoCache.usavel ? null
+        : fronteiraRecenteDoPrimeiroBoot(topo,varrido.faixasLidas);
     // O `ultimoBloco` só avança até onde NÃO há buraco. Avançar por cima de uma
     // janela que falhou gravaria o buraco para sempre.
     let cobertoAte = ateOndeSemBuraco(comecaEm, varrido.faixasLidas);
@@ -3878,9 +3883,9 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
         varrido.devedores,
         topo,
     );
-    let blocoInicialDoCache = estadoDoCache.usavel ? estadoDoCache.cache.blocoInicial : comecaEm;
+    let blocoInicialDoCache = estadoDoCache.usavel ? estadoDoCache.cache.blocoInicial : (recente?.inicio ?? comecaEm);
     let ultimoBlocoDoCache = Math.max(
-        cobertoAte, estadoDoCache.usavel ? estadoDoCache.cache.ultimoBloco : comecaEm - 1);
+        cobertoAte, estadoDoCache.usavel ? estadoDoCache.cache.ultimoBloco : (recente?.ultimo ?? comecaEm - 1));
 
     // ------------------------------------------------------------------ o fundo
     if (blocoInicialDoCache > nascimento) {
@@ -3921,7 +3926,7 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
     //
     // Nao e defeito novo da logica do cursor; e um caminho que o adiamento
     // tornou alcancavel, e deixa-lo passar seria gravar o buraco para sempre.
-    if (varrido.faixasLidas.length === 0 && !estadoDoCache.usavel) {
+    if (!estadoDoCache.usavel && recente === null) {
         log.warn('[CACHE] NÃO gravei: não li nada e não havia fronteira anterior.', {
             devedoresAchados: varrido.devedores.length,
             faixasQueFalharam: varrido.faixasQueFalharam,

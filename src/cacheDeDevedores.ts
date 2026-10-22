@@ -438,3 +438,10 @@ export async function gravarCache(
         };
     }
 }
+
+/** First boot can retain a verified recent suffix when archive RPC is unavailable. */
+export function fronteiraRecenteDoPrimeiroBoot(topo:number,faixas:Array<[number,number]>):
+    {inicio:number;ultimo:number}|null {
+    const inicio=deOndeSemBuraco(topo,faixas);
+    return inicio>topo ? null : {inicio,ultimo:topo};
+}

@@ -430,3 +430,12 @@ test('TODO campo do cache aparece em TODO gravador — a classe inteira, não o 
         + `Faltando: ${faltando.join('; ')}`,
     );
 });
+
+
+test('cold start saves only the contiguous recent suffix and keeps archive gaps uncovered',()=>{
+    const {fronteiraRecenteDoPrimeiroBoot}=require('./cacheDeDevedores') as typeof import('./cacheDeDevedores');
+    assert.deepEqual(fronteiraRecenteDoPrimeiroBoot(100,[[91,100],[81,90]]),{inicio:81,ultimo:100});
+    assert.deepEqual(fronteiraRecenteDoPrimeiroBoot(100,[[91,100],[61,70]]),{inicio:91,ultimo:100});
+    assert.equal(fronteiraRecenteDoPrimeiroBoot(100,[[61,70]]),null);
+    assert.equal(fronteiraRecenteDoPrimeiroBoot(100,[]),null);
+});
