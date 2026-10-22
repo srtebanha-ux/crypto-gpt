@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { priorizarCotacoes, MemoriaDeCotacoesNegativas } from './titanPriorizacao';
+import { priorizarCotacoes, MemoriaDeCotacoesNegativas, deveProcessarCotacoes } from './titanPriorizacao';
 import type { CandidataMista, Triagem, VeredictoDoSpread } from './rotasMistas';
 
 const candidata = (chave: string): CandidataMista => ({
@@ -19,6 +19,37 @@ function comSpread(t: Triagem, c: CandidataMista, num: bigint): void {
         razoes: { emprestimo: { num, den: 100n }, venda: { num: 1n, den: 1n } },
     });
 }
+test('estado identico drena fila sem reabrir cooldown negativo antes do prazo',()=>{
+ const m=new MemoriaDeCotacoesNegativas(120_000);
+ const a={...candidata('a'),pernas:[{pool:'0xab'},{pool:'0xcd'}]} as CandidataMista;
+ const b={...a,chave:'b'};
+ const estado=new Map([['0xab','1'],['0xcd','2']]);
+ m.registrar(a,estado,-1n,true,100);
+ assert.equal(deveProcessarCotacoes(false,[a,b],new Set(['b']),m,estado,101),true);
+ assert.equal(deveProcessarCotacoes(false,[a],new Set(['a']),m,estado,101),false);
+ assert.equal(deveProcessarCotacoes(false,[a],new Set(),m,estado,120_100),true);
+ assert.equal(deveProcessarCotacoes(false,[b],new Set(),m,estado,101),false);
+ assert.equal(deveProcessarCotacoes(true,[a],new Set(),m,estado,101),true);
+});
+test('fila inteira recebe cotacao em snapshot constante sem elevar o teto',()=>{
+ const m=new MemoriaDeCotacoesNegativas();
+ const estado=new Map([['0xab','1'],['0xcd','2']]);
+ const cs=Array.from({length:37},(_,i)=>({...candidata('q'+i),
+   pernas:[{pool:'0xab'},{pool:'0xcd'}]} as CandidataMista));
+ const t=triagem();t.valem=cs;
+ for(const c of cs)comSpread(t,c,110n);
+ const pendentes=new Set(cs.map(c=>c.chave)),vistas=new Set<string>();
+ for(let rodada=1;rodada<=10;rodada++){
+   if(!deveProcessarCotacoes(false,cs,pendentes,m,estado,100+rodada))break;
+   const elegiveis=cs.filter(c=>pendentes.has(c.chave)&&m.deveCotar(c,estado,100+rodada));
+   const escolhidas=priorizarCotacoes(elegiveis,t,8,rodada,true).selecionadas;
+   assert.ok(escolhidas.length<=8);
+   for(const c of escolhidas){vistas.add(c.chave);pendentes.delete(c.chave);
+     m.registrar(c,estado,-1n,true,100+rodada);}
+ }
+ assert.equal(vistas.size,37);assert.equal(pendentes.size,0);
+ assert.equal(deveProcessarCotacoes(false,cs,pendentes,m,estado,111),false);
+});
 test('se ha menos rotas que vagas nao omite nada', () => {
     const a = [candidata('a'), candidata('b')];
     assert.deepEqual(priorizarCotacoes(a, triagem(), 8, 0).selecionadas, a);

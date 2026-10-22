@@ -116,3 +116,13 @@ export class MemoriaDeCotacoesNegativas {
         return true;
     }
 }
+
+/** An unchanged snapshot must still drain deferred quotes and expired cooldowns. */
+export function deveProcessarCotacoes(
+    estadoMudou:boolean, candidatas:CandidataMista[], pendentes:ReadonlySet<string>,
+    memoria:MemoriaDeCotacoesNegativas, estado:ReadonlyMap<string,string|null>, agora:number,
+):boolean {
+    return estadoMudou || candidatas.some(c =>
+        (pendentes.has(c.chave) || memoria.venceu(c,estado,agora))
+        && memoria.deveCotar(c,estado,agora));
+}
