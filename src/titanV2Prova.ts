@@ -5,7 +5,8 @@
  */
 import fs from 'node:fs';
 import {ocultarSegredos} from './logger';
-import { Interface, JsonRpcProvider, Wallet, getAddress } from 'ethers';
+import { Interface, JsonRpcProvider, getAddress } from 'ethers';
+import {identidadeDeProvaV2} from './titanV2Identidade';
 import { ORACULO_DE_GAS_L1, codificarTetoDeL1 } from './custoDaBase';
 import { calcularPisoTitan } from './titanExecucao';
 import { interpretarReversao } from './flashArbExecutor';
@@ -104,7 +105,7 @@ export async function provarV2Atomico(
     c:CandidatoV2Prova,rpcUrl:string,env:NodeJS.ProcessEnv=process.env,
 ):Promise<ProvaV2>{
     const sem={bloco:null,estado:'desconhecido' as const};
-    if(!env.TITAN_CHAVE_PRIVADA||!env.TITAN_ORCAMENTO_GAS_WEI)
+    if(!env.TITAN_ORCAMENTO_GAS_WEI)
         return {...sem,motivo:'sem identidade do executor ou orcamento'};
     if(c.U.toLowerCase()!==WETH_BASE.toLowerCase()||c.quantia<=0n)
         return {...sem,motivo:'lucro nao liquidado em WETH ou tamanho invalido'};
@@ -113,14 +114,15 @@ export async function provarV2Atomico(
     let provider:JsonRpcProvider|undefined;
     let bloco:number|null=null;
     try{
-        const wallet=new Wallet(env.TITAN_CHAVE_PRIVADA);
+        const owner=identidadeDeProvaV2(env);
+        if(!owner)return {...sem,motivo:'identidade publica do executor ausente'};
         const poolA=getAddress(c.emprestimo.endereco);
         const poolB=getAddress(c.venda.endereco);
         const token=getAddress(c.T);
         const virtual=getAddress(ENDERECO_VIRTUAL_V2);
         if(poolA===poolB)return {...sem,motivo:'mesmo pool nos dois lados'};
         const artefato=JSON.parse(fs.readFileSync(artifactPath,'utf8')) as Artifact;
-        const codigo=codigoFlashArbComDono(artefato,wallet.address);
+        const codigo=codigoFlashArbComDono(artefato,owner);
         provider=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true});
         if(BigInt(await provider.send('eth_chainId',[]))!==8453n)
             throw Error('RPC nao e Base 8453');
@@ -138,7 +140,7 @@ export async function provarV2Atomico(
         // taxed tokens; reserve-only calculations cannot detect transfer tax.
         const dados=abi.encodeFunctionData('executarArbitragem',
             [poolA,poolB,token,c.quantia,saldo+1n]);
-        const tx={from:wallet.address,to:virtual,data:dados};
+        const tx={from:owner,to:virtual,data:dados};
         let estimado:bigint;
         try{
             estimado=BigInt(await provider.send('eth_estimateGas',
@@ -171,7 +173,7 @@ export async function provarV2Atomico(
             [poolA,poolB,token,c.quantia,saldo+piso.piso]);
         try{
             const result=await provider.send('eth_call',[
-                {from:wallet.address,to:virtual,data:transacao},'latest',
+                {from:owner,to:virtual,data:transacao},'latest',
                 codigoSobrescrito,
             ]);
             if(result!=='0x')throw Error('FlashArb deveria retornar 0x');
