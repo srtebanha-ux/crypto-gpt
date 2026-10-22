@@ -2693,6 +2693,8 @@ async function principal(): Promise<void> {
                             pools:item.t.pools,
                             tamanho:tamanho.toString(),
                             resultado:tentativa.resultado.situacao,
+                            motivo:tentativa.resultado.motivo,
+                            blocoDaProva:tentativa.resultado.bloco,
                             erro:tentativa.resultado.erroContrato??null,
                             deficitBps:tentativa.resultado.deficitBps??null,
                             gasGastoOnchain:'zero: eth_call, sem broadcast',
