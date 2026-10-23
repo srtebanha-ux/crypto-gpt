@@ -98,8 +98,8 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
  */
 import {
     enumerarMercados, enumerarDevedores, soOsQuePagam, mercadosParaSondagem, soDaBase, codificarIdToMarketParams,
-    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
-    selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,selecionarDevedoresPorRisco,
+    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,
+    selecionarDevedoresPorRisco,
     codificarPosition, codificarMarket, lerMarket, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, cursorDeCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
@@ -509,12 +509,13 @@ export async function descobrirMorphoPorApi(
                 lerRankingMercadosMorpho(JSON.parse(await resp.text()));
         }catch{/* Sem ranking nunca vira "sem mercado"; existe fallback. */}
     }
-    // Uma janela muda a amostra sem aumentar o custo RPC de cada rodada.
-    // Antes a escolha era IDENTICA em todo boot e nao cobria o universo.
-    // Usamos hora UTC em fatias de 15min: recomecar o processo nao
-    // causa um viés para os primeiros 24 mercados.
+    // A single durable queue chooses the markets that can ALSO collect borrowers.
+    // Two wall-clock rotations used to validate a market and discard it before
+    // enumeration. No cursor advanced for that market, so a known market was
+    // incorrectly treated as effective borrower coverage.
     const rodada=opcoes.indiceDaRodada ?? Math.floor(Date.now()/900_000);
-    const escolhidos=priorizarMercadosDaLista(candidatosParaSondagem,rankingDeDividas,tetoValid,rodada);
+    const escolhidos=cursores.selecionarMercados(candidatosParaSondagem,rankingDeDividas,
+        tetoDev===0?tetoValid:Math.min(tetoValid,tetoDev));
     log.info('[MORPHO/API] Selecao de mercados para conferir na Base.',{
         mercadosEnumerados:candidatosParaSondagem.length,
         llTvAte77PorCento:quePagam.length,
@@ -524,10 +525,9 @@ export async function descobrirMorphoPorApi(
         posicoesOnchainPorMercado:tetoPosicoes,
         mercadosComDevedoresPorRodada:tetoDev,
         rodada,
-        fixosDeAltaDivida:rankingDeDividas===null?0:Math.floor(tetoValid/3),
-        politica:rankingDeDividas===null
-          ? 'amostra rotativa por fatia UTC em TODOS os mercados: confirmacao onchain obrigatoria'
-          : 'grupo de alta divida constante e restante em rotacao por fatia UTC; validacao onchain obrigatoria',
+        fixosDeAltaDivida:0,
+        politica:'fila persistente por tentativa mais antiga; ranking desempata; sem segundo descarte antes de consultar devedores',
+        leitura:'tentativa nao comprova coleta bem-sucedida, liquidabilidade ou lucro',
     });
 
     if (veioDoCache) {
@@ -576,7 +576,10 @@ export async function descobrirMorphoPorApi(
         const veredicto = apiConfereComACorrente(m, cru === null ? null : lerIdToMarketParams(cru));
         m.confirmadoNaCorrente = veredicto.confere;
         if (veredicto.confere) confirmados += 1;
-        else recusados.push(`${m.id.slice(0, 10)}…: ${veredicto.porque}`);
+        else {
+            recusados.push(`${m.id.slice(0, 10)}…: ${veredicto.porque}`);
+            await cursores.marcarTentativa(m.id);
+        }
     }
 
     // OS DEVEDORES, so dos mercados CONFIRMADOS. Pedir devedor de mercado que a
@@ -596,13 +599,12 @@ export async function descobrirMorphoPorApi(
     // the V3 execution funnel. The funnel rechecks health and liquidate() itself.
     const liquidaveisParaPreflight: Array<{mercado:MercadoDaApi;usuario:string}> = [];
     const falhasDeDevedores: string[] = [];
-    // Verifica os mercados quentes em TODAS as rodadas e os outros
-    // em rodizio. Antes todos os oito mercados eram os primeiros da
-    // lista, mesmo com 24 confirmados, portanto repetiam os mesmos
-    // cinco devedores indefinidamente.
-    const mercadosComDevedores=selecionarMercadosParaDevedores(
-        escolhidos.filter(x=>x.confirmadoNaCorrente),tetoDev,rodada);
+    // Every confirmed selection has a borrower slot. Hot positions keep their
+    // independent per-block worker; this queue broadens discovery fairly.
+    const mercadosComDevedores=tetoDev===0?[]:escolhidos.filter(x=>x.confirmadoNaCorrente);
     for (const m of mercadosComDevedores) {
+        // A deadline must not falsely advance markets that were never queried.
+        if(orcamento.sinal.aborted||orcamento.gastas>=orcamento.tetoDeRequisicoes)break;
         let totais = null as ReturnType<typeof lerMarket>;
         let precoOracle: bigint | null = null;
         // Same-block full position valuation, not merely "borrowShares>0".
@@ -625,7 +627,14 @@ export async function descobrirMorphoPorApi(
         // paginas, sem declarar que os demais devedores nao existem.
         const r = await enumerarDevedores(buscar, m.id, {tetoDePaginas:3,
             inicio:cursores.obter(m.id).proximo,orcamento});
+        if(r.requisicoes>0)await cursores.marcarTentativa(m.id);
         await cursores.guardar(m.id,r.proximo,r.devedores);
+        log.info('[MORPHO/COBERTURA-DEVEDORES] Resultado da consulta por mercado.',{
+            mercado:m.id,bloco:blocoDoRadar,requisicoes:r.requisicoes,
+            recebidos:r.devedores.length,cursorSeguinte:r.proximo,
+            completa:r.completa,falha:r.falha,
+            observacao:'registro de descoberta; nao autoriza envio',
+        });
         devedores += r.devedores.length;
         if (r.falha !== null) falhasDeDevedores.push(`${m.id.slice(0, 10)}…: ${r.falha}`);
         // Metade dos cinco maiores mantida; a outra metade visita

@@ -1,9 +1,9 @@
 name: Morpho discovery coverage and atomic routes
 on:
   pull_request:
-    branches: [feat/megazord-unified-observation]
+    branches: [CHAT, feat/megazord-unified-observation]
   push:
-    branches: [codex/morpho-funnel-20261023]
+    branches: [codex/morpho-funnel-20261023, codex/morpho-fair-coverage-20261023]
 permissions:
   contents: read
 jobs:
