@@ -4826,7 +4826,7 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
         // Archive gateways differ on eth_getLogs ranges, so we shrink the
         // *same* interval on errors and never skip a block.
         const PASSO_MAXIMO = 1800;
-        const PASSO_MINIMO = 50;
+        const PASSO_MINIMO = 1;
         const NOVE_DIAS_EM_BLOCOS = 9 * 24 * 3600 / 2;
         const inicio = Math.max(0, topo - NOVE_DIAS_EM_BLOCOS + 1);
         const caminho = process.env.CACA_CENSO_ESTADO
@@ -4926,7 +4926,9 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
                 const resultado=await logsComRpcHistorico<LogRPC>(
                     async()=>{throw new Error('censo dedicado: usar apenas RPC historico');},
                     filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
-                        urlsAlternativas:REDE_ESCOLHIDA==='base'?RPCS_PARA_TENTAR.base:[],
+                        urlsAlternativas:REDE_ESCOLHIDA==='base'
+                            ?[...RPCS_PARA_TENTAR.base,'https://base-mainnet.g.alchemy.com/public']:[],
+                        verificarFaixaRecusada:REDE_ESCOLHIDA==='base',
                         chainIdEsperado:REDE_ESCOLHIDA==='base'?8453:undefined,
                         tempoLimiteMs:6000},
                 );
@@ -5297,7 +5299,9 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
             const resposta = await logsComRpcHistorico(
                 () => chamar<typeof logs>('eth_getLogs',[filtro],1,'demorada','historico'),
                 filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
-                    urlsAlternativas:REDE_ESCOLHIDA==='base'?RPCS_PARA_TENTAR.base:[],
+                    urlsAlternativas:REDE_ESCOLHIDA==='base'
+                            ?[...RPCS_PARA_TENTAR.base,'https://base-mainnet.g.alchemy.com/public']:[],
+                        verificarFaixaRecusada:REDE_ESCOLHIDA==='base',
                     chainIdEsperado:REDE_ESCOLHIDA==='base'?8453:undefined},
             );
             logs=resposta.logs;

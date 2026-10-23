@@ -335,3 +335,27 @@ test('historical failover skips denied nodes, verifies Base and keeps the exact 
     assert.equal(chamadas.filter(x=>x.url===urls[2]&&x.method==='eth_chainId').length,1);
     assert.equal(chamadas.filter(x=>x.method==='eth_getLogs').length,2);
 });
+
+test('a 403 is a range rejection ONLY after a same-node one-block control succeeds',async()=>{
+    let leituras=0;
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('primary down')},FILTRO_HISTORICO,{
+        urlSecundaria:'https://range-control.history.test',verificarFaixaRecusada:true,
+        buscar:async(_url,init)=>{
+            const p=JSON.parse(String(init?.body));leituras++;
+            if(leituras===1)return {ok:false,status:403} as Response;
+            assert.equal(p.params[0].fromBlock,FILTRO_HISTORICO.toBlock);
+            assert.equal(p.params[0].toBlock,FILTRO_HISTORICO.toBlock);
+            return {ok:true,json:async()=>({result:[]})} as Response;
+        },
+    }),e=>classificarFalhaHistorica((e as Error).message)==='faixa');
+    assert.equal(leituras,2);
+});
+
+test('a failed one-block control preserves the access-denied classification',async()=>{
+    let leituras=0;
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('primary down')},FILTRO_HISTORICO,{
+        urlSecundaria:'https://denied-control.history.test',verificarFaixaRecusada:true,
+        buscar:async()=>{leituras++;return {ok:false,status:403} as Response;},
+    }),e=>classificarFalhaHistorica((e as Error).message)==='acesso');
+    assert.equal(leituras,2);
+});

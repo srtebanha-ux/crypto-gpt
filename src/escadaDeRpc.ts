@@ -265,6 +265,7 @@ export type OpcoesHistorico = {
     tempoLimiteMs?:number;
     urlsAlternativas?:string[];
     chainIdEsperado?:number;
+    verificarFaixaRecusada?:boolean;
 };
 const historicosRecusadosAte=new Map<string,number>();
 const redesHistoricasConferidas=new Set<string>();
@@ -369,6 +370,24 @@ async function logsEmUmRpc<T>(
                         Math.max(0,Date.parse(retry??'')-Date.now());
                     historica.recusar(Number.isFinite(ms)?ms:0);
                     agendaRpc(url).recusar(Number.isFinite(ms)?ms:0);
+                }
+                if(resposta.status===403&&opcoes.verificarFaixaRecusada
+                    &&filtro.fromBlock!==filtro.toBlock){
+                    // Do not interpret 403 as a range limit without a successful
+                    // same-node control read. No credentials, headers or methods change.
+                    await historica.reservar();await agendaRpc(url).reservar();
+                    let controlePassou=false;
+                    try{
+                        const controle=await (opcoes.buscar??fetch)(url,{
+                            method:'POST',headers:{'content-type':'application/json','accept-encoding':'identity'},
+                            body:JSON.stringify({jsonrpc:'2.0',id:2,method:'eth_getLogs',
+                                params:[{...filtro,fromBlock:filtro.toBlock}]}),
+                            signal:AbortSignal.timeout(limite),
+                        });
+                        if(controle.ok){const c=await controle.json() as {result?:unknown;error?:unknown};
+                            controlePassou=!c.error&&Array.isArray(c.result);}
+                    }catch{ /* inconclusive control cannot loosen range policy */ }
+                    if(controlePassou)throw Error('block range rejected: controle de 1 bloco passou no mesmo RPC');
                 }
                 throw new Error('HTTP '+resposta.status);
             }
