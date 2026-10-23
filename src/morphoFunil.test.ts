@@ -144,3 +144,105 @@ test('provider cancela socket em voo e nao inicia pedidos apos deadline',async()
   assert.equal(recebidas,1);assert.equal(fechada,true);
  }finally{provider.destroy();server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
 });
+
+test('fila unica visita todos os mercados apesar de ranking fixo, reordenacao e reinicios',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'morpho-fair-'));
+ try{
+  const audited=[
+   '0x1a3e69d0109bb1be42b80e11034bb6ee98fc466721f26845dc83b2aa8d979137',
+   '0xdaa04f6819210b11fe4e3b65300c725c32e55755e3598671559b9ae3bac453d7',
+  ];
+  const markets=[...Array.from({length:74},(_,i)=>'0x'+i.toString(16).padStart(64,'0')), ...audited].map(id=>({id}));
+  const visits=new Set<string>();
+  const arquivo=path.join(dir,'cursor.json');
+  for(let round=0;round<4;round++){
+   const c=new CursoresMorpho(arquivo);await c.carregar();
+   const selected=c.selecionarMercados(round%2?[...markets].reverse():markets,markets.map(x=>x.id),20);
+   for(const m of selected){
+    // All 76 must enter collection BEFORE a previously attempted book repeats.
+    if(visits.size<markets.length)assert.equal(visits.has(m.id),false);
+    visits.add(m.id);await c.marcarTentativa(m.id);
+   }
+  }
+  assert.equal(visits.size,76);
+  assert.ok(audited.every(id=>visits.has(id)));
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('falha de consulta roda a fila sem avancar pagina nem apagar devedores',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'morpho-failed-read-'));
+ try{
+  const arquivo=path.join(dir,'cursor.json'),c=new CursoresMorpho(arquivo);
+  const borrower={endereco:endereco(7),borrowSharesDaApi:10n,borrowAssetsUsd:null,collateralUsd:null};
+  await c.guardar(market,700,[borrower]);
+  await c.marcarTentativa(market);
+  const r=await enumerarDevedores(async()=>({status:429,text:async()=>''}),market,{inicio:c.obter(market).proximo});
+  await c.guardar(market,r.proximo,r.devedores);
+  const restart=new CursoresMorpho(arquivo);await restart.carregar();
+  assert.equal(restart.obter(market).proximo,700);
+  assert.deepEqual(restart.obter(market).devedores,[borrower]);
+  const other='0x'+'b'.repeat(64);
+  assert.equal(restart.selecionarMercados([{id:market},{id:other}],[market],1)[0]!.id,other);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('mercado selecionado mas nao consultado mantem prioridade no proximo boot',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'morpho-deadline-'));
+ try{
+  const arquivo=path.join(dir,'cursor.json'),c=new CursoresMorpho(arquivo);
+  const markets=[1,2,3].map(n=>({id:'0x'+n.toString(16).padStart(64,'0')}));
+  const selected=c.selecionarMercados(markets,null,2);
+  await c.marcarTentativa(selected[0]!.id); // deadline before the second HTTP request
+  const restart=new CursoresMorpho(arquivo);await restart.carregar();
+  assert.equal(restart.selecionarMercados(markets,null,1)[0]!.id,selected[1]!.id);
+  assert.deepEqual(c.selecionarMercados(markets,null,0),[]);
+  assert.deepEqual(c.selecionarMercados(markets,null,-1),[]);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('descoberta real leva todos os mercados da validacao a consulta apesar de rodada UTC fixa',async()=>{
+ const {descobrirMorphoPorApi,SELETORES_DO_MORPHO,SELETOR_DO_CALLBACK}=await import('./mercadosDoMorpho');
+ const {AbiCoder}=await import('ethers');
+ const coder=AbiCoder.defaultAbiCoder();
+ const dir=await mkdtemp(path.join(tmpdir(),'morpho-pipeline-'));
+ const markets=Array.from({length:6},(_,i)=>({
+  market_id:'0x'+(i+1).toString(16).padStart(64,'0'),chain_id:8453,
+  loan_token:endereco(1),collateral_token:endereco(2),oracle_address:endereco(3),
+  irm_address:endereco(4),lltv_wad:'625000000000000000',
+ }));
+ const collected:string[]=[],validated:string[]=[];
+ const code='0x'+Object.values(SELETORES_DO_MORPHO).map(s=>s.slice(2)).join('')+SELETOR_DO_CALLBACK.slice(2);
+ try{
+  for(let round=0;round<3;round++){
+   await descobrirMorphoPorApi({
+    caminhoDoCache:path.join(dir,'markets.json'),caminhoDaMemoria:path.join(dir,'memory.json'),
+    tetoDeValidacoes:5,tetoDeMercadosComDevedores:2,indiceDaRodada:0,
+    buscar:async(_url,o)=>{
+     if(o?.method!=='POST')return{status:200,text:async()=>JSON.stringify({data:markets})};
+     const q=JSON.parse(o.body!);
+     if(!q.variables)return{status:200,text:async()=>JSON.stringify({data:{markets:{items:markets.map(m=>({marketId:m.market_id}))}}})};
+     const requested=JSON.stringify(q.variables).match(/0x[0-9a-f]{64}/)![0];
+     collected.push(requested);
+     return{status:200,text:async()=>JSON.stringify({data:{marketPositions:{items:[]}}})};
+    },
+    pedirRpc:async(_url,method,params)=>{
+     if(method==='eth_chainId')return'0x2105';
+     if(method==='eth_getCode')return code;
+     if(method==='eth_getBlockByNumber')return{number:'0x123',hash:'0x'+'b'.repeat(64)};
+     if(method==='eth_call'){
+      const data=(params[0] as {data:string}).data;
+      if(data.startsWith(SELETORES_DO_MORPHO['idToMarketParams(bytes32)']!)){
+       validated.push('0x'+data.slice(10));
+       return coder.encode(['address','address','address','address','uint256'],
+        [endereco(1),endereco(2),endereco(3),endereco(4),625000000000000000n]);
+      }
+      return'0x';
+     }
+     throw Error('unexpected RPC '+method);
+    },
+   });
+  }
+  assert.equal(new Set(collected).size,6);
+  assert.deepEqual(collected,validated,'nenhum mercado validado pode sumir no segundo seletor');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
