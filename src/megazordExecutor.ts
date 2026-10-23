@@ -4,11 +4,13 @@ import path from 'node:path';
 import os from 'node:os';
 import {randomUUID} from 'node:crypto';
 import {AsyncLocalStorage} from 'node:async_hooks';
-import {Wallet,Transaction,keccak256,computeAddress,JsonRpcProvider,
+import {Wallet,Transaction,keccak256,computeAddress,JsonRpcProvider,id,
  type TransactionRequest,type TransactionResponse} from 'ethers';
 import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
+import {COFRE_ESPERADO} from './caca';
 
-type Receipt={status:number|null;blockNumber:number};
+type Log={address:string;topics:readonly string[];data:string};
+type Receipt={status:number|null;blockNumber:number;logs?:readonly Log[]};
 export interface RedeMegazord {
  getNetwork():Promise<{chainId:bigint}>;
  getBlock(tag:string):Promise<{number:number;timestamp:number}|null>;
@@ -17,12 +19,42 @@ export interface RedeMegazord {
  call(tx:TransactionRequest):Promise<string>;
  broadcastTransaction(raw:string):Promise<TransactionResponse>;
 }
-type Pending={hash:string;nonce:number;strategy:string;day:string;reservedWei:string};
+type Pending={hash:string;nonce:number;strategy:string;day:string;reservedWei:string;to?:string};
 type Journal={version:1;address:string;pending:Pending|null;
- days:Record<string,{reservedWei:string;attempts:number}>;
+ days:Record<string,{reservedWei:string;creditedWei?:string;attempts:number}>;
  receipts:Array<Pending&{status:number;block:number}>};
 export type PoliticaMegazord={journal:string;maxDailyWei:bigint;maxPerTxWei:bigint;
  maxDailyTx:number;contracts:readonly string[]};
+
+/** Gas credits require a canonical WETH Transfer from the called executor
+ * to the authorized treasury, corroborated by both independent RPCs.
+ * Receipt status=1, unrelated ERC20 transfers, and estimates are insufficient.
+ */
+export function creditoGasComprovado(
+ pending:Pending,r:Receipt,other:Receipt|null,
+):bigint{
+ const cost=BigInt(pending.reservedWei);
+ if(r.status!==1||other?.status!==1||r.blockNumber!==other.blockNumber
+   ||!pending.to||!r.logs||!other.logs||cost<=0n)return 0n;
+ const transfer=id('Transfer(address,address,uint256)').toLowerCase();
+ const topic=(address:string)=>'0x'+address.toLowerCase().slice(2).padStart(64,'0');
+ const collect=(receipt:Receipt)=>{
+   let total=0n;
+   for(const l of receipt.logs??[]){
+     if(l.address.toLowerCase()!=='0x4200000000000000000000000000000000000006'
+       ||l.topics.length!==3||l.topics[0]?.toLowerCase()!==transfer
+       ||l.topics[1]?.toLowerCase()!==topic(pending.to!)
+       ||l.topics[2]?.toLowerCase()!==topic(COFRE_ESPERADO)
+       ||!/^0x[0-9a-f]{64}$/i.test(l.data))continue;
+     total+=BigInt(l.data);
+   }
+   return total;
+ };
+ const amount=collect(r);
+ // Credit only if WETH paid to treasury covers 2x the conservative gas cost:
+ // one cost to reimburse, another to prove genuinely positive net income.
+ return amount>=cost*2n&&collect(other)>=cost*2n?cost:0n;
+}
 
 export class ExecutorMegazord {
  private tail:Promise<unknown>=Promise.resolve();
@@ -43,7 +75,10 @@ export class ExecutorMegazord {
      ||policy.contracts.length===0||policy.contracts.some(x=>!/^0x[0-9a-f]{40}$/i.test(x)))
      throw Error('politica Megazord invalida');
    this.lock=policy.journal+'.lock';
-   fs.mkdirSync(path.dirname(policy.journal),{recursive:true});
+   // Missing parent directories can be created. Never use /tmp fallback
+   // for an exclusive, real-money nonce journal.
+   try{fs.mkdirSync(path.dirname(policy.journal),{recursive:true});}
+   catch{throw Error('diario persistente indisponivel; envio bloqueado');}
    this.acquire();
    try{
      this.state=fs.existsSync(policy.journal)
@@ -72,6 +107,8 @@ export class ExecutorMegazord {
    if(s.version!==1||s.address?.toLowerCase()!==this.address.toLowerCase()
      ||!s.days||!Array.isArray(s.receipts))throw Error('diario Megazord invalido');
    for(const d of Object.values(s.days))if(!/^\d+$/.test(d.reservedWei)
+     ||(d.creditedWei!==undefined&&(!/^\d+$/.test(d.creditedWei)
+         ||BigInt(d.creditedWei)>BigInt(d.reservedWei)))
      ||!Number.isSafeInteger(d.attempts)||d.attempts<0)throw Error('orcamento persistido invalido');
    if(s.pending&&(!/^0x[0-9a-f]{64}$/i.test(s.pending.hash)
      ||!Number.isSafeInteger(s.pending.nonce)||s.pending.nonce<0))throw Error('pendencia invalida');
@@ -92,6 +129,13 @@ export class ExecutorMegazord {
      if(!r||r.status===null)throw Error('resultado pendente: reconciliar '+p.hash);
      if(r.status!==0&&r.status!==1)throw Error('status de recibo invalido');
      const next=structuredClone(this.state);next.pending=null;
+     const secondary=await this.secondary.getTransactionReceipt(p.hash).catch(()=>null);
+     const credit=creditoGasComprovado(p,r,secondary);
+     if(credit>0n){
+       const day=next.days[p.day];
+       if(!day)throw Error('registro diario ausente para credito de gas');
+       day.creditedWei=String(BigInt(day.creditedWei??'0')+credit);
+     }
      next.receipts.push({...p,status:r.status,block:r.blockNumber});
      next.receipts=next.receipts.slice(-200);this.persist(next);
    }
@@ -154,12 +198,15 @@ export class ExecutorMegazord {
    const cost=tx.gasLimit*tx.maxFeePerGas+2n*l1;
    const day=new Date().toISOString().slice(0,10);
    const used=this.state.days[day]??{reservedWei:'0',attempts:0};
-   if(cost>this.policy.maxPerTxWei||BigInt(used.reservedWei)+cost>this.policy.maxDailyWei
+   const uncovered=BigInt(used.reservedWei)-BigInt(used.creditedWei??'0');
+   if(cost>this.policy.maxPerTxWei||uncovered+cost>this.policy.maxDailyWei
      ||used.attempts>=this.policy.maxDailyTx)throw Error('orcamento global Megazord excedido');
    if(tx.nonce!==await this.nonceLivre())throw Error('nonce mudou no pre-broadcast');
    const next=structuredClone(this.state),hash=keccak256(raw);
-   next.pending={hash,nonce:tx.nonce,strategy:this.context.getStore()!.strategy,day,reservedWei:String(cost)};
-   next.days[day]={reservedWei:String(BigInt(used.reservedWei)+cost),attempts:used.attempts+1};
+   next.pending={hash,nonce:tx.nonce,strategy:this.context.getStore()!.strategy,
+     day,reservedWei:String(cost),to:tx.to};
+   next.days[day]={reservedWei:String(BigInt(used.reservedWei)+cost),
+     creditedWei:used.creditedWei??'0',attempts:used.attempts+1};
    this.persist(next); // Durable reservation BEFORE network side effect.
    const sent=await this.primary.broadcastTransaction(raw);
    if(sent.hash.toLowerCase()!==hash.toLowerCase())throw Error('hash RPC divergente');
@@ -238,7 +285,7 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
  const s=new JsonRpcProvider(env.MEGAZORD_RPC_SECUNDARIO);
  try{
    active=new ExecutorMegazord(key,p,s,{
-     journal:file,maxDailyWei:BigInt(env.MEGAZORD_GAS_MAX_DIA_WEI??'0'),
+     journal:file,maxDailyWei:BigInt(env.MEGAZORD_GAS_MAX_DIA_WEI??'2000000000000000'),
      maxPerTxWei:BigInt(env.MEGAZORD_GAS_MAX_TX_WEI??'0'),
      maxDailyTx:Number(env.MEGAZORD_MAX_TX_DIA??'0'),
      contracts:(env.MEGAZORD_CONTRATOS??'').split(',').map(x=>x.trim()).filter(Boolean),

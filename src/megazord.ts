@@ -1,9 +1,9 @@
 /** Combined scanners with optional shared financial executor. */
 import {createLogger} from './logger';
 import {instalarExecutorMegazord,conferirIdentidadeMegazord} from './megazordExecutor';
-import {conferirRedeMegazord} from './megazordPreflight';
+import {selecionarRpcSecundarioMegazord} from './megazordRpcFailover';
 import {prepararMorphoMegazord} from './megazordMorphoBoot';
-import {confirmarMultiHopAave,habilitarAaveMultiHopMegazord} from './megazordAaveMultiBoot';
+import {prepararAaveMultiHopMegazord,habilitarAaveMultiHopMegazord} from './megazordAaveMultiBoot';
 import {atualizarPisoUsdMegazord,iniciarAtualizacaoPisoUsd} from './megazordEthUsd';
 import {JsonRpcProvider} from 'ethers';
 const log=createLogger('megazord');
@@ -55,9 +55,9 @@ export async function iniciarMegazord(
    const contratos=await prepararMorphoMegazord(env);
    // Only an Aave executor verified against ALL onchain immutables may be
    // whitelisted. The complete readiness check still follows before arming.
-   const multi=await confirmarMultiHopAave(env);
+   const multi=await prepararAaveMultiHopMegazord(env);
    if(multi)env.MEGAZORD_CONTRATOS=[env.MEGAZORD_CONTRATOS,multi].filter(Boolean).join(',');
-   const rede=await conferirRedeMegazord(env);
+   const rede=await selecionarRpcSecundarioMegazord(env) as Awaited<ReturnType<typeof import('./megazordPreflight').conferirRedeMegazord>>;
    const leitorPreco=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true});
    let lucroUsd:{ethUsd:string;minimoWei:string};
    try{lucroUsd=await atualizarPisoUsdMegazord(env,leitorPreco);}
