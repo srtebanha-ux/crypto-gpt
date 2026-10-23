@@ -329,8 +329,10 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
      contracts:(env.MEGAZORD_CONTRATOS??'').split(',').map(x=>x.trim()).filter(Boolean),
    },async raw=>BigInt(await p.call({to:ORACULO_DE_GAS_L1,
      data:codificarTetoDeL1((raw.length-2)/2)})),
-     async()=>Promise.all([consultarEthUsdBase(p),consultarEthUsdBase(s)])
-       as Promise<[string,string]>);
+     async():Promise<readonly [string,string]>=>{
+       const [p0,p1]=await Promise.all([consultarEthUsdBase(p),consultarEthUsdBase(s)]);
+       return [p0,p1] as const;
+     });
  }catch(e){p.destroy();s.destroy();throw e;}
  const executor=active;
  process.once('exit',()=>executor.close());
