@@ -175,3 +175,23 @@ test('o estado do log diz o provedor em uso e os recuos abertos', () => {
     assert.equal(e.provedor, 'alchemy');
     assert.deepEqual(e.recuoPorProvedor, [{ provedor: 'alchemy', restaMs: 3000 }]);
 });
+
+test('essencial ultrapassa historico na fila cheia; vaga e reservada contra furar teto',async()=>{
+ const g=new GovernadorDeVazao(1);const ordem:string[]=[];
+ const liberar=await g.vez('ocupada');
+ const historico=g.vez('eth_getLogs','demorada').then(s=>{ordem.push('historico');return s;});
+ const urgente=g.vez('eth_call','essencial').then(s=>{ordem.push('urgente');return s;});
+ liberar();
+ // A new arrival in the handoff microtask must not steal the granted slot.
+ const novo=g.vez('normal','normal').then(s=>{ordem.push('normal');return s;});
+ const u=await urgente;assert.deepEqual(ordem,['urgente']);assert.equal(g.estado().emVoo,1);u();
+ const n=await novo;n();const h=await historico;h();
+ assert.deepEqual(ordem,['urgente','normal','historico']);assert.equal(g.estado().emVoo,0);
+});
+test('historico progride mesmo com uma rajada continua de urgentes',async()=>{
+ const g=new GovernadorDeVazao(1);const ordem:string[]=[];const soltar=await g.vez('ocupada');
+ const h=g.vez('historico','demorada').then(s=>{ordem.push('historico');s();});
+ const urgentes=Array.from({length:20},(_,i)=>g.vez('urgente','essencial').then(s=>{ordem.push('u'+i);s();}));
+ soltar();await Promise.all([h,...urgentes]);
+ assert.equal(ordem.indexOf('historico'),8);assert.equal(g.estado().emVoo,0);
+});

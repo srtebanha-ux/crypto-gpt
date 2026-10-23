@@ -1,3 +1,5 @@
+import { agendaRpc, ehSaturacaoRpc } from './rpcCoordenado';
+import {carteiraMegazord} from './megazordExecutor';
 // Arquivo: src/cacarAoVivo.ts
 import { Decimal } from 'decimal.js';
 import { Wallet, JsonRpcProvider, getAddress } from 'ethers';
@@ -67,7 +69,7 @@ import { cronometrar, idDeAvaliacao, LivroDeTempos, comoLerOsTempos, type Avalia
 import { esperarOProximoCiclo } from './despertar';
 import {
     NASCIMENTO_DO_POOL, CAMINHO_DO_CACHE, VERSAO_DO_CACHE,
-    lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco,
+    lerCache, gravarCache, deOndeComecar, ateOndeSemBuraco, deOndeSemBuraco, fronteiraRecenteDoPrimeiroBoot,
     juntarDevedoresDoCache, esquecerQuemNaoDeveMais, comoEstaACobertura,
     juntarVias, viasQueAindaImportam,
 } from './cacheDeDevedores';
@@ -1139,7 +1141,9 @@ async function umaChamada<T>(metodo: string, params: unknown[]): Promise<T> {
     // `undefined` quando o `error` chegava como `[code, message]` — e foi assim
     // que 5.750 posicoes se perderam com "erro sem mensagem" no log.
     if (corpo.error !== undefined && corpo.error !== null) {
-        throw new Error(comoLerOErroJsonRpc(lerErroJsonRpc(corpo, res.status)));
+        const mensagem=comoLerOErroJsonRpc(lerErroJsonRpc(corpo, res.status));
+        if(ehSaturacaoRpc(mensagem))agendaRpc(rpc).recusar();
+        throw new Error(mensagem);
     }
     // O PORTAO. Era `return corpo.result as T`, e um corpo sem `result` nem
     // `error` — que o provedor da Base manda sob carga — devolvia `undefined`
@@ -1417,7 +1421,9 @@ async function chamarCru(
             : undefined;
         // `dados` (o seletor da reversao) continua viajando: e ele que
         // distingue "ainda nao cruzou" de "meu contrato quebrou".
-        return { ok: false, mensagem: comoLerOErroJsonRpc(lido), dados };
+        const mensagem=comoLerOErroJsonRpc(lido);
+        if(ehSaturacaoRpc(mensagem))agendaRpc(rpc).recusar();
+        return { ok: false, mensagem, dados };
     }
     // `corpo.result ?? '0x'` era a mesma forma do defeito do `.replace`, com
     // outra cara: `'0x'` e "o contrato nao devolveu nada", que e RESPOSTA, e
@@ -2072,6 +2078,11 @@ async function lerFaixaPartindoSePreciso(
         const v = DISPONIBILIDADE.veredicto(aqui, 'eth_getLogs');
         if (VAZAO.estaEmRecuo() || !v.podeVarrer) {
             ADIADAS.historico += 1;
+            if (ADIADAS.historico === 1) log.warn('[HISTORICO] Faixa adiada antes de consultar o RPC.', {
+                de:a, ate:b, provedor:aqui, disponibilidade:v.estado,
+                motivo:v.porque, vazao:VAZAO.estado(),
+                nota:'adiamento nao e resposta vazia e nao comprova faixa lida',
+            });
             return { lidas: [], falhas: 1 };
         }
         // A TAREFA vai NA CHAMADA: sobrevive as tentativas e ao fallback, e
@@ -2100,7 +2111,7 @@ async function lerFaixaPartindoSePreciso(
     }
 }
 
-async function varrerDevedores(
+export async function varrerDevedores(
     topo: number,
     blocoInicial?: number,
     opcoes: {
@@ -2176,9 +2187,19 @@ async function varrerDevedores(
         }
 
         lidas += lote.length;
+        if (resultados.every(r => r.lidas.length === 0)) {
+            log.warn('[HISTORICO] Lote sem nenhuma faixa lida; interrompo esta rodada.', {
+                faixasTentadas:lidas, faixasLidas:faixasLidas.length,
+                faixasQueFalharam:falhas, faixasAindaNaoTentadas:faixas.length-lidas,
+                nota:'cache e cursor usam somente as faixas realmente lidas; zero devedores nao comprova ausencia',
+            });
+            break;
+        }
         if (faixas.length > 10 && !opcoes.calada && (lidas % (CONCORRENCIA * 5) === 0 || lidas === faixas.length)) {
             log.info('Progresso da varredura acelerada.', {
-                lidas: `${lidas} de ${faixas.length}`,
+                faixasTentadas: `${lidas} de ${faixas.length}`,
+                faixasRealmenteLidas: faixasLidas.length,
+                faixasQueFalharam: falhas,
                 devedoresAteAgora: vistos.size,
                 decorrido: `${((Date.now() - comecouEm) / 1000).toFixed(0)}s`,
             });
@@ -2288,7 +2309,7 @@ function desligarTudo(): void {
 
 // Uma tentativa anterior de boot nao pode manter sockets e listeners vivos.
 let oracleShadowDaSessao: OracleShadow | null = null;
-async function principal(): Promise<'parar' | void> {
+export async function iniciarLiquidante(): Promise<'parar' | void> {
     // O laco externo recria principal() a cada tropeco. Sem isto, cada
     // reinicio abandonava um WebSocket vivo com cadeia de reconexao eterna:
     // em meses, um socket e um relogio a mais por tropeco de rede.
@@ -2382,7 +2403,7 @@ async function principal(): Promise<'parar' | void> {
     let porQueSemAssinador: string | null = chave ? null : 'CACA_CHAVE_PRIVADA ausente';
     if (chave) {
         try {
-            const assinador = new Wallet(chave, leitor);
+            const assinador = carteiraMegazord(chave, leitor);
             // Quem ASSINA decide de onde o gas sai, entao o endereco da chave
             // manda sobre o escrito. Discordar e erro de configuracao e vira
             // linha de log — nunca silencio, e nunca o valor da chave.
@@ -3848,7 +3869,12 @@ async function principal(): Promise<'parar' | void> {
         seOVolumeNaoEstiverMontado: 'cada boot paga tudo de novo — confira o `gravou` abaixo',
     });
 
-    const varrido = await varrerDevedores(topo, comecaEm);
+    // Public RPCs can serve recent logs while refusing archive history.
+    // A cold start must discover the recent borrowers before probing old blocks.
+    const varrido = await varrerDevedores(topo, comecaEm,
+        estadoDoCache.usavel ? {} : {ordem:'tras'});
+    const recente = estadoDoCache.usavel ? null
+        : fronteiraRecenteDoPrimeiroBoot(topo,varrido.faixasLidas);
     // O `ultimoBloco` só avança até onde NÃO há buraco. Avançar por cima de uma
     // janela que falhou gravaria o buraco para sempre.
     let cobertoAte = ateOndeSemBuraco(comecaEm, varrido.faixasLidas);
@@ -3862,9 +3888,9 @@ async function principal(): Promise<'parar' | void> {
         varrido.devedores,
         topo,
     );
-    let blocoInicialDoCache = estadoDoCache.usavel ? estadoDoCache.cache.blocoInicial : comecaEm;
+    let blocoInicialDoCache = estadoDoCache.usavel ? estadoDoCache.cache.blocoInicial : (recente?.inicio ?? comecaEm);
     let ultimoBlocoDoCache = Math.max(
-        cobertoAte, estadoDoCache.usavel ? estadoDoCache.cache.ultimoBloco : comecaEm - 1);
+        cobertoAte, estadoDoCache.usavel ? estadoDoCache.cache.ultimoBloco : (recente?.ultimo ?? comecaEm - 1));
 
     // ------------------------------------------------------------------ o fundo
     if (blocoInicialDoCache > nascimento) {
@@ -3905,7 +3931,7 @@ async function principal(): Promise<'parar' | void> {
     //
     // Nao e defeito novo da logica do cursor; e um caminho que o adiamento
     // tornou alcancavel, e deixa-lo passar seria gravar o buraco para sempre.
-    if (varrido.faixasLidas.length === 0 && !estadoDoCache.usavel) {
+    if (!estadoDoCache.usavel && recente === null) {
         log.warn('[CACHE] NÃO gravei: não li nada e não havia fronteira anterior.', {
             devedoresAchados: varrido.devedores.length,
             faixasQueFalharam: varrido.faixasQueFalharam,
@@ -4800,7 +4826,7 @@ async function principal(): Promise<'parar' | void> {
         // Archive gateways differ on eth_getLogs ranges, so we shrink the
         // *same* interval on errors and never skip a block.
         const PASSO_MAXIMO = 1800;
-        const PASSO_MINIMO = 50;
+        const PASSO_MINIMO = 1;
         const NOVE_DIAS_EM_BLOCOS = 9 * 24 * 3600 / 2;
         const inicio = Math.max(0, topo - NOVE_DIAS_EM_BLOCOS + 1);
         const caminho = process.env.CACA_CENSO_ESTADO
@@ -4834,7 +4860,7 @@ async function principal(): Promise<'parar' | void> {
             const dado = JSON.parse(await fs.readFile(caminho,'utf8')) as {
                 versao?:number; topo?:number; inicio?:number;
                 proximoAte?:number; lidas?:number;
-                achadas?:AchadoSerial[]; atualizadoEm?:number;
+                achadas?:AchadoSerial[]; atualizadoEm?:number; tamanho?:number;
             };
             const valido=dado.versao===1
                 && Number.isSafeInteger(dado.topo)
@@ -4854,6 +4880,8 @@ async function principal(): Promise<'parar' | void> {
                 if(!terminou || Date.now()-(dado.atualizadoEm??0)<86_400_000){
                     proximoAte=dado.proximoAte!;
                     janelasLidas=dado.lidas!;
+                    tamanho=Number.isSafeInteger(dado.tamanho)&&dado.tamanho!>=PASSO_MINIMO
+                        &&dado.tamanho!<=PASSO_MAXIMO?dado.tamanho!:PASSO_MAXIMO;
                     ultimoSalvoEm=dado.atualizadoEm??0;
                     for(const a of dado.achadas!){
                         if(Number.isSafeInteger(a.bloco) && typeof a.cru==='string'
@@ -4871,7 +4899,7 @@ async function principal(): Promise<'parar' | void> {
             await fs.mkdir(path.dirname(caminho),{recursive:true});
             const temporario=caminho+'.tmp';
             await fs.writeFile(temporario,JSON.stringify({
-                versao:1,topo,inicio:menorBloco,proximoAte,lidas:janelasLidas,
+                versao:1,topo,inicio:menorBloco,proximoAte,lidas:janelasLidas,tamanho,
                 atualizadoEm:Date.now(),
                 achadas:achadas.map(a=>({...a,cru:a.cru.toString()})),
             }),'utf8');
@@ -4900,6 +4928,11 @@ async function principal(): Promise<'parar' | void> {
                 const resultado=await logsComRpcHistorico<LogRPC>(
                     async()=>{throw new Error('censo dedicado: usar apenas RPC historico');},
                     filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
+                        urlsAlternativas:REDE_ESCOLHIDA==='base'
+                            ?[...RPCS_PARA_TENTAR.base,'https://base-mainnet.g.alchemy.com/public',
+                                'https://rpc.swiftnodes.io/rpc/base']:[],
+                        verificarFaixaRecusada:REDE_ESCOLHIDA==='base',
+                        chainIdEsperado:REDE_ESCOLHIDA==='base'?8453:undefined,
                         tempoLimiteMs:6000},
                 );
                 for(const cru of resultado.logs){
@@ -4945,6 +4978,7 @@ async function principal(): Promise<'parar' | void> {
                 // 225, 112 blocos: repetir so gasta cota e cega o radar.
                 if(tipoDeFalha==='faixa'&&tamanho>PASSO_MINIMO){
                     tamanho=Math.max(PASSO_MINIMO,Math.floor(tamanho/2));
+                    await salvar(); // Persist learned range without advancing unread block.
                     log.warn('[MERCADO/CENSO] RPC historico recusou faixa; reduzindo, sem pular blocos.',{
                         proxAte:proximoAte,novoTamanho:tamanho,
                         veredito:'nenhum bloco perdido nem contado como zero',
@@ -5268,7 +5302,12 @@ async function principal(): Promise<'parar' | void> {
             };
             const resposta = await logsComRpcHistorico(
                 () => chamar<typeof logs>('eth_getLogs',[filtro],1,'demorada','historico'),
-                filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL},
+                filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
+                    urlsAlternativas:REDE_ESCOLHIDA==='base'
+                            ?[...RPCS_PARA_TENTAR.base,'https://base-mainnet.g.alchemy.com/public',
+                                'https://rpc.swiftnodes.io/rpc/base']:[],
+                        verificarFaixaRecusada:REDE_ESCOLHIDA==='base',
+                    chainIdEsperado:REDE_ESCOLHIDA==='base'?8453:undefined},
             );
             logs=resposta.logs;
             if(resposta.origem==='secundario')log.info('[PLACAR/RPC] Recuperado por RPC historico independente.',{
@@ -8145,7 +8184,7 @@ if (require.main === module && exigirAtivacao('cacarAoVivo')) {
     void (async () => {
         for (;;) {
             try {
-                if ((await principal()) === 'parar') {
+                if ((await iniciarLiquidante()) === 'parar') {
                     log.error('Configuração impede rodar. Não reinicio sozinho — corrija e reimplante.');
                     return;
                 }

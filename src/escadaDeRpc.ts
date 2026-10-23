@@ -1,3 +1,4 @@
+import { agendaRpc, AgendaRpc, ehSaturacaoRpc } from './rpcCoordenado';
 // Arquivo: src/escadaDeRpc.ts
 //
 // REDUNDÂNCIA DE CEGUEIRA: quando um provedor morre, trocar de provedor.
@@ -253,14 +254,89 @@ export function classificarFalhaHistorica(mensagem:string):
  * The configured URL remains private: callers receive only its hostname.
  * A one-off fallback gets a strict deadline to protect block processing.
  */
+const agendasHistoricas=new Map<string,AgendaRpc>();
+function agendaHistorica(url:string):AgendaRpc{
+    let a=agendasHistoricas.get(url);
+    if(!a){a=new AgendaRpc(1);agendasHistoricas.set(url,a);}return a;
+}
+export type OpcoesHistorico = {
+    urlSecundaria?:string;
+    buscar?:typeof fetch;
+    tempoLimiteMs?:number;
+    urlsAlternativas?:string[];
+    chainIdEsperado?:number;
+    verificarFaixaRecusada?:boolean;
+};
+const historicosRecusadosAte=new Map<string,number>();
+const redesHistoricasConferidas=new Set<string>();
+let ultimoHistoricoDisponivel:string|undefined;
+
+/** Bounded historical failover. Never advances the caller's checkpoint. */
 export async function logsComRpcHistorico<T>(
-    consultarPrimario: () => Promise<T[]>,
-    filtro: {address:string;fromBlock:string;toBlock:string;topics:string[]},
-    opcoes: {
-        urlSecundaria?:string;
-        buscar?:typeof fetch;
-        tempoLimiteMs?:number;
-    } = {},
+    consultarPrimario:()=>Promise<T[]>,
+    filtro:{address:string;fromBlock:string;toBlock:string;topics:string[]},
+    opcoes:OpcoesHistorico={},
+):Promise<{logs:T[];origem:'primario'|'secundario';provedor:string}>{
+    if(!opcoes.urlsAlternativas?.length)return logsEmUmRpc(consultarPrimario,filtro,opcoes);
+    try{
+        const logs=await consultarPrimario();
+        if(!Array.isArray(logs))throw Error('RPC principal nao retornou lista');
+        return {logs,origem:'primario',provedor:'principal'};
+    }catch{ /* only history falls back; urgent RPC selection is untouched */ }
+    const principal=opcoes.urlSecundaria?.trim()||'https://mainnet.base.org';
+    const urls=[...new Set([principal,...opcoes.urlsAlternativas])];
+    for(const url of urls){
+        if(porQueNaoServe(url)!==null||new URL(url).protocol!=='https:')
+            throw Error('RPC historico secundario invalido (exige HTTPS)');
+    }
+    const elegiveis=urls.filter(url=>(historicosRecusadosAte.get(url)??0)<=Date.now());
+    elegiveis.sort((a,b)=>Number(b===ultimoHistoricoDisponivel)-Number(a===ultimoHistoricoDisponivel));
+    const falhas:string[]=[];
+    for(const url of elegiveis.slice(0,3)){
+        try{
+            if(opcoes.chainIdEsperado!==undefined){
+                const chave=JSON.stringify([url,opcoes.chainIdEsperado]);
+                if(!redesHistoricasConferidas.has(chave)){
+                    await agendaHistorica(url).reservar();
+                    await agendaRpc(url).reservar();
+                    const r=await (opcoes.buscar??fetch)(url,{
+                        method:'POST',headers:{'content-type':'application/json','accept-encoding':'identity'},
+                        body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_chainId',params:[]}),
+                        signal:AbortSignal.timeout(Math.max(500,Math.min(opcoes.tempoLimiteMs??5000,10000))),
+                    });
+                    if(!r.ok)throw Error('HTTP '+r.status);
+                    const c=await r.json() as {result?:string;error?:unknown};
+                    if(c.error)throw Error(JSON.stringify(c.error));
+                    if(typeof c.result!=='string'||!/^0x[0-9a-f]+$/i.test(c.result)
+                        ||BigInt(c.result)!==BigInt(opcoes.chainIdEsperado))
+                        throw Error('rede incorreta no RPC historico');
+                    redesHistoricasConferidas.add(chave);
+                }
+            }
+            const resultado=await logsEmUmRpc<T>(async()=>{throw Error('primario indisponivel')},
+                filtro,{...opcoes,urlSecundaria:url});
+            ultimoHistoricoDisponivel=url;
+            historicosRecusadosAte.delete(url);
+            return resultado;
+        }catch(e){
+            const msg=e instanceof Error?e.message:'historico indisponivel';
+            const tipo=classificarFalhaHistorica(msg);
+            // A range error must reach the caller so it can split this SAME range.
+            if(tipo==='faixa')throw e;
+            const pausa=tipo==='acesso'||/rede incorreta/.test(msg)?15*60_000
+                :tipo==='frequencia'?60_000:15_000;
+            historicosRecusadosAte.set(url,Date.now()+pausa);
+            falhas.push(new URL(url).hostname+': '+msg.replace(/https?:\/\/\S+/g,'[url]').slice(0,110));
+        }
+    }
+    throw Error('historico sem RPC disponivel; checkpoint preservado: '
+        +(falhas.join(' | ')||'provedores em cooldown'));
+}
+
+async function logsEmUmRpc<T>(
+    consultarPrimario:()=>Promise<T[]>,
+    filtro:{address:string;fromBlock:string;toBlock:string;topics:string[]},
+    opcoes:OpcoesHistorico={},
 ):Promise<{logs:T[];origem:'primario'|'secundario';provedor:string}> {
     try {
         const logs=await consultarPrimario();
@@ -271,22 +347,82 @@ export async function logsComRpcHistorico<T>(
         const problema=porQueNaoServe(url);
         if(problema!==null||new URL(url).protocol!=='https:')
             throw new Error('RPC historico secundario invalido (exige HTTPS)');
+        // Every historical consumer shares pacing/cooldown, including new rounds.
+        // Reserve BEFORE starting the network timeout; queue time is not a timeout.
+        const historica=agendaHistorica(url);
+        await historica.reservar();
+        await agendaRpc(url).reservar();
         const abortar=new AbortController();
         const limite=Math.max(500,Math.min(opcoes.tempoLimiteMs??5000,10000));
         const timeout=setTimeout(()=>abortar.abort(),limite);
         try {
             const resposta=await (opcoes.buscar??fetch)(url,{
                 method:'POST',
-                headers:{'content-type':'application/json'},
+                headers:{'content-type':'application/json','accept-encoding':'identity'},
                 body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_getLogs',params:[filtro]}),
                 signal:abortar.signal,
             });
-            if(!resposta.ok)throw new Error('HTTP '+resposta.status);
+            if(!resposta.ok){
+                if(resposta.status===429){
+                    const retry=resposta.headers?.get('retry-after');
+                    const segundos=Number(retry);
+                    const ms=Number.isFinite(segundos)?segundos*1000:
+                        Math.max(0,Date.parse(retry??'')-Date.now());
+                    historica.recusar(Number.isFinite(ms)?ms:0);
+                    agendaRpc(url).recusar(Number.isFinite(ms)?ms:0);
+                }
+                if(resposta.status===403&&opcoes.verificarFaixaRecusada
+                    &&filtro.fromBlock!==filtro.toBlock){
+                    // Do not interpret 403 as a range limit without a successful
+                    // same-node control read. No credentials, headers or methods change.
+                    await historica.reservar();await agendaRpc(url).reservar();
+                    let controlePassou=false;
+                    try{
+                        const controle=await (opcoes.buscar??fetch)(url,{
+                            method:'POST',headers:{'content-type':'application/json','accept-encoding':'identity'},
+                            body:JSON.stringify({jsonrpc:'2.0',id:2,method:'eth_getLogs',
+                                params:[{...filtro,fromBlock:filtro.toBlock}]}),
+                            signal:AbortSignal.timeout(limite),
+                        });
+                        if(controle.status===429){
+                            const ra=controle.headers?.get('retry-after');
+                            const segundos=Number(ra);
+                            const ms=Number.isFinite(segundos)?segundos*1000:Math.max(0,Date.parse(ra??'')-Date.now());
+                            historica.recusar(Number.isFinite(ms)?ms:0);
+                            agendaRpc(url).recusar(Number.isFinite(ms)?ms:0);
+                        }
+                        if(!controle.ok&&controle.status!==401&&controle.status!==403)
+                            throw Error('controle inconclusivo HTTP '+controle.status);
+                        if(controle.ok){
+                            const c=await controle.json() as {result?:unknown;error?:unknown};
+                            if(c.error)throw Error(ehSaturacaoRpc(c.error)
+                                ?'controle inconclusivo: rate limit':'controle JSON-RPC inconclusivo');
+                            if(!Array.isArray(c.result))throw Error('controle JSON-RPC sem lista');
+                            controlePassou=true;
+                        }
+                    }catch(e){
+                        const causa=e instanceof Error?e.message:'falha de rede';
+                        if(ehSaturacaoRpc(causa)){historica.recusar();agendaRpc(url).recusar();
+                            throw Error('controle de faixa inconclusivo: rate limit (429)');}
+                        throw Error('controle de faixa inconclusivo: transporte/JSON sem prova de acesso');
+                    }
+                    if(controlePassou)throw Error('block range rejected: controle de 1 bloco passou no mesmo RPC');
+                }
+                throw new Error('HTTP '+resposta.status);
+            }
             const corpo:unknown=await resposta.json();
+            if(corpo&&typeof corpo==='object'&&'error' in corpo&&corpo.error){
+                if(ehSaturacaoRpc(corpo.error)){
+                    historica.recusar();agendaRpc(url).recusar();
+                    throw Error('JSON-RPC historico rate limit');
+                }
+                throw Error('JSON-RPC historico: '+JSON.stringify(corpo.error).slice(0,180));
+            }
             if(!corpo||typeof corpo!=='object'
                 ||('error' in corpo&&Boolean(corpo.error))
                 ||!('result' in corpo)||!Array.isArray(corpo.result))
                 throw new Error('JSON-RPC historico sem lista de logs valida');
+            historica.passou();
             return {logs:corpo.result as T[],origem:'secundario',
                 provedor:new URL(url).hostname};
         }catch(erroSecundario){

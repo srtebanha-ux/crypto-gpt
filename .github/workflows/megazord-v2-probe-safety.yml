@@ -1,0 +1,31 @@
+name: Megazord V2 probe and credential safety
+on:
+  push:
+    branches:
+      - fix/megazord-v2-sonda-prontidao-20261022
+  pull_request:
+    branches:
+      - feat/megazord-unified-observation
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: V2 probe, execution gates and secret redaction
+        run: |
+          node --require ts-node/register --test \
+            src/titanV2Modo.test.ts \
+            src/titanV2Selecao.test.ts \
+            src/titanV2Prova.test.ts \
+            src/logger.test.ts \
+            src/megazord.test.ts

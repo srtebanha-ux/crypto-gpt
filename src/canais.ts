@@ -206,6 +206,9 @@ export class OrcamentoHttp {
         private readonly agora: () => number = () => Date.now(),
     ) {
         this.comecouEm = this.agora();
+        const timer=setTimeout(()=>this.encerrar(`teto de ${this.tetoDeMs}ms`),Math.max(0,tetoDeMs));
+        timer.unref?.();
+        this.controle.signal.addEventListener('abort',()=>clearTimeout(timer),{once:true});
     }
 
     /** O sinal que o transporte tem de respeitar. */

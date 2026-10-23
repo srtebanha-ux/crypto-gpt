@@ -235,6 +235,8 @@ test('historico: archive 403 usa somente eth_getLogs read-only no RPC secundario
         async()=>{throw Error('HTTP 403 archive requires token')},FILTRO_HISTORICO,{
             urlSecundaria:'https://mainnet.base.org',
             buscar:async(_url,init)=>{
+                assert.equal((init?.headers as Record<string,string>)['accept-encoding'],'identity',
+                    'history must request plain JSON rather than an unsupported compressed body');
                 pedidos.push(JSON.parse(String(init?.body)) as Record<string,unknown>);
                 return {ok:true,json:async()=>({jsonrpc:'2.0',id:1,
                     result:[{blockNumber:'0x124'}]})} as Response;
@@ -309,4 +311,69 @@ test('censo historico: reduz faixa APENAS quando o provedor nega tamanho da cons
         'response size exceeded',
         'block range too large',
     ])assert.equal(classificarFalhaHistorica(msg),'faixa',msg);
+});
+
+test('historical failover skips denied nodes, verifies Base and keeps the exact unread interval',async()=>{
+    const urls=['https://denied.history.test','https://wrong.history.test','https://base.history.test'];
+    const chamadas:Array<{url:string;method:string;params:unknown[]}>=[];
+    const buscar=async(url:Parameters<typeof fetch>[0],init?:Parameters<typeof fetch>[1])=>{
+        const u=String(url),p=JSON.parse(String(init?.body));
+        chamadas.push({url:u,...p});
+        if(u===urls[0])return {ok:false,status:403} as Response;
+        if(p.method==='eth_chainId')return {ok:true,json:async()=>({result:u===urls[1]?'0x1':'0x2105'})} as Response;
+        assert.equal(u,urls[2]);assert.equal(p.method,'eth_getLogs');
+        assert.deepEqual(p.params,[FILTRO_HISTORICO]);
+        return {ok:true,json:async()=>({result:[{blockNumber:FILTRO_HISTORICO.toBlock}]})} as Response;
+    };
+    const opcoes={urlSecundaria:urls[0],urlsAlternativas:urls.slice(1),chainIdEsperado:8453,buscar};
+    for(let i=0;i<2;i++){
+        const r=await logsComRpcHistorico(async()=>{throw Error('primary unavailable')},FILTRO_HISTORICO,opcoes);
+        assert.equal(r.provedor,'base.history.test');assert.equal(r.logs.length,1);
+    }
+    assert.equal(chamadas.filter(x=>x.url===urls[0]).length,1,'denied provider is not retried in the next round');
+    assert.equal(chamadas.filter(x=>x.url===urls[1]).length,1,'wrong chain is not queried for logs');
+    assert.equal(chamadas.filter(x=>x.url===urls[2]&&x.method==='eth_chainId').length,1);
+    assert.equal(chamadas.filter(x=>x.method==='eth_getLogs').length,2);
+});
+
+test('a 403 is a range rejection ONLY after a same-node one-block control succeeds',async()=>{
+    let leituras=0;
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('primary down')},FILTRO_HISTORICO,{
+        urlSecundaria:'https://range-control.history.test',verificarFaixaRecusada:true,
+        buscar:async(_url,init)=>{
+            const p=JSON.parse(String(init?.body));leituras++;
+            if(leituras===1)return {ok:false,status:403} as Response;
+            assert.equal(p.params[0].fromBlock,FILTRO_HISTORICO.toBlock);
+            assert.equal(p.params[0].toBlock,FILTRO_HISTORICO.toBlock);
+            return {ok:true,json:async()=>({result:[]})} as Response;
+        },
+    }),e=>classificarFalhaHistorica((e as Error).message)==='faixa');
+    assert.equal(leituras,2);
+});
+
+test('a failed one-block control preserves the access-denied classification',async()=>{
+    let leituras=0;
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('primary down')},FILTRO_HISTORICO,{
+        urlSecundaria:'https://denied-control.history.test',verificarFaixaRecusada:true,
+        buscar:async()=>{leituras++;return {ok:false,status:403} as Response;},
+    }),e=>classificarFalhaHistorica((e as Error).message)==='acesso');
+    assert.equal(leituras,2);
+});
+
+test('rate limiting the control query cannot turn the original 403 into an access verdict',async()=>{
+    let calls=0;
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('primary down')},FILTRO_HISTORICO,{
+        urlSecundaria:'https://rate-control.history.test',verificarFaixaRecusada:true,
+        buscar:async()=>{calls++;return {ok:false,status:calls===1?403:429} as Response;},
+    }),e=>classificarFalhaHistorica((e as Error).message)==='frequencia');
+    assert.equal(calls,2);
+});
+
+test('a timed-out control query cannot prove access denial or range restriction',async()=>{
+    let calls=0;
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('primary down')},FILTRO_HISTORICO,{
+        urlSecundaria:'https://timeout-control.history.test',verificarFaixaRecusada:true,
+        buscar:async()=>{if(++calls===1)return {ok:false,status:403} as Response;throw Error('timeout');},
+    }),e=>classificarFalhaHistorica((e as Error).message)==='transitoria');
+    assert.equal(calls,2);
 });

@@ -1,3 +1,4 @@
+import {executorMegazordInstalado} from './megazordExecutor';
 /**
  * Arbitragem TITAN e CACA partilham a MESMA carteira.
  * Exclusividade temporal cruzada com prova Base em DOIS RPCs independentes.
@@ -19,7 +20,7 @@ export function papelDaJanela(timestampSec:number):PapelDoEnvio|null{
 }
 type Leitor=Pick<JsonRpcProvider,'getNetwork'|'getBlock'|'getTransactionCount'>;
 export async function conferirJanelaDeNonce(
-    principal:Leitor,carteira:string,papel:PapelDoEnvio,
+    principal:Leitor,carteira:string,papel:PapelDoEnvio|'TITAN_SOLO',
     opcoes:{segundo?:Leitor;agoraMs?:number}={},
 ):Promise<RespostaDaJanela>{
     const own=opcoes.segundo===undefined;
@@ -43,7 +44,7 @@ export async function conferirJanelaDeNonce(
         const stale=(t:number)=>Math.abs(Math.floor(agoraMs/1000)-t)>20;
         if(stale(a.quando)||stale(b.quando))
             return{pode:false,motivo:'base stale: RPC nao esta acompanhando a corrente'};
-        if(papelDaJanela(a.quando)!==papel||papelDaJanela(b.quando)!==papel)
+        if(!executorMegazordInstalado() && papel!=='TITAN_SOLO' && (papelDaJanela(a.quando)!==papel||papelDaJanela(b.quando)!==papel))
             return{pode:false,motivo:'janela de nonce reservada ao outro executor ou intervalo de guarda'};
         if(a.pendente!==a.confirmado||b.pendente!==b.confirmado)
             return{pode:false,motivo:'transacao pendente; nao dividir nonce entre executores'};
@@ -51,7 +52,7 @@ export async function conferirJanelaDeNonce(
             return{pode:false,motivo:'dois RPCs discordam sobre nonce confirmado'};
         if(Math.abs(a.bloco-b.bloco)>3)
             return{pode:false,motivo:'dois RPCs com blocos divergentes'};
-        return{pode:true,motivo:'janela, relogio, rede e nonce confirmados em dois RPCs',
+        return{pode:true,motivo:papel==='TITAN_SOLO'?'TITAN sem janela horaria; nonce livre e dois RPCs atuais':'janela, relogio, rede e nonce confirmados em dois RPCs',
             bloco:Math.max(a.bloco,b.bloco),nonce:a.confirmado};
     }catch(e){
         return{pode:false,motivo:'nao confirmou exclusividade em dois RPCs: '+

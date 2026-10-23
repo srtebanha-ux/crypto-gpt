@@ -1,3 +1,6 @@
+import {abrirSnapshotMorpho} from './morphoDescobertaRpc';
+import {CursoresMorpho} from './morphoCursores';
+import {rotasMorphoHabilitadas} from './titanMorphoDiretorDeRota';
 // Arquivo: src/mercadosDoMorpho.ts
 //
 // OS MERCADOS DO MORPHO BLUE DE LLTV BAIXO — a lista que decide se vale a obra.
@@ -98,7 +101,7 @@ import {
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
     selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,selecionarDevedoresPorRisco,
     codificarPosition, codificarMarket, lerMarket, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
-    paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
+    paraCache, doCache, cursorDeCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
 import {
     disponibilidadeDoCanal, comoLerOsCanais, OrcamentoHttp,
@@ -347,6 +350,8 @@ export async function descobrirMorphoPorApi(
     opcoes: {
         /** O transporte HTTP da API. Injetado para o teste e para o proxy. */
         buscar?: TransporteHttp;
+        /** Read-only RPC transport, injectable for deterministic offline tests. */
+        pedirRpc?: import('./morphoDescobertaRpc').PedidoMorphoRpc;
         /** Quantos mercados validar na corrente nesta volta. Teto de orcamento. */
         tetoDeValidacoes?: number;
         /** Quantos mercados consultar devedores. Cada um e uma requisicao. */
@@ -422,9 +427,12 @@ export async function descobrirMorphoPorApi(
     // O CACHE PRIMEIRO: se a API cair, e ele que mantem o monitoramento. Ler
     // antes de pedir nada tambem responde "o que eu já sabia" na mesma linha.
     let doDisco: MercadoDaApi[] | null = null;
+    let cursorInicial: string | null = null;
     try {
-        doDisco = doCache(JSON.parse(await readFile(caminho, 'utf8')));
-    } catch { doDisco = null; }
+        const cacheAnterior = JSON.parse(await readFile(caminho, 'utf8'));
+        doDisco = doCache(cacheAnterior);
+        cursorInicial = doDisco === null ? null : cursorDeCache(cacheAnterior);
+    } catch { doDisco = null; cursorInicial = null; }
 
     const agente = process.env.HTTPS_PROXY ? new ProxyAgent(process.env.HTTPS_PROXY) : undefined;
     // A CONTAGEM DE HTTP MORA AQUI, num lugar so, por fora do transporte.
@@ -455,9 +463,26 @@ export async function descobrirMorphoPorApi(
     });
     const buscar: TransporteHttp = contado(buscarCru);
 
-    const enumeracao = await enumerarMercados(buscar, { orcamento });
-    const legiveis = enumeracao.mercados.length > 0 ? enumeracao.mercados : (doDisco ?? []);
+    const cursores=new CursoresMorpho(caminho+'.devedores.json');
+    await cursores.carregar();
+    const enumeracao = await enumerarMercados(buscar, { orcamento,
+        inicio:cursorInicial,
+        reservaDeRequisicoes:Math.min(1+tetoDev*3,Math.floor(orcamento.tetoDeRequisicoes/2)) });
+    // Janelas distintas devem ACUMULAR mercados. Apenas uma varredura que
+    // começou no início e chegou ao fim substitui o inventário anterior.
+    const inventario = new Map<string, MercadoDaApi>();
+    if (!enumeracao.completa || cursorInicial !== null) {
+        for (const m of doDisco ?? []) inventario.set(m.id,m);
+    }
+    for (const m of enumeracao.mercados) inventario.set(m.id,m);
+    const legiveis = [...inventario.values()];
     const veioDoCache = enumeracao.mercados.length === 0 && doDisco !== null;
+    const completoNoCache = enumeracao.completa && cursorInicial === null;
+    // Um cursor de API inválido não pode aprisionar o scanner para sempre.
+    const cursorInvalido = enumeracao.mercados.length === 0 &&
+        /HTTP 400|HTTP 404|repetiu o cursor|nenhum mercado novo|NÃO-JSON/.test(enumeracao.falha ?? '');
+    const proximoCursor = enumeracao.completa || cursorInvalido
+        ? null : (enumeracao.proximoCursor ?? cursorInicial);
     // A BASE, pelo chain do PROPRIO item. Filtrar aqui e diferente de confiar
     // no `chain_id` da URL: a API pode ignorar o parametro, e validar um
     // mercado de outra rede contra a Base daria divergencia de campos — que
@@ -518,107 +543,34 @@ export async function descobrirMorphoPorApi(
     // A CORRENTE VALIDA, e so ela autoriza. Teto de validacoes porque cada uma
     // e um `eth_call`, e orcamento e orcamento.
     const escada = listaDeRpcs(process.env, RPCS_PARA_TENTAR.base ?? ['https://mainnet.base.org']);
-    const url = escada[0]!;
-    // O ENDERECO DO MORPHO sai da MESMA variavel que a varredura por evento usa,
-    // com o mesmo padrao — e ele NAO entra por confianca: `julgarMorpho` confere
-    // a superficie no `eth_getCode` antes de qualquer `eth_call`. Em 2026-10-09
-    // os 10 seletores e o callback `0xcf7ea196` foram confirmados assim.
-    const morpho = (process.env.MORPHO_CANDIDATOS
-        ?? '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb').split(',')[0]!.trim();
-    let chamadasRpc = 0;
-    // A same-block snapshot prevents mixing market balances, collateral
-    // and oracle prices across different blocks. If unavailable, the radar
-    // returns no candidates rather than treating unpinned quotes as facts.
-    let blocoDoRadar: string | null = null;
-    const chamarRpc = async (data: string, alvo: string = morpho): Promise<string | null> => {
-        chamadasRpc += 1;
-        opcoes.contarRpc?.('eth_call');
-        try {
-            const r = await fetch(url, {
-                ...(agente ? { dispatcher: agente } : {}),
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({
-                    jsonrpc: '2.0', id: 1, method: 'eth_call',
-                    params: [{ to: alvo, data }, blocoDoRadar ?? 'latest'],
-                }),
-            } as Parameters<typeof fetch>[1]);
-            const j = await r.json() as { result?: string; error?: unknown };
-            return typeof j.result === 'string' ? j.result : null;
-        } catch { return null; }
+    let chamadasRpc=0;
+    const pedirRpc:import('./morphoDescobertaRpc').PedidoMorphoRpc=async(url,method,params)=>{
+        // RPC has its own bounded request allowance, but shares the round deadline.
+        if(orcamento.sinal.aborted||chamadasRpc>=240)throw Error('orcamento RPC/deadline encerrado');
+        chamadasRpc++;opcoes.contarRpc?.(method);
+        if(opcoes.pedirRpc)return opcoes.pedirRpc(url,method,params);
+        const response=await fetch(url,{
+            ...(agente?{dispatcher:agente}:{}),method:'POST',
+            headers:{'content-type':'application/json'},signal:orcamento.sinal,
+            body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),
+        } as Parameters<typeof fetch>[1]);
+        if(!response.ok)throw Error('RPC HTTP '+response.status);
+        const j=await response.json() as {result?:unknown;error?:unknown};
+        if(j.error||j.result===undefined)throw Error('RPC sem resultado valido');
+        return j.result;
     };
-
-    // A SUPERFICIE, antes de tudo: endereco que nao e o Morpho nao vale um
-    // `eth_call`, e aceitar por memoria e o defeito do `0x80d1e0f4…`.
-    let codigo: string | null = null;
-    try {
-        const r = await fetch(url, {
-            ...(agente ? { dispatcher: agente } : {}),
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getCode', params: [morpho, 'latest'] }),
-        } as Parameters<typeof fetch>[1]);
-        const j = await r.json() as { result?: string };
-        codigo = typeof j.result === 'string' ? j.result : null;
-        chamadasRpc += 1;
-        opcoes.contarRpc?.('eth_getCode');
-    } catch { codigo = null; }
-    // AS DUAS CAUSAS SAO SEPARADAS, e pedem acoes OPOSTAS. A primeira versao
-    // deste trecho dava `return` nas duas — e com isso um soluco de RPC jogava
-    // fora a enumeracao inteira que a API acabara de entregar. Ela mandou o
-    // contrario, e esta certa: *"Se a API responder e o RPC estiver
-    // indisponivel, preserve os mercados encontrados como NAO CONFIRMADOS e
-    // processe as validacoes posteriormente."*
-    //
-    //     codigo === null   -> NAO CONSEGUI LER. Nao e sobre o endereco.
-    //                          Guarda o que a API deu, nao confirmado, e valida
-    //                          na proxima volta
-    //     codigo lido e a   -> ESTE ENDERECO NAO E O MORPHO. Conclusao, nao
-    //     superficie falha     ausencia: aqui parar e certo, e `return` fica
-    const juri = julgarMorpho(codigo ?? '');
-    const rpcMudo = codigo === null;
-    if (!rpcMudo && !juri.eh) {
-        log.error('[MORPHO/API] O endereço NÃO tem a superfície do Morpho Blue: não valido nada.', {
-            endereco: morpho,
-            faltando: juri.faltando.slice(0, 5),
-            lido: `${codigo!.length} caracteres`,
-            oQueIssoE: 'é CONCLUSÃO, não ausência: o eth_getCode respondeu e a superfície não '
-                + 'bate. Sem identificação positiva não gasto eth_call',
-            comoDestravar: 'MORPHO_CANDIDATOS=0x… com o endereço correto',
-        });
-        return;
-    }
-    // Por que a validacao nao vai rodar, quando nao vai. Guardado como TEXTO
-    // para viajar com a evidencia, em vez de eu reconstruir a frase la embaixo.
-    const porqueNaoValidou: string | null = rpcMudo
-        ? 'o eth_getCode não respondeu (RPC indisponível): não confirmo superfície nem mercado, '
-            + 'e NÃO jogo a enumeração fora — ela fica guardada como NÃO CONFIRMADA'
-        : null;
-    if (rpcMudo) {
-        log.warn('[MORPHO/API] O RPC não respondeu: guardo a enumeração como NÃO CONFIRMADA.', {
-            endereco: morpho,
-            canalRpc: disponibilidadeDoCanal('validacao', infra).porque,
-            oQueIssoNaoE: 'não é "o endereço não é o Morpho" (isso exige o código LIDO) e não é '
-                + '"não há mercados": é "não consegui validar agora"',
-            oQueAcontece: 'os mercados vão ao cache com confirmadoNaCorrente=false e a validação '
-                + 'roda na próxima volta, quando o RPC voltar',
-        });
-    }
-
-    // Fix the read snapshot BEFORE retrieving market / oracle / user state.
-    // API market discovery remains independent of this RPC call.
-    try {
-        const r = await fetch(url, {
-            ...(agente ? { dispatcher: agente } : {}),
-            method:'POST',headers:{'content-type':'application/json'},
-            body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_blockNumber',params:[]}),
-        } as Parameters<typeof fetch>[1]);
-        const j=await r.json() as {result?:string};
-        if(typeof j.result==='string'&&/^0x[0-9a-fA-F]+$/.test(j.result))
-            blocoDoRadar=j.result;
-    } catch { blocoDoRadar=null; }
+    const snapshot=await abrirSnapshotMorpho(escada,
+        (process.env.MORPHO_CANDIDATOS??'').split(','),pedirRpc,c=>julgarMorpho(c).eh);
+    const morpho=snapshot?.morpho??'0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb';
+    const url=snapshot?.url??escada[0]!;
+    const blocoDoRadar=snapshot?.bloco??null;
+    const rpcMudo=snapshot===null;
+    const porqueNaoValidou=rpcMudo?'nenhum RPC confirmou Base, superficie e snapshot Morpho':null;
+    const chamarRpc=async(data:string,alvo=morpho):Promise<string|null>=>
+        snapshot? snapshot.chamar(data,alvo):null;
     let confirmados = 0;
     const recusados: string[] = [];
+    for(const m of escolhidos)m.confirmadoNaCorrente=false;
     for (const m of rpcMudo ? [] : escolhidos) {
         const cru = await chamarRpc(codificarIdToMarketParams(m.id));
         const veredicto = apiConfereComACorrente(m, cru === null ? null : lerIdToMarketParams(cru));
@@ -631,7 +583,6 @@ export async function descobrirMorphoPorApi(
     // corrente nao confirmou seria gastar requisicao sobre dado que nao decide.
     let devedores = 0;
     let validados = 0;
-    let reqGraph = 0;
     // Risk radar is read-only, strictly lower priority than CACA hot-path.
     // Protocol liquidation is NOT proved by this health estimate.
     let posicoesAvaliadas = 0;
@@ -640,7 +591,8 @@ export async function descobrirMorphoPorApi(
     let oraculosIndisponiveis = 0;
     const alvosDeRisco: Array<{mercado:string;usuario:string;
         distanciaBps:string;dividaCrua:string;situacao:string}> = [];
-    // Only positions that crossed the onchain-estimated threshold can enter
+    // Crossed and nearby positions can enter bounded accrual-inclusive probes.
+    // Neither classification can authorize transmission. Candidates enter
     // the V3 execution funnel. The funnel rechecks health and liquidate() itself.
     const liquidaveisParaPreflight: Array<{mercado:MercadoDaApi;usuario:string}> = [];
     const falhasDeDevedores: string[] = [];
@@ -671,8 +623,9 @@ export async function descobrirMorphoPorApi(
         // Tres paginas no maximo por mercado: consulta os maiores por
         // BorrowShares antes do prazo do job. COMPLETA=false caso sobrem
         // paginas, sem declarar que os demais devedores nao existem.
-        const r = await enumerarDevedores(buscar, m.id, {tetoDePaginas:3});
-        reqGraph += r.requisicoes;
+        const r = await enumerarDevedores(buscar, m.id, {tetoDePaginas:3,
+            inicio:cursores.obter(m.id).proximo,orcamento});
+        await cursores.guardar(m.id,r.proximo,r.devedores);
         devedores += r.devedores.length;
         if (r.falha !== null) falhasDeDevedores.push(`${m.id.slice(0, 10)}…: ${r.falha}`);
         // Metade dos cinco maiores mantida; a outra metade visita
@@ -680,7 +633,7 @@ export async function descobrirMorphoPorApi(
         // Multicall3 faz ate 60 verificacoes de devedor num UNICO eth_call
         // no mesmo bloco do preco do oracle e dos totais. Antes isto eram
         // dezenas de round trips e a fila parava no primeiro HTTP 429.
-        const candidatos=selecionarDevedoresPorRisco(r.devedores,m.lltv,tetoPosicoes,rodada);
+        const candidatos=selecionarDevedoresPorRisco(cursores.obter(m.id).devedores,m.lltv,tetoPosicoes,rodada);
         const dadosLote=candidatos.length>0
             ?await chamarRpc(codificarAggregate3(candidatos.map(d=>({
                 alvo:morpho,dados:codificarPosition(m.id,d.endereco),
@@ -721,11 +674,15 @@ export async function descobrirMorphoPorApi(
                             const {registrarQuenteMorpho}=await import('./titanMorphoHot');
                             registrarQuenteMorpho(m,d.endereco,risco.distanciaBps);
                         }
+                        if(m.confirmadoNaCorrente){
+                            const alvo={mercado:m,usuario:d.endereco};
+                            if(risco.situacao==='cruzou-estimado')liquidaveisParaPreflight.unshift(alvo);
+                            else if(liquidaveisParaPreflight.length<3)liquidaveisParaPreflight.push(alvo);
+                            if(liquidaveisParaPreflight.length>3)liquidaveisParaPreflight.pop();
+                        }
                         if(risco.situacao==='proxima')pertoDoLimiar+=1;
                         else {
                             cruzaramEstimado+=1;
-                            if(m.confirmadoNaCorrente&&liquidaveisParaPreflight.length<3)
-                                liquidaveisParaPreflight.push({mercado:m,usuario:d.endereco});
                         }
                         if(alvosDeRisco.length<20&&risco.distanciaBps!==null
                             &&risco.dividaCrua!==null)
@@ -759,9 +716,9 @@ export async function descobrirMorphoPorApi(
     // crossed position goes through the whole deployed contract by eth_call,
     // an onchain loan-token -> WETH fee comparison, fresh gas and strict nonce.
     // V3 can only sign if Aave signing is OFF (one wallet cannot have two senders).
-    if (process.env.CACA_MORPHO_V3_AVALIAR !== '0') {
+    if (rotasMorphoHabilitadas(process.env)) {
         if (liquidaveisParaPreflight.length === 0) {
-            log.info('[TITAN/MORPHO-V3] Nenhuma posicao cruzou LLTV nesta rodada.', {
+            log.info('[TITAN/MORPHO-V3] Nenhuma posicao cruzada ou proxima para sonda nesta rodada.', {
                 radar: 'ativo; aguardando posicao onchain verdadeiramente liquidavel',
                 contrato:process.env.CACA_MORPHO_V3_CONTRATO
                     ? 'informado (imutaveis exigidos no preflight)' : 'NAO IMPLANTADO/CONFIGURADO',
@@ -771,10 +728,10 @@ export async function descobrirMorphoPorApi(
             const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
             for(const alvo of liquidaveisParaPreflight){
                 const {via,resultado}=await avaliarSaidasMorpho({
-                    mercado:alvo.mercado,usuario:alvo.usuario,
+                    mercado:alvo.mercado,usuario:alvo.usuario,signal:orcamento.sinal,
                     // PublicNode pode devolver 403 no preflight/transmissao;
                     // o executor nao herda o RPC do censo por acidente.
-                    rpcUrl:process.env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org',
+                    rpcUrl:process.env.CACA_MORPHO_V3_RPC_URL??url,
                 });
                 log.warn('[TITAN/MORPHO-V3] Preflight do executor real.',{
                     mercado:alvo.mercado.id,usuario:alvo.usuario,
@@ -785,19 +742,7 @@ export async function descobrirMorphoPorApi(
         }
     }
 
-    let blocoAgora: number | null = null;
-    try {
-        const r = await fetch(url, {
-            ...(agente ? { dispatcher: agente } : {}),
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
-        } as Parameters<typeof fetch>[1]);
-        const j = await r.json() as { result?: string };
-        if (typeof j.result === 'string') blocoAgora = Number.parseInt(j.result, 16);
-        chamadasRpc += 1;
-        opcoes.contarRpc?.('eth_blockNumber');
-    } catch { blocoAgora = null; }
+    const blocoAgora=blocoDoRadar===null?null:Number.parseInt(blocoDoRadar,16);
 
     // O DESFECHO, entre as quatro situacoes que ela mandou separar. A ordem
     // importa: cada ramo exclui o anterior, e nenhuma delas e silenciosa.
@@ -837,8 +782,8 @@ export async function descobrirMorphoPorApi(
             confirmados,
             devedores,
             validados,
-            requisicoes: enumeracao.requisicoes + reqGraph,
-            completa: enumeracao.completa,
+            requisicoes: orcamento.gastas,
+            completa: completoNoCache,
             blocoIndexado: enumeracao.blocoIndexado,
             blocoAgora,
             falha: enumeracao.falha,
@@ -932,9 +877,9 @@ export async function descobrirMorphoPorApi(
         devedoresEncontrados: devedores,
         devedoresValidados: validados,
         blocoIndexado: enumeracao.blocoIndexado,
-        coberturaCompleta: enumeracao.completa,
+        coberturaCompleta: completoNoCache,
         falha: enumeracao.falha,
-        requisicoesHttp: enumeracao.requisicoes + reqGraph,
+        requisicoesHttp: orcamento.gastas,
         chamadasRpc,
         // A LISTA VEIO DO CACHE? Sem isto, uma volta com a API morta renovaria
         // a idade do ultimo sucesso para sempre.
@@ -980,12 +925,15 @@ export async function descobrirMorphoPorApi(
             await mkdir(dirname(caminho), { recursive: true });
             const tmp = `${caminho}.${process.pid}.${Date.now()}.tmp`;
             await writeFile(tmp, JSON.stringify(
-                paraCache(legiveis, enumeracao.blocoIndexado, enumeracao.completa, Date.now()),
+                paraCache(legiveis, enumeracao.blocoIndexado, completoNoCache, Date.now(), proximoCursor),
             ));
             const { rename } = await import('fs/promises');
             await rename(tmp, caminho);
             log.info('[MORPHO/API] Cache gravado.', {
-                caminho, mercados: legiveis.length, completo: enumeracao.completa,
+                caminho, mercados: legiveis.length, completo: completoNoCache,
+                mercadoDaApiNestaRodada: enumeracao.mercados.length,
+                retomouDaPaginaAnterior: cursorInicial !== null,
+                temProximaPagina: proximoCursor !== null,
                 porque: 'nome único por gravação e rename atômico — a mesma regra do cache de '
                     + 'devedores, que já custou uma gravação perdida a este projeto',
             });

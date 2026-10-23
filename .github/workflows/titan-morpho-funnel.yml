@@ -1,0 +1,30 @@
+name: Morpho discovery coverage and atomic routes
+on:
+  pull_request:
+    branches: [feat/megazord-unified-observation]
+  push:
+    branches: [codex/morpho-funnel-20261023]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: >-
+          node --require ts-node/register --test --test-concurrency=2
+          src/morphoFunil.test.ts src/morphoApi.test.ts
+          src/mercadosDoMorpho.test.ts src/titanMorpho*.test.ts
+          src/vazaoDoProvedor.test.ts src/canais.test.ts
+          src/megazord.test.ts src/megazordExecutor.test.ts
+      - run: >-
+          npx hardhat test --config hardhat.morpho-local.cjs
+          forkTests/titanMorphoV3Local.js forkTests/titanMorphoAeroLocal.js

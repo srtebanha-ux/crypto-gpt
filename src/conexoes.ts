@@ -1,3 +1,4 @@
+import { agendaRpc } from './rpcCoordenado';
 // Arquivo: src/conexoes.ts
 //
 // Abrir mais de uma porta para o mesmo servidor.
@@ -39,7 +40,7 @@ let agente: Agent | null = null;
  * Usar o fetch do mesmo pacote que criou o Agent resolve os dois de uma vez:
  * o pool vale, e a descompressao volta a ser feita por quem sabe.
  */
-export function buscar(url: string, opcoes: Parameters<typeof fetchUndici>[1] = {}) {
+export async function buscar(url: string, opcoes: Parameters<typeof fetchUndici>[1] = {}) {
     if (agente === null) {
         agente = new Agent({
             connections: CONEXOES_POR_SERVIDOR,
@@ -47,7 +48,18 @@ export function buscar(url: string, opcoes: Parameters<typeof fetchUndici>[1] = 
             keepAliveMaxTimeout: 60_000,
         });
     }
-    return fetchUndici(url, { ...opcoes, dispatcher: agente });
+    let rpc=false;
+    let custo=1;
+    if(typeof opcoes?.body==='string'){
+        try{const corpo=JSON.parse(opcoes.body);
+            rpc=corpo?.jsonrpc==='2.0'||(Array.isArray(corpo)&&corpo[0]?.jsonrpc==='2.0');
+            custo=Array.isArray(corpo)?corpo.length:1;
+        }catch{ /* other HTTP APIs do not consume JSON-RPC quota */ }
+    }
+    if(rpc)await agendaRpc(url).reservar(custo);
+    const resposta=await fetchUndici(url, { ...opcoes, dispatcher: agente });
+    if(rpc&&resposta.status===429)agendaRpc(url).recusar();
+    return resposta;
 }
 
 /** Quantas conexoes o pool abre. Existe so para o log dizer a verdade. */

@@ -1,3 +1,7 @@
+import {ProviderMorphoRpc} from './morphoProvider';
+import {loanValueInWeth} from './titanMorphoV3Tiro';
+import {planejarRotasMorphoAero,combinarSondasMorpho} from './titanMorphoRotas';
+import {comExecutorMegazord,carteiraMegazord,transmitirMegazord,contextoExecutorMegazord} from './megazordExecutor';
 /**
  * TITAN Morpho AERODROME: onchain candidate -> complete eth_call -> gas L1/L2 ->
  * enforced profit floor -> one signed tx (when expressly armed).
@@ -15,7 +19,7 @@ import type {MercadoDaApi} from './morphoApi';
 import {codificarIdToMarketParams,codificarMarket,codificarPosition,
   lerIdToMarketParams,lerMarket,lerPosition,apiConfereComACorrente} from './morphoApi';
 import {examinarSaudeMorpho} from './titanMorphoRadar';
-import {politicaMorphoV3,candidatoElegivelV3,custoConservadorMorphoV3,
+import {politicaMorphoAero,candidatoElegivelV3,custoConservadorMorphoV3,
   pisoEconomicoMorphoV3} from './titanMorphoV3Gate';
 import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
 import {FABRICA_V3_BASE,MORPHO_FLASH_BASE} from './titanPonteMultiHop';
@@ -29,6 +33,10 @@ const AERO_FACTORY='0x420DD381b31aEf6683db6B902084cB0FFECe40Da';
 const QUOTER='0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a';
 const FEES=[100,500,3000,10000] as const;
 const executorAbi=new Interface([
+  'function versaoRotas() view returns(uint256)',
+  'function intermediarioPermitido(address) view returns(bool)',
+  'function liquidarRota((address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) mercado,address devedor,uint256 seizedAssets,uint256 repaidShares,(address from,address to,bool stable,address factory)[] rota,uint256 pisoLucroDivida,uint256 prazo) returns(uint256 lucro)',
+
   'function dono() view returns(address)',
   'function cofre() view returns(address)',
   'function morpho() view returns(address)',
@@ -40,10 +48,11 @@ const executorAbi=new Interface([
 const factoryAbi=new Interface(['function getPool(address,address,uint24) view returns(address)']);
 const aeroFactoryAbi=new Interface(['function getPool(address,address,bool) view returns(address)']);
 const quoteAbi=new Interface([
+  'function quoteExactInput(bytes path,uint256 amountIn) returns(uint256 amountOut,uint160[] sqrtPriceX96AfterList,uint32[] initializedTicksCrossedList,uint256 gasEstimate)',
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96) params) returns(uint256 amountOut,uint160 sqrtPriceX96After,uint32 initializedTicksCrossed,uint256 gasEstimate)'
 ]);
 const oracleAbi=new Interface(['function price() view returns(uint256)']);
-type Entrada={mercado:MercadoDaApi;usuario:string;rpcUrl:string};
+type Entrada={mercado:MercadoDaApi;usuario:string;rpcUrl:string;signal?:AbortSignal};
 type Resposta={status:'descartada'|'inviavel'|'aprovada-simulada'|'enviada'|'confirmada'|'revertida'|'desconhecida';motivo:string;hash?:string};
 const cooldown=new Map<string,number>();
 const elapsed=(key:string)=>{const t=cooldown.get(key)??0;return t>Date.now();};
@@ -57,24 +66,6 @@ async function readAddress(p:JsonRpcProvider,contract:string,method:string):Prom
   return getAddress(executorAbi.decodeFunctionResult(method,await p.call({to:contract,data}))[0] as string);
 }
 /** QuoterV2 runs in eth_call. No direct WETH pool = unknown cost, never zero. */
-async function loanValueInWeth(p:JsonRpcProvider,token:string,amount:bigint):Promise<bigint|null>{
-  if(amount<=0n)return null;
-  if(same(token,WETH))return amount;
-  for(const fee of FEES){
-    const pool=await p.call({to:FABRICA_V3_BASE,
-      data:factoryAbi.encodeFunctionData('getPool',[token,WETH,fee])})
-      .then(x=>factoryAbi.decodeFunctionResult('getPool',x)[0] as string)
-      .catch(()=>ZeroAddress);
-    if(same(pool,ZeroAddress))continue;
-    try{
-      const result=await p.call({to:QUOTER,data:quoteAbi.encodeFunctionData(
-        'quoteExactInputSingle',[[token,WETH,amount,fee,0]])});
-      const v=quoteAbi.decodeFunctionResult('quoteExactInputSingle',result)[0] as bigint;
-      if(v>0n)return v;
-    }catch{/* a pool nao tem quote verificavel no tamanho atual */ }
-  }
-  return null;
-}
 async function validateExecutor(p:JsonRpcProvider,addr:string,owner:string):Promise<void>{
   if(await p.getCode(addr)==='0x')throw Error('executor Morpho Aero sem bytecode na Base');
   for(const [method,expected] of [
@@ -113,17 +104,17 @@ async function reserveJournal(
   finally {fs.closeSync(fd);}
 }
 /**
- * Called only for an already-crossed risk candidate, from the scanner worker.
+ * Called for a crossed or nearby risk candidate (bounded read-only accrual probes), from the scanner worker.
  * It re-reads EVERYTHING onchain, so stale API/shares cannot authorize a tx.
  * Throws are converted into read-only diagnostic; no paid attempt without proof.
  */
-export async function avaliarELiquidarMorphoAero(
+async function avaliarELiquidarMorphoAeroInterno(
   e:Entrada, env:NodeJS.ProcessEnv=process.env,
 ):Promise<Resposta>{
   const key=e.mercado.id.toLowerCase()+':'+e.usuario.toLowerCase();
   if(elapsed(key))return{status:'descartada',motivo:'cooldown de posicao ja analisada'};
   mark(key,10_000);
-  const policy=politicaMorphoV3(env);
+  const policy=politicaMorphoAero(env);
   if(!e.mercado.confirmadoNaCorrente)return{status:'descartada',motivo:'mercado sem identidade onchain confirmada'};
   const contrato=env.CACA_MORPHO_AERO_CONTRATO;
   // Production CACA has a private key, but historically no public address env.
@@ -132,7 +123,7 @@ export async function avaliarELiquidarMorphoAero(
   const dono=env.CACA_ENDERECO_PUBLICO??(chave?new Wallet(chave).address:undefined);
   if(!contrato||!dono)
     return{status:'descartada',motivo:'executor Aero, carteira ou identificacao publica indisponivel'};
-  const p=new JsonRpcProvider(e.rpcUrl,8453,{staticNetwork:true});
+  const p=new ProviderMorphoRpc(e.rpcUrl,e.signal);
   let hash:string|undefined;
   try{
     const addr=getAddress(contrato),owner=getAddress(dono);
@@ -163,16 +154,28 @@ export async function avaliarELiquidarMorphoAero(
     if(pos.borrowShares<=0n)return{status:'descartada',motivo:'shares de divida zero'};
     const marketTuple=[params.loanToken,params.collateralToken,params.oracle,
       params.irm,BigInt(params.lltv.mul('1e18').toFixed(0))] as const;
-    const fees:boolean[]=[];
-    if(same(params.loanToken,params.collateralToken))fees.push(false);
-    else for(const stable of [true,false]){
-      const rawPool=await p.call({to:AERO_FACTORY,
-        data:aeroFactoryAbi.encodeFunctionData('getPool',[params.collateralToken,params.loanToken,stable])});
-      const pool=aeroFactoryAbi.decodeFunctionResult('getPool',rawPool)[0] as string;
-      if(!same(pool,ZeroAddress)&&await p.getCode(pool)!=='0x')fees.push(stable);
-    }
-    if(fees.length===0)return{status:'inviavel',motivo:'sem pool Aerodrome comprovada garantia -> divida'};
-    type Sonda={data:string;profit:bigint;shares:bigint;fee:boolean;estimated:bigint;score:bigint};
+    const suportaMultihop=await p.call({to:addr,data:executorAbi.encodeFunctionData('versaoRotas')})
+      .then(r=>BigInt(r)===2n).catch(()=>false);
+    const permitido=async(token:string)=>{
+      const r=await p.call({to:addr,data:executorAbi.encodeFunctionData('intermediarioPermitido',[token])});
+      return executorAbi.decodeFunctionResult('intermediarioPermitido',r)[0]===true;
+    };
+    const rotas=await planejarRotasMorphoAero(params.collateralToken,params.loanToken,AERO_FACTORY,suportaMultihop,
+      async(a,b,stable)=>{
+        const r=await p.call({to:AERO_FACTORY,data:aeroFactoryAbi.encodeFunctionData('getPool',[a,b,stable])});
+        const pool=aeroFactoryAbi.decodeFunctionResult('getPool',r)[0] as string;
+        return !same(pool,ZeroAddress)&&await p.getCode(pool)!=='0x';
+      },permitido);
+    type Rota=typeof rotas[number];
+    const montar=(shares:bigint,rota:Rota,piso:bigint,prazo:bigint)=>{
+      const metodo=rota.length>1?'liquidarRota':'liquidar';
+      return{metodo,data:executorAbi.encodeFunctionData(metodo,[marketTuple,user,0n,shares,
+        metodo==='liquidarRota'?rota:(rota[0]?.stable??false),piso,prazo])};
+    };
+    if(rotas.length===0)return{status:'inviavel',motivo:suportaMultihop
+      ?'sem rota direta ou multihop comprovada garantia -> divida'
+      :'rota_nao_suportada: sem pool direta; executor implantado sem suporte multihop'};
+    type Sonda={data:string;profit:bigint;shares:bigint;rota:Rota;estimated:bigint;score:bigint};
     let best:Sonda|null=null;
     const falhas=new Map<string,number>();
     const amounts=tamanhosDeLiquidacaoMorpho({
@@ -182,13 +185,12 @@ export async function avaliarELiquidarMorphoAero(
     });
     if(amounts.length===0)return{status:'inviavel',
       motivo:'garantia insuficiente para qualquer parcela segura de divida'};
-    const combinacoes=amounts.flatMap(shares=>fees.map(fee=>({shares,fee})));
-    const sondas=await sondarMorphoEmLotes(combinacoes,async({shares,fee}):Promise<Sonda|null>=>{
-        const data=executorAbi.encodeFunctionData('liquidar',[
-          marketTuple,user,0n,shares,fee,1n,BigInt(block.timestamp+90)]);
+    const combinacoes=combinarSondasMorpho(rotas,amounts,risk.situacao==='proxima');
+    const sondas=await sondarMorphoEmLotes(combinacoes,async({shares,rota}):Promise<Sonda|null>=>{
+        const {data,metodo}=montar(shares,rota,1n,BigInt(block.timestamp+90));
         try{
           const ret=await p.call({to:addr,from:owner,data,blockTag:tag});
-          const profit=executorAbi.decodeFunctionResult('liquidar',ret)[0] as bigint;
+          const profit=executorAbi.decodeFunctionResult(metodo,ret)[0] as bigint;
           if(profit<=1n)return null;
           const gross=await loanValueInWeth(p,params.loanToken,profit);
           if(gross===null||gross<=0n)return null;
@@ -197,7 +199,7 @@ export async function avaliarELiquidarMorphoAero(
           const score=pontuacaoLiquidaMorpho(gross,estimated,
             baseFee,policy.tipWei,policy.maxGas);
           if(score===null||score<=0n)return null;
-          return {data,profit,shares,fee,estimated,score};
+          return {data,profit,shares,rota,estimated,score};
         }catch(err){
           const reason=motivoDoRevertMorpho(err);
           falhas.set(reason,(falhas.get(reason)??0)+1);
@@ -226,8 +228,7 @@ export async function avaliarELiquidarMorphoAero(
     const economic=pisoEconomicoMorphoV3(best.profit,floorEth??0n,feePlan.custo,policy);
     if(!economic.aprovado){mark(key,30_000);
       return{status:'inviavel',motivo:'piso de lucro nao cobre gas L1+L2 com margem em WETH'};}
-    const finalData=executorAbi.encodeFunctionData('liquidar',[
-      marketTuple,user,0n,best.shares,best.fee,economic.pisoToken,BigInt(pricedBlock.timestamp+90)]);
+    const finalData=montar(best.shares,best.rota,economic.pisoToken,BigInt(pricedBlock.timestamp+90)).data;
     // The enforceable floor itself must also pass, not just floor=1.
     await p.call({to:addr,from:owner,data:finalData});
     // A long multifee search can span many two-second Base blocks. The final
@@ -239,7 +240,7 @@ export async function avaliarELiquidarMorphoAero(
     if(!policy.armed)return{status:'aprovada-simulada',
       motivo:'callback Aero+lucro e gas verificados; falta autorizacao exclusiva de envio'};
     if(!chave)throw Error('chave do CACA indisponivel');
-    const wallet=new Wallet(chave,p);
+    const wallet=carteiraMegazord(chave,p);
     if(!same(wallet.address,owner))throw Error('signer difere de owner');
     const latest=await p.getTransactionCount(owner,'latest');
     const pending=await p.getTransactionCount(owner,'pending');
@@ -259,7 +260,7 @@ export async function avaliarELiquidarMorphoAero(
     const signed=await wallet.signTransaction(tx);
     hash=keccak256(signed);
     await reserveJournal(p,journalPath(env),hash,pending);
-    const sent=await p.broadcastTransaction(signed);
+    const sent=await transmitirMegazord(p,signed);
     if(!sameHash(sent.hash,hash))throw Error('broadcast retornou hash divergente');
     const receipt=await sent.wait(1,60_000);
     if(!receipt)return{status:'enviada',hash,motivo:'sem recibo: journal deve reconciliar; nao reenviar'};
@@ -276,3 +277,7 @@ export async function avaliarELiquidarMorphoAero(
   }finally{p.destroy();}
 }
 function sameHash(a:string,b:string){return a.toLowerCase()===b.toLowerCase();}
+
+export async function avaliarELiquidarMorphoAero(...args:Parameters<typeof avaliarELiquidarMorphoAeroInterno>):ReturnType<typeof avaliarELiquidarMorphoAeroInterno>{
+ return comExecutorMegazord('liquidacao-morpho-aero',()=>avaliarELiquidarMorphoAeroInterno(...args));
+}
