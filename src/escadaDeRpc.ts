@@ -259,14 +259,83 @@ function agendaHistorica(url:string):AgendaRpc{
     let a=agendasHistoricas.get(url);
     if(!a){a=new AgendaRpc(1);agendasHistoricas.set(url,a);}return a;
 }
+export type OpcoesHistorico = {
+    urlSecundaria?:string;
+    buscar?:typeof fetch;
+    tempoLimiteMs?:number;
+    urlsAlternativas?:string[];
+    chainIdEsperado?:number;
+};
+const historicosRecusadosAte=new Map<string,number>();
+const redesHistoricasConferidas=new Set<string>();
+let ultimoHistoricoDisponivel:string|undefined;
+
+/** Bounded historical failover. Never advances the caller's checkpoint. */
 export async function logsComRpcHistorico<T>(
-    consultarPrimario: () => Promise<T[]>,
-    filtro: {address:string;fromBlock:string;toBlock:string;topics:string[]},
-    opcoes: {
-        urlSecundaria?:string;
-        buscar?:typeof fetch;
-        tempoLimiteMs?:number;
-    } = {},
+    consultarPrimario:()=>Promise<T[]>,
+    filtro:{address:string;fromBlock:string;toBlock:string;topics:string[]},
+    opcoes:OpcoesHistorico={},
+):Promise<{logs:T[];origem:'primario'|'secundario';provedor:string}>{
+    if(!opcoes.urlsAlternativas?.length)return logsEmUmRpc(consultarPrimario,filtro,opcoes);
+    try{
+        const logs=await consultarPrimario();
+        if(!Array.isArray(logs))throw Error('RPC principal nao retornou lista');
+        return {logs,origem:'primario',provedor:'principal'};
+    }catch{ /* only history falls back; urgent RPC selection is untouched */ }
+    const principal=opcoes.urlSecundaria?.trim()||'https://mainnet.base.org';
+    const urls=[...new Set([principal,...opcoes.urlsAlternativas])];
+    for(const url of urls){
+        if(porQueNaoServe(url)!==null||new URL(url).protocol!=='https:')
+            throw Error('RPC historico secundario invalido (exige HTTPS)');
+    }
+    const elegiveis=urls.filter(url=>(historicosRecusadosAte.get(url)??0)<=Date.now());
+    elegiveis.sort((a,b)=>Number(b===ultimoHistoricoDisponivel)-Number(a===ultimoHistoricoDisponivel));
+    const falhas:string[]=[];
+    for(const url of elegiveis.slice(0,3)){
+        try{
+            if(opcoes.chainIdEsperado!==undefined){
+                const chave=JSON.stringify([url,opcoes.chainIdEsperado]);
+                if(!redesHistoricasConferidas.has(chave)){
+                    await agendaHistorica(url).reservar();
+                    await agendaRpc(url).reservar();
+                    const r=await (opcoes.buscar??fetch)(url,{
+                        method:'POST',headers:{'content-type':'application/json','accept-encoding':'identity'},
+                        body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_chainId',params:[]}),
+                        signal:AbortSignal.timeout(Math.max(500,Math.min(opcoes.tempoLimiteMs??5000,10000))),
+                    });
+                    if(!r.ok)throw Error('HTTP '+r.status);
+                    const c=await r.json() as {result?:string;error?:unknown};
+                    if(c.error)throw Error(JSON.stringify(c.error));
+                    if(typeof c.result!=='string'||!/^0x[0-9a-f]+$/i.test(c.result)
+                        ||BigInt(c.result)!==BigInt(opcoes.chainIdEsperado))
+                        throw Error('rede incorreta no RPC historico');
+                    redesHistoricasConferidas.add(chave);
+                }
+            }
+            const resultado=await logsEmUmRpc<T>(async()=>{throw Error('primario indisponivel')},
+                filtro,{...opcoes,urlSecundaria:url});
+            ultimoHistoricoDisponivel=url;
+            historicosRecusadosAte.delete(url);
+            return resultado;
+        }catch(e){
+            const msg=e instanceof Error?e.message:'historico indisponivel';
+            const tipo=classificarFalhaHistorica(msg);
+            // A range error must reach the caller so it can split this SAME range.
+            if(tipo==='faixa')throw e;
+            const pausa=tipo==='acesso'||/rede incorreta/.test(msg)?15*60_000
+                :tipo==='frequencia'?60_000:15_000;
+            historicosRecusadosAte.set(url,Date.now()+pausa);
+            falhas.push(new URL(url).hostname+': '+msg.replace(/https?:\/\/\S+/g,'[url]').slice(0,110));
+        }
+    }
+    throw Error('historico sem RPC disponivel; checkpoint preservado: '
+        +(falhas.join(' | ')||'provedores em cooldown'));
+}
+
+async function logsEmUmRpc<T>(
+    consultarPrimario:()=>Promise<T[]>,
+    filtro:{address:string;fromBlock:string;toBlock:string;topics:string[]},
+    opcoes:OpcoesHistorico={},
 ):Promise<{logs:T[];origem:'primario'|'secundario';provedor:string}> {
     try {
         const logs=await consultarPrimario();

@@ -312,3 +312,26 @@ test('censo historico: reduz faixa APENAS quando o provedor nega tamanho da cons
         'block range too large',
     ])assert.equal(classificarFalhaHistorica(msg),'faixa',msg);
 });
+
+test('historical failover skips denied nodes, verifies Base and keeps the exact unread interval',async()=>{
+    const urls=['https://denied.history.test','https://wrong.history.test','https://base.history.test'];
+    const chamadas:Array<{url:string;method:string;params:unknown[]}>=[];
+    const buscar=async(url:Parameters<typeof fetch>[0],init?:Parameters<typeof fetch>[1])=>{
+        const u=String(url),p=JSON.parse(String(init?.body));
+        chamadas.push({url:u,...p});
+        if(u===urls[0])return {ok:false,status:403} as Response;
+        if(p.method==='eth_chainId')return {ok:true,json:async()=>({result:u===urls[1]?'0x1':'0x2105'})} as Response;
+        assert.equal(u,urls[2]);assert.equal(p.method,'eth_getLogs');
+        assert.deepEqual(p.params,[FILTRO_HISTORICO]);
+        return {ok:true,json:async()=>({result:[{blockNumber:FILTRO_HISTORICO.toBlock}]})} as Response;
+    };
+    const opcoes={urlSecundaria:urls[0],urlsAlternativas:urls.slice(1),chainIdEsperado:8453,buscar};
+    for(let i=0;i<2;i++){
+        const r=await logsComRpcHistorico(async()=>{throw Error('primary unavailable')},FILTRO_HISTORICO,opcoes);
+        assert.equal(r.provedor,'base.history.test');assert.equal(r.logs.length,1);
+    }
+    assert.equal(chamadas.filter(x=>x.url===urls[0]).length,1,'denied provider is not retried in the next round');
+    assert.equal(chamadas.filter(x=>x.url===urls[1]).length,1,'wrong chain is not queried for logs');
+    assert.equal(chamadas.filter(x=>x.url===urls[2]&&x.method==='eth_chainId').length,1);
+    assert.equal(chamadas.filter(x=>x.method==='eth_getLogs').length,2);
+});
