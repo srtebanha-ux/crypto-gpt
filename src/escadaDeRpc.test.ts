@@ -235,6 +235,8 @@ test('historico: archive 403 usa somente eth_getLogs read-only no RPC secundario
         async()=>{throw Error('HTTP 403 archive requires token')},FILTRO_HISTORICO,{
             urlSecundaria:'https://mainnet.base.org',
             buscar:async(_url,init)=>{
+                assert.equal((init?.headers as Record<string,string>)['accept-encoding'],'identity',
+                    'history must request plain JSON rather than an unsupported compressed body');
                 pedidos.push(JSON.parse(String(init?.body)) as Record<string,unknown>);
                 return {ok:true,json:async()=>({jsonrpc:'2.0',id:1,
                     result:[{blockNumber:'0x124'}]})} as Response;
