@@ -1,3 +1,4 @@
+import { CacheLeituraRpc, ProviderSondaRpc } from './rpcCoordenado';
 import {comExecutorMegazord,carteiraMegazord,transmitirMegazord,contextoExecutorMegazord} from './megazordExecutor';
 /**
  * TITAN — executor opcional de rotas CacadorV3 na Base.
@@ -511,6 +512,8 @@ export function blocoValidoParaProvaAtomica(blocoDaCotacao:number,blocoAtual:num
         &&blocoAtual-blocoDaCotacao<=20;
 }
 
+const metadadosSonda = new CacheLeituraRpc<readonly [string,string,string,string,string|null]>(15_000);
+
 export async function simularTitanAoVivo(
     plano:PlanoTitan,rpcUrl:string,ambiente:NodeJS.ProcessEnv=process.env
 ):Promise<EnsaioAtomicoTitan>{
@@ -527,7 +530,7 @@ export async function simularTitanAoVivo(
         contrato=contratoExecutorTitan(ambiente)!;
         cofre=getAddress(ambiente.TITAN_COFRE);
     }catch{return{situacao:'desconhecido',motivo:'enderecos do contrato/cofre invalidos',bloco:null};}
-    const rpc=new JsonRpcProvider(rpcUrl,Number(REDE_BASE),{staticNetwork:true});
+    const rpc=new ProviderSondaRpc(rpcUrl);
     let bloco:number|null=null;
     try{
         const get=async(nome:'dono'|'cofre')=>{
@@ -536,10 +539,19 @@ export async function simularTitanAoVivo(
         };
         // Leituras independentes: conserva todas as verificacoes sem somar
         // suas latencias antes de cada prova atomica.
-        const [chainId,bytecode,cofreAtual,donoAtual]=await Promise.all([
-            rpc.send('eth_chainId',[]),rpc.getCode(contrato),get('cofre'),
-            get('dono'),
-        ]);
+        const [chainId,bytecode,cofreAtual,donoAtual,morphoAtual]=await metadadosSonda.ler(
+            JSON.stringify([rpcUrl,contrato,ambiente.TITAN_FONTE_CREDITO??'flashswap']),async()=>{
+                const valores=await Promise.all([
+                    rpc.send('eth_chainId',[]) as Promise<string>,rpc.getCode(contrato),
+                    get('cofre'),get('dono'),
+                    ambiente.TITAN_FONTE_CREDITO==='morpho'
+                        ? rpc.call({to:contrato,data:ABI_TITAN.encodeFunctionData('morpho')})
+                        : Promise.resolve(null),
+                ] as const);
+                if(BigInt(valores[0])!==REDE_BASE||valores[1]==='0x')
+                    throw Error('RPC/rede ou bytecode do executor invalido');
+                return valores;
+            });
         if(BigInt(chainId)!==REDE_BASE)throw Error('RPC nao e Base 8453');
         if(bytecode==='0x')throw Error('executor sem bytecode na Base');
         if(cofreAtual!==cofre)throw Error('cofre do executor diverge');
@@ -548,7 +560,7 @@ export async function simularTitanAoVivo(
         // como remetente de eth_call/estimateGas. Nao concede assinatura.
         const {from,identidade}=remetenteDaSondaTitan(donoAtual,ambiente);
         if(ambiente.TITAN_FONTE_CREDITO==='morpho'){
-            const cru=await rpc.call({to:contrato,data:ABI_TITAN.encodeFunctionData('morpho')});
+            const cru=morphoAtual!;
             const configurado=getAddress(ABI_TITAN.decodeFunctionResult('morpho',cru)[0] as string);
             if(configurado!==getAddress(MORPHO_BASE_OFICIAL))
                 throw Error('executor de arbitragem Morpho nao referencia o singleton da Base');
