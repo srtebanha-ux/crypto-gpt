@@ -8,6 +8,7 @@ import {ContractFactory,Interface,JsonRpcProvider,Wallet,getAddress} from 'ether
 import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
 import {COFRE_ESPERADO} from './caca';
 import {FABRICA_V3_BASE,MORPHO_FLASH_BASE} from './titanPonteMultiHop';
+import {aguardarReciboMorpho,rpcsReciboMorpho} from './morphoDeployReceipt';
 const ROUTER='0x2626664c2603336E57B271c5C0b26F421741e481';
 const ARTIFACT='.tmp/artifacts/contracts/TitanCacadorMorphoV3.sol/TitanCacadorMorphoV3.json';
 const marker='/app/data/titanMorphoV3Deploy.json';
@@ -77,10 +78,13 @@ export async function implantarTitanMorphoV3(env:NodeJS.ProcessEnv=process.env):
        gasLimit:gasLimit.toString(),maxCostWei:worst.toString()}));
      fs.fsyncSync(fd);
    }finally{fs.closeSync(fd);}
-   const tx=await p.broadcastTransaction(raw);
-   if(tx.hash.toLowerCase()!==hash.toLowerCase())no('hash mismatch');
-   const rec=await tx.wait(1,120000);
-   if(!rec||rec.status!==1||!rec.contractAddress)no('missing receipt; check hash, do not retry');
+   // Broadcast exactly once. Even an HTTP error can follow acceptance: resolve
+   // the known hash by read-only receipt polling, never send a replacement.
+   let sent:unknown;
+   try{sent=await p.send('eth_sendRawTransaction',[raw]);}catch{ /* reservation stays durable */ }
+   if(sent!==undefined&&sent!==hash)no('hash mismatch');
+   const rec=await aguardarReciboMorpho(hash,wallet.address,pending,
+     rpcsReciboMorpho(rpcUrl,env.TITAN_DEPLOY_RPC_SECUNDARIO));
    await deployedInvariants(p,rec.contractAddress,wallet.address);
    fs.writeFileSync(marker,JSON.stringify({status:'confirmed',hash,
      contract:rec.contractAddress,block:rec.blockNumber,nonce:pending}),{mode:0o600});

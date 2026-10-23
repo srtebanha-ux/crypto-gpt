@@ -8,6 +8,7 @@ import path from 'node:path';
 import {Interface,JsonRpcProvider,Wallet,getAddress} from 'ethers';
 import {COFRE_ESPERADO} from './caca';
 import {FABRICA_V3_BASE,MORPHO_FLASH_BASE} from './titanPonteMultiHop';
+import {conferirReciboMorpho,rpcsReciboMorpho,type RpcRecibo} from './morphoDeployReceipt';
 
 const V3_ROUTER='0x2626664c2603336E57B271c5C0b26F421741e481';
 const AERO_ROUTER='0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43';
@@ -67,12 +68,33 @@ function config(tipo:Tipo,owner:string):ContratoConfig {
    cap:'TITAN_MORPHO_AERO_DEPLOY_WEI',
    invariants:{...common,aerodromeRouter:AERO_ROUTER,aerodromeFactory:AERO_FACTORY}};
 }
-function markerConfirmado(file:string):string|undefined {
+export async function markerConfirmado(file:string,env:NodeJS.ProcessEnv,
+ read?:RpcRecibo,verify=verificarContrato):Promise<string|undefined> {
  if(!fs.existsSync(file))return;
  // A reserved/uncertain deployment is never retried or guessed to have succeeded.
  let data:unknown;
  try{data=JSON.parse(fs.readFileSync(file,'utf8'));}catch{throw Error('marcador Morpho ilegivel: abortar boot');}
- const m=data as {status?:unknown;contract?:unknown;hash?:unknown};
+ const m=data as {status?:unknown;contract?:unknown;hash?:unknown;nonce?:unknown};
+ if(m.status==='reserved'){
+   const owner=env.MEGAZORD_ENDERECO_PUBLICO??env.CACA_ENDERECO_PUBLICO;
+   if(!owner||!env.MEGAZORD_RPC_URL||typeof m.hash!=='string'||typeof m.nonce!=='number')
+     throw Error('marcador reservado sem identidade; nao reenviar');
+   const receipt=await conferirReciboMorpho(m.hash,owner,m.nonce,
+     rpcsReciboMorpho(env.MEGAZORD_RPC_URL,env.MEGAZORD_RPC_SECUNDARIO),read);
+   if(!receipt)throw Error('deploy Morpho pendente/incerto: recibo duplo ausente; nao reenviar');
+   const tipo=file.endsWith('titanMorphoV3Deploy.json')?'v3'
+     :file.endsWith('titanMorphoAeroDeploy.json')?'aero':undefined;
+   if(!tipo)throw Error('marcador Morpho desconhecido');
+   await verify(tipo,receipt.contractAddress,owner,env.MEGAZORD_RPC_URL);
+   const confirmed={...m,status:'confirmed',contract:receipt.contractAddress,
+     block:receipt.blockNumber,blockHash:receipt.blockHash,reconciled:true};
+   const temp=file+'.'+process.pid+'.reconciled';
+   const fd=fs.openSync(temp,'wx',0o600);
+   try{fs.writeFileSync(fd,JSON.stringify(confirmed));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+   fs.renameSync(temp,file);
+   const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}
+   return receipt.contractAddress;
+ }
  if(m.status!=='confirmed'||typeof m.contract!=='string'
    ||!/^0x[0-9a-f]{40}$/i.test(m.contract)
    ||typeof m.hash!=='string'||!/^0x[0-9a-f]{64}$/i.test(m.hash))
@@ -82,7 +104,7 @@ function markerConfirmado(file:string):string|undefined {
 export type DependenciasMorphoBoot={
  verificar:(tipo:Tipo,address:string,owner:string,rpc:string)=>Promise<void>;
  implantar:(tipo:Tipo,env:NodeJS.ProcessEnv)=>Promise<string>;
- recuperar:(file:string)=>string|undefined;
+ recuperar:(file:string,env:NodeJS.ProcessEnv)=>string|undefined|Promise<string|undefined>;
 };
 async function verificarContrato(tipo:Tipo,address:string,owner:string,rpcUrl:string):Promise<void>{
  const p=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true});
@@ -128,7 +150,7 @@ export async function prepararMorphoMegazord(
  for(const tipo of ['v3','aero'] as const){
    const c=config(tipo,owner);
    const fromEnv=env[c.env];
-   const fromMarker=deps.recuperar(c.marker);
+   const fromMarker=await deps.recuperar(c.marker,env);
    const fromCache=cached[tipo];
    if([fromEnv,fromMarker,fromCache].filter(Boolean).some(
      addr=>getAddress(addr!)!==getAddress(fromEnv??fromMarker??fromCache!)))
@@ -156,6 +178,7 @@ export async function prepararMorphoMegazord(
        CACA_CHAVE_PRIVADA:key,TITAN_CHAVE_PRIVADA:key,
        CACA_ENDERECO_PUBLICO:owner,
        TITAN_EXECUTOR_RPC_URL:rpc,TITAN_NONCE_EXCLUSIVO:env.MEGAZORD_EXCLUSIVO,
+       TITAN_DEPLOY_RPC_SECUNDARIO:env.MEGAZORD_RPC_SECUNDARIO,
        ...(tipo==='v3'
          ?{TITAN_MORPHO_V3_DEPLOY:'1',TITAN_MORPHO_V3_CONFIRMAR:'IMPLANTAR_MORPHO_BASE'}
          :{TITAN_MORPHO_AERO_DEPLOY:'1',TITAN_MORPHO_AERO_CONFIRMAR:'IMPLANTAR_MORPHO_BASE'}),

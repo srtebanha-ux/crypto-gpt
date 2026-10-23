@@ -4,6 +4,8 @@ on:
     branches: [CHAT, main]
     paths:
       - 'src/megazord*'
+      - 'src/morphoDeployReceipt*'
+      - 'src/implantarTitanMorpho*'
       - 'package*.json'
       - '.github/workflows/megazord-readiness.yml'
 permissions:
@@ -22,4 +24,4 @@ jobs:
       - run: npm run build
       - run: npm run typecheck
       - name: Offline wallet, RPC, boot and executor regressions
-        run: node --require ts-node/register --test src/megazord*.test.ts
+        run: node --require ts-node/register --test src/megazord*.test.ts src/morphoDeployReceipt.test.ts
