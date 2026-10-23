@@ -49,7 +49,8 @@ export interface ContagemDeChamadas {
 
 export class GovernadorDeVazao {
     private emVoo = 0;
-    private fila: Array<() => void> = [];
+    private fila: Array<{prioridade:Prioridade; entrar:()=>void}> = [];
+    private prioritariasSeguidas=0;
     /**
      * O recuo e POR PROVEDOR, e nao um so para todos.
      *
@@ -125,16 +126,26 @@ export class GovernadorDeVazao {
             await this.dormir(espera);
         }
         if (this.emVoo >= this.maxEmVoo) {
-            await new Promise<void>((r) => { this.fila.push(r); });
-        }
-        this.emVoo += 1;
+            await new Promise<void>((entrar) => { this.fila.push({prioridade,entrar}); });
+        } else this.emVoo += 1;
         let liberou = false;
         return () => {
             if (liberou) return;
             liberou = true;
             this.emVoo -= 1;
-            const proximo = this.fila.shift();
-            if (proximo !== undefined) proximo();
+            if(this.fila.length){
+                const rank={essencial:0,normal:1,demorada:2};
+                // After eight priority grants, admit the oldest request once.
+                let i=0;
+                if(this.prioritariasSeguidas<8){
+                    for(let j=1;j<this.fila.length;j++)
+                        if(rank[this.fila[j]!.prioridade]<rank[this.fila[i]!.prioridade])i=j;
+                    this.prioritariasSeguidas++;
+                }else this.prioritariasSeguidas=0;
+                const [proximo]=this.fila.splice(i,1);
+                this.emVoo++;
+                proximo!.entrar();
+            }
         };
     }
 

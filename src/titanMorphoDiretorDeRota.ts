@@ -1,27 +1,29 @@
-/**
- * TITAN: one owner / one nonce / two possible Morpho exit routes.
- * This module is shared by block-hot and the slower discovery radar.
- * A rejected simulation is never an order; both use full onchain proof.
- */
+/** One director owns both route preflights; no second route after an uncertain tx. */
 import type {MercadoDaApi} from './morphoApi';
 import {avaliarELiquidarMorphoV3} from './titanMorphoV3Tiro';
 import {avaliarELiquidarMorphoAero} from './titanMorphoAeroTiro';
-type Entrada={mercado:MercadoDaApi;usuario:string;rpcUrl:string};
+type Entrada={mercado:MercadoDaApi;usuario:string;rpcUrl:string;signal?:AbortSignal};
 type Resultado=Awaited<ReturnType<typeof avaliarELiquidarMorphoV3>>;
 export type TentativaMorpho={via:'Uniswap V3'|'Aerodrome';resultado:Resultado;primeiroMotivo?:string};
+export function rotasMorphoHabilitadas(env:NodeJS.ProcessEnv):boolean {
+ return env.CACA_MORPHO_V3_AVALIAR!=='0'||
+   (!!env.CACA_MORPHO_AERO_CONTRATO&&env.CACA_MORPHO_AERO_AVALIAR!=='0');
+}
+export type SondadoresMorpho={v3:typeof avaliarELiquidarMorphoV3;aero:typeof avaliarELiquidarMorphoAero};
 let ocupado=false;
-export async function avaliarSaidasMorpho(e:Entrada,env:NodeJS.ProcessEnv=process.env):
- Promise<TentativaMorpho>{
- if(ocupado)return{via:'Uniswap V3',resultado:{
-   status:'descartada',motivo:'outro preflight Morpho ocupa a unica carteira'}};
+export async function avaliarSaidasMorpho(e:Entrada,env:NodeJS.ProcessEnv=process.env,
+ sondadores:SondadoresMorpho={v3:avaliarELiquidarMorphoV3,aero:avaliarELiquidarMorphoAero}):Promise<TentativaMorpho>{
+ if(ocupado)return{via:'Uniswap V3',resultado:{status:'descartada',motivo:'outro preflight Morpho ocupa a unica carteira'}};
  ocupado=true;
  try {
-   const v3=await avaliarELiquidarMorphoV3(e,env);
-   if(v3.status!=='inviavel'||!env.CACA_MORPHO_AERO_CONTRATO)
-     return {via:'Uniswap V3',resultado:v3};
-   // The V3 call has no hash/broadcast, so and ONLY so can the alternative
-   // attempt a fresh independent proof of the same borrower.
-   const aero=await avaliarELiquidarMorphoAero(e,env);
-   return {via:'Aerodrome',resultado:aero,primeiroMotivo:v3.motivo};
+   let v3:Resultado={status:'descartada',motivo:'rota V3 ausente ou desabilitada'};
+   if(env.CACA_MORPHO_V3_CONTRATO&&env.CACA_MORPHO_V3_AVALIAR!=='0')
+     v3=await sondadores.v3(e,env);
+   // Hash is a stop even if a future adapter returns an unexpected status.
+   if(v3.hash||!['inviavel','descartada'].includes(v3.status))return{via:'Uniswap V3',resultado:v3};
+   if(e.signal?.aborted||!env.CACA_MORPHO_AERO_CONTRATO||env.CACA_MORPHO_AERO_AVALIAR==='0')
+     return{via:'Uniswap V3',resultado:v3};
+   const aero=await sondadores.aero(e,env);
+   return{via:'Aerodrome',resultado:aero,primeiroMotivo:v3.motivo};
  }finally{ocupado=false;}
 }

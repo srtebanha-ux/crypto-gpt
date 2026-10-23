@@ -478,6 +478,7 @@ test('5. a API da Morpho funciona INDEPENDENTEMENTE do estado do RPC', async () 
     const http: string[] = [];
     const rpc: string[] = [];
     await descobrirMorphoPorApi({
+        pedirRpc:async()=>{throw Error('RPC offline no teste');},
         infra: {
             provedoresEsgotados: ['base-mainnet.g.alchemy.com'],
             noFallback: true,
@@ -521,6 +522,7 @@ test('6. API fora do ar com cache anterior válido: segue com o cache e DIZ', as
 
     // Primeiro: uma volta que DEU CERTO, para haver cache e memória.
     await descobrirMorphoPorApi({
+        pedirRpc:async()=>{throw Error('RPC offline no teste');},
         infra: { provedoresEsgotados: [], noFallback: false },
         buscar: async () => ({ status: 200, text: async () => pagina([1, 2, 3]) }),
         caminhoDoCache: cache, caminhoDaMemoria: memoria,
@@ -532,6 +534,7 @@ test('6. API fora do ar com cache anterior válido: segue com o cache e DIZ', as
 
     // Agora a API cai. O cache tem de sustentar, e o último sucesso sobreviver.
     await descobrirMorphoPorApi({
+        pedirRpc:async()=>{throw Error('RPC offline no teste');},
         infra: { provedoresEsgotados: [], noFallback: false },
         buscar: async () => { throw new Error('getaddrinfo ENOTFOUND api.morpho.org'); },
         caminhoDoCache: cache, caminhoDaMemoria: memoria,
@@ -561,6 +564,7 @@ test('8. memória corrompida no disco não impede a descoberta nem lança', asyn
     await writeFile(memoria, '{"ultimoSucesso": {"merc');  // JSON cortado
 
     await descobrirMorphoPorApi({
+        pedirRpc:async()=>{throw Error('RPC offline no teste');},
         infra: { provedoresEsgotados: [], noFallback: false },
         buscar: async () => ({ status: 200, text: async () => pagina([7, 8]) }),
         caminhoDoCache: j(dir, 'mercados.json'), caminhoDaMemoria: memoria,

@@ -25,6 +25,21 @@ contract TitanMockV3Router02 {
   address tokenIn;address tokenOut;uint24 fee;address recipient;
   uint256 amountIn;uint256 amountOutMinimum;uint160 sqrtPriceLimitX96;
  }
+ struct ExactInputParams {bytes path;address recipient;uint256 amountIn;uint256 amountOutMinimum;}
+ uint256 public hopsExecutados;
+ function exactInput(ExactInputParams calldata x) external returns(uint256 amountOut){
+  require(x.path.length==66,"two hops");
+  address entrada;address meio;address saida;
+  bytes memory rota=x.path;
+  assembly {entrada:=shr(96,mload(add(rota,32))) meio:=shr(96,mload(add(rota,55))) saida:=shr(96,mload(add(rota,78)))}
+  require(ITitanMockTokenV3(entrada).transferFrom(msg.sender,address(this),x.amountIn));
+  uint256 intermediario=x.amountIn*outputBps/10000;
+  // Model both transfers/swaps, not a direct fabricated final output.
+  require(ITitanMockTokenV3(meio).transfer(address(this),intermediario));
+  amountOut=intermediario*outputBps/10000;hopsExecutados=2;
+  require(amountOut>=x.amountOutMinimum,"amountOutMinimum");
+  require(ITitanMockTokenV3(saida).transfer(x.recipient,amountOut));
+ }
  function exactInputSingle(ExactInputSingleParams calldata x) external returns(uint256 amountOut) {
   require(x.sqrtPriceLimitX96==0,"partial fill disallowed");
   require(ITitanMockTokenV3(x.tokenIn).transferFrom(msg.sender,address(this),x.amountIn));

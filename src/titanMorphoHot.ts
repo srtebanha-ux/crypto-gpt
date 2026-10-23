@@ -1,3 +1,4 @@
+import {rotasMorphoHabilitadas} from './titanMorphoDiretorDeRota';
 /**
  * TITAN Morpho HOT — bloco a bloco nas posicoes ja descobertas.
  *
@@ -141,7 +142,8 @@ async function verificarBlocoMorphoHot():Promise<void>{
    const agora=Date.now();
    const selecionados=[...alvos.values()]
      .filter(a=>(aguardando.get(chave(a))??0)<=agora)
-     .sort((a,b)=>a.distanciaBps<b.distanciaBps?-1:a.distanciaBps>b.distanciaBps?1:0);
+     .sort((a,b)=>Number(b.distanciaBps<=0n)-Number(a.distanciaBps<=0n)
+       ||(aguardando.get(chave(a))??0)-(aguardando.get(chave(b))??0));
    if(!selecionados.length)return;
    const lote=montarLoteMorphoHot(selecionados);
    const retorno=await rpc.send('eth_call',[{
@@ -170,15 +172,15 @@ async function verificarBlocoMorphoHot():Promise<void>{
      if(state.situacao==='sem-divida'||state.situacao==='sem-garantia'){
        alvos.delete(chave(a));continue;
      }
-     if(state.situacao!=='cruzou-estimado')continue;
-     cruzaram++;
+     if(state.situacao!=='cruzou-estimado'&&state.situacao!=='proxima')continue;
+     if(state.situacao==='cruzou-estimado')cruzaram++;
      // Only one V3 transaction candidate at a time: shared wallet/nonce.
      if(emProva>0)continue;
      emProva++;
      aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
      const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
      const {via,resultado:result,primeiroMotivo}=await avaliarSaidasMorpho({
-       mercado:a.mercado,usuario:a.usuario,
+       mercado:a.mercado,usuario:a.usuario,signal:AbortSignal.timeout(20_000),
        rpcUrl:process.env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org',
      });
      // An existent pool is not liquid. If ALL executor sizes reverted from
@@ -201,7 +203,7 @@ async function verificarBlocoMorphoHot():Promise<void>{
        bloquearMercadoSemSaida(a.mercado.id);
        aguardando.set(chave(a),Date.now()+30*60_000);
      }
-     log.warn('[TITAN/MORPHO-HOT/TIRO] Posicao cruzou em bloco novo, executor avaliado.',{
+     log.warn('[TITAN/MORPHO-HOT/TIRO] Posicao cruzada ou proxima sondada com liquidacao integral.',{
        bloco:block,mercado:a.mercado.id,usuario:a.usuario,
        via,resultado:result,
        primeiroV3:primeiroMotivo,
@@ -229,7 +231,7 @@ async function verificarBlocoMorphoHot():Promise<void>{
  }finally{emCurso=false;}
 }
 export function iniciarGatilhoQuenteMorpho(env:NodeJS.ProcessEnv=process.env):void{
- if(iniciado||env.CACA_MORPHO_V3_AVALIAR==='0')return;
+ if(iniciado||!rotasMorphoHabilitadas(env))return;
  iniciado=true;
  const url=env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org';
  rpc=new JsonRpcProvider(url,8453,{staticNetwork:true});

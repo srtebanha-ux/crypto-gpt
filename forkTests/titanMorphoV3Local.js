@@ -33,10 +33,11 @@ describe('TITAN Morpho V3 local atomic callback',function(){
   },'latest']);
   return BigInt(v);
  }
- async function setup(){
+ async function setup(morphoNome='MorphoAuditoriaFalso'){
+
   const loan=await deploy('TokenFalso',['USDC']);
   const collateral=await deploy('TokenFalso',['USDe']);
-  const morpho=await deploy('MorphoAuditoriaFalso');
+  const morpho=await deploy(morphoNome);
   const router=await deploy('TitanMockV3Router02');
   const factory=await deploy('TitanMockV3Factory');
   const pool=await deploy('TitanMockV3Pool');
@@ -86,5 +87,49 @@ describe('TITAN Morpho V3 local atomic callback',function(){
   assert.equal(await balance(a.collateral,a.hunter.address),7n);
   assert.equal(await balance(a.loan,a.morpho.address),0n);
   assert.equal(await balance(a.loan,cofre),0n);
+ });
+
+ it('near position reaches full simulation: interest accrues before health; healthy case never sends',async()=>{
+  const {candidatoElegivelV3}=require('../dist/titanMorphoV3Gate');
+  assert.equal(candidatoElegivelV3('proxima',true),true);
+  const a=await setup('MorphoJurosFalso');
+  const data=a.hunter.iface.encodeFunctionData('liquidar',[
+   a.params,outsider,100n,0n,500,10n,9999999999n]);
+  const ret=await p.send('eth_call',[{from:owner,to:a.hunter.address,data},'latest']);
+  assert.equal(BigInt(ret),10n);
+  // eth_call does not persist accrual or move real balances.
+  assert.equal(await balance(a.loan,cofre),0n);
+  assert.equal(BigInt(await p.send('eth_call',[{to:a.morpho.address,
+   data:a.morpho.iface.encodeFunctionData('divida')},'latest'])),100n);
+  await invoke(owner,a.morpho,'configurar',[0]);
+  await assert.rejects(()=>p.send('eth_call',[{from:owner,to:a.hunter.address,data},'latest']),/HEALTHY_POSITION/);
+  assert.equal(await balance(a.loan,cofre),0n);
+ });
+
+ it('two-hop V3 route simulates and repays without direct pool; rejects wrong/unauthorized path and floor',async()=>{
+  const {solidityPacked}=require('ethers');
+  const a=await setup();const meio=await deploy('TokenFalso',['bridge']);
+  const rota=solidityPacked(['address','uint24','address','uint24','address'],
+   [a.collateral.address,500,meio.address,3000,a.loan.address]);
+  await invoke(owner,a.factory,'setPool',[a.collateral.address,a.loan.address,500,'0x0000000000000000000000000000000000000000']);
+  await invoke(owner,a.factory,'setPool',[a.collateral.address,meio.address,500,a.pool.address]);
+  await invoke(owner,a.factory,'setPool',[meio.address,a.loan.address,3000,a.pool.address]);
+  const args=[a.params,outsider,100n,0n,rota,10n,9999999999n];
+  await assert.rejects(()=>invoke(owner,a.hunter,'liquidarRota',args)); // not allowlisted
+  await invoke(owner,a.hunter,'autorizarIntermediario',[meio.address,true]);
+  await invoke(owner,meio,'criar',[a.router.address,1000000n]);
+  await assert.rejects(()=>invoke(outsider,a.hunter,'liquidarRota',args));
+  await assert.rejects(()=>invoke(owner,a.hunter,'liquidarRota',[...args.slice(0,5),11n,args[6]]));
+  const wrong=solidityPacked(['address','uint24','address','uint24','address'],
+   [a.collateral.address,500,meio.address,3000,a.collateral.address]);
+  await assert.rejects(()=>invoke(owner,a.hunter,'liquidarRota',[...args.slice(0,4),wrong,10n,args[6]]));
+  const data=a.hunter.iface.encodeFunctionData('liquidarRota',args);
+  assert.equal(BigInt(await p.send('eth_call',[{from:owner,to:a.hunter.address,data},'latest'])),10n);
+  await invoke(owner,a.hunter,'liquidarRota',args);
+  assert.equal(await balance(a.loan,cofre),10n);
+  assert.equal(await balance(a.loan,a.morpho.address),100n);
+  assert.equal(await balance(a.loan,a.hunter.address),25n);
+  assert.equal(await balance(a.collateral,a.hunter.address),7n);
+  assert.equal(BigInt(await p.send('eth_call',[{to:a.router.address,data:a.router.iface.encodeFunctionData('hopsExecutados')},'latest'])),2n);
  });
 });

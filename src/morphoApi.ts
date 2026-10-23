@@ -140,6 +140,7 @@ export async function enumerarMercados(
     buscar: TransporteHttp,
     opcoes: {
         base?: string;
+        reservaDeRequisicoes?: number;
         porPagina?: number;
         dormir?: (ms: number) => Promise<void>;
         orcamento?: OrcamentoHttp;
@@ -168,6 +169,8 @@ export async function enumerarMercados(
     });
 
     for (let pagina = 0; pagina < TETO_DE_PAGINAS; pagina += 1) {
+        if(opcoes.orcamento && (opcoes.reservaDeRequisicoes??0)>0 && opcoes.orcamento.tetoDeRequisicoes-opcoes.orcamento.gastas
+            <=(opcoes.reservaDeRequisicoes??0))return parcial('capacidade reservada para devedores',false);
         if (opcoes.orcamento && !opcoes.orcamento.pedir()) {
             return parcial(
                 `o orçamento encerrou a enumeração: ${opcoes.orcamento.encerrado ?? 'sem motivo registrado'}`,
@@ -953,62 +956,54 @@ export async function enumerarDevedores(
     buscar: TransporteHttp,
     idDoMercado: string,
     opcoes: { url?: string; porPagina?: number; tetoDePaginas?: number;
+        inicio?: number; orcamento?: OrcamentoHttp; signal?: AbortSignal;
         dormir?: (ms: number) => Promise<void> } = {},
-): Promise<{ devedores: DevedorDaApi[]; requisicoes: number; falha: string | null; completa: boolean }> {
+): Promise<{ devedores: DevedorDaApi[]; requisicoes: number; falha: string | null;
+    completa: boolean; proximo: number }> {
     const url = opcoes.url ?? 'https://api.morpho.org/graphql';
-    const porPagina = Math.min(opcoes.porPagina ?? POR_PAGINA, POR_PAGINA);
-    const teto = opcoes.tetoDePaginas ?? TETO_DE_PAGINAS;
-    const dormir = opcoes.dormir ?? ((ms: number) => new Promise<void>((r) => { setTimeout(r, ms); }));
+    const porPagina = Math.max(1, Math.min(opcoes.porPagina ?? POR_PAGINA, POR_PAGINA));
+    const teto = Math.max(0, opcoes.tetoDePaginas ?? TETO_DE_PAGINAS);
+    const dormir = opcoes.dormir ?? ((ms: number) => new Promise<void>(r => setTimeout(r,ms)));
     const devedores: DevedorDaApi[] = [];
     const vistos = new Set<string>();
+    let proximo = Number.isSafeInteger(opcoes.inicio) && opcoes.inicio! >= 0 ? opcoes.inicio! : 0;
+    const inicio = proximo;
     let requisicoes = 0;
-    for (let p = 0; p < teto; p += 1) {
-        requisicoes += 1;
-        let cru: string; let status: number;
-        try {
-            const r = await buscar(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                body: consultaDeDevedores(idDoMercado, porPagina, p * porPagina),
-            });
-            status = r.status; cru = await r.text();
-        } catch (e) {
-            return { devedores, requisicoes, completa: false,
-                falha: `o transporte falhou: ${sanitizar(e instanceof Error ? e.message : String(e))}` };
-        }
-        if (status !== 200) {
-            return { devedores, requisicoes, completa: false,
-                falha: `o GraphQL respondeu HTTP ${status}` };
-        }
+    const parcial = (falha: string | null, completa = false) =>
+        ({devedores,requisicoes,falha,completa,proximo});
+    const signal = opcoes.signal ?? opcoes.orcamento?.sinal;
+    for (let pagina=0; pagina<teto; pagina++) {
+        if(signal?.aborted || (opcoes.orcamento && !opcoes.orcamento.pedir()))
+            return parcial('orcamento ou cancelamento encerrou paginas de devedores');
+        requisicoes++;
         let corpo: unknown;
-        try { corpo = JSON.parse(cru); } catch {
-            return { devedores, requisicoes, completa: false,
-                falha: `o GraphQL respondeu NÃO-JSON: "${sanitizar(cru.slice(0, 50))}"` };
+        try {
+            const r=await buscar(url,{method:'POST',
+                headers:{'Content-Type':'application/json',Accept:'application/json'},
+                body:consultaDeDevedores(idDoMercado,porPagina,proximo),signal});
+            if(r.status!==200)return parcial(`o GraphQL respondeu HTTP ${r.status}`);
+            corpo=JSON.parse(await r.text());
+        } catch(e) { return parcial(`o transporte/JSON falhou: ${sanitizar(String(e))}`); }
+        if(signal?.aborted)return parcial('cancelado antes de aceitar pagina');
+        const envelope=corpo as {data?:{marketPositions?:{items?:unknown}};errors?:unknown[]}|null;
+        const itens=envelope?.data?.marketPositions?.items;
+        if(!Array.isArray(itens)||envelope?.errors?.length)
+            return parcial('GraphQL HTTP 200 sem marketPositions.items valido ou com errors');
+        const lidos=lerDevedores(corpo);
+        let novos=0;
+        for(const d of lidos)if(!vistos.has(d.endereco)){
+            vistos.add(d.endereco);devedores.push(d);novos++;
         }
-        // A API pode responder HTTP 200 com erros GraphQL. Antes isso
-        // virava 0 devedores com completa=true, escondendo falha de schema.
-        const envelope=(corpo&&typeof corpo==='object')?
-            corpo as Record<string,unknown>:null;
-        if(!envelope||!envelope.data||typeof envelope.data!=='object'
-          ||Array.isArray(envelope.errors)&&envelope.errors.length>0
-          ||!((envelope.data as Record<string,unknown>).marketPositions as
-            Record<string,unknown>|undefined)?.items) {
-            return {devedores,requisicoes,completa:false,
-                falha:'GraphQL HTTP 200 sem marketPositions.items valido ou com errors'};
+        if(itens.length<porPagina){
+            proximo=0;
+            // Completion means a full pass, not just reaching the end from a cursor.
+            return parcial(null,inicio===0);
         }
-        const lidos = lerDevedores(corpo);
-        let novos = 0;
-        for (const d of lidos) {
-            if (vistos.has(d.endereco)) continue;
-            vistos.add(d.endereco); devedores.push(d); novos += 1;
-        }
-        if (lidos.length === 0 || novos === 0 || lidos.length < porPagina) {
-            return { devedores, requisicoes, falha: null, completa: true };
-        }
-        await dormir(ENTRE_PAGINAS_MS);
+        if(novos===0)return parcial('pagina repetida ou sem enderecos validos; cursor conservado');
+        proximo+=itens.length;
+        if(pagina+1<teto)await dormir(ENTRE_PAGINAS_MS);
     }
-    return { devedores, requisicoes, completa: false,
-        falha: `a paginação passou de ${teto} páginas e eu parei` };
+    return parcial(`paginacao parcial: teto de ${teto} paginas; retomar em ${proximo}`);
 }
 
 // ---------------------------------------------------------------------------

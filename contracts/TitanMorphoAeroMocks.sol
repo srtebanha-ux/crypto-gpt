@@ -26,11 +26,15 @@ contract AeroRouterMock {
   uint256 amountIn,uint256 minOut,Route[] calldata routes,
   address recipient,uint256 deadline
  ) external returns(uint256[] memory outputs){
-  require(deadline>=block.timestamp&&routes.length==1,"bad path");
+  require(deadline>=block.timestamp&&(routes.length==1||routes.length==2),"bad path");
   require(IAeroMockToken(routes[0].from).transferFrom(msg.sender,address(this),amountIn));
-  uint256 out=amountIn*outputBps/10000;
+  outputs=new uint256[](routes.length+1);outputs[0]=amountIn;
+  uint256 out=amountIn;
+  for(uint256 i=0;i<routes.length;i++){
+   if(i>0)require(routes[i-1].to==routes[i].from,"disconnected");
+   out=out*outputBps/10000;outputs[i+1]=out;
+  }
   require(out>=minOut,"INSUFFICIENT_OUTPUT_AMOUNT");
-  require(IAeroMockToken(routes[0].to).transfer(recipient,out));
-  outputs=new uint256[](2);outputs[0]=amountIn;outputs[1]=out;
+  require(IAeroMockToken(routes[routes.length-1].to).transfer(recipient,out));
  }
 }
