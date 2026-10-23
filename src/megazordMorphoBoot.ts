@@ -121,7 +121,10 @@ export async function prepararMorphoMegazord(
    throw Error('auto-deploy nao pode coexistir com CACA_ENVIAR');
  const found={} as Record<Tipo,string>;
  const cached=lerCache(env,owner);
+ const planned:Partial<Record<Tipo,string>>={};
  let novos=0;
+ // Resolve BOTH markers/caches and validate existing executors/caps before
+ // spending on either missing contract. An invalid Aero must not cost a V3 deploy.
  for(const tipo of ['v3','aero'] as const){
    const c=config(tipo,owner);
    const fromEnv=env[c.env];
@@ -130,7 +133,7 @@ export async function prepararMorphoMegazord(
    if([fromEnv,fromMarker,fromCache].filter(Boolean).some(
      addr=>getAddress(addr!)!==getAddress(fromEnv??fromMarker??fromCache!)))
      throw Error('endereco do contrato diverge do marcador/cache persistente: '+tipo);
-   let address=fromEnv??fromMarker??fromCache;
+   const address=fromEnv??fromMarker??fromCache;
    if(!address){
      if(env.MEGAZORD_AUTO_DEPLOY!=='1')
        throw Error('executor Morpho '+tipo+' ausente: auto-deploy nao autorizado');
@@ -139,6 +142,16 @@ export async function prepararMorphoMegazord(
      const cap=env[c.cap];
      if(!cap||!/^[0-9]+$/.test(cap)||BigInt(cap)<=0n||BigInt(cap)>2000000000000000n)
        throw Error('limite de gas para deploy ausente/invalido: '+tipo);
+   }else{
+     if(!/^0x[0-9a-f]{40}$/i.test(address))
+       throw Error('endereco Morpho nao e EVM valido: '+tipo);
+     await deps.verificar(tipo,address,owner,rpc);
+     planned[tipo]=getAddress(address);
+   }
+ }
+ for(const tipo of ['v3','aero'] as const){
+   let address=planned[tipo];
+   if(!address){
      const local:NodeJS.ProcessEnv={...env,
        CACA_CHAVE_PRIVADA:key,TITAN_CHAVE_PRIVADA:key,
        CACA_ENDERECO_PUBLICO:owner,
@@ -149,10 +162,10 @@ export async function prepararMorphoMegazord(
      };
      address=await deps.implantar(tipo,local);
      novos++;
+     if(!/^0x[0-9a-f]{40}$/i.test(address))
+       throw Error('endereco Morpho nao e EVM valido: '+tipo);
+     await deps.verificar(tipo,address,owner,rpc);
    }
-   if(!/^0x[0-9a-f]{40}$/i.test(address))
-     throw Error('endereco Morpho nao e EVM valido: '+tipo);
-   await deps.verificar(tipo,address,owner,rpc);
    found[tipo]=getAddress(address);
    // Persist immediately after each verified deploy, not only when BOTH finish.
    // A crash between V3 and Aero may retry Aero, but never pays twice for V3.

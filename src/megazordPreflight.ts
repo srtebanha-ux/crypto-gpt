@@ -1,14 +1,8 @@
 /** Read-only deployment checks. Never imports a signer or broadcasts. */
 import {isAddress} from 'ethers';
+import {criarRpcPreflight} from './megazordRpcLeitura';
 type Rpc=(url:string,method:string,params:unknown[])=>Promise<unknown>;
-const call:Rpc=async(url,method,params)=>{
- const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},
-   body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),signal:AbortSignal.timeout(10000)});
- if(!response.ok)throw Error('RPC HTTP '+response.status);
- const body=await response.json() as {result?:unknown;error?:unknown};
- if(body.error||body.result===undefined)throw Error('resposta RPC invalida');
- return body.result;
-};
+const call:Rpc=criarRpcPreflight();
 function quantity(value:unknown):bigint{
  if(typeof value!=='string'||!/^0x[0-9a-f]+$/i.test(value))throw Error('quantidade RPC invalida');
  return BigInt(value);

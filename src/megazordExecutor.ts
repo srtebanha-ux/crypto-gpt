@@ -9,6 +9,8 @@ import {Wallet,Transaction,keccak256,computeAddress,JsonRpcProvider,id,
 import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
 import {COFRE_ESPERADO} from './caca';
 import {consultarEthUsdBase} from './megazordEthUsd';
+import {normalizarChaveMegazord,resolverChaveMegazord,
+ normalizarCredenciaisMegazord} from './megazordCredenciais';
 
 type Log={address:string;topics:readonly string[];data:string};
 type Receipt={status:number|null;blockNumber:number;logs?:readonly Log[]};
@@ -101,7 +103,7 @@ export class ExecutorMegazord {
  constructor(key:string,private primary:RedeMegazord,private secondary:RedeMegazord,
    private policy:PoliticaMegazord,private l1Upper:(raw:string)=>Promise<bigint>,
    private onchainUsdcTwaps?:()=>Promise<readonly [string,string]>){
-   this.signer=new Wallet(key);
+   this.signer=new Wallet(normalizarChaveMegazord(key));
    if(policy.maxDailyWei<=0n||policy.maxPerTxWei<=0n||policy.maxPerTxWei>policy.maxDailyWei
      ||!Number.isSafeInteger(policy.maxDailyTx)||policy.maxDailyTx<1
      ||policy.contracts.length===0||policy.contracts.some(x=>!/^0x[0-9a-f]{40}$/i.test(x)))
@@ -251,6 +253,7 @@ export class ExecutorMegazord {
    return sent;
  }
  wallet(key:string,provider?:JsonRpcProvider):Wallet{
+   key=normalizarChaveMegazord(key);
    if(computeAddress(key).toLowerCase()!==this.address.toLowerCase())
      throw Error('Megazord exige a mesma carteira em todos os motores');
    const target=provider?this.signer.connect(provider):this.signer;
@@ -287,14 +290,14 @@ export function comExecutorMegazord<T>(strategy:string,work:()=>Promise<T>):Prom
  return active?active.run(strategy,work):work();
 }
 export function carteiraMegazord(key:string,provider?:JsonRpcProvider):Wallet{
- return active?active.wallet(key,provider):new Wallet(key,provider);
+ return active?active.wallet(key,provider):new Wallet(normalizarChaveMegazord(key),provider);
 }
 export function transmitirMegazord(rpc:JsonRpcProvider,raw:string):Promise<TransactionResponse>{
  return active?active.broadcast(raw):rpc.broadcastTransaction(raw);
 }
 /** Independent of network: validates the EXISTING wallet and persistent journal. */
 export function conferirIdentidadeMegazord(env:NodeJS.ProcessEnv):{address:string;journal:string}{
- const key=env.MEGAZORD_CHAVE_PRIVADA;
+ const key=resolverChaveMegazord(env);
  const journal=env.MEGAZORD_DIARIO;
  const expected=env.MEGAZORD_ENDERECO_PUBLICO??env.CACA_ENDERECO_PUBLICO;
  if(!key||!expected||!/^0x[0-9a-f]{40}$/i.test(expected))
@@ -314,6 +317,8 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
  if(active)throw Error('executor Megazord ja instalado');
  if(env.MEGAZORD_CONFIRMAR!=='OPERAR_BASE_REAL'||env.MEGAZORD_EXCLUSIVO!=='1')
    throw Error('executor requer confirmacao e desligamento dos assinadores antigos');
+ normalizarCredenciaisMegazord(env);
+ conferirOrcamentoMegazord(env);
  const {journal:file}=conferirIdentidadeMegazord(env);
  const key=env.MEGAZORD_CHAVE_PRIVADA!;
  if(!env.MEGAZORD_RPC_URL||!env.MEGAZORD_RPC_SECUNDARIO
@@ -337,4 +342,17 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
  const executor=active;
  process.once('exit',()=>executor.close());
  return executor;
+}
+
+/** Check spending policy before any optional paid contract deployment. */
+export function conferirOrcamentoMegazord(env:NodeJS.ProcessEnv):void{
+ const daily=env.MEGAZORD_GAS_MAX_DIA_WEI??'2000000000000000';
+ const perTx=env.MEGAZORD_GAS_MAX_TX_WEI??'0';
+ const count=Number(env.MEGAZORD_MAX_TX_DIA??'0');
+ if(!/^\d+$/.test(daily)||!/^\d+$/.test(perTx)
+   ||BigInt(perTx)<=0n||BigInt(daily)<=0n||BigInt(perTx)>BigInt(daily)
+   ||!Number.isSafeInteger(count)||count<1||count>250)
+   throw Error('orcamento Megazord invalido: confira tetos por transacao, por dia e quantidade');
+ if(env.TITAN_SNOWBALL_REINVESTIR==='1')
+   throw Error('reinvestimento precisa de migracao separada');
 }
