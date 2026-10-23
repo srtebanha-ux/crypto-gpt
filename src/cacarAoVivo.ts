@@ -4860,7 +4860,7 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
             const dado = JSON.parse(await fs.readFile(caminho,'utf8')) as {
                 versao?:number; topo?:number; inicio?:number;
                 proximoAte?:number; lidas?:number;
-                achadas?:AchadoSerial[]; atualizadoEm?:number;
+                achadas?:AchadoSerial[]; atualizadoEm?:number; tamanho?:number;
             };
             const valido=dado.versao===1
                 && Number.isSafeInteger(dado.topo)
@@ -4880,6 +4880,8 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
                 if(!terminou || Date.now()-(dado.atualizadoEm??0)<86_400_000){
                     proximoAte=dado.proximoAte!;
                     janelasLidas=dado.lidas!;
+                    tamanho=Number.isSafeInteger(dado.tamanho)&&dado.tamanho!>=PASSO_MINIMO
+                        &&dado.tamanho!<=PASSO_MAXIMO?dado.tamanho!:PASSO_MAXIMO;
                     ultimoSalvoEm=dado.atualizadoEm??0;
                     for(const a of dado.achadas!){
                         if(Number.isSafeInteger(a.bloco) && typeof a.cru==='string'
@@ -4897,7 +4899,7 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
             await fs.mkdir(path.dirname(caminho),{recursive:true});
             const temporario=caminho+'.tmp';
             await fs.writeFile(temporario,JSON.stringify({
-                versao:1,topo,inicio:menorBloco,proximoAte,lidas:janelasLidas,
+                versao:1,topo,inicio:menorBloco,proximoAte,lidas:janelasLidas,tamanho,
                 atualizadoEm:Date.now(),
                 achadas:achadas.map(a=>({...a,cru:a.cru.toString()})),
             }),'utf8');
@@ -4975,6 +4977,7 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
                 // 225, 112 blocos: repetir so gasta cota e cega o radar.
                 if(tipoDeFalha==='faixa'&&tamanho>PASSO_MINIMO){
                     tamanho=Math.max(PASSO_MINIMO,Math.floor(tamanho/2));
+                    await salvar(); // Persist learned range without advancing unread block.
                     log.warn('[MERCADO/CENSO] RPC historico recusou faixa; reduzindo, sem pular blocos.',{
                         proxAte:proximoAte,novoTamanho:tamanho,
                         veredito:'nenhum bloco perdido nem contado como zero',
