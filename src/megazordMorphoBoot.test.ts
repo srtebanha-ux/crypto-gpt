@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Wallet} from 'ethers';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {prepararMorphoMegazord,type DependenciasMorphoBoot} from './megazordMorphoBoot';
 
 const key='0x'+'11'.repeat(32);
@@ -66,4 +69,26 @@ test('invalid cap or failed immutable validation does not enable partial runtime
 test('cannot silently switch to a different private wallet',async()=>{
  const e={...env(),MEGAZORD_ENDERECO_PUBLICO:'0x'+'55'.repeat(20)};
  await assert.rejects(prepararMorphoMegazord(e,mocked([])),/carteira diverge/);
+});
+
+test('restart reads addresses atomically from diary cache without a second paid deployment',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'megazord-contracts-'));
+ try{
+  const journal=path.join(dir,'megazord.json');
+  const first:NodeJS.ProcessEnv={...env(),MEGAZORD_DIARIO:journal,
+    MEGAZORD_AUTO_DEPLOY:'1',
+    TITAN_MORPHO_V3_DEPLOY_WEI:'100000000000000',
+    TITAN_MORPHO_AERO_DEPLOY_WEI:'100000000000000'};
+  const calls1:string[]=[];
+  await prepararMorphoMegazord(first,mocked(calls1));
+  assert.deepEqual(calls1,['deploy:v3','check:v3','deploy:aero','check:aero']);
+  assert.equal(fs.existsSync(journal+'.contratos.json'),true);
+  const second:NodeJS.ProcessEnv={...env(),MEGAZORD_DIARIO:journal};
+  const calls2:string[]=[];
+  const resumed=await prepararMorphoMegazord(second,mocked(calls2));
+  assert.equal(resumed.novos,0);
+  assert.deepEqual(calls2,['check:v3','check:aero']);
+  assert.equal(second.CACA_MORPHO_V3_CONTRATO,v3);
+  assert.equal(second.CACA_MORPHO_AERO_CONTRATO,aero);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
