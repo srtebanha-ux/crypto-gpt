@@ -30,8 +30,17 @@ export function politicaMorphoV3(
     maxAgeBlocks:3,
   };
 }
+/** Aero can be observed and armed independently; still one shared signer/nonce gate. */
+export function politicaMorphoAero(env:NodeJS.ProcessEnv=process.env):MorphoV3Policy{
+ return politicaMorphoV3({...env,
+   CACA_MORPHO_V3_ENVIAR:env.CACA_MORPHO_AERO_ENVIAR,
+   CACA_MORPHO_V3_CONFIRMAR:env.CACA_MORPHO_AERO_CONFIRMAR,
+   CACA_MORPHO_V3_NONCE_EXCLUSIVO:env.CACA_MORPHO_AERO_NONCE_EXCLUSIVO,
+ });
+}
+/** Admission to read-only full liquidation, never a broadcast authorization. */
 export function candidatoElegivelV3(situacao:string,mercadoConfirmado:boolean):boolean{
-  return situacao==='cruzou-estimado'&&mercadoConfirmado;
+  return (situacao==='cruzou-estimado'||situacao==='proxima')&&mercadoConfirmado;
 }
 export function custoConservadorMorphoV3(
   gasEstimado:bigint,baseFee:bigint,tipWei:bigint,l1Fee:bigint,policy:MorphoV3Policy,

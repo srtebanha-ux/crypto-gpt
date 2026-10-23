@@ -40,6 +40,8 @@ interface ITitanSwapRouter02 {
         uint256 amountOutMinimum;
         uint160 sqrtPriceLimitX96;
     }
+    struct ExactInputParams { bytes path; address recipient; uint256 amountIn; uint256 amountOutMinimum; }
+    function exactInput(ExactInputParams calldata params) external payable returns(uint256 amountOut);
     function exactInputSingle(ExactInputSingleParams calldata params)
         external payable returns(uint256 amountOut);
 }
@@ -62,6 +64,34 @@ contract TitanCacadorMorphoV3 {
         bool callbackExecutado;
     }
     Contexto private contexto;
+    bytes private caminho;
+    mapping(address=>bool) public intermediarioPermitido;
+    function versaoRotas() external pure returns(uint256){return 2;}
+    function autorizarIntermediario(address token,bool habilitado) external soDono {
+        if(contexto.ativa||token==address(0))revert ParametrosInvalidos();
+        intermediarioPermitido[token]=habilitado;
+    }
+    function _token(bytes memory rota,uint256 offset) private pure returns(address a){
+        assembly {a:=shr(96,mload(add(add(rota,32),offset)))}
+    }
+    function _taxa(bytes memory rota,uint256 offset) private pure returns(uint24 f){
+        assembly {f:=shr(232,mload(add(add(rota,32),offset)))}
+    }
+    function _validarRota(bytes memory rota,address entrada,address saida) private view {
+        if(entrada==saida){if(rota.length!=0)revert ParametrosInvalidos();return;}
+        if(rota.length!=43&&rota.length!=66)revert ParametrosInvalidos();
+        if(_token(rota,0)!=entrada||_token(rota,rota.length-20)!=saida)revert ParametrosInvalidos();
+        if(rota.length==66){
+            address meio=_token(rota,23);
+            if(!intermediarioPermitido[meio]||meio==entrada||meio==saida)revert ParametrosInvalidos();
+        }
+        for(uint256 i=0;i+20<rota.length;i+=23){
+            uint24 taxa=_taxa(rota,i+20);
+            if(taxa!=100&&taxa!=500&&taxa!=3000&&taxa!=10000)revert ParametrosInvalidos();
+            address pool=fabricaV3.getPool(_token(rota,i),_token(rota,i+23),taxa);
+            if(pool==address(0)||pool.code.length==0)revert PoolNaoVerificada();
+        }
+    }
 
     error ApenasDono();
     error EnderecoInvalido();
@@ -88,6 +118,8 @@ contract TitanCacadorMorphoV3 {
         routerV3=ITitanSwapRouter02(_routerV3);
         fabricaV3=ITitanUniswapV3Factory(_fabricaV3);
         cofre=_cofre;
+        intermediarioPermitido[0x4200000000000000000000000000000000000006]=true;
+        intermediarioPermitido[0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913]=true;
     }
     modifier soDono(){
         if (msg.sender!=dono)revert ApenasDono();
@@ -111,7 +143,23 @@ contract TitanCacadorMorphoV3 {
         TitanMorphoParamsV3 calldata mercado,address devedor,
         uint256 seizedAssets,uint256 repaidShares,
         uint24 taxa,uint256 pisoLucroDivida,uint256 prazo
-    ) external soDono returns(uint256 lucro) {
+    ) external soDono returns(uint256) {
+        return _liquidar(mercado,devedor,seizedAssets,repaidShares,
+            mercado.loanToken==mercado.collateralToken?bytes(""):abi.encodePacked(mercado.collateralToken,taxa,mercado.loanToken),
+            pisoLucroDivida,prazo);
+    }
+    function liquidarRota(
+        TitanMorphoParamsV3 calldata mercado,address devedor,
+        uint256 seizedAssets,uint256 repaidShares,
+        bytes calldata rota,uint256 pisoLucroDivida,uint256 prazo
+    ) external soDono returns(uint256){
+        return _liquidar(mercado,devedor,seizedAssets,repaidShares,rota,pisoLucroDivida,prazo);
+    }
+    function _liquidar(
+        TitanMorphoParamsV3 calldata mercado,address devedor,
+        uint256 seizedAssets,uint256 repaidShares,
+        bytes memory rota,uint256 pisoLucroDivida,uint256 prazo
+    ) private returns(uint256 lucro) {
         if(contexto.ativa)revert OperacaoEmAndamento();
         if((seizedAssets==0)==(repaidShares==0)
             ||devedor==address(0)||pisoLucroDivida==0
@@ -119,15 +167,11 @@ contract TitanCacadorMorphoV3 {
             ||mercado.loanToken==address(0)||mercado.collateralToken==address(0)
             ||mercado.oracle==address(0)||mercado.lltv==0||mercado.lltv>=1e18)
             revert ParametrosInvalidos();
-        if(mercado.loanToken!=mercado.collateralToken) {
-            if(taxa!=100&&taxa!=500&&taxa!=3000&&taxa!=10000)
-                revert ParametrosInvalidos();
-            address pool=fabricaV3.getPool(mercado.collateralToken,mercado.loanToken,taxa);
-            if(pool==address(0)||pool.code.length==0)revert PoolNaoVerificada();
-        }
+        _validarRota(rota,mercado.collateralToken,mercado.loanToken);
+        caminho=rota;
         contexto=Contexto({
             devedor:devedor,garantia:mercado.collateralToken,
-            divida:mercado.loanToken,taxa:taxa,
+            divida:mercado.loanToken,taxa:rota.length>=43?_taxa(rota,20):0,
             saldoInicialDivida:ITitanTokenV3(mercado.loanToken).balanceOf(address(this)),
             saldoInicialGarantia:ITitanTokenV3(mercado.collateralToken).balanceOf(address(this)),
             lucroMinimoDivida:pisoLucroDivida,ativa:true,callbackExecutado:false
@@ -140,6 +184,7 @@ contract TitanCacadorMorphoV3 {
         lucro=afterBalance-contexto.saldoInicialDivida;
         if(lucro<pisoLucroDivida)revert LucroInsuficiente(lucro,pisoLucroDivida);
         delete contexto;
+        delete caminho;
         // Transfer only new profits to immutable vault. Old balances untouched.
         _safe(mercado.loanToken,abi.encodeWithSignature("transfer(address,uint256)",cofre,lucro));
         emit MorphoLiquidadoV3(marketId,devedor,mercado.collateralToken,paid,lucro);
@@ -155,14 +200,19 @@ contract TitanCacadorMorphoV3 {
         uint256 seized=novo-contexto.saldoInicialGarantia;
         if(contexto.garantia!=contexto.divida){
             _approve(contexto.garantia,address(routerV3),seized);
-            uint256 out=routerV3.exactInputSingle(
-                ITitanSwapRouter02.ExactInputSingleParams({
+            uint256 out;
+            if(caminho.length==66){
+                out=routerV3.exactInput(ITitanSwapRouter02.ExactInputParams({
+                    path:caminho,recipient:address(this),amountIn:seized,
+                    amountOutMinimum:repaidAssets+contexto.lucroMinimoDivida
+                }));
+            }else{
+                out=routerV3.exactInputSingle(ITitanSwapRouter02.ExactInputSingleParams({
                     tokenIn:contexto.garantia,tokenOut:contexto.divida,
                     fee:contexto.taxa,recipient:address(this),amountIn:seized,
-                    amountOutMinimum:repaidAssets+contexto.lucroMinimoDivida,
-                    sqrtPriceLimitX96:0
-                })
-            );
+                    amountOutMinimum:repaidAssets+contexto.lucroMinimoDivida,sqrtPriceLimitX96:0
+                }));
+            }
             if(out<repaidAssets+contexto.lucroMinimoDivida)revert SemLucroNovo();
         }
         uint256 saldo=ITitanTokenV3(contexto.divida).balanceOf(address(this));

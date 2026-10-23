@@ -56,6 +56,28 @@ contract TitanCacadorMorphoAero {
         bool callbackExecutado;
     }
     Contexto private contexto;
+    ITitanAeroRouter.Route[] private percurso;
+    mapping(address=>bool) public intermediarioPermitido;
+    function versaoRotas() external pure returns(uint256){return 2;}
+    function autorizarIntermediario(address token,bool habilitado) external soDono {
+        if(contexto.ativa||token==address(0))revert ParametrosInvalidos();
+        intermediarioPermitido[token]=habilitado;
+    }
+    function _validarRota(ITitanAeroRouter.Route[] memory rota,address entrada,address saida) private view {
+        if(entrada==saida){if(rota.length!=0)revert ParametrosInvalidos();return;}
+        if(rota.length<1||rota.length>2||rota[0].from!=entrada||rota[rota.length-1].to!=saida)
+            revert ParametrosInvalidos();
+        if(rota.length==2){
+            address meio=rota[0].to;
+            if(meio!=rota[1].from||!intermediarioPermitido[meio]||meio==entrada||meio==saida)
+                revert ParametrosInvalidos();
+        }
+        for(uint256 i=0;i<rota.length;i++){
+            if(rota[i].factory!=address(aerodromeFactory))revert PoolNaoVerificada();
+            address pool=aerodromeFactory.getPool(rota[i].from,rota[i].to,rota[i].stable);
+            if(pool==address(0)||pool.code.length==0)revert PoolNaoVerificada();
+        }
+    }
 
     error ApenasDono();
     error EnderecoInvalido();
@@ -82,6 +104,8 @@ contract TitanCacadorMorphoAero {
         aerodromeRouter=ITitanAeroRouter(_aerodromeRouter);
         aerodromeFactory=ITitanAeroFactory(_aerodromeFactory);
         cofre=_cofre;
+        intermediarioPermitido[0x4200000000000000000000000000000000000006]=true;
+        intermediarioPermitido[0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913]=true;
     }
     modifier soDono(){
         if (msg.sender!=dono)revert ApenasDono();
@@ -105,7 +129,25 @@ contract TitanCacadorMorphoAero {
         TitanMorphoParamsAero calldata mercado,address devedor,
         uint256 seizedAssets,uint256 repaidShares,
         bool poolEstavel,uint256 pisoLucroDivida,uint256 prazo
-    ) external soDono returns(uint256 lucro) {
+    ) external soDono returns(uint256) {
+        bool semSwap=mercado.loanToken==mercado.collateralToken;
+        if(semSwap&&poolEstavel)revert ParametrosInvalidos();
+        ITitanAeroRouter.Route[] memory rota=new ITitanAeroRouter.Route[](semSwap?0:1);
+        if(!semSwap)rota[0]=ITitanAeroRouter.Route(mercado.collateralToken,mercado.loanToken,poolEstavel,address(aerodromeFactory));
+        return _liquidar(mercado,devedor,seizedAssets,repaidShares,rota,pisoLucroDivida,prazo);
+    }
+    function liquidarRota(
+        TitanMorphoParamsAero calldata mercado,address devedor,
+        uint256 seizedAssets,uint256 repaidShares,
+        ITitanAeroRouter.Route[] calldata rota,uint256 pisoLucroDivida,uint256 prazo
+    ) external soDono returns(uint256){
+        return _liquidar(mercado,devedor,seizedAssets,repaidShares,rota,pisoLucroDivida,prazo);
+    }
+    function _liquidar(
+        TitanMorphoParamsAero calldata mercado,address devedor,
+        uint256 seizedAssets,uint256 repaidShares,
+        ITitanAeroRouter.Route[] memory rota,uint256 pisoLucroDivida,uint256 prazo
+    ) private returns(uint256 lucro) {
         if(contexto.ativa)revert OperacaoEmAndamento();
         if((seizedAssets==0)==(repaidShares==0)
             ||devedor==address(0)||pisoLucroDivida==0
@@ -113,13 +155,12 @@ contract TitanCacadorMorphoAero {
             ||mercado.loanToken==address(0)||mercado.collateralToken==address(0)
             ||mercado.oracle==address(0)||mercado.lltv==0||mercado.lltv>=1e18)
             revert ParametrosInvalidos();
-        if(mercado.loanToken!=mercado.collateralToken){
-            address pool=aerodromeFactory.getPool(mercado.collateralToken,mercado.loanToken,poolEstavel);
-            if(pool==address(0)||pool.code.length==0)revert PoolNaoVerificada();
-        }else if(poolEstavel)revert ParametrosInvalidos();
+        _validarRota(rota,mercado.collateralToken,mercado.loanToken);
+        delete percurso;
+        for(uint256 i=0;i<rota.length;i++)percurso.push(rota[i]);
         contexto=Contexto({
             devedor:devedor,garantia:mercado.collateralToken,
-            divida:mercado.loanToken,poolEstavel:poolEstavel,
+            divida:mercado.loanToken,poolEstavel:rota.length>0?rota[0].stable:false,
             saldoInicialDivida:ITitanTokenAero(mercado.loanToken).balanceOf(address(this)),
             saldoInicialGarantia:ITitanTokenAero(mercado.collateralToken).balanceOf(address(this)),
             lucroMinimoDivida:pisoLucroDivida,ativa:true,callbackExecutado:false
@@ -132,6 +173,7 @@ contract TitanCacadorMorphoAero {
         lucro=afterBalance-contexto.saldoInicialDivida;
         if(lucro<pisoLucroDivida)revert LucroInsuficiente(lucro,pisoLucroDivida);
         delete contexto;
+        delete percurso;
         // Transfer only new profits to immutable vault. Old balances untouched.
         _safe(mercado.loanToken,abi.encodeWithSignature("transfer(address,uint256)",cofre,lucro));
         emit MorphoLiquidadoV3(marketId,devedor,mercado.collateralToken,paid,lucro);
@@ -147,16 +189,12 @@ contract TitanCacadorMorphoAero {
         uint256 seized=novo-contexto.saldoInicialGarantia;
         if(contexto.garantia!=contexto.divida){
             _approve(contexto.garantia,address(aerodromeRouter),seized);
-            ITitanAeroRouter.Route[] memory rota=new ITitanAeroRouter.Route[](1);
-            rota[0]=ITitanAeroRouter.Route({
-                from:contexto.garantia,to:contexto.divida,
-                stable:contexto.poolEstavel,factory:address(aerodromeFactory)
-            });
+            ITitanAeroRouter.Route[] memory rota=percurso;
             uint256[] memory outputs=aerodromeRouter.swapExactTokensForTokens(
                 seized,repaidAssets+contexto.lucroMinimoDivida,
                 rota,address(this),block.timestamp
             );
-            uint256 out=outputs.length==2?outputs[1]:0;
+            uint256 out=outputs.length==rota.length+1?outputs[outputs.length-1]:0;
             if(out<repaidAssets+contexto.lucroMinimoDivida)revert SemLucroNovo();
         }
         uint256 saldo=ITitanTokenAero(contexto.divida).balanceOf(address(this));

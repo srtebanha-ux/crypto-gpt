@@ -39,3 +39,23 @@ contract ERC20RetornoFalsoTeste {
     function transfer(address,uint256) external pure returns(bool){return false;}
     function transferFrom(address,address,uint256) external pure returns(bool){return false;}
 }
+
+/** Models interest-before-health ordering for admission regression, not mainnet economics. */
+contract MorphoJurosFalso {
+    uint256 public divida=100;
+    uint256 public jurosPendentes=2;
+    uint256 public limite=101;
+    function configurar(uint256 juros) external {jurosPendentes=juros;}
+    function liquidate(ParametrosMorphoDoTeste calldata params,address,
+        uint256 seizedAssets,uint256 repaidShares,bytes calldata data
+    ) external returns(uint256,uint256){
+        require((seizedAssets==0)!=(repaidShares==0),"one amount");
+        divida+=jurosPendentes;jurosPendentes=0; // accrual in SAME call
+        require(divida>limite,"HEALTHY_POSITION");
+        uint256 repay=seizedAssets>0?seizedAssets:repaidShares;
+        require(ITokenCacadaDoTeste(params.collateralToken).transfer(msg.sender,repay*110/100));
+        IMorphoCacadaDoTeste(msg.sender).onMorphoLiquidate(repay,data);
+        require(ITokenCacadaDoTeste(params.loanToken).transferFrom(msg.sender,address(this),repay));
+        return(repay,repay);
+    }
+}
