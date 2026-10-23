@@ -371,27 +371,23 @@ test('falha de RPC DEPOIS de enumeração boa preserva os mercados como NÃO CON
     // defeito do MEU teste — e ele expôs um de verdade no bloqueio, que
     // colapsava "a corrente não devolveu parâmetros" com "os campos
     // divergiram". São causas opostas: RPC contra dado.
-    const rpcAntes = process.env.CACA_RPC_URL;
-    const rpcsAntes = process.env.CACA_RPC_URLS;
-    process.env.CACA_RPC_URL = 'https://rpc-que-nao-existe.invalid';
-    delete process.env.CACA_RPC_URLS;
-    try {
+    // Isola TODOS os provedores da escada, inclusive fallbacks novos.
+    // Alterar só CACA_RPC_URL deixou de garantir falha na descoberta;
+    // transportes injetados tornam o teste determinístico e offline.
     await descobrirMorphoPorApi({
         infra: { provedoresEsgotados: [], noFallback: false },
         buscar: async () => ({
             status: 200,
             text: async () => corpoRest([itemRest(1), itemRest(2), itemRest(3)]),
         }),
+        pedirRpc: async (_url, metodo) => {
+            throw new Error('RPC de teste indisponivel: ' + metodo);
+        },
         caminhoDoCache: cache,
         caminhoDaMemoria: memoria,
         tetoDeValidacoes: 3,
         tetoDeMercadosComDevedores: 0,
     });
-    } finally {
-        if (rpcAntes === undefined) delete process.env.CACA_RPC_URL;
-        else process.env.CACA_RPC_URL = rpcAntes;
-        if (rpcsAntes !== undefined) process.env.CACA_RPC_URLS = rpcsAntes;
-    }
 
     const m = lerMemoria(JSON.parse(await readFile(memoria, 'utf8')));
     const t = m.ultimaTentativa!;

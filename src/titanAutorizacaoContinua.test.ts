@@ -65,8 +65,12 @@ test('modo permanente nao usa relogio da autorizacao antiga', () => {
         quantia:1n,bloco:52000000,brutoEstimado:100n,liquidoEstimado:5n,
         estadoConsistente:true,
     };
-    // O journal da test-run nao existe no GitHub Actions, por isso esta
-    // prevalidacao e pura; nenhum RPC nem chave valida sao usados.
+    // A autorizacao permanente nao substitui exclusividade da carteira:
+    // sem um executor compartilhado, a janela explicita segue obrigatoria.
+    assert.match(motivoDaRecusaTitan(plano,env)!,/janela exclusiva Base/);
+    env.TITAN_JANELAS_EXCLUSIVAS='1';
+    // O journal da test-run nao existe no GitHub Actions; prevalidacao pura,
+    // sem RPC nem chave real. A data antiga nao deve bloquear modo continuo.
     assert.equal(motivoDaRecusaTitan(plano,env),null);
     delete env.TITAN_GAS_DIA_WEI;
     assert.match(motivoDaRecusaTitan(plano,env)!,/controle duravel/);
