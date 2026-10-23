@@ -109,3 +109,31 @@ test('Aave missing deployment cap fails closed without paid broadcasts',async()=
       verificar:async()=>contract}),/teto dedicado/);
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('explicit canary=0 allows repeated Multi-Hop attempts under the same daily executor budget',()=>{
+ const continuous:NodeJS.ProcessEnv={
+   MEGAZORD_MODO:'execucao',MEGAZORD_CONFIRMAR:'OPERAR_BASE_REAL',
+   MEGAZORD_EXCLUSIVO:'1',CACA_MULTIHOP_AVALIAR:'1',
+   CACA_MULTIHOP_CANARY_UM_TIRO:'0',MEGAZORD_MAX_TX_DIA:'250',
+ };
+ habilitarAaveMultiHopMegazord(continuous,contract);
+ assert.equal(continuous.CACA_MULTIHOP_CANARY_UM_TIRO,'0',
+   'boot must not silently re-arm the one-shot canary');
+ assert.equal(continuous.CACA_SOMENTE_MULTIHOP,'1');
+ assert.equal(continuous.CACA_MULTIHOP_ENVIAR,'1');
+ assert.equal(continuous.CACA_MAX_ENVIOS,'250',
+   'CACA per-window cap should not be lower than shared daily cap by default');
+ const lower:NodeJS.ProcessEnv={...continuous,CACA_MAX_ENVIOS:'12'};
+ habilitarAaveMultiHopMegazord(lower,contract);
+ assert.equal(lower.CACA_MAX_ENVIOS,'12','explicit lower per-window cap remains enforceable');
+ const invalid:NodeJS.ProcessEnv={...continuous,CACA_MAX_ENVIOS:'251'};
+ assert.throws(()=>habilitarAaveMultiHopMegazord(invalid,contract),/nao superar o teto diario/);
+});
+test('no automatic continuous mode unless CACA_MULTIHOP_CANARY_UM_TIRO explicitly is zero',()=>{
+ const e:NodeJS.ProcessEnv={MEGAZORD_MODO:'execucao',
+   MEGAZORD_CONFIRMAR:'OPERAR_BASE_REAL',MEGAZORD_EXCLUSIVO:'1',
+   CACA_MULTIHOP_AVALIAR:'1',MEGAZORD_MAX_TX_DIA:'250'};
+ habilitarAaveMultiHopMegazord(e,contract);
+ assert.equal(e.CACA_MULTIHOP_CANARY_UM_TIRO,'1');
+ assert.equal(e.CACA_MAX_ENVIOS,undefined);
+});
