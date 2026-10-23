@@ -2214,6 +2214,7 @@ export async function iniciarArbitragem(): Promise<void> {
     const bloqueiosV2Ate=new Map<string,number>();
     let ultimoEnsaioV2Em=0;
     const tetoCotarRotas = Number(process.env.ARB_COTAR_MAX_ROTAS ?? 12);
+    const ultimaTentativaCotacao=new Map<string,number>();
     const tetoTentativasCru = Number(process.env.TITAN_TX_POR_SESSAO ?? 1);
     // O modo continuo nao herda o teto de UMA tentativa por sessao:
     // a trava persistente do executor ja limita contagem + gas POR DIA.
@@ -2640,6 +2641,7 @@ export async function iniciarArbitragem(): Promise<void> {
             const escolha = priorizarCotacoes(
                 afetadasPotenciais, tri, tetoCotarRotas, ++rodadaCotacoes,
                 process.env.TITAN_ROTACIONAR_COTACOES!=='0',
+                ultimaTentativaCotacao,
             );
             const destaqueRebote=radarRebote.ativos(blocoDaAmostra);
             const afetadas=priorizarRebotes(
@@ -2655,6 +2657,11 @@ export async function iniciarArbitragem(): Promise<void> {
                 queue: escolha.adiadas, mixed: MISTAS.length,
             });
             const escolhidas = new Set(afetadas.map((c) => c.chave));
+            for(const c of afetadas)ultimaTentativaCotacao.set(c.chave,rodadaCotacoes);
+            if(ultimaTentativaCotacao.size>10_000){
+                const ativas=new Set(MISTAS.map(c=>c.chave));
+                for(const k of ultimaTentativaCotacao.keys())if(!ativas.has(k))ultimaTentativaCotacao.delete(k);
+            }
             pendentesCotacao.clear();
             for (const c of afetadasPotenciais) {
                 if (!escolhidas.has(c.chave)) pendentesCotacao.add(c.chave);

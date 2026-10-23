@@ -129,3 +129,18 @@ test('lucro positivo, dados ausentes ou inconsistencia nunca suprimem validacao'
  assert.equal(m.registrar(rota,ok,null,true,102),false);
  assert.equal(m.deveCotar(rota,ok,103),true);
 });
+
+test('oldest pending quotes progress even when rankings change each cycle',()=>{
+    const cs=Array.from({length:120},(_,i)=>candidata('pendente-'+i));
+    const ultima=new Map<string,number>(),vistas=new Set<string>();
+    for(let rodada=1;rodada<=12;rodada++){
+        const t=triagem();
+        // Different state/ranking every cycle, so negative snapshot cache cannot help.
+        for(let i=0;i<cs.length;i++)comSpread(t,cs[i]!,BigInt(101+(i+rodada*7)%120));
+        const x=priorizarCotacoes([...cs].reverse(),t,16,rodada,true,ultima);
+        assert.equal(x.selecionadas.length,16);
+        assert.equal(new Set(x.selecionadas.map(c=>c.chave)).size,16);
+        for(const c of x.selecionadas){vistas.add(c.chave);ultima.set(c.chave,rodada);}
+    }
+    assert.equal(vistas.size,120,'fresh high-spread routes cannot indefinitely displace older pending routes');
+});

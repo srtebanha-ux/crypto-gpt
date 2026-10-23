@@ -17,6 +17,7 @@ function fracao(r: { emprestimo: RazaoMaxima; venda: RazaoMaxima }) {
 export function priorizarCotacoes(
     afetadas: CandidataMista[], tri: Triagem, teto: number, rodada: number,
     rotacionarComProva=false,
+    ultimaTentativa?: ReadonlyMap<string,number>,
 ): SelecaoDeCotacao {
     if (!Number.isSafeInteger(teto) || teto < 1 || teto > 256) {
         throw new Error('ARB_COTAR_MAX_ROTAS deve estar entre 1 e 256');
@@ -50,17 +51,22 @@ export function priorizarCotacoes(
     // entre candidatos menores que ficariam eternamente atras da fila.
     // O filtro economico nao muda: todas estas rotas passaram pela triagem.
     const fixas=rotacionarComProva
-        ? Math.max(1,Math.ceil(conhecidasDisponiveis/2)) : conhecidasDisponiveis;
+        ? Math.max(1,Math.ceil(conhecidasDisponiveis/(ultimaTentativa?4:2))) : conhecidasDisponiveis;
     const principais=comRazao.slice(0,fixas).map(x=>x.c);
     const fundo=comRazao.slice(fixas).map(x=>x.c);
+    if(ultimaTentativa){
+        const idade=(a:CandidataMista,b:CandidataMista)=>
+            (ultimaTentativa.get(a.chave)??-1)-(ultimaTentativa.get(b.chave)??-1);
+        fundo.sort(idade);semRazao.sort(idade);
+    }
     const vagasRotativas=Math.max(0,conhecidasDisponiveis-principais.length);
-    const rotativas=fundo.length===0 ? [] : Array.from({
+    const rotativas=ultimaTentativa?fundo.slice(0,vagasRotativas):fundo.length===0 ? [] : Array.from({
         length:Math.min(vagasRotativas,fundo.length),
     },(_,i)=>fundo[(rodada*Math.max(1,vagasRotativas)+i)%fundo.length]!);
     const remanescentes=rotacionarComProva?rotativas
         :comRazao.slice(conhecidasDisponiveis).map(x=>x.c);
     const disponiveis = teto - principais.length-(rotacionarComProva?rotativas.length:0);
-    const desconhecidas = semRazao.length > 0 ? Array.from(
+    const desconhecidas = ultimaTentativa?semRazao.slice(0,disponiveis):semRazao.length > 0 ? Array.from(
         { length: Math.min(disponiveis, semRazao.length) },
         (_, i) => semRazao[(rodada * Math.max(1, disponiveis) + i) % semRazao.length]!,
     ) : [];
