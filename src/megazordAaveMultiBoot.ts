@@ -65,18 +65,20 @@ export async function prepararAaveMultiHopMegazord(
  const diary=env.MEGAZORD_DIARIO;
  if(!key||!owner||new Wallet(key).address.toLowerCase()!==owner.toLowerCase())
    throw Error('Aave Multi-Hop: carteira existente nao corresponde');
- if(!diary||!path.isAbsolute(diary)||!path.resolve(diary).startsWith('/app/data/'))
+ if(!diary||!path.isAbsolute(diary)
+   ||(env.MEGAZORD_MODO==='execucao'&&!path.resolve(diary).startsWith('/app/data/')))
    throw Error('Aave Multi-Hop: diario persistente exigido');
  const cache=diary+'.aave-multihop.json';
- const marker=env.TITAN_MULTI_DEPLOY_MARCADOR??'/app/data/titanMultiHopDeploy.json';
- if(!path.isAbsolute(marker)||!path.resolve(marker).startsWith('/app/data/'))
+ const marker=env.TITAN_MULTI_DEPLOY_MARCADOR??path.join(path.dirname(diary),'titanMultiHopDeploy.json');
+ if(!path.isAbsolute(marker)
+   ||(env.MEGAZORD_MODO==='execucao'&&!path.resolve(marker).startsWith('/app/data/')))
    throw Error('Aave Multi-Hop: marcador fora do volume persistente');
  const existing=env.CACA_MULTIHOP_CONTRATO;
  let cached:string|undefined;
  if(fs.existsSync(cache)){
    let data:AaveCache;
    try{data=JSON.parse(fs.readFileSync(cache,'utf8')) as AaveCache;}
-   catch{throw Error('Aave Multi-Hop: cache ilegiveI; sem redeploy');}
+   catch{throw Error('Aave Multi-Hop: cache ilegivel; sem redeploy');}
    if(data.version!==1||data.owner.toLowerCase()!==owner.toLowerCase()
       ||!/^0x[0-9a-f]{40}$/i.test(data.contrato))
      throw Error('Aave Multi-Hop: cache da carteira invalido');
