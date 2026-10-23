@@ -14,6 +14,13 @@ function positiveBigInt(s:string|undefined,defaultValue:string,max:bigint):bigin
   if(v<=0n||v>max)throw Error('gas policy outside capped range');
   return v;
 }
+function nonnegativeBigInt(s:string|undefined,defaultValue:string,max:bigint):bigint{
+ const raw=s??defaultValue;
+ if(!/^[0-9]+$/.test(raw))throw Error('minimum net profit must be integer WETH wei');
+ const n=BigInt(raw);
+ if(n>max)throw Error('minimum net profit outside cap');
+ return n;
+}
 export function politicaMorphoV3(
   env:NodeJS.ProcessEnv=process.env,
 ):MorphoV3Policy{
@@ -27,8 +34,8 @@ export function politicaMorphoV3(
     maxCostWei:positiveBigInt(env.CACA_MORPHO_V3_CUSTO_MAX_WEI,'500000000000000',2000000000000000n),
     tipWei:positiveBigInt(env.CACA_MORPHO_V3_TIP_WEI,'20000000',3000000000n),
     minReturnBps:positiveBigInt(env.CACA_MORPHO_V3_RETORNO_BPS,'12000',20000n),
-    minNetWethWei:positiveBigInt(env.CACA_MORPHO_V3_LUCRO_MIN_WETH_WEI,'1',
-      10000000000000000n)-1n,
+    minNetWethWei:nonnegativeBigInt(env.CACA_MORPHO_V3_LUCRO_MIN_WETH_WEI,'0',
+      10000000000000000n),
     maxAgeBlocks:3,
   };
 }
