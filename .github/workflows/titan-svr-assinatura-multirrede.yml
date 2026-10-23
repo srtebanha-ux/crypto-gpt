@@ -1,0 +1,50 @@
+name: TITAN SVR Signing + Multichain Discovery
+on:
+  push:
+    branches: [feat/titan-svr-assinatura-radar-20261018]
+  pull_request:
+    branches: [feat/caca-integracao-multihop-ativa]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  signing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '22',cache: npm}
+      - run: npm ci
+      - name: Compile TypeScript
+        run: npm run build
+      - name: Validate EIP712 Atlas signing, hard gates and no broadcast
+        run: node --require ts-node/register --test src/titanSvrOperacao.test.ts src/titanSvr.test.ts src/titanRadarMorphoMultirrede.test.ts src/titanSvrDiagnostico.test.ts
+      - name: Inspect readonly onchain Atlas Verification and gas cap
+        run: node scripts/titanAtlasLeiturasPublicas.cjs
+      - name: Check public Atlas bonded ETH of existing TITAN signer
+        env:
+          PUBLIC_SIGNER_ADDRESS: '0x3D310384d674532f5D41cF2D43B03001F3515AE8'
+        run: node scripts/titanAtlasBondPublico.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: titan-atlas-contract-readonly
+          path: .tmp/atlas-abi-health.json
+          if-no-files-found: ignore
+  multichain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '22',cache: npm}
+      - run: npm ci
+      - name: Query actual Morpho liquidations from 6 supported networks
+        run: node scripts/titanRadarMorphoMultirrede.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: titan-morpho-multichain-sample
+          path: .tmp/titan-multirede-morpho.json
+          if-no-files-found: ignore

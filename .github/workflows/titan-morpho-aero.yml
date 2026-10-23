@@ -1,0 +1,26 @@
+name: TITAN Morpho Aerodrome atomic callback
+on:
+  push:
+    branches:
+      - feat/titan-morpho-aero-executor-20261020
+  pull_request:
+    branches:
+      - feat/caca-integracao-multihop-ativa
+permissions:
+  contents: read
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npx hardhat compile --config hardhat.morpho-local.cjs
+      - name: Test Aerodrome stable atomic callback plus existing V3 regression
+        run: npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanMorphoAeroLocal.js forkTests/titanMorphoV3Local.js
