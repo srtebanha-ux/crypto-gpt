@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {conferirModoMegazord,iniciarMegazord,manterLiquidanteMegazord,alinharMaxEnviosMegazord} from './megazord';
+import {conferirModoMegazord,iniciarMegazord,manterLiquidanteMegazord,alinharMaxEnviosMegazord,
+ type DependenciasBootMegazord} from './megazord';
+import {Wallet} from 'ethers';
+import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 test('refuses inherited financial authorization before engine loading',async()=>{
  for(const key of ['CACA_ENVIAR','TITAN_ENVIAR','TITAN_V2_ENVIAR',
    'CACA_MORPHO_V3_ENVIAR','CACA_MULTIHOP_ENVIAR','ARB_ENVIAR']){
@@ -11,6 +14,74 @@ test('refuses inherited financial authorization before engine loading',async()=>
    assert.equal(loaded,false);
  }
  assert.throws(()=>conferirModoMegazord({MEGAZORD_MODO:'real'}),/observacao/);
+});
+
+function bootFixture(){
+ const events:string[]=[];
+ const raw='11'.repeat(32);
+ const env:NodeJS.ProcessEnv={MEGAZORD_MODO:'execucao',
+   MEGAZORD_CONFIRMAR:'OPERAR_BASE_REAL',MEGAZORD_EXCLUSIVO:'1',
+   CACA_CHAVE_PRIVADA:raw,CACA_ENDERECO_PUBLICO:new Wallet(raw).address,
+   MEGAZORD_DIARIO:'/app/data/fixture.json',MEGAZORD_RPC_URL:'rpc-a',
+   MEGAZORD_RPC_SECUNDARIO:'rpc-b',MEGAZORD_MAX_TX_DIA:'1',
+   MEGAZORD_GAS_MAX_TX_WEI:'100',MEGAZORD_GAS_MAX_DIA_WEI:'200'};
+ let checks=0;
+ const deps:DependenciasBootMegazord={
+   rede:async e=>{
+     events.push('rede');checks++;
+     assert.notEqual(e.CACA_MORPHO_V3_ENVIAR,'1');
+     if(checks===1)assert.equal(e.MEGAZORD_CONTRATOS,MORPHO_FLASH_BASE);
+     else assert.notEqual(e.MEGAZORD_CONTRATOS,MORPHO_FLASH_BASE);
+     return {readOnly:true,address:e.CACA_ENDERECO_PUBLICO!,checks:[
+       {rpc:0,block:1,nonce:'0',balanceWei:'10000',contractsWithCode:1},
+       {rpc:1,block:1,nonce:'0',balanceWei:'10000',contractsWithCode:1},
+     ],scope:'fixture'};
+   },
+   preco:async()=>{events.push('preco');return {ethUsd:'2000',minimoWei:'1'};},
+   morpho:async e=>{
+     events.push('deploy-morpho');
+     assert.equal(e.MEGAZORD_CHAVE_PRIVADA,'0x'+raw);
+     e.MEGAZORD_CONTRATOS='0x'+'22'.repeat(20);
+     return {v3:'0x'+'22'.repeat(20),aero:'0x'+'33'.repeat(20),novos:2};
+   },
+   aave:async()=>{events.push('aave');return null;},
+   atualizar:()=>{events.push('atualizacao');return ()=>{};},
+ };
+ const load=async()=>{
+   events.push('engines');
+   assert.equal(env.CACA_MORPHO_V3_ENVIAR,'1');
+   return {liquidacoes:async()=> 'parar' as const,arbitragem:()=>new Promise<void>(()=>{})};
+ };
+ return {env,deps,events,load};
+}
+test('invalid budgets abort before network reads, deployment and engine imports',async()=>{
+ const f=bootFixture();delete f.env.MEGAZORD_GAS_MAX_TX_WEI;
+ await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),/orcamento Megazord invalido/);
+ assert.deepEqual(f.events,[]);
+});
+test('network and price failures happen before any paid contract preparation',async()=>{
+ for(const stage of ['rede','preco'] as const){
+   const f=bootFixture();
+   f.deps[stage]=async()=>{f.events.push(stage);throw Error(stage+' unavailable');};
+   await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),/unavailable/);
+   assert.ok(!f.events.includes('deploy-morpho'));
+   assert.ok(!f.events.includes('engines'));
+   assert.notEqual(f.env.CACA_MORPHO_V3_ENVIAR,'1');
+ }
+});
+test('pre-deploy readiness is repeated for actual executors and price before arming',async()=>{
+ const f=bootFixture();
+ await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),/liquidacoes encerrou/);
+ assert.deepEqual(f.events,['rede','preco','deploy-morpho','aave','rede','preco','atualizacao','engines']);
+ assert.equal(f.env.CACA_MAX_ENVIOS,'1');
+ assert.equal(f.env.CACA_CHAVE_PRIVADA,f.env.MEGAZORD_CHAVE_PRIVADA);
+});
+test('failed final readiness never arms strategies even after contract preparation',async()=>{
+ const f=bootFixture();let n=0;
+ f.deps.preco=async()=>{if(++n===2)throw Error('quote expired');return {ethUsd:'2000',minimoWei:'1'};};
+ await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),/quote expired/);
+ assert.notEqual(f.env.CACA_MORPHO_V3_ENVIAR,'1');
+ assert.ok(!f.events.includes('engines'));
 });
 test('starts both engines concurrently and reports configuration stop',async()=>{
  const started:string[]=[];

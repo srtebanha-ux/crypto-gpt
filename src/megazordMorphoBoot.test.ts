@@ -41,6 +41,21 @@ test('missing executors without explicit deployment authorization fail closed',a
  await assert.rejects(prepararMorphoMegazord(e,mocked(seen)),/auto-deploy nao autorizado/);
  assert.deepEqual(seen,[]);assert.equal(e.CACA_MORPHO_V3_CONTRATO,undefined);
 });
+test('invalid second deployment cap cannot spend on the first contract',async()=>{
+ const e={...env(),MEGAZORD_AUTO_DEPLOY:'1',TITAN_MORPHO_V3_DEPLOY_WEI:'1000',
+   TITAN_MORPHO_AERO_DEPLOY_WEI:'0'};
+ const seen:string[]=[];
+ await assert.rejects(prepararMorphoMegazord(e,mocked(seen)),/limite de gas.*aero/);
+ assert.deepEqual(seen,[]);
+});
+test('incompatible existing second executor is rejected before deploying the missing first',async()=>{
+ const e={...env(),MEGAZORD_AUTO_DEPLOY:'1',TITAN_MORPHO_V3_DEPLOY_WEI:'1000',
+   CACA_MORPHO_AERO_CONTRATO:aero};
+ const seen:string[]=[];const deps=mocked(seen);
+ deps.verificar=async()=>{seen.push('check:aero');throw Error('old executor version');};
+ await assert.rejects(prepararMorphoMegazord(e,deps),/old executor version/);
+ assert.deepEqual(seen,['check:aero']);
+});
 test('authorized one-time deploys require an independent positive gas cap per contract',async()=>{
  const e:NodeJS.ProcessEnv={...env(),MEGAZORD_AUTO_DEPLOY:'1',
   TITAN_MORPHO_V3_DEPLOY_WEI:'100000000000000',

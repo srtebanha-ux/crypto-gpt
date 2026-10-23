@@ -25,3 +25,9 @@ test('public preflight rejects nonce disagreement and missing public settings',a
  await assert.rejects(conferirRedeMegazord(env,async(u,m)=>u==='rpc-b'&&m==='eth_getTransactionCount'?'0x1':rpc(u,m)),/discordam/);
  await assert.rejects(conferirRedeMegazord({},rpc),/configuracao/);
 });
+test('old blocks and pending nonces never become readiness approvals',async()=>{
+ await assert.rejects(conferirRedeMegazord(env,async(u,m,p)=>
+   m==='eth_getTransactionCount'&&p[1]==='pending'?'0x1':rpc(u,m)),/nonce pendente/);
+ await assert.rejects(conferirRedeMegazord(env,async(u,m)=>
+   m==='eth_getBlockByNumber'?{number:'0x64',timestamp:'0x1'}:rpc(u,m)),/bloco ausente ou antigo/);
+});

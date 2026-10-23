@@ -22,7 +22,10 @@ A entrada e `node dist/megazord.js`. Execucao exige todas estas variaveis:
   da mesma carteira foram desligados; o programa nao verifica outros servicos.
 - `MEGAZORD_CHAVE_PRIVADA`: chave da carteira EXISTENTE, apenas no gerenciador
   de segredos. Nunca inserir em GitHub, issue, console compartilhado ou logs.
-  Aliases CACA/TITAN devem corresponder a mesma carteira.
+  Tambem aceita a credencial ja cadastrada em `CACA_CHAVE_PRIVADA` ou
+  `TITAN_CHAVE_PRIVADA`. Todas as credenciais fornecidas devem corresponder
+  a mesma carteira. O formato hexadecimal com ou sem `0x` e normalizado
+  internamente; entradas invalidas geram erro generico sem repetir o valor.
 - `MEGAZORD_ENDERECO_PUBLICO` (ou `CACA_ENDERECO_PUBLICO`): endereço já
   autorizado; o executor deriva o endereço da chave e rejeita divergência.
 - `MEGAZORD_RPC_URL` e `MEGAZORD_RPC_SECUNDARIO`: endpoints distintos da Base.
@@ -113,3 +116,27 @@ permanece pendente; os testes EVM locais nao substituem essa verificacao.
 
 Sem acesso às variáveis ou console autorizados do Railway não se deve afirmar
 que estas etapas foram executadas. Este documento não contém segredos.
+
+## Preparacao antes de custos de implantacao
+
+A entrada de execucao valida identidade, aliases e limites de gas antes de
+preparar contratos. Em seguida confere rede/nonce/saldo em dois RPCs e o TWAP
+publico, usando o contrato canonico Morpho apenas como testemunha de bytecode.
+Esse endereco nao e adicionado a lista de destinos financeiros. Depois da
+preparacao dos executores, repete o preflight sobre os destinos reais e
+atualiza novamente o preco antes de habilitar qualquer estrategia.
+
+O planejamento Morpho resolve ambos os marcadores/caches e valida todos os
+executores existentes e tetos necessarios antes do primeiro deploy. Um teto
+Aero invalido ou um executor existente incompativel nao deve consumir gas
+implantando V3 primeiro. Falhas posteriores de rede ou mercado ainda podem
+ocorrer; esta ordem nao garante sucesso nem lucro.
+
+As consultas HTTP do preflight sao serializadas por endpoint, com espacamento
+minimo e ate tres tentativas apenas para HTTP 429. O transporte respeita
+`Retry-After` em segundos ou data; se o prazo excede cinco segundos, falha e
+permite ao seletor tentar outro provedor, sem encurtar o prazo. A restricao
+tambem vale para consultas ja enfileiradas. Nao ha repeticao automatica de
+assinaturas ou broadcasts neste transporte, que aceita somente cinco metodos
+de leitura usados pelo preflight. Blocos antigos e nonce pendente continuam
+impedindo a aprovacao.

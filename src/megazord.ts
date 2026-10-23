@@ -1,11 +1,30 @@
 /** Combined scanners with optional shared financial executor. */
 import {createLogger} from './logger';
-import {instalarExecutorMegazord,conferirIdentidadeMegazord} from './megazordExecutor';
+import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord} from './megazordExecutor';
+import {normalizarCredenciaisMegazord} from './megazordCredenciais';
 import {selecionarRpcSecundarioMegazord} from './megazordRpcFailover';
 import {prepararMorphoMegazord} from './megazordMorphoBoot';
 import {prepararAaveMultiHopMegazord,habilitarAaveMultiHopMegazord} from './megazordAaveMultiBoot';
 import {atualizarPisoUsdMegazord,iniciarAtualizacaoPisoUsd} from './megazordEthUsd';
 import {JsonRpcProvider} from 'ethers';
+import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
+type RedeVerificada=Awaited<ReturnType<typeof import('./megazordPreflight').conferirRedeMegazord>>;
+export type DependenciasBootMegazord={
+ rede:(env:NodeJS.ProcessEnv)=>Promise<RedeVerificada>;
+ preco:(env:NodeJS.ProcessEnv)=>Promise<{ethUsd:string;minimoWei:string}>;
+ morpho:typeof prepararMorphoMegazord;
+ aave:typeof prepararAaveMultiHopMegazord;
+ atualizar:typeof iniciarAtualizacaoPisoUsd;
+};
+const boot:DependenciasBootMegazord={
+ rede:async env=>await selecionarRpcSecundarioMegazord(env) as RedeVerificada,
+ preco:async env=>{
+   const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true});
+   try{return await atualizarPisoUsdMegazord(env,p);}finally{p.destroy();}
+ },
+ morpho:prepararMorphoMegazord,aave:prepararAaveMultiHopMegazord,
+ atualizar:iniciarAtualizacaoPisoUsd,
+};
 const log=createLogger('megazord');
 export type MotoresMegazord={
  liquidacoes:()=>Promise<'parar'|void>;
@@ -61,6 +80,7 @@ export async function manterLiquidanteMegazord(
 export async function iniciarMegazord(
  env:NodeJS.ProcessEnv,
  carregar:()=>Promise<MotoresMegazord>,
+ deps:DependenciasBootMegazord=boot,
 ):Promise<never>{
  conferirModoMegazord(env);
  if(env.MEGAZORD_MODO==='execucao'){
@@ -68,21 +88,28 @@ export async function iniciarMegazord(
    // Fails closed if the contract is not deployed, RPCs disagree, wallet differs,
    // gas balance is zero or a non-durable journal was configured.
    conferirIdentidadeMegazord(env);
+   normalizarCredenciaisMegazord(env);
    // Align BEFORE loading the CACA module, which snapshots its env on import.
    // Invalid quotas abort before deploying contracts or loading signers.
    alinharMaxEnviosMegazord(env);
+   conferirOrcamentoMegazord(env);
+   // Check network/nonce/gas and the public price reference BEFORE any paid
+   // deploy. The canonical Morpho address is only a readiness witness here,
+   // never added to the financial executor's destination allowlist.
+   const preliminar:NodeJS.ProcessEnv={...env,MEGAZORD_CONTRATOS:MORPHO_FLASH_BASE};
+   await deps.rede(preliminar);
+   env.MEGAZORD_RPC_SECUNDARIO=preliminar.MEGAZORD_RPC_SECUNDARIO;
+   await deps.preco(env);
    // Deploy is strictly opt-in with a per-contract gas cap. An unresolved
    // marker, unknown nonce or mismatching immutable fails the WHOLE boot.
-   const contratos=await prepararMorphoMegazord(env);
+   const contratos=await deps.morpho(env);
    // Only an Aave executor verified against ALL onchain immutables may be
    // whitelisted. The complete readiness check still follows before arming.
-   const multi=await prepararAaveMultiHopMegazord(env);
+   const multi=await deps.aave(env);
    if(multi)env.MEGAZORD_CONTRATOS=[env.MEGAZORD_CONTRATOS,multi].filter(Boolean).join(',');
-   const rede=await selecionarRpcSecundarioMegazord(env) as Awaited<ReturnType<typeof import('./megazordPreflight').conferirRedeMegazord>>;
-   const leitorPreco=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true});
-   let lucroUsd:{ethUsd:string;minimoWei:string};
-   try{lucroUsd=await atualizarPisoUsdMegazord(env,leitorPreco);}
-   finally{leitorPreco.destroy();}
+   const rede=await deps.rede(env);
+   // Deploy confirmation can take time: do not arm from the pre-deploy quote.
+   const lucroUsd=await deps.preco(env);
    log.info('Preflight de execucao aprovado (somente leitura).',{
      endereco:rede.address,
      rpcs:rede.checks.length,
@@ -108,7 +135,7 @@ export async function iniciarMegazord(
      env.CACA_ENVIAR='0';
      env.CACA_MULTIHOP_ENVIAR='0';
    }
-   iniciarAtualizacaoPisoUsd(env,env.MEGAZORD_RPC_URL!,
+   deps.atualizar(env,env.MEGAZORD_RPC_URL!,
      message=>log.warn(message));
  }
  // Import engines only after policy validation. No scanner boot on import.
