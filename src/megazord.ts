@@ -26,6 +26,24 @@ export function conferirModoMegazord(env:NodeJS.ProcessEnv):void{
  if(armed.length)throw Error('Megazord de observacao recusa envio habilitado: '+armed.join(', '));
 }
 
+/** Match the CACA per-window cap to the shared daily cap only for an
+ * explicitly authorized Megazord. The scanner reads it at module import.
+ * A smaller operator-set quota is always preserved.
+ */
+export function alinharMaxEnviosMegazord(env:NodeJS.ProcessEnv):void{
+ if(env.MEGAZORD_MODO!=='execucao')return;
+ const max=Number(env.MEGAZORD_MAX_TX_DIA);
+ if(!Number.isSafeInteger(max)||max<1||max>250)
+   throw Error('Megazord exige MEGAZORD_MAX_TX_DIA entre 1 e 250');
+ if(env.CACA_MAX_ENVIOS===undefined||env.CACA_MAX_ENVIOS===''){
+   env.CACA_MAX_ENVIOS=String(max);
+ }else{
+   const configured=Number(env.CACA_MAX_ENVIOS);
+   if(!Number.isSafeInteger(configured)||configured<1||configured>max)
+     throw Error('CACA_MAX_ENVIOS deve estar entre 1 e MEGAZORD_MAX_TX_DIA');
+ }
+}
+
 /** Preserve the liquidator's standalone retry lifecycle inside the combined process. */
 export async function manterLiquidanteMegazord(
  iniciar:()=>Promise<'parar'|void>,
@@ -50,6 +68,9 @@ export async function iniciarMegazord(
    // Fails closed if the contract is not deployed, RPCs disagree, wallet differs,
    // gas balance is zero or a non-durable journal was configured.
    conferirIdentidadeMegazord(env);
+   // Align BEFORE loading the CACA module, which snapshots its env on import.
+   // Invalid quotas abort before deploying contracts or loading signers.
+   alinharMaxEnviosMegazord(env);
    // Deploy is strictly opt-in with a per-contract gas cap. An unresolved
    // marker, unknown nonce or mismatching immutable fails the WHOLE boot.
    const contratos=await prepararMorphoMegazord(env);
