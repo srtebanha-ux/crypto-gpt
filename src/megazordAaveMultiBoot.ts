@@ -104,7 +104,7 @@ export async function prepararAaveMultiHopMegazord(
    if(env.MEGAZORD_EXCLUSIVO!=='1'||env.CACA_ENVIAR==='1')
      throw Error('Aave Multi-Hop: exclusividade de carteira ausente');
    const max=env.TITAN_MULTI_DEPLOY_TETO_WEI;
-   if(!max||!/^\\d+$/.test(max)||BigInt(max)<=0n||BigInt(max)>1000000000000000n)
+   if(!max||!/^[0-9]+$/.test(max)||BigInt(max)<=0n||BigInt(max)>1000000000000000n)
      throw Error('Aave Multi-Hop: teto dedicado de deploy <=0.001 ETH exigido');
    // Reuse the current wallet and existing guarded deployer. This script
    // reserves the durable marker BEFORE broadcast and never auto-retries.
