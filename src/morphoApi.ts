@@ -168,7 +168,7 @@ export async function enumerarMercados(
     let cursor: string | null = typeof opcoes.inicio === 'string'
         && opcoes.inicio.length > 0 && opcoes.inicio.length <= 2048
         ? opcoes.inicio : null;
-    if (cursor !== null) cursoresUsados.add(cursor);
+    if (cursor !== null) { cursoresUsados.add(cursor); paginouPorCursor = true; }
 
     const parcial = (falha: string | null, completa: boolean): ResultadoDaEnumeracao => ({
         mercados, devolvidos, paginas, requisicoes, blocoIndexado, falha, completa,
