@@ -1,0 +1,92 @@
+name: Build TITAN runtime image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [CHAT, codex/titan-container-build-20261023]
+    paths:
+      - '.github/workflows/titan-container.yml'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'package*.json'
+      - 'tsconfig*.json'
+      - 'hardhat.config.cjs'
+      - 'src/**'
+      - 'contracts/**'
+      - 'scripts/gerarProvaFlashArb.cjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: titan-container-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build the existing production Dockerfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker build --pull \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "$image:$GITHUB_SHA" .
+      - name: Verify compiled runtime and all executor artifacts without starting engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          docker run --rm --network none --entrypoint node "$image" -e '
+            const fs = require("node:fs");
+            const assert = require("node:assert/strict");
+            const credentials = require("./dist/megazordCredenciais");
+            assert.equal(typeof credentials.normalizarCredenciaisMegazord, "function");
+            assert.equal(typeof require("./dist/megazord").iniciarMegazord, "function");
+            for (const name of ["megazord", "cacarAoVivo", "cacarArbitragem"])
+              assert.ok(fs.statSync("dist/" + name + ".js").size > 0);
+            const root = ".tmp/artifacts/";
+            for (const name of ["CacadorV3", "CacadorAaveMultiHopMorpho", "TitanCacadorMorphoV3", "TitanCacadorMorphoAero"]) {
+              const a = JSON.parse(fs.readFileSync(root + "contracts/" + name + ".sol/" + name + ".json", "utf8"));
+              assert.ok(Array.isArray(a.abi));
+              assert.match(a.bytecode, /^0x[0-9a-fA-F]+$/);
+            }
+            const proof = JSON.parse(fs.readFileSync(root + "FlashArbProva.json", "utf8"));
+            assert.ok(Array.isArray(proof.abi));
+            assert.match(proof.creation, /^0x[0-9a-fA-F]+$/);
+            assert.match(proof.runtime, /^0x[0-9a-fA-F]+$/);
+            assert.ok(proof.ownerReferences.length > 0);
+            console.log("Runtime and five contract artifacts verified offline; no wallet, network or transaction.");
+          '
+      - name: Publish commit-specific image to GitHub Container Registry
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          docker push "$image"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$image")"
+          {
+            echo '### Verified TITAN runtime image'
+            echo
+            echo "Commit: $GITHUB_SHA"
+            echo
+            echo "Image: $image"
+            echo
+            echo "Pinned digest: $digest"
+            echo
+            echo 'Publishing this image does not deploy or arm the bot. Railway must retain its explicit start command and persistent /app/data volume.'
+          } >> "$GITHUB_STEP_SUMMARY"
