@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {Transaction,keccak256,type TransactionResponse} from 'ethers';
-import {ExecutorMegazord,type RedeMegazord,type PoliticaMegazord} from './megazordExecutor';
+import {Transaction,keccak256,Wallet,type TransactionResponse} from 'ethers';
+import {ExecutorMegazord,conferirIdentidadeMegazord,
+ type RedeMegazord,type PoliticaMegazord} from './megazordExecutor';
 const key='0x'+'11'.repeat(32); // Offline fixture only, never funded.
 const target='0x'+'22'.repeat(20);
 function fixture(override:Partial<PoliticaMegazord>={}){
@@ -66,10 +67,12 @@ test('timeout preserves hash and blocks another strategy, including after restar
    try{
      await assert.rejects(recovered.run('liquidacao',async()=>{}),/resultado pendente/);
      f.receipts.set(hash,{status:0,blockNumber:102});
-     await recovered.run('liquidacao',async()=>{});
+     await assert.rejects(recovered.run('liquidacao',async()=>{}),/circuit breaker Megazord/);
      const journal=JSON.parse(fs.readFileSync(f.policy.journal,'utf8'));
      assert.equal(journal.pending,null);assert.equal(journal.receipts[0].status,0);
      assert.equal(f.sent.length,1,'unknown transaction was never sent again');
+     // Revert recorded durably must also block the NEXT request.
+     await assert.rejects(recovered.run('arbitragem',async()=>{}),/circuit breaker Megazord/);
    }finally{recovered.close();}
  }finally{f.cleanup();}
 });
@@ -116,4 +119,18 @@ test('corrupted journal is rejected before execution',()=>{
    f.e.close();fs.writeFileSync(f.policy.journal,'{"version":999}');
    assert.throws(f.build,/diario Megazord invalido/);
  }finally{f.cleanup();}
+});
+
+test('execution reuses only the authorized wallet and mounted journal',()=>{
+ const valid={MEGAZORD_CHAVE_PRIVADA:key,
+   MEGAZORD_ENDERECO_PUBLICO:new Wallet(key).address,
+   MEGAZORD_DIARIO:'/app/data/megazord-diario.json'};
+ const verified=conferirIdentidadeMegazord(valid);
+ assert.equal(verified.address.toLowerCase(),valid.MEGAZORD_ENDERECO_PUBLICO.toLowerCase());
+ assert.equal(verified.journal,valid.MEGAZORD_DIARIO);
+ assert.throws(()=>conferirIdentidadeMegazord({...valid,MEGAZORD_ENDERECO_PUBLICO:target}),/carteira existente/);
+ assert.throws(()=>conferirIdentidadeMegazord({...valid,MEGAZORD_DIARIO:'/tmp/megazord.json'}),/volume persistente/);
+ assert.throws(()=>conferirIdentidadeMegazord({...valid,MEGAZORD_DIARIO:'/app/data/../tmp/megazord.json'}),/volume persistente/);
+ assert.throws(()=>conferirIdentidadeMegazord({...valid,MEGAZORD_DIARIO:'/app/data/megazord'}),/volume persistente/);
+ assert.throws(()=>conferirIdentidadeMegazord({...valid,MEGAZORD_CHAVE_PRIVADA:'not-a-key'}),/credencial Megazord invalida/);
 });

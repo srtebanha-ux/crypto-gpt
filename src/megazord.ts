@@ -1,6 +1,7 @@
 /** Combined scanners with optional shared financial executor. */
 import {createLogger} from './logger';
-import {instalarExecutorMegazord} from './megazordExecutor';
+import {instalarExecutorMegazord,conferirIdentidadeMegazord} from './megazordExecutor';
+import {conferirRedeMegazord} from './megazordPreflight';
 const log=createLogger('megazord');
 export type MotoresMegazord={
  liquidacoes:()=>Promise<'parar'|void>;
@@ -40,6 +41,18 @@ export async function iniciarMegazord(
  carregar:()=>Promise<MotoresMegazord>,
 ):Promise<never>{
  conferirModoMegazord(env);
+ if(env.MEGAZORD_MODO==='execucao'){
+   // Network-only readiness must pass before any signer or scanner is loaded.
+   // Fails closed if the contract is not deployed, RPCs disagree, wallet differs,
+   // gas balance is zero or a non-durable journal was configured.
+   conferirIdentidadeMegazord(env);
+   const rede=await conferirRedeMegazord(env);
+   log.info('Preflight de execucao aprovado (somente leitura).',{
+     endereco:rede.address,
+     rpcs:rede.checks.length,
+     escopo:rede.scope,
+   });
+ }
  // Import engines only after policy validation. No scanner boot on import.
  const motores=await carregar();
  const rodar=async(nome:keyof MotoresMegazord)=>{

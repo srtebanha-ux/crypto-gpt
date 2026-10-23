@@ -41,3 +41,15 @@ test('liquidator transient boot returns and RPC errors retry without restarting 
  },async()=>{waits++;});
  assert.equal(result,'parar');assert.equal(calls,3);assert.equal(waits,2);
 });
+
+test('financial mode rejects missing identity before importing scanner engines',async()=>{
+ let loaded=false;
+ await assert.rejects(iniciarMegazord({
+   MEGAZORD_MODO:'execucao',
+   MEGAZORD_CONFIRMAR:'OPERAR_BASE_REAL',
+   MEGAZORD_EXCLUSIVO:'1',
+ },async()=>{
+   loaded=true;return{liquidacoes:async()=>{},arbitragem:async()=>{}};
+ }),/carteira publica e credencial/);
+ assert.equal(loaded,false,'no scanners or signer may start without identity');
+});
