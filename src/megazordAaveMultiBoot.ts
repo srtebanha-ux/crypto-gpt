@@ -147,5 +147,18 @@ export function habilitarAaveMultiHopMegazord(env:NodeJS.ProcessEnv,contrato:str
  env.CACA_SOMENTE_MULTIHOP='1';
  env.CACA_MULTIHOP_ENVIAR='1';
  env.CACA_MULTIHOP_CONFIRMAR='OPERAR_BASE_REAL';
- env.CACA_MULTIHOP_CANARY_UM_TIRO='1';
+ // Explicit opt-out of the one-shot canary is respected only in a
+ // separately authorized Megazord, with a durable shared nonce journal.
+ // The executor still enforces its own daily count AND gas budgets.
+ if(env.CACA_MULTIHOP_CANARY_UM_TIRO==='0'){
+   const daily=Number(env.MEGAZORD_MAX_TX_DIA);
+   if(!Number.isSafeInteger(daily)||daily<1||daily>250)
+     throw Error('Multi-Hop continuo exige MEGAZORD_MAX_TX_DIA entre 1 e 250');
+   const window=Number(env.CACA_MAX_ENVIOS??String(daily));
+   if(!Number.isSafeInteger(window)||window<1||window>daily)
+     throw Error('CACA_MAX_ENVIOS deve ser positivo e nao superar o teto diario');
+   env.CACA_MAX_ENVIOS=String(window);
+ }else{
+   env.CACA_MULTIHOP_CANARY_UM_TIRO='1';
+ }
 }
