@@ -4,7 +4,7 @@ import { Decimal } from 'decimal.js';
 import { AbiCoder, id } from 'ethers';
 import {
     julgarMorpho, lerCreateMarket, SELETORES_DO_MORPHO, SELETOR_DO_CALLBACK,
-    TOPICO_CREATE_MARKET, LLTV_MAXIMO_QUE_PAGA,
+    TOPICO_CREATE_MARKET, LLTV_MAXIMO_QUE_PAGA, lerPosicaoMorphoComFallback,
 } from './mercadosDoMorpho';
 
 const coder = AbiCoder.defaultAbiCoder();
@@ -78,4 +78,52 @@ test('o corte de LLTV é a conta, não uma preferência', () => {
         'no limite do corte o Morpho tem de pagar MAIS que a Aave real');
     assert.ok(bonusPct(new Decimal('0.86'))!.lessThan(4.56),
         'e logo acima dele tem de pagar MENOS: é isso que o corte significa');
+});
+
+test('Morpho: Multicall valido com divida nao repete RPC direta',async()=>{
+    const dados=coder.encode(['uint256','uint128','uint128'],[0n,42n,15n]);
+    let diretas=0;
+    const r=await lerPosicaoMorphoComFallback({ok:true,dados},async()=>{
+        diretas++;return dados;
+    },true);
+    assert.equal(r.posicao?.borrowShares,42n);
+    assert.equal(r.tentouDireto,false);
+    assert.equal(diretas,0);
+});
+
+test('Morpho: zero de divida CONFIRMADO no bloco nao dispara fallback nem tiro',async()=>{
+    const dados=coder.encode(['uint256','uint128','uint128'],[0n,0n,15n]);
+    let diretas=0;
+    const r=await lerPosicaoMorphoComFallback({ok:true,dados},async()=>{
+        diretas++;return null;
+    },true);
+    assert.equal(r.posicao?.borrowShares,0n);
+    assert.equal(r.tentouDireto,false);
+    assert.equal(diretas,0);
+});
+
+test('Morpho: resultado individual incompleto ou revertido tenta leitura direta no mesmo snapshot',async()=>{
+    const dados=coder.encode(['uint256','uint128','uint128'],[0n,65n,40n]);
+    for(const resposta of [{ok:false,dados:'0x'}, {ok:true,dados:'0x'},undefined]){
+        let diretas=0;
+        const r=await lerPosicaoMorphoComFallback(resposta,async()=>{
+            diretas++;return dados;
+        },true);
+        assert.equal(r.posicao?.borrowShares,65n);
+        assert.equal(r.tentouDireto,true);
+        assert.equal(diretas,1);
+    }
+});
+
+test('Morpho: leitura desconhecida sem orcamento jamais e interpretada como zero ou alvo',async()=>{
+    let diretas=0;
+    const r=await lerPosicaoMorphoComFallback({ok:false,dados:'0x'},async()=>{
+        diretas++;return null;
+    },false);
+    assert.equal(r.posicao,null);
+    assert.equal(r.tentouDireto,false);
+    assert.equal(diretas,0);
+    const falha=await lerPosicaoMorphoComFallback({ok:false,dados:'0x'},async()=>null,true);
+    assert.equal(falha.posicao,null);
+    assert.equal(falha.tentouDireto,true);
 });
