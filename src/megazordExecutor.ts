@@ -34,7 +34,7 @@ export type PoliticaMegazord={journal:string;maxDailyWei:bigint;maxPerTxWei:bigi
 export function usdcEmWethWeiConservador(amount:bigint,twaps:readonly [string,string]):bigint{
  if(amount<=0n)return 0n;
  const parsed=twaps.map(q=>{
-   if(!/^[0-9]{3,6}\\.[0-9]{12}$/.test(q))throw Error('ETH/USDC: TWAP invalido');
+   if(!/^[0-9]{3,6}\.[0-9]{12}$/.test(q))throw Error('ETH/USDC: TWAP invalido');
    const [whole,frac]=q.split('.');
    const n=BigInt(whole!)*1000000000000n+BigInt(frac!);
    if(n<500000000000000n||n>100000000000000000n)
