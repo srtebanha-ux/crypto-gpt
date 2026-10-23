@@ -5,7 +5,7 @@ import {contextoExecutorMegazord} from './megazordExecutor';
  */
 export type MorphoV3Policy = Readonly<{
   armed:boolean; maxGas:bigint; maxCostWei:bigint; tipWei:bigint;
-  minReturnBps:bigint; maxAgeBlocks:number;
+  minReturnBps:bigint; minNetWethWei:bigint; maxAgeBlocks:number;
 }>;
 function positiveBigInt(s:string|undefined,defaultValue:string,max:bigint):bigint{
   const x=s===undefined?defaultValue:s;
@@ -13,6 +13,13 @@ function positiveBigInt(s:string|undefined,defaultValue:string,max:bigint):bigin
   const v=BigInt(x);
   if(v<=0n||v>max)throw Error('gas policy outside capped range');
   return v;
+}
+function nonnegativeBigInt(s:string|undefined,defaultValue:string,max:bigint):bigint{
+ const raw=s??defaultValue;
+ if(!/^[0-9]+$/.test(raw))throw Error('minimum net profit must be integer WETH wei');
+ const n=BigInt(raw);
+ if(n>max)throw Error('minimum net profit outside cap');
+ return n;
 }
 export function politicaMorphoV3(
   env:NodeJS.ProcessEnv=process.env,
@@ -27,6 +34,8 @@ export function politicaMorphoV3(
     maxCostWei:positiveBigInt(env.CACA_MORPHO_V3_CUSTO_MAX_WEI,'500000000000000',2000000000000000n),
     tipWei:positiveBigInt(env.CACA_MORPHO_V3_TIP_WEI,'20000000',3000000000n),
     minReturnBps:positiveBigInt(env.CACA_MORPHO_V3_RETORNO_BPS,'12000',20000n),
+    minNetWethWei:nonnegativeBigInt(env.CACA_MORPHO_V3_LUCRO_MIN_WETH_WEI,'0',
+      10000000000000000n),
     maxAgeBlocks:3,
   };
 }
@@ -61,6 +70,10 @@ export function pisoEconomicoMorphoV3(
   if(lucroEmToken<=1n||pisoEmWeth<=0n||custoWei<=0n)
     return {pisoToken:0n,aprovado:false};
   const pisoToken=(lucroEmToken*80n)/100n;
-  return{pisoToken,aprovado:pisoToken>0n&&
-    pisoEmWeth*10000n>=custoWei*policy.minReturnBps};
+  // Net threshold is in WETH, NOT USD. It is evaluated on the enforceable
+  // profit floor (after the 20% haircut), after the full L1/L2 gas bound.
+  return{pisoToken,aprovado:pisoToken>0n
+    &&pisoEmWeth>custoWei
+    &&pisoEmWeth-custoWei>=policy.minNetWethWei
+    &&pisoEmWeth*10000n>=custoWei*policy.minReturnBps};
 }
