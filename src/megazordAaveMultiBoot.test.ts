@@ -26,7 +26,7 @@ test('Aave multi-hop only authorized after immutable owner+protocol verification
   MEGAZORD_RPC_URL:'rpc-fixture',MEGAZORD_ENDERECO_PUBLICO:owner};
  assert.equal(await confirmarMultiHopAave(e,()=>fixture()),contract);
  assert.equal(e.CACA_ENVIAR,undefined);
- const live={...e,MEGAZORD_MODO:'execucao',
+ const live:NodeJS.ProcessEnv={...e,MEGAZORD_MODO:'execucao',
    MEGAZORD_CONFIRMAR:'OPERAR_BASE_REAL',MEGAZORD_EXCLUSIVO:'1'};
  habilitarAaveMultiHopMegazord(live,contract);
  assert.equal(live.CACA_ENVIAR,'1');
