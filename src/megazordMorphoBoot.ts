@@ -4,6 +4,7 @@
  * receipt marker, no pending nonce and a separately opted-in auto-deploy flag.
  */
 import fs from 'node:fs';
+import path from 'node:path';
 import {Interface,JsonRpcProvider,Wallet,getAddress} from 'ethers';
 import {COFRE_ESPERADO} from './caca';
 import {FABRICA_V3_BASE,MORPHO_FLASH_BASE} from './titanPonteMultiHop';
@@ -22,6 +23,39 @@ const abi=new Interface([
  'function aerodromeFactory() view returns(address)',
 ]);
 type Tipo='v3'|'aero';
+type CacheContratos={version:1;owner:string;v3?:string;aero?:string};
+function arquivoCache(env:NodeJS.ProcessEnv):string|undefined{
+ const diary=env.MEGAZORD_DIARIO;
+ if(!diary)return undefined;
+ if(!path.isAbsolute(diary)
+   ||(env.MEGAZORD_MODO==='execucao'&&!path.resolve(diary).startsWith('/app/data/')))
+   throw Error('cache de contratos requer MEGAZORD_DIARIO em volume persistente');
+ return diary+'.contratos.json';
+}
+function lerCache(env:NodeJS.ProcessEnv,owner:string):CacheContratos{
+ const file=arquivoCache(env);
+ if(!file||!fs.existsSync(file))return {version:1,owner};
+ let cached:CacheContratos;
+ try{cached=JSON.parse(fs.readFileSync(file,'utf8')) as CacheContratos;}
+ catch{throw Error('cache de contratos ilegivel, nao repetir deploy');}
+ if(cached.version!==1||cached.owner.toLowerCase()!==owner.toLowerCase()
+   ||['v3','aero'].some(x=>{const a=cached[x as Tipo];return a!==undefined
+     &&!/^0x[0-9a-f]{40}$/i.test(a);}))
+   throw Error('cache de contratos invalido ou carteira divergente');
+ return cached;
+}
+function guardarCache(env:NodeJS.ProcessEnv,cached:CacheContratos):void{
+ const file=arquivoCache(env);
+ if(!file)return;
+ fs.mkdirSync(path.dirname(file),{recursive:true});
+ const tmp=file+'.'+process.pid+'.tmp';
+ const fd=fs.openSync(tmp,'wx',0o600);
+ try{fs.writeFileSync(fd,JSON.stringify(cached));fs.fsyncSync(fd);}
+ finally{fs.closeSync(fd);}
+ fs.renameSync(tmp,file);
+ const dir=fs.openSync(path.dirname(file),'r');
+ try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}
+}
 type ContratoConfig={env:string;marker:string;cap:string;invariants:Record<string,string>};
 function config(tipo:Tipo,owner:string):ContratoConfig {
  const common={dono:owner,cofre:COFRE_ESPERADO,morpho:MORPHO_FLASH_BASE};
@@ -86,14 +120,17 @@ export async function prepararMorphoMegazord(
  if(env.CACA_ENVIAR==='1'&&env.MEGAZORD_AUTO_DEPLOY==='1')
    throw Error('auto-deploy nao pode coexistir com CACA_ENVIAR');
  const found={} as Record<Tipo,string>;
+ const cached=lerCache(env,owner);
  let novos=0;
  for(const tipo of ['v3','aero'] as const){
    const c=config(tipo,owner);
    const fromEnv=env[c.env];
    const fromMarker=deps.recuperar(c.marker);
-   if(fromEnv&&fromMarker&&getAddress(fromEnv)!==getAddress(fromMarker))
-     throw Error('endereco do contrato diverge do recibo de deploy: '+tipo);
-   let address=fromEnv??fromMarker;
+   const fromCache=cached[tipo];
+   if([fromEnv,fromMarker,fromCache].filter(Boolean).some(
+     addr=>getAddress(addr!)!==getAddress(fromEnv??fromMarker??fromCache!)))
+     throw Error('endereco do contrato diverge do marcador/cache persistente: '+tipo);
+   let address=fromEnv??fromMarker??fromCache;
    if(!address){
      if(env.MEGAZORD_AUTO_DEPLOY!=='1')
        throw Error('executor Morpho '+tipo+' ausente: auto-deploy nao autorizado');
@@ -117,6 +154,10 @@ export async function prepararMorphoMegazord(
      throw Error('endereco Morpho nao e EVM valido: '+tipo);
    await deps.verificar(tipo,address,owner,rpc);
    found[tipo]=getAddress(address);
+   // Persist immediately after each verified deploy, not only when BOTH finish.
+   // A crash between V3 and Aero may retry Aero, but never pays twice for V3.
+   cached[tipo]=found[tipo];
+   guardarCache(env,cached);
  }
  // Only expose runtime addresses AFTER both executors passed immutable and
  // version checks. No partial permission to send.
