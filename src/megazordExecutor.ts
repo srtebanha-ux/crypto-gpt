@@ -86,13 +86,20 @@ export class ExecutorMegazord {
    this.state=next;
  }
  async reconcile():Promise<void>{
-   const p=this.state.pending;if(!p)return;
-   const r=await this.primary.getTransactionReceipt(p.hash);
-   if(!r||r.status===null)throw Error('resultado pendente: reconciliar '+p.hash);
-   if(r.status!==0&&r.status!==1)throw Error('status de recibo invalido');
-   const next=structuredClone(this.state);next.pending=null;
-   next.receipts.push({...p,status:r.status,block:r.blockNumber});
-   next.receipts=next.receipts.slice(-200);this.persist(next);
+   const p=this.state.pending;
+   if(p){
+     const r=await this.primary.getTransactionReceipt(p.hash);
+     if(!r||r.status===null)throw Error('resultado pendente: reconciliar '+p.hash);
+     if(r.status!==0&&r.status!==1)throw Error('status de recibo invalido');
+     const next=structuredClone(this.state);next.pending=null;
+     next.receipts.push({...p,status:r.status,block:r.blockNumber});
+     next.receipts=next.receipts.slice(-200);this.persist(next);
+   }
+   // Revert consome gas e pode ser sintoma de contrato/rota incorreta.
+   // Nunca repetir tentativas em piloto automatico apos uma falha on-chain,
+   // inclusive se o processo reiniciou e o recibo ja estava no diario.
+   if(this.state.receipts.some(x=>x.status===0))
+     throw Error('circuit breaker Megazord: recibo revertido; revisar diario e execucao antes de novos envios');
  }
  async run<T>(strategy:string,work:()=>Promise<T>):Promise<T>{
    if(this.closed)throw Error('executor fechado');
@@ -200,13 +207,31 @@ export function carteiraMegazord(key:string,provider?:JsonRpcProvider):Wallet{
 export function transmitirMegazord(rpc:JsonRpcProvider,raw:string):Promise<TransactionResponse>{
  return active?active.broadcast(raw):rpc.broadcastTransaction(raw);
 }
+/** Independent of network: validates the EXISTING wallet and persistent journal. */
+export function conferirIdentidadeMegazord(env:NodeJS.ProcessEnv):{address:string;journal:string}{
+ const key=env.MEGAZORD_CHAVE_PRIVADA;
+ const journal=env.MEGAZORD_DIARIO;
+ const expected=env.MEGAZORD_ENDERECO_PUBLICO??env.CACA_ENDERECO_PUBLICO;
+ if(!key||!expected||!/^0x[0-9a-f]{40}$/i.test(expected))
+   throw Error('carteira publica e credencial do Megazord obrigatorias');
+ // Railway uses /app/data for the mounted durable volume. An ephemeral file
+ // silently loses nonce reservations on redeploy, causing duplicate sends.
+ if(!journal||!path.isAbsolute(journal)||!path.resolve(journal).startsWith('/app/data/')
+   ||!journal.endsWith('.json')||path.basename(journal)==='.json')
+   throw Error('diario Megazord deve estar no volume persistente /app/data/*.json');
+ let address:string;
+ try{address=computeAddress(key);}catch{throw Error('credencial Megazord invalida');}
+ if(address.toLowerCase()!==expected.toLowerCase())
+   throw Error('chave nao corresponde ao endereco PUBLICO autorizado da carteira existente');
+ return {address,journal};
+}
 export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord{
  if(active)throw Error('executor Megazord ja instalado');
  if(env.MEGAZORD_CONFIRMAR!=='OPERAR_BASE_REAL'||env.MEGAZORD_EXCLUSIVO!=='1')
    throw Error('executor requer confirmacao e desligamento dos assinadores antigos');
- const key=env.MEGAZORD_CHAVE_PRIVADA;
- const file=env.MEGAZORD_DIARIO;
- if(!key||!file||!path.isAbsolute(file)||!env.MEGAZORD_RPC_URL||!env.MEGAZORD_RPC_SECUNDARIO
+ const {journal:file}=conferirIdentidadeMegazord(env);
+ const key=env.MEGAZORD_CHAVE_PRIVADA!;
+ if(!env.MEGAZORD_RPC_URL||!env.MEGAZORD_RPC_SECUNDARIO
    ||env.MEGAZORD_RPC_URL===env.MEGAZORD_RPC_SECUNDARIO)throw Error('configuracao Megazord incompleta');
  if(env.TITAN_SNOWBALL_REINVESTIR==='1')throw Error('reinvestimento precisa de migracao separada');
  const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL);
