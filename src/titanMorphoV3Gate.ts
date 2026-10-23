@@ -24,16 +24,24 @@ function nonnegativeBigInt(s:string|undefined,defaultValue:string,max:bigint):bi
 export function politicaMorphoV3(
   env:NodeJS.ProcessEnv=process.env,
 ):MorphoV3Policy{
+  // Only unified financial mode uses the on-chain USD conversion.
+  // A failed/expired refresh is a hard stop, never a reason to fall back
+  // to a stale ETH/USD quote or a lower WETH floor.
+  const usdTimestamp=Number(env.MEGAZORD_COTACAO_ATUALIZADA_EM_MS??0);
+  const usdFresh=env.MEGAZORD_MODO!=='execucao'
+    ||(Number.isSafeInteger(usdTimestamp)&&usdTimestamp>0
+      &&Date.now()>=usdTimestamp&&Date.now()-usdTimestamp<=90000);
   return {
     // CACA Aave and Morpho MUST NOT sign simultaneously with one wallet.
-    armed:env.CACA_MORPHO_V3_ENVIAR==='1'
+    armed:usdFresh&&env.CACA_MORPHO_V3_ENVIAR==='1'
       &&env.CACA_MORPHO_V3_CONFIRMAR==='OPERAR_MORPHO_BASE'
       &&env.CACA_MORPHO_V3_NONCE_EXCLUSIVO==='1'
       &&(env.CACA_ENVIAR!=='1'||contextoExecutorMegazord()),
     maxGas:positiveBigInt(env.CACA_MORPHO_V3_GAS_MAX,'1200000',2000000n),
     maxCostWei:positiveBigInt(env.CACA_MORPHO_V3_CUSTO_MAX_WEI,'500000000000000',2000000000000000n),
     tipWei:positiveBigInt(env.CACA_MORPHO_V3_TIP_WEI,'20000000',3000000000n),
-    minReturnBps:positiveBigInt(env.CACA_MORPHO_V3_RETORNO_BPS,'12000',20000n),
+    // 10005 is 1.0005x the conservative GAS cost, not 0.05% of loan notional.
+    minReturnBps:positiveBigInt(env.CACA_MORPHO_V3_RETORNO_BPS,'10005',20000n),
     minNetWethWei:nonnegativeBigInt(env.CACA_MORPHO_V3_LUCRO_MIN_WETH_WEI,'0',
       10000000000000000n),
     maxAgeBlocks:3,
