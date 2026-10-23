@@ -4926,6 +4926,8 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
                 const resultado=await logsComRpcHistorico<LogRPC>(
                     async()=>{throw new Error('censo dedicado: usar apenas RPC historico');},
                     filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
+                        urlsAlternativas:REDE_ESCOLHIDA==='base'?RPCS_PARA_TENTAR.base:[],
+                        chainIdEsperado:REDE_ESCOLHIDA==='base'?8453:undefined,
                         tempoLimiteMs:6000},
                 );
                 for(const cru of resultado.logs){
@@ -5294,7 +5296,9 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
             };
             const resposta = await logsComRpcHistorico(
                 () => chamar<typeof logs>('eth_getLogs',[filtro],1,'demorada','historico'),
-                filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL},
+                filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
+                    urlsAlternativas:REDE_ESCOLHIDA==='base'?RPCS_PARA_TENTAR.base:[],
+                    chainIdEsperado:REDE_ESCOLHIDA==='base'?8453:undefined},
             );
             logs=resposta.logs;
             if(resposta.origem==='secundario')log.info('[PLACAR/RPC] Recuperado por RPC historico independente.',{
