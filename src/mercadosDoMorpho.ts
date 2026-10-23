@@ -101,7 +101,7 @@ import {
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
     selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,selecionarDevedoresPorRisco,
     codificarPosition, codificarMarket, lerMarket, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
-    paraCache, doCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
+    paraCache, doCache, cursorDeCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
 import {
     disponibilidadeDoCanal, comoLerOsCanais, OrcamentoHttp,
@@ -427,9 +427,12 @@ export async function descobrirMorphoPorApi(
     // O CACHE PRIMEIRO: se a API cair, e ele que mantem o monitoramento. Ler
     // antes de pedir nada tambem responde "o que eu já sabia" na mesma linha.
     let doDisco: MercadoDaApi[] | null = null;
+    let cursorInicial: string | null = null;
     try {
-        doDisco = doCache(JSON.parse(await readFile(caminho, 'utf8')));
-    } catch { doDisco = null; }
+        const cacheAnterior = JSON.parse(await readFile(caminho, 'utf8'));
+        doDisco = doCache(cacheAnterior);
+        cursorInicial = doDisco === null ? null : cursorDeCache(cacheAnterior);
+    } catch { doDisco = null; cursorInicial = null; }
 
     const agente = process.env.HTTPS_PROXY ? new ProxyAgent(process.env.HTTPS_PROXY) : undefined;
     // A CONTAGEM DE HTTP MORA AQUI, num lugar so, por fora do transporte.
@@ -463,9 +466,23 @@ export async function descobrirMorphoPorApi(
     const cursores=new CursoresMorpho(caminho+'.devedores.json');
     await cursores.carregar();
     const enumeracao = await enumerarMercados(buscar, { orcamento,
+        inicio:cursorInicial,
         reservaDeRequisicoes:Math.min(1+tetoDev*3,Math.floor(orcamento.tetoDeRequisicoes/2)) });
-    const legiveis = enumeracao.mercados.length > 0 ? enumeracao.mercados : (doDisco ?? []);
+    // Janelas distintas devem ACUMULAR mercados. Apenas uma varredura que
+    // começou no início e chegou ao fim substitui o inventário anterior.
+    const inventario = new Map<string, MercadoDaApi>();
+    if (!enumeracao.completa || cursorInicial !== null) {
+        for (const m of doDisco ?? []) inventario.set(m.id,m);
+    }
+    for (const m of enumeracao.mercados) inventario.set(m.id,m);
+    const legiveis = [...inventario.values()];
     const veioDoCache = enumeracao.mercados.length === 0 && doDisco !== null;
+    const completoNoCache = enumeracao.completa && cursorInicial === null;
+    // Um cursor de API inválido não pode aprisionar o scanner para sempre.
+    const cursorInvalido = enumeracao.mercados.length === 0 &&
+        /HTTP 400|HTTP 404|repetiu o cursor|nenhum mercado novo|NÃO-JSON/.test(enumeracao.falha ?? '');
+    const proximoCursor = enumeracao.completa || cursorInvalido
+        ? null : (enumeracao.proximoCursor ?? cursorInicial);
     // A BASE, pelo chain do PROPRIO item. Filtrar aqui e diferente de confiar
     // no `chain_id` da URL: a API pode ignorar o parametro, e validar um
     // mercado de outra rede contra a Base daria divergencia de campos — que
@@ -908,12 +925,15 @@ export async function descobrirMorphoPorApi(
             await mkdir(dirname(caminho), { recursive: true });
             const tmp = `${caminho}.${process.pid}.${Date.now()}.tmp`;
             await writeFile(tmp, JSON.stringify(
-                paraCache(legiveis, enumeracao.blocoIndexado, enumeracao.completa, Date.now()),
+                paraCache(legiveis, enumeracao.blocoIndexado, completoNoCache, Date.now(), proximoCursor),
             ));
             const { rename } = await import('fs/promises');
             await rename(tmp, caminho);
             log.info('[MORPHO/API] Cache gravado.', {
-                caminho, mercados: legiveis.length, completo: enumeracao.completa,
+                caminho, mercados: legiveis.length, completo: completoNoCache,
+                mercadoDaApiNestaRodada: enumeracao.mercados.length,
+                retomouDaPaginaAnterior: cursorInicial !== null,
+                temProximaPagina: proximoCursor !== null,
                 porque: 'nome único por gravação e rename atômico — a mesma regra do cache de '
                     + 'devedores, que já custou uma gravação perdida a este projeto',
             });
