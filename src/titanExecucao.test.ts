@@ -196,7 +196,11 @@ test('prova atomica pode medir estado latest mesmo que a cotacao tenha atravessa
     assert.equal(blocoValidoParaProvaAtomica(100,101),true);
     assert.equal(blocoValidoParaProvaAtomica(100,105),true);
     assert.equal(blocoValidoParaProvaAtomica(100,120),true);
-    assert.equal(blocoValidoParaProvaAtomica(100,121),false);
+    // The bot previously lost a live candidate at 21 blocks while
+    // the paid executor could still safely re-simulate within 60.
+    assert.equal(blocoValidoParaProvaAtomica(100,121),true);
+    assert.equal(blocoValidoParaProvaAtomica(100,160),true);
+    assert.equal(blocoValidoParaProvaAtomica(100,161),false);
     assert.equal(blocoValidoParaProvaAtomica(100,99),false);
     assert.equal(blocoValidoParaProvaAtomica(0,120),false);
     assert.equal(blocoValidoParaProvaAtomica(NaN,120),false);
