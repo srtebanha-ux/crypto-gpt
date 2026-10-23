@@ -2782,6 +2782,9 @@ export async function iniciarArbitragem(): Promise<void> {
                     if(bruto<=0n||liquido<=0n)continue;
                     ultimoEnsaioTitanEm=Date.now();
                     const envio=await executarTitan({...sinal,
+                        // The proof ran against latest. Paid execution must
+                        // still revalidate state and nonce before broadcast.
+                        bloco:resultado.bloco??sinal.bloco,
                         brutoEstimado:bruto,liquidoEstimado:liquido},
                         process.env.TITAN_EXECUTOR_RPC_URL??rpc);
                     if(['enviado','confirmado','revertido','desconhecido']
@@ -2915,6 +2918,7 @@ export async function iniciarArbitragem(): Promise<void> {
                         let melhorExecutavel:(typeof candidatos)[number]|null=null;
                         let melhorGanhoReal:bigint=0n;
                         let melhorBrutoReal:bigint=0n;
+                        let melhorBlocoDaProva:number|null=null;
                         for(const c of candidatos){
                             const sn=c.sinal;
                             // Simular separadamente cada rota no executor real,
@@ -2937,6 +2941,7 @@ export async function iniciarArbitragem(): Promise<void> {
                                 if(ganho>melhorGanhoReal){
                                     melhorGanhoReal=ganho;
                                     melhorBrutoReal=BigInt(resultado.brutoWei??'0');
+                                    melhorBlocoDaProva=resultado.bloco;
                                     melhorExecutavel=c;
                                 }
                             }else if(resultado.situacao==='inviavel')atomicasInviaveis++;
@@ -2963,7 +2968,10 @@ export async function iniciarArbitragem(): Promise<void> {
                             const resultado=await executarTitan({
                                 rota:pernasDaCandidata(melhorExecutavel.rota,
                                     WETH_DA_BASE,sn.melhorTamanho!),
-                                quantia:sn.melhorTamanho!,bloco:blocoDaAmostra,
+                                // Send candidate carries the block of the actual
+                                // current-state proof, not stale pool discovery.
+                                // The paid path repeats eth_call and price checks.
+                                quantia:sn.melhorTamanho!,bloco:melhorBlocoDaProva??blocoDaAmostra,
                                 // The only approval comes from the
                                 // complete EVM simulation, NOT from the
                                 // possibly missing gas-aware quote.
