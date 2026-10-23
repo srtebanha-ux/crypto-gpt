@@ -26,6 +26,36 @@ type Journal={version:1;address:string;pending:Pending|null;
 export type PoliticaMegazord={journal:string;maxDailyWei:bigint;maxPerTxWei:bigint;
  maxDailyTx:number;contracts:readonly string[]};
 
+/** Gas credits require a canonical WETH Transfer from the called executor
+ * to the authorized treasury, corroborated by both independent RPCs.
+ * Receipt status=1, unrelated ERC20 transfers, and estimates are insufficient.
+ */
+export function creditoGasComprovado(
+ pending:Pending,r:Receipt,other:Receipt|null,
+):bigint{
+ const cost=BigInt(pending.reservedWei);
+ if(r.status!==1||other?.status!==1||r.blockNumber!==other.blockNumber
+   ||!pending.to||!r.logs||!other.logs||cost<=0n)return 0n;
+ const transfer=id('Transfer(address,address,uint256)').toLowerCase();
+ const topic=(address:string)=>'0x'+address.toLowerCase().slice(2).padStart(64,'0');
+ const collect=(receipt:Receipt)=>{
+   let total=0n;
+   for(const l of receipt.logs??[]){
+     if(l.address.toLowerCase()!=='0x4200000000000000000000000000000000000006'
+       ||l.topics.length!==3||l.topics[0]?.toLowerCase()!==transfer
+       ||l.topics[1]?.toLowerCase()!==topic(pending.to!)
+       ||l.topics[2]?.toLowerCase()!==topic(COFRE_ESPERADO)
+       ||!/^0x[0-9a-f]{64}$/i.test(l.data))continue;
+     total+=BigInt(l.data);
+   }
+   return total;
+ };
+ const amount=collect(r);
+ // Credit only if WETH paid to treasury covers 2x the conservative gas cost:
+ // one cost to reimburse, another to prove genuinely positive net income.
+ return amount>=cost*2n&&collect(other)>=cost*2n?cost:0n;
+}
+
 export class ExecutorMegazord {
  private tail:Promise<unknown>=Promise.resolve();
  private context=new AsyncLocalStorage<{strategy:string;token:string}>();
@@ -92,35 +122,6 @@ export class ExecutorMegazord {
    try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}
    this.state=next;
  }
-/** Gas credits require a canonical WETH Transfer from the called executor
- * to the authorized treasury, corroborated by both independent RPCs.
- * Receipt status=1, unrelated ERC20 transfers, and estimates are insufficient.
- */
-export function creditoGasComprovado(
- pending:Pending,r:Receipt,other:Receipt|null,
-):bigint{
- const cost=BigInt(pending.reservedWei);
- if(r.status!==1||other?.status!==1||r.blockNumber!==other.blockNumber
-   ||!pending.to||!r.logs||!other.logs||cost<=0n)return 0n;
- const transfer=id('Transfer(address,address,uint256)').toLowerCase();
- const topic=(address:string)=>'0x'+address.toLowerCase().slice(2).padStart(64,'0');
- const collect=(receipt:Receipt)=>{
-   let total=0n;
-   for(const l of receipt.logs??[]){
-     if(l.address.toLowerCase()!=='0x4200000000000000000000000000000000000006'
-       ||l.topics.length!==3||l.topics[0]?.toLowerCase()!==transfer
-       ||l.topics[1]?.toLowerCase()!==topic(pending.to!)
-       ||l.topics[2]?.toLowerCase()!==topic(COFRE_ESPERADO)
-       ||!/^0x[0-9a-f]{64}$/i.test(l.data))continue;
-     total+=BigInt(l.data);
-   }
-   return total;
- };
- const amount=collect(r);
- // Credit only if WETH paid to treasury covers 2x the conservative gas cost:
- // one cost to reimburse, another to prove genuinely positive net income.
- return amount>=cost*2n&&collect(other)>=cost*2n?cost:0n;
-}
  async reconcile():Promise<void>{
    const p=this.state.pending;
    if(p){
