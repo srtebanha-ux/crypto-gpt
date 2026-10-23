@@ -2,6 +2,7 @@
 import {createLogger} from './logger';
 import {instalarExecutorMegazord,conferirIdentidadeMegazord} from './megazordExecutor';
 import {conferirRedeMegazord} from './megazordPreflight';
+import {prepararMorphoMegazord} from './megazordMorphoBoot';
 const log=createLogger('megazord');
 export type MotoresMegazord={
  liquidacoes:()=>Promise<'parar'|void>;
@@ -46,12 +47,26 @@ export async function iniciarMegazord(
    // Fails closed if the contract is not deployed, RPCs disagree, wallet differs,
    // gas balance is zero or a non-durable journal was configured.
    conferirIdentidadeMegazord(env);
+   // Deploy is strictly opt-in with a per-contract gas cap. An unresolved
+   // marker, unknown nonce or mismatching immutable fails the WHOLE boot.
+   const contratos=await prepararMorphoMegazord(env);
    const rede=await conferirRedeMegazord(env);
    log.info('Preflight de execucao aprovado (somente leitura).',{
      endereco:rede.address,
      rpcs:rede.checks.length,
      escopo:rede.scope,
+     executoresMorphoConferidos:2,
+     implantesNestaInicializacao:contratos.novos,
    });
+   // Automatic Morpho LIVE only when the service was expressly configured
+   // for MEGAZORD_MODO=execucao and every onchain + wallet gate passed.
+   // Strategies still execute full eth_call/gas/profit gates per candidate.
+   for(const kind of ['V3','AERO']){
+     env['CACA_MORPHO_'+kind+'_AVALIAR']='1';
+     env['CACA_MORPHO_'+kind+'_ENVIAR']='1';
+     env['CACA_MORPHO_'+kind+'_CONFIRMAR']='OPERAR_MORPHO_BASE';
+     env['CACA_MORPHO_'+kind+'_NONCE_EXCLUSIVO']='1';
+   }
  }
  // Import engines only after policy validation. No scanner boot on import.
  const motores=await carregar();
