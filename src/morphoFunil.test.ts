@@ -8,6 +8,7 @@ import {CursoresMorpho} from './morphoCursores';
 import {OrcamentoHttp} from './canais';
 import {abrirSnapshotMorpho} from './morphoDescobertaRpc';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
+import {blocoValidoParaProvaAtomica} from './titanExecucao';
 import {avaliarSaidasMorpho,rotasMorphoHabilitadas,SondadoresMorpho} from './titanMorphoDiretorDeRota';
 import {planejarRotasMorphoV3,planejarRotasMorphoAero,PONTES_MORPHO,combinarSondasMorpho} from './titanMorphoRotas';
 import type {MercadoDaApi} from './morphoApi';
@@ -245,4 +246,12 @@ test('descoberta real leva todos os mercados da validacao a consulta apesar de r
   assert.equal(new Set(collected).size,6);
   assert.deepEqual(collected,validated,'nenhum mercado validado pode sumir no segundo seletor');
  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+
+test('cotacao atomica antiga ate 60 blocos ainda recebe prova integral latest, nao libera sinal de 61',()=>{
+  assert.equal(blocoValidoParaProvaAtomica(1000,1021),true);
+  assert.equal(blocoValidoParaProvaAtomica(1000,1060),true);
+  assert.equal(blocoValidoParaProvaAtomica(1000,1061),false);
+  assert.equal(blocoValidoParaProvaAtomica(1000,999),false);
 });
