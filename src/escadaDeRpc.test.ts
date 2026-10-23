@@ -359,3 +359,21 @@ test('a failed one-block control preserves the access-denied classification',asy
     }),e=>classificarFalhaHistorica((e as Error).message)==='acesso');
     assert.equal(leituras,2);
 });
+
+test('rate limiting the control query cannot turn the original 403 into an access verdict',async()=>{
+    let calls=0;
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('primary down')},FILTRO_HISTORICO,{
+        urlSecundaria:'https://rate-control.history.test',verificarFaixaRecusada:true,
+        buscar:async()=>{calls++;return {ok:false,status:calls===1?403:429} as Response;},
+    }),e=>classificarFalhaHistorica((e as Error).message)==='frequencia');
+    assert.equal(calls,2);
+});
+
+test('a timed-out control query cannot prove access denial or range restriction',async()=>{
+    let calls=0;
+    await assert.rejects(logsComRpcHistorico(async()=>{throw Error('primary down')},FILTRO_HISTORICO,{
+        urlSecundaria:'https://timeout-control.history.test',verificarFaixaRecusada:true,
+        buscar:async()=>{if(++calls===1)return {ok:false,status:403} as Response;throw Error('timeout');},
+    }),e=>classificarFalhaHistorica((e as Error).message)==='transitoria');
+    assert.equal(calls,2);
+});
