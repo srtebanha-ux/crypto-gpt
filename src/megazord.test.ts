@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {conferirModoMegazord,iniciarMegazord,manterLiquidanteMegazord} from './megazord';
+import {conferirModoMegazord,iniciarMegazord,manterLiquidanteMegazord,alinharMaxEnviosMegazord} from './megazord';
 test('refuses inherited financial authorization before engine loading',async()=>{
  for(const key of ['CACA_ENVIAR','TITAN_ENVIAR','TITAN_V2_ENVIAR',
    'CACA_MORPHO_V3_ENVIAR','CACA_MULTIHOP_ENVIAR','ARB_ENVIAR']){
@@ -52,4 +52,20 @@ test('financial mode rejects missing identity before importing scanner engines',
    loaded=true;return{liquidacoes:async()=>{},arbitragem:async()=>{}};
  }),/carteira publica e credencial/);
  assert.equal(loaded,false,'no scanners or signer may start without identity');
+});
+
+test('Megazord entrypoint aligns CACA window to global 250 daily cap before CACA import',()=>{
+ const env:NodeJS.ProcessEnv={MEGAZORD_MODO:'execucao',MEGAZORD_MAX_TX_DIA:'250'};
+ alinharMaxEnviosMegazord(env);
+ assert.equal(env.CACA_MAX_ENVIOS,'250');
+ const smaller:NodeJS.ProcessEnv={...env,CACA_MAX_ENVIOS:'15'};
+ alinharMaxEnviosMegazord(smaller);
+ assert.equal(smaller.CACA_MAX_ENVIOS,'15','operator quota must be preserved');
+ assert.throws(()=>alinharMaxEnviosMegazord({
+   ...env,CACA_MAX_ENVIOS:'251'}),/CACA_MAX_ENVIOS/);
+ assert.throws(()=>alinharMaxEnviosMegazord({
+   ...env,MEGAZORD_MAX_TX_DIA:'251'}),/MEGAZORD_MAX_TX_DIA/);
+ const observer:NodeJS.ProcessEnv={MEGAZORD_MODO:'observacao',MEGAZORD_MAX_TX_DIA:'250'};
+ alinharMaxEnviosMegazord(observer);
+ assert.equal(observer.CACA_MAX_ENVIOS,undefined,'observation has no live defaults');
 });

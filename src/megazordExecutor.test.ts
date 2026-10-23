@@ -4,11 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {Transaction,keccak256,Wallet,id,type TransactionResponse} from 'ethers';
-import {ExecutorMegazord,conferirIdentidadeMegazord,creditoGasComprovado,
+import {ExecutorMegazord,conferirIdentidadeMegazord,creditoGasComprovado,usdcEmWethWeiConservador,
  type RedeMegazord,type PoliticaMegazord} from './megazordExecutor';
 const key='0x'+'11'.repeat(32); // Offline fixture only, never funded.
 const target='0x'+'22'.repeat(20);
-function fixture(override:Partial<PoliticaMegazord>={}){
+function fixture(override:Partial<PoliticaMegazord>={},quotes?:()=>Promise<readonly [string,string]>){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'megazord-test-'));
  let nonce=0,timeout=false,preflightFails=false;
  const sent:number[]=[];
@@ -32,7 +32,7 @@ function fixture(override:Partial<PoliticaMegazord>={}){
  };
  const policy={journal:path.join(dir,'journal.json'),maxDailyWei:100000n,
    maxPerTxWei:30000n,maxDailyTx:4,contracts:[target],...override};
- const build=()=>new ExecutorMegazord(key,provider,provider,policy,async()=>1n);
+ const build=()=>new ExecutorMegazord(key,provider,provider,policy,async()=>1n,quotes);
  const e=build();
  const raw=(n:number)=>e.sign({chainId:8453,type:2,nonce:n,to:target,data:'0x1234',
    value:0n,gasLimit:21000n,maxFeePerGas:1n,maxPriorityFeePerGas:1n});
@@ -175,5 +175,60 @@ test('onchain WETH transfer proof renews uncovered budget but never daily tx cou
    assert.equal(journal.days[today].attempts,2);
    await assert.rejects(f.e.run('liquidacao',async()=>f.e.broadcast(await f.raw(2))),
      /orcamento global/);
+ }finally{f.cleanup();}
+});
+
+test('USDC to WETH uses TWO validated on-chain ETH/USDC prices and conservative haircut',()=>{
+ const same:['2000.000000000000','2000.000000000000']=['2000.000000000000','2000.000000000000'];
+ assert.equal(usdcEmWethWeiConservador(2000000n,same),950000000000000n);
+ assert.equal(usdcEmWethWeiConservador(2000000n,
+   ['2000.000000000000','2010.000000000000']),945273631840796n);
+ assert.throws(()=>usdcEmWethWeiConservador(2000000n,
+   ['2000.000000000000','2050.000000000000']),/oraculos divergem/);
+ assert.throws(()=>usdcEmWethWeiConservador(2000000n,
+   ['0.000000000000','2000.000000000000']),/TWAP invalido|faixa/);
+});
+test('USDC treasury receipts on both RPCs credit budget, other stables not assumed pegged',()=>{
+ const usdc='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+ const topic=(address:string)=>'0x'+address.toLowerCase().slice(2).padStart(64,'0');
+ const log={address:usdc,topics:[id('Transfer(address,address,uint256)'),
+   topic(target),topic('0x3dffA934170bdD491724747Be2c4F56E3f1512A7')],
+   data:'0x'+(2000000n).toString(16).padStart(64,'0')};
+ const p={hash:'0x'+'44'.repeat(32),nonce:3,strategy:'morpho',day:'2026-10-23',
+   reservedWei:'400000000000000',to:target};
+ const r={status:1,blockNumber:9001,logs:[log]};
+ const quote:['2000.000000000000','2010.000000000000']=[
+   '2000.000000000000','2010.000000000000'];
+ assert.equal(creditoGasComprovado(p,r,r),0n,'WETH-only proof not enough for USDC');
+ assert.equal(creditoGasComprovado(p,r,r,quote),400000000000000n);
+ assert.equal(creditoGasComprovado(p,r,{...r,blockNumber:9000},quote),0n);
+ assert.equal(creditoGasComprovado(p,r,{...r,
+   logs:[{...log,data:'0x'+(1900000n).toString(16).padStart(64,'0')}]},quote),0n);
+ assert.equal(creditoGasComprovado(p,r,r,
+   ['2000.000000000000','2050.000000000000']),0n);
+ assert.equal(creditoGasComprovado(p,{...r,
+   logs:[{...log,address:'0xd9AAeC86B65D86f6A7B5B1b0c42FFA531710b6CA'}]},r,quote),0n);
+ const small={...r,logs:[{...log,data:'0x'+(100000n).toString(16).padStart(64,'0')}]};
+ assert.equal(creditoGasComprovado(p,small,small,quote),0n);
+});
+test('USDC credit works during reconcile, but never without a two-RPC oracle result',async()=>{
+ const prices:()=>Promise<readonly [string,string]>=async()=>[
+   '2000.000000000000','2000.000000000000'];
+ const f=fixture({maxDailyWei:40000n,maxDailyTx:2},prices);
+ try{
+   await f.e.run('morpho',async()=>{const tx=await f.e.broadcast(await f.raw(0));await tx.wait();});
+   const [hash]=f.receipts.keys();
+   const rec=f.receipts.get(hash)!;
+   const topic=(address:string)=>'0x'+address.toLowerCase().slice(2).padStart(64,'0');
+   rec.logs=[{address:'0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+     topics:[id('Transfer(address,address,uint256)'),topic(target),
+       topic('0x3dffA934170bdD491724747Be2c4F56E3f1512A7')],
+     data:'0x'+(2000000n).toString(16).padStart(64,'0')}];
+   await f.e.reconcile();
+   const journal=JSON.parse(fs.readFileSync(f.policy.journal,'utf8'));
+   const day=new Date().toISOString().slice(0,10);
+   assert.equal(journal.days[day].creditedWei,'21002');
+   await f.e.run('morpho',async()=>{const tx=await f.e.broadcast(await f.raw(1));await tx.wait();});
+   assert.equal(f.sent.length,2);
  }finally{f.cleanup();}
 });
