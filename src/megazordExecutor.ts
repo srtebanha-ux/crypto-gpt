@@ -8,6 +8,7 @@ import {Wallet,Transaction,keccak256,computeAddress,JsonRpcProvider,id,
  type TransactionRequest,type TransactionResponse} from 'ethers';
 import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
 import {COFRE_ESPERADO} from './caca';
+import {consultarEthUsdBase} from './megazordEthUsd';
 
 type Log={address:string;topics:readonly string[];data:string};
 type Receipt={status:number|null;blockNumber:number;logs?:readonly Log[]};
@@ -26,34 +27,64 @@ type Journal={version:1;address:string;pending:Pending|null;
 export type PoliticaMegazord={journal:string;maxDailyWei:bigint;maxPerTxWei:bigint;
  maxDailyTx:number;contracts:readonly string[]};
 
-/** Gas credits require a canonical WETH Transfer from the called executor
- * to the authorized treasury, corroborated by both independent RPCs.
- * Receipt status=1, unrelated ERC20 transfers, and estimates are insufficient.
+/** Conservatively value USDC earnings in WETH wei using two independently
+ * verified 30-minute onchain ETH/USDC TWAPs. Never assume USD peg.
+ * A price disagreement greater than 1%, invalid oracle or wrong token denies credit.
+ */
+export function usdcEmWethWeiConservador(amount:bigint,twaps:readonly [string,string]):bigint{
+ if(amount<=0n)return 0n;
+ const parsed=twaps.map(q=>{
+   if(!/^[0-9]{3,6}\.[0-9]{12}$/.test(q))throw Error('ETH/USDC: TWAP invalido');
+   const [whole,frac]=q.split('.');
+   const n=BigInt(whole!)*1000000000000n+BigInt(frac!);
+   if(n<500000000000000n||n>100000000000000000n)
+     throw Error('ETH/USDC: cotacao fora da faixa');
+   return n;
+ });
+ const high=parsed[0]!>parsed[1]!?parsed[0]!:parsed[1]!;
+ const low=parsed[0]!<parsed[1]!?parsed[0]!:parsed[1]!;
+ if(high*100n>low*101n)throw Error('ETH/USDC: oraculos divergem');
+ // 6 decimal USDC; price in USDC/WETH with 12 decimal fixed point.
+ // Choose the HIGHEST ETH price (smallest WETH equivalent) and
+ // haircut 5% to absorb intra-block volatility/route friction.
+ return amount*1000000000000000000000000n*95n/(high*100n);
+}
+/** Both independent receipts must report the SAME canonical ERC20 transfer
+ * from the exact called executor to the immutable treasury. An EVM success
+ * by itself never establishes distributable profits.
  */
 export function creditoGasComprovado(
- pending:Pending,r:Receipt,other:Receipt|null,
+ pending:Pending,r:Receipt,other:Receipt|null,twaps?:readonly [string,string],
 ):bigint{
  const cost=BigInt(pending.reservedWei);
  if(r.status!==1||other?.status!==1||r.blockNumber!==other.blockNumber
    ||!pending.to||!r.logs||!other.logs||cost<=0n)return 0n;
  const transfer=id('Transfer(address,address,uint256)').toLowerCase();
  const topic=(address:string)=>'0x'+address.toLowerCase().slice(2).padStart(64,'0');
- const collect=(receipt:Receipt)=>{
-   let total=0n;
+ const total=(receipt:Receipt,token:string)=>{
+   let sum=0n;
    for(const l of receipt.logs??[]){
-     if(l.address.toLowerCase()!=='0x4200000000000000000000000000000000000006'
+     if(l.address.toLowerCase()!==token
        ||l.topics.length!==3||l.topics[0]?.toLowerCase()!==transfer
        ||l.topics[1]?.toLowerCase()!==topic(pending.to!)
        ||l.topics[2]?.toLowerCase()!==topic(COFRE_ESPERADO)
        ||!/^0x[0-9a-f]{64}$/i.test(l.data))continue;
-     total+=BigInt(l.data);
+     sum+=BigInt(l.data);
    }
-   return total;
+   return sum;
  };
- const amount=collect(r);
- // Credit only if WETH paid to treasury covers 2x the conservative gas cost:
- // one cost to reimburse, another to prove genuinely positive net income.
- return amount>=cost*2n&&collect(other)>=cost*2n?cost:0n;
+ const weth='0x4200000000000000000000000000000000000006';
+ const usdc='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+ const weth0=total(r,weth),weth1=total(other,weth);
+ if(weth0>0n&&weth0===weth1&&weth0>=cost*2n)return cost;
+ // Only canonical Base USDC has a proven WETH/USDC reference pool.
+ // Other stablecoin contracts need their OWN independently validated oracle.
+ if(!twaps)return 0n;
+ const usdc0=total(r,usdc),usdc1=total(other,usdc);
+ if(usdc0<=0n||usdc0!==usdc1)return 0n;
+ try {
+   return usdcEmWethWeiConservador(usdc0,twaps)>=cost*2n?cost:0n;
+ }catch{return 0n;}
 }
 
 export class ExecutorMegazord {
@@ -68,7 +99,8 @@ export class ExecutorMegazord {
  private signer:Wallet;
  private state:Journal;
  constructor(key:string,private primary:RedeMegazord,private secondary:RedeMegazord,
-   private policy:PoliticaMegazord,private l1Upper:(raw:string)=>Promise<bigint>){
+   private policy:PoliticaMegazord,private l1Upper:(raw:string)=>Promise<bigint>,
+   private onchainUsdcTwaps?:()=>Promise<readonly [string,string]>){
    this.signer=new Wallet(key);
    if(policy.maxDailyWei<=0n||policy.maxPerTxWei<=0n||policy.maxPerTxWei>policy.maxDailyWei
      ||!Number.isSafeInteger(policy.maxDailyTx)||policy.maxDailyTx<1
@@ -130,7 +162,13 @@ export class ExecutorMegazord {
      if(r.status!==0&&r.status!==1)throw Error('status de recibo invalido');
      const next=structuredClone(this.state);next.pending=null;
      const secondary=await this.secondary.getTransactionReceipt(p.hash).catch(()=>null);
-     const credit=creditoGasComprovado(p,r,secondary);
+     // No external read is needed for native WETH. USDC credit is optional:
+     // oracle failure cannot turn a successful receipt into free gas.
+     let credit=creditoGasComprovado(p,r,secondary);
+     if(credit===0n&&this.onchainUsdcTwaps){
+       const twaps=await this.onchainUsdcTwaps().catch(()=>null);
+       if(twaps)credit=creditoGasComprovado(p,r,secondary,twaps);
+     }
      if(credit>0n){
        const day=next.days[p.day];
        if(!day)throw Error('registro diario ausente para credito de gas');
@@ -290,7 +328,11 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
      maxDailyTx:Number(env.MEGAZORD_MAX_TX_DIA??'0'),
      contracts:(env.MEGAZORD_CONTRATOS??'').split(',').map(x=>x.trim()).filter(Boolean),
    },async raw=>BigInt(await p.call({to:ORACULO_DE_GAS_L1,
-     data:codificarTetoDeL1((raw.length-2)/2)})));
+     data:codificarTetoDeL1((raw.length-2)/2)})),
+     async():Promise<readonly [string,string]>=>{
+       const [p0,p1]=await Promise.all([consultarEthUsdBase(p),consultarEthUsdBase(s)]);
+       return [p0,p1] as const;
+     });
  }catch(e){p.destroy();s.destroy();throw e;}
  const executor=active;
  process.once('exit',()=>executor.close());
