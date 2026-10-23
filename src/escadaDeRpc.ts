@@ -1,3 +1,4 @@
+import { agendaRpc, AgendaRpc, ehSaturacaoRpc } from './rpcCoordenado';
 // Arquivo: src/escadaDeRpc.ts
 //
 // REDUNDÂNCIA DE CEGUEIRA: quando um provedor morre, trocar de provedor.
@@ -253,6 +254,11 @@ export function classificarFalhaHistorica(mensagem:string):
  * The configured URL remains private: callers receive only its hostname.
  * A one-off fallback gets a strict deadline to protect block processing.
  */
+const agendasHistoricas=new Map<string,AgendaRpc>();
+function agendaHistorica(url:string):AgendaRpc{
+    let a=agendasHistoricas.get(url);
+    if(!a){a=new AgendaRpc(1);agendasHistoricas.set(url,a);}return a;
+}
 export async function logsComRpcHistorico<T>(
     consultarPrimario: () => Promise<T[]>,
     filtro: {address:string;fromBlock:string;toBlock:string;topics:string[]},
@@ -271,6 +277,11 @@ export async function logsComRpcHistorico<T>(
         const problema=porQueNaoServe(url);
         if(problema!==null||new URL(url).protocol!=='https:')
             throw new Error('RPC historico secundario invalido (exige HTTPS)');
+        // Every historical consumer shares pacing/cooldown, including new rounds.
+        // Reserve BEFORE starting the network timeout; queue time is not a timeout.
+        const historica=agendaHistorica(url);
+        await historica.reservar();
+        await agendaRpc(url).reservar();
         const abortar=new AbortController();
         const limite=Math.max(500,Math.min(opcoes.tempoLimiteMs??5000,10000));
         const timeout=setTimeout(()=>abortar.abort(),limite);
@@ -281,12 +292,30 @@ export async function logsComRpcHistorico<T>(
                 body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_getLogs',params:[filtro]}),
                 signal:abortar.signal,
             });
-            if(!resposta.ok)throw new Error('HTTP '+resposta.status);
+            if(!resposta.ok){
+                if(resposta.status===429){
+                    const retry=resposta.headers?.get('retry-after');
+                    const segundos=Number(retry);
+                    const ms=Number.isFinite(segundos)?segundos*1000:
+                        Math.max(0,Date.parse(retry??'')-Date.now());
+                    historica.recusar(Number.isFinite(ms)?ms:0);
+                    agendaRpc(url).recusar(Number.isFinite(ms)?ms:0);
+                }
+                throw new Error('HTTP '+resposta.status);
+            }
             const corpo:unknown=await resposta.json();
+            if(corpo&&typeof corpo==='object'&&'error' in corpo&&corpo.error){
+                if(ehSaturacaoRpc(corpo.error)){
+                    historica.recusar();agendaRpc(url).recusar();
+                    throw Error('JSON-RPC historico rate limit');
+                }
+                throw Error('JSON-RPC historico: '+JSON.stringify(corpo.error).slice(0,180));
+            }
             if(!corpo||typeof corpo!=='object'
                 ||('error' in corpo&&Boolean(corpo.error))
                 ||!('result' in corpo)||!Array.isArray(corpo.result))
                 throw new Error('JSON-RPC historico sem lista de logs valida');
+            historica.passou();
             return {logs:corpo.result as T[],origem:'secundario',
                 provedor:new URL(url).hostname};
         }catch(erroSecundario){

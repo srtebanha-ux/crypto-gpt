@@ -1,3 +1,4 @@
+import { agendaRpc, ehSaturacaoRpc, resumoRpcCoordenado } from './rpcCoordenado';
 /**
  * ENTREGA 2 — O CACADOR DE ARBITRAGEM CONTINUO.
  *
@@ -502,6 +503,7 @@ export function montarTransporteRpc(opcoes: {
     /** Teto de requisicoes HTTP na execucao. 0 = sem teto. */
     tetoDeRequisicoes?: number;
     timeoutMs?: number;
+    coordenarEndpoint?: boolean;
     /** Teto fisico de inicio de requisicoes HTTP por segundo (0 desliga). */
     requisicoesPorSegundo?: number;
     /** Quota dura de HTTP por janela de 1h; ao esgotar dorme ate renovar. */
@@ -603,6 +605,13 @@ export function montarTransporteRpc(opcoes: {
             }
             conta.http200 += 1;
             const texto = await r.text();
+            // Only the live runtime enables endpoint-wide coordination.
+            if(opcoes.coordenarEndpoint){
+                try{const json=JSON.parse(texto);
+                    const itens=Array.isArray(json)?json:[json];
+                    if(itens.some(x=>x?.error&&ehSaturacaoRpc(x.error)))agendaRpc(opcoes.rpc).recusar();
+                }catch{ /* normal parser below reports malformed responses */ }
+            }
             conta.bytesRecebidos += texto.length;
             conta.msTotal += agora() - t0;
             return { tipo: 'corpo', texto };
@@ -1841,12 +1850,25 @@ export async function iniciarArbitragem(): Promise<void> {
     // reversao de contrato. A fabrica e testada com respostas SIMULADAS.
     const TRANSPORTE = montarTransporteRpc({
         rpc,
-        fetchar: ((url: string, init: unknown) => fetch(url, {
-            ...(agente ? { dispatcher: agente } : {}),
-            ...(init as Record<string, unknown>),
-        } as Parameters<typeof fetch>[1])) as unknown as Fetchador,
+        coordenarEndpoint: true,
+        fetchar: (async (url: string, init: {body:string}) => {
+            const corpo=JSON.parse(init.body);
+            const agenda=agendaRpc(url);
+            await agenda.reservar(Array.isArray(corpo)?corpo.length:1);
+            const resposta=await fetch(url, {
+                ...(agente ? { dispatcher: agente } : {}),
+                ...init,
+                signal: Number(process.env.ARB_TIMEOUT_MS??8000)>0
+                    ? AbortSignal.timeout(Number(process.env.ARB_TIMEOUT_MS??8000)) : undefined,
+            } as Parameters<typeof fetch>[1]);
+            if(resposta.status===429){
+                const segundos=Number(resposta.headers.get('retry-after'));
+                agenda.recusar(Number.isFinite(segundos)?segundos*1000:0);
+            }
+            return resposta;
+        }) as unknown as Fetchador,
         tentativas: Number(process.env.ARB_TENTATIVAS ?? 3),
-        loteMaximo: Number(process.env.ARB_LOTE_MAX ?? 200),
+        loteMaximo: Math.min(16, Number(process.env.ARB_LOTE_MAX ?? 16)),
         tetoDeRequisicoes: Number(process.env.ARB_TETO_RPC ?? 0),
         timeoutMs: Number(process.env.ARB_TIMEOUT_MS ?? 8000),
         requisicoesPorSegundo: Number(process.env.ARB_HTTP_RPS ?? 0),
@@ -2095,6 +2117,7 @@ export async function iniciarArbitragem(): Promise<void> {
     let atomicasInviaveis=0;
     let atomicasDesconhecidas=0;
     let ultimoTrianguloEm=0;
+    let trianguloEmCurso=false;
     let indiceTriangular=0;
     let triangulosComSpread=0;
     let triangulosSemSpread=0;
@@ -2241,6 +2264,7 @@ export async function iniciarArbitragem(): Promise<void> {
                 // A CONTABILIDADE DE REDE, por desfecho: sem ela, 33% de
                 // recusa HTTP ficava invisível no relatório econômico.
                 rpc: TRANSPORTE.comoLerAContabilidade(),
+                rpcCoordenado: resumoRpcCoordenado(),
                 porSinal: LIVRO_DE_SINAIS.todos.map((sn) => ({
                     rota: sn.rota,
                     protocolo: sn.protocolo,
@@ -2642,9 +2666,12 @@ export async function iniciarArbitragem(): Promise<void> {
             // eth_call; so uma simulacao economicamente positiva permite
             // chamar o executor de transacao (que valida tudo novamente).
             if(triangulosConhecidos.length>0
+                && !trianguloEmCurso
                 && process.env.TITAN_EXPLORAR_TRIANGULOS==='1'
                 && Date.now()-ultimoTrianguloEm>=75_000) {
                 ultimoTrianguloEm=Date.now();
+                trianguloEmCurso=true;
+                const explorarAmostra=async()=>{
                 // Rotacao com limite: nao repetir o mesmo prefixo de 2000
                 // caminhos no boot, nem carregar 2000 pools em cada bloco.
                 const tamanhoAmostra=Number(process.env.TITAN_TRIANGULOS_POR_RODADA??'4');
@@ -2770,6 +2797,16 @@ export async function iniciarArbitragem(): Promise<void> {
                         capacidadeDesconhecida:avaliadas.filter(x=>x.liquidez===null).length,
                     });
                 }
+                };
+                const tarefa=explorarAmostra().finally(()=>{trianguloEmCurso=false;});
+                // Observation never holds the live quote loop behind 12 probes.
+                // Financial execution retains its original serialized lifecycle.
+                if(process.env.TITAN_ENVIAR==='1')await tarefa;
+                else void tarefa.catch(e=>{
+                    log.warn('[TITAN/TRIANGULOS] Explorar amostra falhou.',{
+                        motivo:e instanceof Error?e.message.slice(0,160):'falha de leitura',
+                    });
+                });
             }
 
             // A COTACAO: UM LOTE JSON-RPC POR DEGRAU da escada, com as rotas

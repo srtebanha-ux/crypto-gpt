@@ -301,7 +301,9 @@ test('o transporte do caçador NÃO pode voltar a ignorar o status — lido no c
     // `r.status`), e nenhum teste de valor pega o retorno de uma função que
     // nem existe mais. É a mesma razão do teste que lê os gravadores do cache.
     const fonte = fs.readFileSync(path.join(__dirname, 'cacarArbitragem.ts'), 'utf8');
-    const principal = fonte.slice(fonte.indexOf('async function principal'));
+    const inicio = fonte.indexOf('export async function iniciarArbitragem');
+    assert.ok(inicio >= 0, 'ponto de entrada do scanner deve existir');
+    const principal = fonte.slice(inicio);
     assert.match(principal, /montarTransporteRpc\(\{/,
         'o laço tem de usar a fábrica, senão volta a existir um transporte sem status');
     assert.ok(!/const j = await r\.json\(\)/.test(principal),

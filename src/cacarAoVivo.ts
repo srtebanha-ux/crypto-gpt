@@ -1,3 +1,4 @@
+import { agendaRpc, ehSaturacaoRpc } from './rpcCoordenado';
 import {carteiraMegazord} from './megazordExecutor';
 // Arquivo: src/cacarAoVivo.ts
 import { Decimal } from 'decimal.js';
@@ -1140,7 +1141,9 @@ async function umaChamada<T>(metodo: string, params: unknown[]): Promise<T> {
     // `undefined` quando o `error` chegava como `[code, message]` — e foi assim
     // que 5.750 posicoes se perderam com "erro sem mensagem" no log.
     if (corpo.error !== undefined && corpo.error !== null) {
-        throw new Error(comoLerOErroJsonRpc(lerErroJsonRpc(corpo, res.status)));
+        const mensagem=comoLerOErroJsonRpc(lerErroJsonRpc(corpo, res.status));
+        if(ehSaturacaoRpc(mensagem))agendaRpc(rpc).recusar();
+        throw new Error(mensagem);
     }
     // O PORTAO. Era `return corpo.result as T`, e um corpo sem `result` nem
     // `error` — que o provedor da Base manda sob carga — devolvia `undefined`
@@ -1418,7 +1421,9 @@ async function chamarCru(
             : undefined;
         // `dados` (o seletor da reversao) continua viajando: e ele que
         // distingue "ainda nao cruzou" de "meu contrato quebrou".
-        return { ok: false, mensagem: comoLerOErroJsonRpc(lido), dados };
+        const mensagem=comoLerOErroJsonRpc(lido);
+        if(ehSaturacaoRpc(mensagem))agendaRpc(rpc).recusar();
+        return { ok: false, mensagem, dados };
     }
     // `corpo.result ?? '0x'` era a mesma forma do defeito do `.replace`, com
     // outra cara: `'0x'` e "o contrato nao devolveu nada", que e RESPOSTA, e

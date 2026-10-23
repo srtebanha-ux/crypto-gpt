@@ -1,3 +1,4 @@
+import { ProviderSondaRpc } from './rpcCoordenado';
 /**
  * Real FlashArb EVM preflight on Base with eth_call state override.
  * No contract deployment, no signing, no gas spending, no broadcast.
@@ -123,7 +124,7 @@ export async function provarV2Atomico(
         if(poolA===poolB)return {...sem,motivo:'mesmo pool nos dois lados'};
         const artefato=JSON.parse(fs.readFileSync(artifactPath,'utf8')) as Artifact;
         const codigo=codigoFlashArbComDono(artefato,owner);
-        provider=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true});
+        provider=new ProviderSondaRpc(rpcUrl);
         if(BigInt(await provider.send('eth_chainId',[]))!==8453n)
             throw Error('RPC nao e Base 8453');
         if(await provider.getCode(virtual)!=='0x')
