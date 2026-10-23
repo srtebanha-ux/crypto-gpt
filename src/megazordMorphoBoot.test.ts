@@ -25,7 +25,7 @@ function mocked(seen:string[]):DependenciasMorphoBoot{
  };
 }
 test('existing deployed contract addresses validated and whitelisted without paid deploy',async()=>{
- const e={...env(),CACA_MORPHO_V3_CONTRATO:v3,CACA_MORPHO_AERO_CONTRATO:aero};
+ const e:NodeJS.ProcessEnv={...env(),CACA_MORPHO_V3_CONTRATO:v3,CACA_MORPHO_AERO_CONTRATO:aero};
  const seen:string[]=[];
  const result=await prepararMorphoMegazord(e,mocked(seen));
  assert.deepEqual(seen,['check:v3','check:aero']);
@@ -39,7 +39,7 @@ test('missing executors without explicit deployment authorization fail closed',a
  assert.deepEqual(seen,[]);assert.equal(e.CACA_MORPHO_V3_CONTRATO,undefined);
 });
 test('authorized one-time deploys require an independent positive gas cap per contract',async()=>{
- const e={...env(),MEGAZORD_AUTO_DEPLOY:'1',
+ const e:NodeJS.ProcessEnv={...env(),MEGAZORD_AUTO_DEPLOY:'1',
   TITAN_MORPHO_V3_DEPLOY_WEI:'100000000000000',
   TITAN_MORPHO_AERO_DEPLOY_WEI:'100000000000000'};
  const seen:string[]=[];
@@ -50,14 +50,14 @@ test('authorized one-time deploys require an independent positive gas cap per co
  assert.equal(e.CACA_MORPHO_AERO_CONTRATO,aero);
 });
 test('never auto-deploy when a second signer is declared active',async()=>{
- const e={...env(),MEGAZORD_AUTO_DEPLOY:'1',CACA_ENVIAR:'1'};
+ const e:NodeJS.ProcessEnv={...env(),MEGAZORD_AUTO_DEPLOY:'1',CACA_ENVIAR:'1'};
  await assert.rejects(prepararMorphoMegazord(e,mocked([])),/CACA_ENVIAR/);
 });
 test('invalid cap or failed immutable validation does not enable partial runtime state',async()=>{
  const e={...env(),MEGAZORD_AUTO_DEPLOY:'1',
   TITAN_MORPHO_V3_DEPLOY_WEI:'2500000000000000'};
  await assert.rejects(prepararMorphoMegazord(e,mocked([])),/limite de gas/);
- const e2={...env(),CACA_MORPHO_V3_CONTRATO:v3,CACA_MORPHO_AERO_CONTRATO:aero};
+ const e2:NodeJS.ProcessEnv={...env(),CACA_MORPHO_V3_CONTRATO:v3,CACA_MORPHO_AERO_CONTRATO:aero};
  const deps=mocked([]);
  deps.verificar=async tipo=>{if(tipo==='aero')throw Error('immutable mismatch');};
  await assert.rejects(prepararMorphoMegazord(e2,deps),/immutable mismatch/);
