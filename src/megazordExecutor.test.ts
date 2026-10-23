@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {Transaction,keccak256,Wallet,id,type TransactionResponse} from 'ethers';
-import {ExecutorMegazord,conferirIdentidadeMegazord,creditoGasComprovado,usdcEmWethWeiConservador,
+import {ExecutorMegazord,instalarEncerramentoMegazord,conferirIdentidadeMegazord,creditoGasComprovado,usdcEmWethWeiConservador,
  type RedeMegazord,type PoliticaMegazord} from './megazordExecutor';
 const key='0x'+'11'.repeat(32); // Offline fixture only, never funded.
 const target='0x'+'22'.repeat(20);
@@ -231,4 +231,42 @@ test('USDC credit works during reconcile, but never without a two-RPC oracle res
    await f.e.run('morpho',async()=>{const tx=await f.e.broadcast(await f.raw(1));await tx.wait();});
    assert.equal(f.sent.length,2);
  }finally{f.cleanup();}
+});
+
+test('SIGTERM Railway libera lock exclusivamente quando executor esta ocioso',()=>{
+ const {EventEmitter}=require('node:events') as typeof import('node:events');
+ const proc=new EventEmitter();
+ let exits=0;
+ const falso={
+  once:(evento:string,listener:()=>void)=>{proc.once(evento,listener);return falso;},
+  exit:(_:number)=>{exits++;proc.emit('exit');return undefined as never;},
+ } as unknown as Pick<NodeJS.Process,'once'|'exit'>;
+ const f=fixture();
+ try{
+  const lock=f.policy.journal+'.lock';
+  assert.equal(fs.existsSync(lock),true);
+  instalarEncerramentoMegazord(f.e,falso);
+  proc.emit('SIGTERM');
+  assert.equal(exits,1);
+  assert.equal(fs.existsSync(lock),false);
+  const novo=f.build();
+  novo.close();
+  proc.emit('exit');
+  assert.equal(exits,1);
+ }finally{f.cleanup();}
+});
+
+test('SIGINT fecha executor somente uma vez e remove lock sem trabalho pendente',()=>{
+ const {EventEmitter}=require('node:events') as typeof import('node:events');
+ const proc=new EventEmitter();
+ let fechamentos=0,exits=0;
+ const falso={
+  once:(evento:string,listener:()=>void)=>{proc.once(evento,listener);return falso;},
+  exit:(_:number)=>{exits++;return undefined as never;},
+ } as unknown as Pick<NodeJS.Process,'once'|'exit'>;
+ instalarEncerramentoMegazord({close:()=>{fechamentos++;}},falso);
+ proc.emit('SIGINT');
+ proc.emit('exit');
+ assert.equal(fechamentos,1);
+ assert.equal(exits,1);
 });
