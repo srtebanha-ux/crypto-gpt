@@ -3,6 +3,9 @@ import {createLogger} from './logger';
 import {instalarExecutorMegazord,conferirIdentidadeMegazord} from './megazordExecutor';
 import {conferirRedeMegazord} from './megazordPreflight';
 import {prepararMorphoMegazord} from './megazordMorphoBoot';
+import {confirmarMultiHopAave,habilitarAaveMultiHopMegazord} from './megazordAaveMultiBoot';
+import {atualizarPisoUsdMegazord,iniciarAtualizacaoPisoUsd} from './megazordEthUsd';
+import {JsonRpcProvider} from 'ethers';
 const log=createLogger('megazord');
 export type MotoresMegazord={
  liquidacoes:()=>Promise<'parar'|void>;
@@ -50,13 +53,23 @@ export async function iniciarMegazord(
    // Deploy is strictly opt-in with a per-contract gas cap. An unresolved
    // marker, unknown nonce or mismatching immutable fails the WHOLE boot.
    const contratos=await prepararMorphoMegazord(env);
+   // Only an Aave executor verified against ALL onchain immutables may be
+   // whitelisted. The complete readiness check still follows before arming.
+   const multi=await confirmarMultiHopAave(env);
+   if(multi)env.MEGAZORD_CONTRATOS=[env.MEGAZORD_CONTRATOS,multi].filter(Boolean).join(',');
    const rede=await conferirRedeMegazord(env);
+   const leitorPreco=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true});
+   let lucroUsd:{ethUsd:string;minimoWei:string};
+   try{lucroUsd=await atualizarPisoUsdMegazord(env,leitorPreco);}
+   finally{leitorPreco.destroy();}
    log.info('Preflight de execucao aprovado (somente leitura).',{
      endereco:rede.address,
      rpcs:rede.checks.length,
      escopo:rede.scope,
      executoresMorphoConferidos:2,
      implantesNestaInicializacao:contratos.novos,
+     lucroMinimoWethWei:lucroUsd.minimoWei,
+     precoReferenciaEthUsd:lucroUsd.ethUsd,
    });
    // Automatic Morpho LIVE only when the service was expressly configured
    // for MEGAZORD_MODO=execucao and every onchain + wallet gate passed.
@@ -67,6 +80,15 @@ export async function iniciarMegazord(
      env['CACA_MORPHO_'+kind+'_CONFIRMAR']='OPERAR_MORPHO_BASE';
      env['CACA_MORPHO_'+kind+'_NONCE_EXCLUSIVO']='1';
    }
+   if(multi)habilitarAaveMultiHopMegazord(env,multi);
+   else{
+     // No compatible Aave multi-hop contract: keep legacy V1/V2 disarmed,
+     // while Morpho V3/Aero can still prove and submit atomically.
+     env.CACA_ENVIAR='0';
+     env.CACA_MULTIHOP_ENVIAR='0';
+   }
+   iniciarAtualizacaoPisoUsd(env,env.MEGAZORD_RPC_URL!,
+     message=>log.warn(message));
  }
  // Import engines only after policy validation. No scanner boot on import.
  const motores=await carregar();
