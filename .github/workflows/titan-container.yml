@@ -63,7 +63,9 @@ jobs:
             }
             const proof = JSON.parse(fs.readFileSync(root + "FlashArbProva.json", "utf8"));
             assert.ok(Array.isArray(proof.abi));
-            assert.match(proof.bytecode, /^0x[0-9a-fA-F]+$/);
+            assert.match(proof.creation, /^0x[0-9a-fA-F]+$/);
+            assert.match(proof.runtime, /^0x[0-9a-fA-F]+$/);
+            assert.ok(proof.ownerReferences.length > 0);
             console.log("Runtime and five contract artifacts verified offline; no wallet, network or transaction.");
           '
       - name: Publish commit-specific image to GitHub Container Registry
