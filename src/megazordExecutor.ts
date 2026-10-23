@@ -313,6 +313,29 @@ export function conferirIdentidadeMegazord(env:NodeJS.ProcessEnv):{address:strin
    throw Error('chave nao corresponde ao endereco PUBLICO autorizado da carteira existente');
  return {address,journal};
 }
+/** Railway terminates workers with SIGTERM, not a normal JS exit.
+ * Releasing lock is synchronous and token-checked; when a transaction
+ * callback is still running close() retains it for manual reconciliation.
+ */
+export function instalarEncerramentoMegazord(
+ executor:Pick<ExecutorMegazord,'close'>,
+ processo:Pick<NodeJS.Process,'once'|'exit'>=process,
+):void{
+ let encerrado=false;
+ const liberar=()=>{
+  if(encerrado)return;
+  encerrado=true;
+  executor.close();
+ };
+ processo.once('exit',liberar);
+ for(const sinal of ['SIGTERM','SIGINT'] as const){
+  processo.once(sinal,()=>{
+   liberar();
+   processo.exit(0);
+  });
+ }
+}
+
 export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord{
  if(active)throw Error('executor Megazord ja instalado');
  if(env.MEGAZORD_CONFIRMAR!=='OPERAR_BASE_REAL'||env.MEGAZORD_EXCLUSIVO!=='1')
@@ -340,7 +363,7 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
      });
  }catch(e){p.destroy();s.destroy();throw e;}
  const executor=active;
- process.once('exit',()=>executor.close());
+ instalarEncerramentoMegazord(executor);
  return executor;
 }
 
