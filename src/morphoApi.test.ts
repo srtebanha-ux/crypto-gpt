@@ -5,7 +5,7 @@ import {
     enumerarMercados, enumerarDevedores, lerPaginaDeMercados, lerUmMercado, lerLltv,
     soOsQuePagam, mercadosParaSondagem, lerIdToMarketParams, lerPosition, lerMarket, sharesParaAtivos,
     apiConfereComACorrente, codificarIdToMarketParams, codificarPosition, codificarMarket,
-    consultaDeDevedores, lerDevedores, paraCache, doCache, idadeDoIndice, comoLerADescoberta,
+    consultaDeDevedores, lerDevedores, paraCache, doCache, cursorDeCache, idadeDoIndice, comoLerADescoberta,
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
     selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
     CHAIN_ID_DA_BASE, POR_PAGINA, TETO_DE_PAGINAS, type MercadoDaApi, type TransporteHttp,
@@ -49,6 +49,37 @@ const pagina = (ids: number[], extra: Record<string, unknown> = {}, cursor?: str
         irm: '0x2222222222222222222222222222222222222222',
         lltv: n % 2 === 0 ? '625000000000000000' : '945000000000000000',
     })),
+});
+
+test('enumeração continua após teto de páginas sem repetir o primeiro lote', async () => {
+    let chamadas = 0;
+    const urls: string[] = [];
+    const buscar: TransporteHttp = async (url) => {
+        urls.push(url);
+        chamadas += 1;
+        return {
+            status: 200,
+            text: async () => pagina([chamadas], {},
+                chamadas <= TETO_DE_PAGINAS ? `pagina-${chamadas}` : undefined),
+        };
+    };
+    const primeira = await enumerarMercados(buscar, { dormir: semSono });
+    assert.equal(primeira.completa, false);
+    assert.equal(primeira.paginas, TETO_DE_PAGINAS);
+    assert.equal(primeira.proximoCursor, `pagina-${TETO_DE_PAGINAS}`);
+
+    // Simula uma nova rodada/deploy: cursor restaura, cache mantém mercado anterior.
+    const cache = paraCache(primeira.mercados, null, false, Date.now(), primeira.proximoCursor);
+    assert.equal(cursorDeCache(JSON.parse(JSON.stringify(cache))), `pagina-${TETO_DE_PAGINAS}`);
+    assert.equal(cursorDeCache({ ...cache, proximoCursor: 'x'.repeat(2050) }), null);
+    const segunda = await enumerarMercados(buscar, {
+        inicio: cursorDeCache(cache), dormir: semSono,
+    });
+    assert.equal(segunda.completa, true);
+    assert.equal(segunda.paginas, 1);
+    assert.equal(segunda.proximoCursor, null);
+    assert.match(urls[TETO_DE_PAGINAS]!, new RegExp(`cursor=pagina-${TETO_DE_PAGINAS}`));
+    assert.equal(primeira.mercados.length + segunda.mercados.length, TETO_DE_PAGINAS + 1);
 });
 
 test('enumera por CURSOR e encerra quando a API não oferece o próximo', async () => {
