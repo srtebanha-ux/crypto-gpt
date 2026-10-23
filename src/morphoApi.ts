@@ -119,6 +119,8 @@ export interface ResultadoDaEnumeracao {
     elementosRecebidos: number;
     /** Quantas paginas vieram por CURSOR (contrato REST) e nao por offset. */
     paginouPorCursor: boolean;
+    /** Cursor da próxima página, para continuar em outra rodada sem recomeçar. */
+    proximoCursor?: string | null;
     /**
      * Os status HTTP REAIS observados, um por requisicao, na ordem.
      *
@@ -141,6 +143,8 @@ export async function enumerarMercados(
     opcoes: {
         base?: string;
         reservaDeRequisicoes?: number;
+        /** Cursor opaco da última página aceita em uma rodada anterior. */
+        inicio?: string | null;
         porPagina?: number;
         dormir?: (ms: number) => Promise<void>;
         orcamento?: OrcamentoHttp;
@@ -161,11 +165,15 @@ export async function enumerarMercados(
     let tentou = false;
     let erroDeSchema: string | null = null;
     let paginouPorCursor = false;
-    let cursor: string | null = null;
+    let cursor: string | null = typeof opcoes.inicio === 'string'
+        && opcoes.inicio.length > 0 && opcoes.inicio.length <= 2048
+        ? opcoes.inicio : null;
+    if (cursor !== null) cursoresUsados.add(cursor);
 
     const parcial = (falha: string | null, completa: boolean): ResultadoDaEnumeracao => ({
         mercados, devolvidos, paginas, requisicoes, blocoIndexado, falha, completa,
         tentou, statusHttp, erroDeSchema, elementosRecebidos, paginouPorCursor,
+        proximoCursor: completa ? null : cursor,
     });
 
     for (let pagina = 0; pagina < TETO_DE_PAGINAS; pagina += 1) {
@@ -259,12 +267,10 @@ export async function enumerarMercados(
                 false,
             );
         }
-        cursoresUsados.add(proximo);
-        cursor = proximo;
-        paginouPorCursor = true;
-
-        // Pagina que nao trouxe nada NOVO com cursor novo tambem encerra: a
-        // alternativa e girar sobre dados repetidos pagando requisicao.
+        if (proximo.length > 2048) {
+            return parcial('a API enviou cursor grande demais; não persisto', false);
+        }
+        // Não avanço o cursor se a página não é utilizável.
         if (lido.itens.length === 0 && lido.elementos === 0) return parcial(null, true);
         if (novos === 0) {
             return parcial(
@@ -272,6 +278,9 @@ export async function enumerarMercados(
                 false,
             );
         }
+        cursoresUsados.add(proximo);
+        cursor = proximo;
+        paginouPorCursor = true;
         await dormir(ENTRE_PAGINAS_MS);
     }
     return parcial(`a paginação passou de ${TETO_DE_PAGINAS} páginas e eu parei`, false);
@@ -1019,6 +1028,8 @@ export interface CacheDeMercados {
     blocoIndexado: number | null;
     /** `true` so quando a paginacao completou. Cache parcial se declara. */
     completo: boolean;
+    /** Próxima página REST; null quando atingiu o fim da enumeração. */
+    proximoCursor?: string | null;
     mercados: Array<{
         id: string; loanToken: string; collateralToken: string; oracle: string; irm: string;
         /** Texto, nunca `Decimal`: `JSON.stringify` de um `Decimal` grava os
@@ -1031,15 +1042,26 @@ export interface CacheDeMercados {
 
 export function paraCache(
     ms: MercadoDaApi[], blocoIndexado: number | null, completo: boolean, agora: number,
+    proximoCursor: string | null = null,
 ): CacheDeMercados {
     return {
         versao: VERSAO_DO_CACHE_MORPHO, gravadoEm: agora, blocoIndexado, completo,
+        proximoCursor,
         mercados: ms.map((m) => ({
             id: m.id, loanToken: m.loanToken, collateralToken: m.collateralToken,
             oracle: m.oracle, irm: m.irm, lltv: m.lltv.toString(),
             confirmadoNaCorrente: m.confirmadoNaCorrente,
         })),
     };
+}
+
+/** Cursor durável apenas de cache com versão conhecida; nunca confiar em string arbitrária. */
+export function cursorDeCache(x: unknown): string | null {
+    if (!x || typeof x !== 'object') return null;
+    const c = x as Record<string, unknown>;
+    const v = c.proximoCursor;
+    return c.versao === VERSAO_DO_CACHE_MORPHO && typeof v === 'string'
+        && v.length > 0 && v.length <= 2048 ? v : null;
 }
 
 /** `null` quando o arquivo nao serve. Nunca cache vazio com cara de cache. */
