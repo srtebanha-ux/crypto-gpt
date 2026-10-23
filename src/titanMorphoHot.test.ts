@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
@@ -129,4 +129,28 @@ test('illiquid market can be rotated for 10 minutes without blocking others',()=
 });
 test('HOT forgets old debtors rather than treating stale API as an actionable target',()=>{
   assert.equal(limparQuentesMorpho(block+26*60_000),0);
+});
+
+test('leituras onchain continuas conservam alvo por mais de 25min sem nova rodada da API',()=>{
+ const now=block+8*60*60_000;
+ limparQuentesMorpho(now);
+ const m=mercado(true,'0x'+'ef'.repeat(32));
+ assert.equal(registrarQuenteMorpho(m,user1,30n,now),true);
+ for(let minute=10;minute<=60;minute+=10){
+  assert.equal(renovarQuenteMorphoPorLeitura(m.id,user1,20n,now+minute*60_000),true);
+  assert.equal(resumoQuentesMorpho(now+minute*60_000).posicoes,1);
+ }
+ // No further successful onchain reads: expiry still protects stale data.
+ assert.equal(resumoQuentesMorpho(now+86*60_000).posicoes,0);
+ assert.equal(renovarQuenteMorphoPorLeitura(m.id,user1,10n,now+87*60_000),false);
+});
+test('renovacao nao insere desconhecido nem prolonga posicao distante ou expirada',()=>{
+ const now=block+10*60*60_000;
+ limparQuentesMorpho(now);
+ const m=mercado(true,'0x'+'fa'.repeat(32));
+ assert.equal(renovarQuenteMorphoPorLeitura(m.id,user1,1n,now),false);
+ registrarQuenteMorpho(m,user1,10n,now);
+ assert.equal(renovarQuenteMorphoPorLeitura(m.id,user1,501n,now+20*60_000),false);
+ assert.equal(renovarQuenteMorphoPorLeitura(m.id,user1,1n,now+26*60_000),false);
+ assert.equal(resumoQuentesMorpho(now+26*60_000).posicoes,0);
 });

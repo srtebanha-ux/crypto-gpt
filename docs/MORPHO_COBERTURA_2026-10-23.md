@@ -48,3 +48,11 @@ não cobertura instantânea de toda a Base. Os tetos HTTP/RPC e de tempo continu
 valendo. O trabalhador rápido mantém seu limite de 24 posições e as verificações
 onchain, simulações integrais, piso econômico e limites financeiros não mudam.
 Não há transação nem lucro realizado comprovado por esses testes.
+
+## Continuidade da lista rápida
+
+A validade de 25 minutos passa a ser renovada quando o próprio trabalhador
+rápido confirma mercado, oracle e posição no mesmo bloco e a posição continua
+próxima ou cruzada. Assim uma rodada ampla da API não expira posições que
+continuam sendo observadas onchain. Falhas de leitura, posições distantes e
+entradas já expiradas não recebem renovação; a rotina não insere desconhecidos.
