@@ -3039,6 +3039,9 @@ export async function iniciarArbitragem(): Promise<void> {
                 },
                 cotacoesAdiadasPorCapacidade: escolha.adiadas,
                 pendentesCotacao: pendentesCotacao.size,
+                candidatasSemTentativaDesdeBoot: afetadasPotenciais.filter(
+                    c=>!ultimaTentativaCotacao.has(c.chave)).length,
+                rotasComTentativaDesdeBoot: ultimaTentativaCotacao.size,
                 mudancasIntrabloco: `${INTRABLOCO.detectadas} estado(s) novo(s) detectado(s) com `
                     + 'o MESMO bloco confirmado — é o que o gatilho por número de bloco não via',
                 estadosRepetidosIgnorados: `${ULTIMA_IMPRESSAO.repetidas} ciclo(s) com estado `
