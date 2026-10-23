@@ -1,0 +1,46 @@
+name: Megazord contract artifacts and runtime image
+on:
+  push:
+    branches:
+      - fix/megazord-bundle-provas-v2-cotador-20261022
+  pull_request:
+    branches:
+      - feat/megazord-unified-observation
+permissions:
+  contents: read
+jobs:
+  packaging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Reproduce Docker contract build
+        run: |
+          npx hardhat compile
+          node scripts/gerarProvaFlashArb.cjs
+          node - <<'NODE'
+          const fs = require('fs');
+          const a=JSON.parse(fs.readFileSync('.tmp/artifacts/FlashArbProva.json','utf8'));
+          const c=JSON.parse(fs.readFileSync('.tmp/artifacts/contracts/CacadorV3.sol/CacadorV3.json','utf8'));
+          if(!a.runtime?.startsWith('0x')||!a.ownerReferences?.length||
+             !Array.isArray(a.variantes)||!a.variantes.length) throw Error('FlashArb incomplete');
+          if(!c.deployedBytecode?.startsWith('0x')||c.deployedBytecode.length<100)
+             throw Error('CacadorV3 bytecode missing');
+          console.log('FlashArb + CacadorV3 artifacts compiled');
+          NODE
+      - name: Test local probe and quote modules
+        run: |
+          node --require ts-node/register --test \
+            src/titanV2Prova.test.ts \
+            src/titanV2Modo.test.ts \
+            src/titanV2Identidade.test.ts \
+            src/cotarMista.test.ts
+      - name: Docker image must contain both artifacts
+        run: docker build --progress=plain -t megazord-artifacts-ci .

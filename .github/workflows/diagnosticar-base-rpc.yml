@@ -1,0 +1,19 @@
+name: Base RPC diagnosis
+on:
+  push:
+    branches:
+      - feat/ranking-liquidadores-base-20261018
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: node scripts/diagnosticarLogsBase.cjs

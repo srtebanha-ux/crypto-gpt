@@ -1,0 +1,29 @@
+name: TITAN SVR batch / Atlas safety tests
+on:
+  push:
+    branches: [feat/titan-svr-batch-solver-20261018]
+  pull_request:
+    branches: [feat/caca-integracao-multihop-ativa]
+  workflow_dispatch:
+permissions: { contents: read }
+jobs:
+  atlas-batch-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '22',cache: npm}
+      - run: npm ci
+      - name: TypeScript build
+        run: npm run build
+      - name: Testar notificacoes SVR, leiloes paralelos e oferta economica
+        run: node --require ts-node/register --test src/titanSvr.test.ts
+      - name: Compile all contracts with local solc
+        run: npx hardhat compile --config hardhat.morpho-local.cjs
+      - name: Safety and atomicity regression on Hardhat EVM
+        run: npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanAtlasMorphoLocal.js
+      - name: Verify Atlas v1.6.4, Morpho, Aerodrome and TITAN deployment in a real Base fork (no broadcast)
+        env:
+          ARB_BLOCO: "52786700"
+        run: npx hardhat test --no-compile --config hardhat.config.cjs forkTests/titanAtlasBaseForkPreflight.js

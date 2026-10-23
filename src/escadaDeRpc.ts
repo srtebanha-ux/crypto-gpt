@@ -1,0 +1,448 @@
+import { agendaRpc, AgendaRpc, ehSaturacaoRpc } from './rpcCoordenado';
+// Arquivo: src/escadaDeRpc.ts
+//
+// REDUNDÂNCIA DE CEGUEIRA: quando um provedor morre, trocar de provedor.
+//
+// O bot JÁ tinha failover, e era pior que nenhum, porque dava a impressão de
+// estar resolvido: a escolha do RPC acontecia UMA VEZ, no boot (o laço `for (const
+// c of rpcs)` em `cacarAoVivo`). Depois disso `chamar()` insistia na MESMA url
+// quatro vezes, dobrando a espera — 1s, 2s, 4s, 8s — e desistia. Se a Alchemy
+// caísse às 3 da manhã, o bot passava a noite inteira falando com um nó morto,
+// com a escada de failover escrita no arquivo e nunca alcançada.
+//
+// E é o pior momento possível para ficar cego: provedor sobrecarregado e crash de
+// mercado são o MESMO evento. O minuto em que o RPC cai é o minuto em que as
+// liquidações acontecem.
+//
+// A distinção que decide tudo aqui: nó MUDO não é a mesma coisa que nó que
+// RESPONDEU "não". Timeout, DNS, 429, 503 são o provedor falhando — troca. Já
+// `execution reverted` é resposta correta do nó sobre o nosso contrato, e trocar
+// de provedor só repetiria o mesmo revert em outro lugar, gastando os
+// milissegundos que decidem a liquidação. Confundir os dois transformaria a
+// escada numa máquina de perder tempo em cima de uma resposta que já estava boa.
+
+/**
+ * A lista de provedores, em ordem de preferência, sem repetidos.
+ *
+ * Aceita os três nomes de propósito: `CACA_RPC_URL` é o que o Railway dela já
+ * usa hoje e não pode quebrar; `RPC_URL_1..9` é o que ela pediu; `CACA_RPC_URLS`
+ * separado por vírgula serve quando são muitos. Os padrões da rede entram no
+ * fim — nunca na frente, porque o RPC público é 5x mais lento e tem teto de
+ * 2.000 blocos no `eth_getLogs`.
+ */
+export function listaDeRpcs(
+    env: Record<string, string | undefined>,
+    padroes: string[],
+): string[] {
+    return escadaDeRpcs(env, padroes).degraus;
+}
+
+/**
+ * URL QUEBRADA NÃO É DEGRAU, e o log dela de 2026-10-09 20:09 provou que isso
+ * importa:
+ *
+ *     "degraus":["base-mainnet.g.alchemy.com","mainnet.base.orghttps",
+ *                "mainnet.base.org","base-rpc.publicnode.com","base.llamarpc.com"]
+ *
+ * **`mainnet.base.orghttps` não existe.** São duas URLs coladas sem separador
+ * numa variável de ambiente — e ela entrou na escada como DEGRAU 2. Quer dizer:
+ * quando a Alchemy falhar duas vezes seguidas, o bot troca para um host que não
+ * resolve, gasta as duas falhas de transporte DELE, e só então chega num
+ * provedor que funciona. Redundância que parece existir e não existe — e o
+ * minuto em que o RPC cai é o minuto em que as liquidações acontecem.
+ *
+ * Então a lista passa a RECUSAR o que não é URL de verdade, e a dizer o que
+ * recusou. Silêncio aqui era a escada mentindo sobre o próprio tamanho.
+ *
+ * O teste de "é URL de verdade" é o `URL` do próprio Node (não uma regex
+ * minha), mais três exigências que o caso dela mostra: protocolo http(s), host
+ * com ponto, e nenhum `http` no meio do host — que é a assinatura de duas URLs
+ * coladas.
+ */
+export function escadaDeRpcs(
+    env: Record<string, string | undefined>,
+    padroes: string[],
+): { degraus: string[]; recusados: { url: string; porque: string }[] } {
+    const degraus: string[] = [];
+    const recusados: { url: string; porque: string }[] = [];
+    const juntar = (u: string | undefined) => {
+        const limpo = (u ?? '').trim();
+        if (limpo === '') return;
+        const mal = porQueNaoServe(limpo);
+        if (mal !== null) {
+            if (!recusados.some((r) => r.url === limpo)) recusados.push({ url: limpo, porque: mal });
+            return;
+        }
+        // Repetido não é redundância: dois nomes apontando para o mesmo host
+        // dariam uma escada de dois degraus que caem juntos.
+        if (!degraus.includes(limpo)) degraus.push(limpo);
+    };
+    juntar(env.CACA_RPC_URL);
+    for (let i = 1; i <= 9; i += 1) juntar(env[`RPC_URL_${i}`]);
+    for (const u of (env.CACA_RPC_URLS ?? '').split(',')) juntar(u);
+    for (const u of padroes) juntar(u);
+    return { degraus, recusados };
+}
+
+/** `null` quando serve. A frase, quando não — e ela diz o que consertar. */
+export function porQueNaoServe(url: string): string | null {
+    let u: URL;
+    try {
+        u = new URL(url);
+    } catch {
+        return 'não é uma URL que o Node consiga ler';
+    }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+        return `protocolo "${u.protocol}" não serve para JSON-RPC: use https://`;
+    }
+    if (!u.hostname.includes('.')) return `o host "${u.hostname}" não tem ponto: não é um domínio`;
+    // DUAS URLS COLADAS: o caso real dela. `https://a.orghttps://b.com` vira
+    // host "a.orghttps" com o resto no caminho, e nenhum DNS resolve isso.
+    if (/https?$/i.test(u.hostname)) {
+        return `o host termina em "http(s)" — são DUAS URLs coladas sem separador. `
+            + 'Separe por vírgula em CACA_RPC_URLS, ou use RPC_URL_1 e RPC_URL_2';
+    }
+    if (u.hostname.includes('..')) return `o host "${u.hostname}" tem ponto duplo`;
+    return null;
+}
+
+/**
+ * O provedor falhou, ou o provedor respondeu?
+ *
+ * Só o primeiro caso justifica trocar de degrau. A lista de sinais é de
+ * transporte — tempo, conexão, código HTTP, limite de taxa — e nenhum deles
+ * descreve o conteúdo de uma resposta.
+ */
+export function ehFalhaDeTransporte(mensagem: string): boolean {
+    const m = mensagem.toLowerCase();
+    // Uma reversão é RESPOSTA. Sai na frente para nenhum padrão abaixo a pegar
+    // por acidente (uma mensagem de revert pode conter quase qualquer palavra).
+    if (m.includes('revert')) return false;
+    return /timeout|timed out|abort|socket|econnreset|econnrefused|enotfound|eai_again|network|fetch failed|terminated|502|503|504|429|too many requests|rate limit|capacity|exceeded|unavailable|internal error|bad gateway/
+        .test(m);
+}
+
+export interface DegrauDaEscada {
+    url: string;
+    /** Quantas falhas de transporte seguidas, usado para decidir a troca. */
+    falhasSeguidas: number;
+    /** Quando este degrau foi marcado como caído. 0 = nunca. */
+    caiuEm: number;
+}
+
+/**
+ * Qual provedor usar agora, e quando trocar.
+ *
+ * O estado é mínimo de propósito: índice atual, falhas seguidas e o instante da
+ * queda. Nada de média móvel nem de pontuação — isso é um bot que tem 2.000ms
+ * por bloco, e a decisão tem de ser uma comparação de inteiros.
+ */
+export class EscadaDeRpc {
+    private readonly degraus: DegrauDaEscada[];
+    private atual = 0;
+    private readonly falhasParaTrocar: number;
+    private readonly voltarAoPrimarioMs: number;
+    private readonly agora: () => number;
+    /** Quantas vezes trocou de provedor, para o log do ciclo poder dizer. */
+    public trocas = 0;
+
+    constructor(
+        urls: string[],
+        opcoes: { falhasParaTrocar?: number; voltarAoPrimarioMs?: number; agora?: () => number } = {},
+    ) {
+        if (urls.length === 0) throw new Error('escada de RPC sem nenhuma url');
+        this.degraus = urls.map((url) => ({ url, falhasSeguidas: 0, caiuEm: 0 }));
+        // DUAS falhas, e não uma: um timeout solitário é soluço de rede, e
+        // trocar nele faria o bot pular de provedor a cada soluço, perdendo a
+        // conexão aberta (keep-alive) justamente quando a pressa é maior. Duas
+        // seguidas no mesmo degrau já são o provedor, não a sorte.
+        this.falhasParaTrocar = Math.max(1, opcoes.falhasParaTrocar ?? 2);
+        this.voltarAoPrimarioMs = opcoes.voltarAoPrimarioMs ?? 300_000;
+        this.agora = opcoes.agora ?? Date.now;
+    }
+
+    public url(): string { return this.degraus[this.atual]!.url; }
+    public indice(): number { return this.atual; }
+    public quantos(): number { return this.degraus.length; }
+    public ehOPrimario(): boolean { return this.atual === 0; }
+    /**
+     * A url do PRIMEIRO degrau, qualquer que seja o degrau em uso.
+     *
+     * Existe porque o controle de capacidade pergunta sobre o primario estando
+     * no secundario: `url()` responderia sobre o provedor errado, e marcar o
+     * esgotamento do secundario como se fosse do primario seria pior que nao
+     * medir.
+     */
+    public urlDoPrimario(): string { return this.degraus[0]!.url; }
+
+    /** Deu certo: zera a conta deste degrau. Sucesso apaga histórico de falha. */
+    public deuCerto(): void {
+        this.degraus[this.atual]!.falhasSeguidas = 0;
+        this.degraus[this.atual]!.caiuEm = 0;
+    }
+
+    /**
+     * Falhou o transporte. Devolve a url a usar na próxima tentativa, e se trocou.
+     *
+     * Quando todos os degraus caíram, VOLTA para o primário em vez de desistir:
+     * "todos fora" é quase sempre a rede local ou o proxy, e nesse caso insistir
+     * no melhor provedor é melhor que insistir no pior. Desistir não é opção —
+     * quem chama trata o erro, e o bot tem de continuar vivo para a próxima volta.
+     */
+    public falhou(): { url: string; trocou: boolean; de: string; para: string } {
+        const antes = this.degraus[this.atual]!;
+        antes.falhasSeguidas += 1;
+        if (antes.falhasSeguidas < this.falhasParaTrocar) {
+            return { url: antes.url, trocou: false, de: antes.url, para: antes.url };
+        }
+        antes.caiuEm = this.agora();
+        const proximo = (this.atual + 1) % this.degraus.length;
+        this.atual = proximo;
+        this.degraus[proximo]!.falhasSeguidas = 0;
+        this.trocas += 1;
+        return { url: this.degraus[proximo]!.url, trocou: true, de: antes.url, para: this.degraus[proximo]!.url };
+    }
+
+    /**
+     * Hora de tentar o primário de novo?
+     *
+     * Sem isto um soluço de 30 segundos na Alchemy às 3h da manhã deixaria o bot
+     * no RPC público pelo resto do mês — 5x mais lento e com teto de 2.000
+     * blocos, degradado em silêncio porque "está funcionando". A volta é
+     * conferida por tempo e barata: uma chamada que, se falhar, só recoloca o bot
+     * onde ele já estava.
+     */
+    public deveVoltarAoPrimario(): boolean {
+        if (this.atual === 0) return false;
+        const caiuEm = this.degraus[0]!.caiuEm;
+        if (caiuEm === 0) return true;
+        return this.agora() - caiuEm >= this.voltarAoPrimarioMs;
+    }
+
+    public voltarAoPrimario(): void {
+        this.atual = 0;
+        this.degraus[0]!.falhasSeguidas = 0;
+        this.degraus[0]!.caiuEm = 0;
+    }
+}
+
+/**
+ * Distingue limite de frequencia, limite de tamanho e recusas permanentes.
+ * Nao reduzir uma faixa de blocos para um HTTP 403/429 ou timeout: nenhuma
+ * dessas respostas demonstra que a quantidade de blocos seja o problema.
+ */
+export function classificarFalhaHistorica(mensagem:string):
+    'frequencia'|'faixa'|'acesso'|'transitoria'{
+    const m=mensagem.toLowerCase();
+    if(/\b429\b|too many requests|rate[ -]?limit|rate exceeded|throttl/.test(m))
+        return 'frequencia';
+    if(/\b403\b|\b401\b|forbidden|unauthori[sz]ed|access denied|archive (?:not available|requires|unavailable)/.test(m))
+        return 'acesso';
+    if(/(?:block|query|log|response|result).{0,45}(?:range|span|size|limit|too large|too many|exceed)|(?:range|span).{0,45}(?:too large|exceed|limit|maximum)|(?:limit|max(?:imum)?).{0,30}\d+.{0,15}blocks|(?:query|log|result).{0,45}(?:returned more than|too many)|(?:returned more than|too many).{0,24}(?:results|logs)/.test(m))
+        return 'faixa';
+    return 'transitoria';
+}
+
+// Consultas historicas devem ter limite de tempo separado das decisoes urgentes.
+
+/**
+ * Historical log lookup is READ ONLY and isolated from the urgent trading RPC.
+ * A 403/archive restriction on the primary must not make the competitor ledger
+ * permanently blind when another Base node can answer. Neither path signs or
+ * sends a transaction, and a second failure is NEVER treated as an empty log.
+ *
+ * The configured URL remains private: callers receive only its hostname.
+ * A one-off fallback gets a strict deadline to protect block processing.
+ */
+const agendasHistoricas=new Map<string,AgendaRpc>();
+function agendaHistorica(url:string):AgendaRpc{
+    let a=agendasHistoricas.get(url);
+    if(!a){a=new AgendaRpc(1);agendasHistoricas.set(url,a);}return a;
+}
+export type OpcoesHistorico = {
+    urlSecundaria?:string;
+    buscar?:typeof fetch;
+    tempoLimiteMs?:number;
+    urlsAlternativas?:string[];
+    chainIdEsperado?:number;
+    verificarFaixaRecusada?:boolean;
+};
+const historicosRecusadosAte=new Map<string,number>();
+const redesHistoricasConferidas=new Set<string>();
+let ultimoHistoricoDisponivel:string|undefined;
+
+/** Bounded historical failover. Never advances the caller's checkpoint. */
+export async function logsComRpcHistorico<T>(
+    consultarPrimario:()=>Promise<T[]>,
+    filtro:{address:string;fromBlock:string;toBlock:string;topics:string[]},
+    opcoes:OpcoesHistorico={},
+):Promise<{logs:T[];origem:'primario'|'secundario';provedor:string}>{
+    if(!opcoes.urlsAlternativas?.length)return logsEmUmRpc(consultarPrimario,filtro,opcoes);
+    try{
+        const logs=await consultarPrimario();
+        if(!Array.isArray(logs))throw Error('RPC principal nao retornou lista');
+        return {logs,origem:'primario',provedor:'principal'};
+    }catch{ /* only history falls back; urgent RPC selection is untouched */ }
+    const principal=opcoes.urlSecundaria?.trim()||'https://mainnet.base.org';
+    const urls=[...new Set([principal,...opcoes.urlsAlternativas])];
+    for(const url of urls){
+        if(porQueNaoServe(url)!==null||new URL(url).protocol!=='https:')
+            throw Error('RPC historico secundario invalido (exige HTTPS)');
+    }
+    const elegiveis=urls.filter(url=>(historicosRecusadosAte.get(url)??0)<=Date.now());
+    elegiveis.sort((a,b)=>Number(b===ultimoHistoricoDisponivel)-Number(a===ultimoHistoricoDisponivel));
+    const falhas:string[]=[];
+    for(const url of elegiveis.slice(0,3)){
+        try{
+            if(opcoes.chainIdEsperado!==undefined){
+                const chave=JSON.stringify([url,opcoes.chainIdEsperado]);
+                if(!redesHistoricasConferidas.has(chave)){
+                    await agendaHistorica(url).reservar();
+                    await agendaRpc(url).reservar();
+                    const r=await (opcoes.buscar??fetch)(url,{
+                        method:'POST',headers:{'content-type':'application/json','accept-encoding':'identity'},
+                        body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_chainId',params:[]}),
+                        signal:AbortSignal.timeout(Math.max(500,Math.min(opcoes.tempoLimiteMs??5000,10000))),
+                    });
+                    if(!r.ok)throw Error('HTTP '+r.status);
+                    const c=await r.json() as {result?:string;error?:unknown};
+                    if(c.error)throw Error(JSON.stringify(c.error));
+                    if(typeof c.result!=='string'||!/^0x[0-9a-f]+$/i.test(c.result)
+                        ||BigInt(c.result)!==BigInt(opcoes.chainIdEsperado))
+                        throw Error('rede incorreta no RPC historico');
+                    redesHistoricasConferidas.add(chave);
+                }
+            }
+            const resultado=await logsEmUmRpc<T>(async()=>{throw Error('primario indisponivel')},
+                filtro,{...opcoes,urlSecundaria:url});
+            ultimoHistoricoDisponivel=url;
+            historicosRecusadosAte.delete(url);
+            return resultado;
+        }catch(e){
+            const msg=e instanceof Error?e.message:'historico indisponivel';
+            const tipo=classificarFalhaHistorica(msg);
+            // A range error must reach the caller so it can split this SAME range.
+            if(tipo==='faixa')throw e;
+            const pausa=tipo==='acesso'||/rede incorreta/.test(msg)?15*60_000
+                :tipo==='frequencia'?60_000:15_000;
+            historicosRecusadosAte.set(url,Date.now()+pausa);
+            falhas.push(new URL(url).hostname+': '+msg.replace(/https?:\/\/\S+/g,'[url]').slice(0,110));
+        }
+    }
+    throw Error('historico sem RPC disponivel; checkpoint preservado: '
+        +(falhas.join(' | ')||'provedores em cooldown'));
+}
+
+async function logsEmUmRpc<T>(
+    consultarPrimario:()=>Promise<T[]>,
+    filtro:{address:string;fromBlock:string;toBlock:string;topics:string[]},
+    opcoes:OpcoesHistorico={},
+):Promise<{logs:T[];origem:'primario'|'secundario';provedor:string}> {
+    try {
+        const logs=await consultarPrimario();
+        if(!Array.isArray(logs)) throw new Error('resposta do RPC principal nao e lista');
+        return {logs,origem:'primario',provedor:'principal'};
+    }catch(erroPrincipal) {
+        const url=opcoes.urlSecundaria?.trim()||'https://mainnet.base.org';
+        const problema=porQueNaoServe(url);
+        if(problema!==null||new URL(url).protocol!=='https:')
+            throw new Error('RPC historico secundario invalido (exige HTTPS)');
+        // Every historical consumer shares pacing/cooldown, including new rounds.
+        // Reserve BEFORE starting the network timeout; queue time is not a timeout.
+        const historica=agendaHistorica(url);
+        await historica.reservar();
+        await agendaRpc(url).reservar();
+        const abortar=new AbortController();
+        const limite=Math.max(500,Math.min(opcoes.tempoLimiteMs??5000,10000));
+        const timeout=setTimeout(()=>abortar.abort(),limite);
+        try {
+            const resposta=await (opcoes.buscar??fetch)(url,{
+                method:'POST',
+                headers:{'content-type':'application/json','accept-encoding':'identity'},
+                body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_getLogs',params:[filtro]}),
+                signal:abortar.signal,
+            });
+            if(!resposta.ok){
+                if(resposta.status===429){
+                    const retry=resposta.headers?.get('retry-after');
+                    const segundos=Number(retry);
+                    const ms=Number.isFinite(segundos)?segundos*1000:
+                        Math.max(0,Date.parse(retry??'')-Date.now());
+                    historica.recusar(Number.isFinite(ms)?ms:0);
+                    agendaRpc(url).recusar(Number.isFinite(ms)?ms:0);
+                }
+                if(resposta.status===403&&opcoes.verificarFaixaRecusada
+                    &&filtro.fromBlock!==filtro.toBlock){
+                    // Do not interpret 403 as a range limit without a successful
+                    // same-node control read. No credentials, headers or methods change.
+                    await historica.reservar();await agendaRpc(url).reservar();
+                    let controlePassou=false;
+                    try{
+                        const controle=await (opcoes.buscar??fetch)(url,{
+                            method:'POST',headers:{'content-type':'application/json','accept-encoding':'identity'},
+                            body:JSON.stringify({jsonrpc:'2.0',id:2,method:'eth_getLogs',
+                                params:[{...filtro,fromBlock:filtro.toBlock}]}),
+                            signal:AbortSignal.timeout(limite),
+                        });
+                        if(controle.status===429){
+                            const ra=controle.headers?.get('retry-after');
+                            const segundos=Number(ra);
+                            const ms=Number.isFinite(segundos)?segundos*1000:Math.max(0,Date.parse(ra??'')-Date.now());
+                            historica.recusar(Number.isFinite(ms)?ms:0);
+                            agendaRpc(url).recusar(Number.isFinite(ms)?ms:0);
+                        }
+                        if(!controle.ok&&controle.status!==401&&controle.status!==403)
+                            throw Error('controle inconclusivo HTTP '+controle.status);
+                        if(controle.ok){
+                            const c=await controle.json() as {result?:unknown;error?:unknown};
+                            if(c.error)throw Error(ehSaturacaoRpc(c.error)
+                                ?'controle inconclusivo: rate limit':'controle JSON-RPC inconclusivo');
+                            if(!Array.isArray(c.result))throw Error('controle JSON-RPC sem lista');
+                            controlePassou=true;
+                        }
+                    }catch(e){
+                        const causa=e instanceof Error?e.message:'falha de rede';
+                        if(ehSaturacaoRpc(causa)){historica.recusar();agendaRpc(url).recusar();
+                            throw Error('controle de faixa inconclusivo: rate limit (429)');}
+                        throw Error('controle de faixa inconclusivo: transporte/JSON sem prova de acesso');
+                    }
+                    if(controlePassou)throw Error('block range rejected: controle de 1 bloco passou no mesmo RPC');
+                }
+                throw new Error('HTTP '+resposta.status);
+            }
+            const corpo:unknown=await resposta.json();
+            if(corpo&&typeof corpo==='object'&&'error' in corpo&&corpo.error){
+                if(ehSaturacaoRpc(corpo.error)){
+                    historica.recusar();agendaRpc(url).recusar();
+                    throw Error('JSON-RPC historico rate limit');
+                }
+                throw Error('JSON-RPC historico: '+JSON.stringify(corpo.error).slice(0,180));
+            }
+            if(!corpo||typeof corpo!=='object'
+                ||('error' in corpo&&Boolean(corpo.error))
+                ||!('result' in corpo)||!Array.isArray(corpo.result))
+                throw new Error('JSON-RPC historico sem lista de logs valida');
+            historica.passou();
+            return {logs:corpo.result as T[],origem:'secundario',
+                provedor:new URL(url).hostname};
+        }catch(erroSecundario){
+            const p=erroPrincipal instanceof Error?erroPrincipal.message:String(erroPrincipal);
+            const s=erroSecundario instanceof Error?erroSecundario.message:String(erroSecundario);
+            // No URLs from the original error are printed: API keys can be in paths.
+            throw new Error('historico indisponivel em ambos RPCs: primario='
+                +(p.includes('403')||/archive/i.test(p)?'arquivo/403':'indisponivel')
+                +'; secundario='+(/abort/i.test(s)?'timeout':s.replace(/https?:\/\/\S+/g,'[url]').slice(0,95)));
+        }finally{clearTimeout(timeout)}
+    }
+}
+
+/** Inclusive historical ranges, scanned backwards with no overlap or gaps. */
+export function faixaHistoricaReversa(ate:number,inicio:number,tamanho:number):{
+    de:number;ate:number;proximoAte:number;
+}{
+    if(![ate,inicio,tamanho].every(Number.isSafeInteger)
+        ||inicio<0||ate<inicio||tamanho<1)
+        throw new Error('faixa historica invalida');
+    const de=Math.max(inicio,ate-tamanho+1);
+    return {de,ate,proximoAte:de-1};
+}

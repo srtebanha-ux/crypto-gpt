@@ -1,0 +1,40 @@
+name: TITAN Morpho HOT per-block executor
+on:
+  push:
+    branches:
+      - feat/titan-morpho-hot-executor-20261020
+      - feat/titan-morpho-wide-batch-20261020
+  pull_request:
+    branches:
+      - feat/caca-integracao-multihop-ativa
+permissions:
+  contents: read
+jobs:
+  hot-executor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Test fast hot target execution scheduler, economic gates and Morpho math
+        run: |
+          node --require ts-node/register --test \
+            src/titanMorphoHot.test.ts \
+            src/titanMorphoSondas.test.ts \
+            src/titanMorphoRadar.test.ts \
+            src/titanMorphoRevert.test.ts \
+            src/titanMorphoTamanhos.test.ts \
+            src/titanMorphoV3Gate.test.ts \
+            src/titanMorphoCobertura.test.ts \
+            src/multicall.test.ts \
+            src/mercadosDoMorpho.test.ts
+      - name: Validate existing Morpho V3 atomic callback in local EVM
+        run: |
+          npx hardhat compile --config hardhat.morpho-local.cjs
+          npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanMorphoV3Local.js
