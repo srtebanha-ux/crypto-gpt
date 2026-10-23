@@ -631,8 +631,8 @@ test('nada lido e sem cache anterior: NÃO grava fronteira', () => {
     const codigo = fonte.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
     const i = codigo.indexOf('const gravacao = await gravarCache(CAMINHO_DO_CACHE');
     const antes = codigo.slice(Math.max(0, i - 700), i);
-    assert.match(antes, /varrido\.faixasLidas\.length === 0 && !estadoDoCache\.usavel/,
-        'o portão tem de estar ANTES da gravação');
+    assert.match(antes, /!estadoDoCache\.usavel && recente === null/,
+        'sem cache e sem sufixo recente confirmado, o portão deve vir ANTES da gravação');
     assert.match(antes, /return;/, 'e tem de sair sem gravar');
 });
 
