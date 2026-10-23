@@ -41,3 +41,20 @@ test('Aero uses independent explicit send gates without inheriting V3 arming',as
  assert.equal(politicaMorphoAero(aero).armed,true);assert.equal(politicaMorphoV3(aero).armed,false);
  assert.equal(politicaMorphoAero({...aero,CACA_ENVIAR:'1'}).armed,false);
 });
+
+test('Megazord paid Morpho gates reject stale USD oracle and accept recent signed quote',()=>{
+ const flags={MEGAZORD_MODO:'execucao',CACA_MORPHO_V3_ENVIAR:'1',
+  CACA_MORPHO_V3_CONFIRMAR:'OPERAR_MORPHO_BASE',
+  CACA_MORPHO_V3_NONCE_EXCLUSIVO:'1',
+  CACA_MORPHO_V3_RETORNO_BPS:'10005',
+  CACA_MORPHO_V3_LUCRO_MIN_WETH_WEI:'350'};
+ assert.equal(politicaMorphoV3(flags).armed,false);
+ const recent={...flags,MEGAZORD_COTACAO_ATUALIZADA_EM_MS:String(Date.now())};
+ assert.equal(politicaMorphoV3(recent).armed,true);
+ assert.equal(politicaMorphoV3({...recent,
+  MEGAZORD_COTACAO_ATUALIZADA_EM_MS:String(Date.now()-120000)}).armed,false);
+ const p=politicaMorphoV3(recent);
+ assert.equal(p.minReturnBps,10005n);
+ assert.equal(pisoEconomicoMorphoV3(100000n,450n,100n,p).aprovado,true);
+ assert.equal(pisoEconomicoMorphoV3(100000n,449n,100n,p).aprovado,false);
+});
