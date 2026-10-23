@@ -540,8 +540,10 @@ export async function descobrirMorphoPorApi(
         posicoesOnchainPorMercado:tetoPosicoes,
         mercadosComDevedoresPorRodada:tetoDev,
         rodada,
-        fixosDeAltaDivida:0,
-        politica:'fila persistente por tentativa mais antiga; ranking desempata; sem segundo descarte antes de consultar devedores',
+        fixosDeAltaDivida:rankingDeDividas
+            ?escolhidos.slice(0,Math.floor(escolhidos.length/4))
+                .filter(m=>rankingDeDividas!.some(id=>id.toLowerCase()===m.id.toLowerCase())).length:0,
+        politica:'25% vagas para maior divida validavel; 75% rodizio persistente por tentativa mais antiga; sem descarte antes de ler devedores',
         leitura:'tentativa nao comprova coleta bem-sucedida, liquidabilidade ou lucro',
     });
 
