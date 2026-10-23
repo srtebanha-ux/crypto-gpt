@@ -112,6 +112,21 @@ import {
     VERSAO_DA_MEMORIA, type MemoriaDaDescoberta, type RegistroDaDescoberta,
 } from './memoriaDaDescoberta';
 
+/** Retry an individual malformed/failed Multicall3 result on the SAME pinned
+ * block. Never retry a valid onchain zero-debt position: that is evidence,
+ * not an infrastructure failure. Caller must bound total direct RPC retries.
+ */
+export async function lerPosicaoMorphoComFallback(
+    resposta:{ok:boolean;dados:string}|undefined,
+    direto:()=>Promise<string|null>,
+    permitirDireto:boolean,
+):Promise<{posicao:ReturnType<typeof lerPosition>;tentouDireto:boolean}>{
+    const posicao=resposta?.ok?lerPosition(resposta.dados):null;
+    if(posicao!==null||!permitirDireto)return{posicao,tentouDireto:false};
+    const cru=await direto();
+    return{posicao:cru===null?null:lerPosition(cru),tentouDireto:true};
+}
+
 export const LLTV_MAXIMO_QUE_PAGA = new Decimal('0.77');
 
 export interface MercadoDoMorpho {
@@ -525,8 +540,10 @@ export async function descobrirMorphoPorApi(
         posicoesOnchainPorMercado:tetoPosicoes,
         mercadosComDevedoresPorRodada:tetoDev,
         rodada,
-        fixosDeAltaDivida:0,
-        politica:'fila persistente por tentativa mais antiga; ranking desempata; sem segundo descarte antes de consultar devedores',
+        fixosDeAltaDivida:rankingDeDividas
+            ?escolhidos.slice(0,Math.floor(escolhidos.length/4))
+                .filter(m=>rankingDeDividas!.some(id=>id.toLowerCase()===m.id.toLowerCase())).length:0,
+        politica:'25% vagas para maior divida validavel; 75% rodizio persistente por tentativa mais antiga; sem descarte antes de ler devedores',
         leitura:'tentativa nao comprova coleta bem-sucedida, liquidabilidade ou lucro',
     });
 
@@ -655,16 +672,25 @@ export async function descobrirMorphoPorApi(
                 fallback:'maximo 5 leituras diretas para nao matar a rodada',
             });
         }
+        let tentativasDiretas=0;
+        let posicoesSemDivida=0;
+        let posicoesSemLeitura=0;
+        let posicoesComDivida=0;
         for (const [indice,d] of candidatos.entries()) {
-            const resposta=respostas[indice];
-            // A resposta que reverteu nao vira um borrower saudavel. Quando a
-            // leitura em lote falha inteira, garantimos uma pequena amostra
-            // direta, sempre no bloco ancorado desta rodada.
-            const cru=resposta?.ok?resposta.dados:
-                (respostas.length!==candidatos.length&&indice<5
-                    ?await chamarRpc(codificarPosition(m.id,d.endereco)):null);
-            const p = cru === null ? null : lerPosition(cru);
-            if (p !== null && p.borrowShares > 0n) {
+            // A single reverted or truncated position is not proof of zero
+            // debt. Retry up to five missing individual Multicall3 results
+            // directly at the SAME pinned block. Never bypass protocol checks.
+            const lida=await lerPosicaoMorphoComFallback(
+                respostas[indice],
+                ()=>chamarRpc(codificarPosition(m.id,d.endereco)),
+                tentativasDiretas<5,
+            );
+            if(lida.tentouDireto)tentativasDiretas++;
+            const p=lida.posicao;
+            if(p===null){posicoesSemLeitura++;continue;}
+            if(p.borrowShares===0n){posicoesSemDivida++;continue;}
+            posicoesComDivida++;
+            if (p.borrowShares > 0n) {
                 validados += 1;
                 if(totais!==null&&precoOracle!==null&&precoOracle>0n) {
                     const lltvCru=BigInt(m.lltv.mul('1000000000000000000')
@@ -705,6 +731,12 @@ export async function descobrirMorphoPorApi(
                 }
             }
         }
+        if(candidatos.length>0)log.info('[MORPHO/PROVA-POSICOES] Resultado onchain por mercado.',{
+            mercado:m.id,candidatos:candidatos.length,
+            comDivida:posicoesComDivida,semDividaConfirmada:posicoesSemDivida,
+            semLeitura:posicoesSemLeitura,tentativasDiretas,
+            nota:'semDividaConfirmada significa borrowShares=0 na corrente; semLeitura nao significa saudavel',
+        });
     }
     log.info('[MORPHO/RADAR] Posições avaliadas com preço e LLTV da Base.', {
         bloco:blocoDoRadar??'DESCONHECIDO: sem avaliação econômica',

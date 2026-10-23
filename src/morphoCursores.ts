@@ -31,12 +31,22 @@ export class CursoresMorpho {
   if(!Number.isSafeInteger(limite)||limite<=0)return[];
   const ranks=new Map((ranking??[]).map((id,i)=>[id.toLowerCase(),i]));
   const unicos=[...new Map(mercados.map(m=>[m.id.toLowerCase(),m])).values()];
-  return unicos.sort((a,b)=>{
+  // Reserve 25% of each round for markets with the largest indexed debt.
+  // Previously the least-recent-attempted sort dominated every ranking entry,
+  // revisiting large active debt only after thousands of other markets.
+  // Keep 75% rotating fairly so small books can still become candidates.
+  const quentes=unicos.filter(m=>ranks.has(m.id.toLowerCase()))
+   .sort((a,b)=>ranks.get(a.id.toLowerCase())!-ranks.get(b.id.toLowerCase())!)
+   .slice(0,Math.min(Math.floor(limite/4),unicos.length));
+  const reservados=new Set(quentes.map(m=>m.id.toLowerCase()));
+  const rotativos=unicos.filter(m=>!reservados.has(m.id.toLowerCase()));
+  rotativos.sort((a,b)=>{
    const ai=a.id.toLowerCase(),bi=b.id.toLowerCase();
    return (this.tentativas.get(ai)??0)-(this.tentativas.get(bi)??0)
     ||(ranks.get(ai)??Number.MAX_SAFE_INTEGER)-(ranks.get(bi)??Number.MAX_SAFE_INTEGER)
     ||ai.localeCompare(bi);
-  }).slice(0,limite);
+  });
+  return [...quentes,...rotativos].slice(0,limite);
  }
  /** An attempted read is NOT successful coverage. Failure rotates fairly but
   * never changes the pagination cursor or the discovered borrower addresses. */

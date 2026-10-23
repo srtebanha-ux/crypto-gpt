@@ -4,7 +4,7 @@ import { Decimal } from 'decimal.js';
 import { AbiCoder, id } from 'ethers';
 import {
     julgarMorpho, lerCreateMarket, SELETORES_DO_MORPHO, SELETOR_DO_CALLBACK,
-    TOPICO_CREATE_MARKET, LLTV_MAXIMO_QUE_PAGA,
+    TOPICO_CREATE_MARKET, LLTV_MAXIMO_QUE_PAGA, lerPosicaoMorphoComFallback,
 } from './mercadosDoMorpho';
 
 const coder = AbiCoder.defaultAbiCoder();
@@ -78,4 +78,81 @@ test('o corte de LLTV é a conta, não uma preferência', () => {
         'no limite do corte o Morpho tem de pagar MAIS que a Aave real');
     assert.ok(bonusPct(new Decimal('0.86'))!.lessThan(4.56),
         'e logo acima dele tem de pagar MENOS: é isso que o corte significa');
+});
+
+test('Morpho: Multicall valido com divida nao repete RPC direta',async()=>{
+    const dados=coder.encode(['uint256','uint128','uint128'],[0n,42n,15n]);
+    let diretas=0;
+    const r=await lerPosicaoMorphoComFallback({ok:true,dados},async()=>{
+        diretas++;return dados;
+    },true);
+    assert.equal(r.posicao?.borrowShares,42n);
+    assert.equal(r.tentouDireto,false);
+    assert.equal(diretas,0);
+});
+
+test('Morpho: zero de divida CONFIRMADO no bloco nao dispara fallback nem tiro',async()=>{
+    const dados=coder.encode(['uint256','uint128','uint128'],[0n,0n,15n]);
+    let diretas=0;
+    const r=await lerPosicaoMorphoComFallback({ok:true,dados},async()=>{
+        diretas++;return null;
+    },true);
+    assert.equal(r.posicao?.borrowShares,0n);
+    assert.equal(r.tentouDireto,false);
+    assert.equal(diretas,0);
+});
+
+test('Morpho: resultado individual incompleto ou revertido tenta leitura direta no mesmo snapshot',async()=>{
+    const dados=coder.encode(['uint256','uint128','uint128'],[0n,65n,40n]);
+    for(const resposta of [{ok:false,dados:'0x'}, {ok:true,dados:'0x'},undefined]){
+        let diretas=0;
+        const r=await lerPosicaoMorphoComFallback(resposta,async()=>{
+            diretas++;return dados;
+        },true);
+        assert.equal(r.posicao?.borrowShares,65n);
+        assert.equal(r.tentouDireto,true);
+        assert.equal(diretas,1);
+    }
+});
+
+test('Morpho: leitura desconhecida sem orcamento jamais e interpretada como zero ou alvo',async()=>{
+    let diretas=0;
+    const r=await lerPosicaoMorphoComFallback({ok:false,dados:'0x'},async()=>{
+        diretas++;return null;
+    },false);
+    assert.equal(r.posicao,null);
+    assert.equal(r.tentouDireto,false);
+    assert.equal(diretas,0);
+    const falha=await lerPosicaoMorphoComFallback({ok:false,dados:'0x'},async()=>null,true);
+    assert.equal(falha.posicao,null);
+    assert.equal(falha.tentouDireto,true);
+});
+
+test('Morpho: reserva os maiores livros de divida sem impedir rotacao dos demais',async()=>{
+ const {CursoresMorpho}=await import('./morphoCursores');
+ const fs=await import('node:fs/promises');
+ const os=await import('node:os');
+ const path=await import('node:path');
+ const id=(n:number)=>'0x'+n.toString(16).padStart(64,'0');
+ const pasta=await fs.mkdtemp(path.join(os.tmpdir(),'test-morpho-'));
+ try{
+  const c=new CursoresMorpho(path.join(pasta,'posicoes.json'));
+  const markets=Array.from({length:24},(_,i)=>({id:id(i+1)}));
+  const rank=[id(24),id(23),id(22)];
+  const visitados=new Set<string>();
+  for(let ronda=0;ronda<4;ronda++){
+   const escolhidos=c.selecionarMercados(markets,rank,8);
+   assert.equal(escolhidos.length,8);
+   assert.deepEqual(escolhidos.slice(0,2).map(m=>m.id),[id(24),id(23)]);
+   for(const m of escolhidos){
+    visitados.add(m.id);
+    await c.marcarTentativa(m.id);
+   }
+  }
+  assert.equal(visitados.size,24);
+  const reiniciado=new CursoresMorpho(path.join(pasta,'posicoes.json'));
+  await reiniciado.carregar();
+  assert.deepEqual(reiniciado.selecionarMercados(markets,rank,8)
+    .slice(0,2).map(m=>m.id),[id(24),id(23)]);
+ }finally{await fs.rm(pasta,{recursive:true,force:true});}
 });
