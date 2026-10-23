@@ -8,6 +8,7 @@ import {ContractFactory,Interface,JsonRpcProvider,Wallet,getAddress} from 'ether
 import {ORACULO_DE_GAS_L1,codificarTetoDeL1} from './custoDaBase';
 import {COFRE_ESPERADO} from './caca';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
+import {aguardarReciboMorpho,rpcsReciboMorpho} from './morphoDeployReceipt';
 const ROUTER='0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43';
 const AERO_FACTORY='0x420DD381b31aEf6683db6B902084cB0FFECe40Da';
 const ARTIFACT='.tmp/artifacts/contracts/TitanCacadorMorphoAero.sol/TitanCacadorMorphoAero.json';
@@ -78,10 +79,11 @@ export async function implantarTitanMorphoAero(env:NodeJS.ProcessEnv=process.env
        gasLimit:gasLimit.toString(),maxCostWei:worst.toString()}));
      fs.fsyncSync(fd);
    }finally{fs.closeSync(fd);}
-   const tx=await p.broadcastTransaction(raw);
-   if(tx.hash.toLowerCase()!==hash.toLowerCase())no('hash mismatch');
-   const rec=await tx.wait(1,120000);
-   if(!rec||rec.status!==1||!rec.contractAddress)no('missing receipt; check hash, do not retry');
+   let sent:unknown;
+   try{sent=await p.send('eth_sendRawTransaction',[raw]);}catch{ /* resolve the known hash, never resend */ }
+   if(sent!==undefined&&sent!==hash)no('hash mismatch');
+   const rec=await aguardarReciboMorpho(hash,wallet.address,pending,
+     rpcsReciboMorpho(rpcUrl,env.TITAN_DEPLOY_RPC_SECUNDARIO));
    await deployedInvariants(p,rec.contractAddress,wallet.address);
    fs.writeFileSync(marker,JSON.stringify({status:'confirmed',hash,
      contract:rec.contractAddress,block:rec.blockNumber,nonce:pending}),{mode:0o600});
