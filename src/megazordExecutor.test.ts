@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {Transaction,keccak256,Wallet,type TransactionResponse} from 'ethers';
-import {ExecutorMegazord,conferirIdentidadeMegazord,
+import {Transaction,keccak256,Wallet,id,type TransactionResponse} from 'ethers';
+import {ExecutorMegazord,conferirIdentidadeMegazord,creditoGasComprovado,
  type RedeMegazord,type PoliticaMegazord} from './megazordExecutor';
 const key='0x'+'11'.repeat(32); // Offline fixture only, never funded.
 const target='0x'+'22'.repeat(20);
@@ -12,7 +12,7 @@ function fixture(override:Partial<PoliticaMegazord>={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'megazord-test-'));
  let nonce=0,timeout=false,preflightFails=false;
  const sent:number[]=[];
- const receipts=new Map<string,{status:number;blockNumber:number}>();
+ const receipts=new Map<string,{status:number;blockNumber:number;logs?:{address:string;topics:string[];data:string}[]}>();
  const provider:RedeMegazord={
    getNetwork:async()=>({chainId:8453n}),
    getBlock:async()=>({number:100,timestamp:Math.floor(Date.now()/1000)}),
@@ -133,4 +133,47 @@ test('execution reuses only the authorized wallet and mounted journal',()=>{
  assert.throws(()=>conferirIdentidadeMegazord({...valid,MEGAZORD_DIARIO:'/app/data/../tmp/megazord.json'}),/volume persistente/);
  assert.throws(()=>conferirIdentidadeMegazord({...valid,MEGAZORD_DIARIO:'/app/data/megazord'}),/volume persistente/);
  assert.throws(()=>conferirIdentidadeMegazord({...valid,MEGAZORD_CHAVE_PRIVADA:'not-a-key'}),/credencial Megazord invalida/);
+});
+
+test('only WETH paid by executor to authorized treasury credits self-funded gas',async()=>{
+ const WETH='0x4200000000000000000000000000000000000006';
+ const treasury='0x3dffA934170bdD491724747Be2c4F56E3f1512A7';
+ const topic=(address:string)=>'0x'+address.toLowerCase().slice(2).padStart(64,'0');
+ const log={address:WETH,topics:[id('Transfer(address,address,uint256)'),
+   topic(target),topic(treasury)],data:'0x'+(50000n).toString(16).padStart(64,'0')};
+ const p={hash:'0x'+'55'.repeat(32),nonce:0,strategy:'liquidacao',day:'2026-10-23',
+   reservedWei:'21002',to:target};
+ const r={status:1,blockNumber:1234,logs:[log]};
+ assert.equal(creditoGasComprovado(p,r,r),21002n);
+ assert.equal(creditoGasComprovado(p,r,null),0n);
+ assert.equal(creditoGasComprovado(p,{...r,status:0},r),0n);
+ assert.equal(creditoGasComprovado(p,r,{...r,blockNumber:1235}),0n);
+ assert.equal(creditoGasComprovado(p,{...r,logs:[{...log,data:'0x'+(10000n).toString(16).padStart(64,'0')}]},r),0n);
+ assert.equal(creditoGasComprovado(p,{...r,logs:[{...log,address:target}]},r),0n);
+ assert.equal(creditoGasComprovado(p,{...r,logs:[{...log,topics:[log.topics[0],topic(target),topic(target)]}]},r),0n);
+});
+test('onchain WETH transfer proof renews uncovered budget but never daily tx count',async()=>{
+ const f=fixture({maxDailyWei:40000n,maxDailyTx:2});try{
+   await f.e.run('liquidacao',async()=>{
+     const tx=await f.e.broadcast(await f.raw(0));await tx.wait();
+   });
+   const [hash]=f.receipts.keys();
+   const rec=f.receipts.get(hash)!;
+   const topic=(address:string)=>'0x'+address.toLowerCase().slice(2).padStart(64,'0');
+   rec.logs=[{address:'0x4200000000000000000000000000000000000006',
+     topics:[id('Transfer(address,address,uint256)'),topic(target),
+       topic('0x3dffA934170bdD491724747Be2c4F56E3f1512A7')],
+     data:'0x'+(50000n).toString(16).padStart(64,'0')}];
+   await f.e.reconcile();
+   await f.e.run('liquidacao',async()=>{
+     const tx=await f.e.broadcast(await f.raw(1));await tx.wait();
+   });
+   assert.deepEqual(f.sent,[0,1]);
+   const journal=JSON.parse(fs.readFileSync(f.policy.journal,'utf8'));
+   const today=new Date().toISOString().slice(0,10);
+   assert.equal(journal.days[today].creditedWei,'21002');
+   assert.equal(journal.days[today].attempts,2);
+   await assert.rejects(f.e.run('liquidacao',async()=>f.e.broadcast(await f.raw(2))),
+     /orcamento global/);
+ }finally{f.cleanup();}
 });
