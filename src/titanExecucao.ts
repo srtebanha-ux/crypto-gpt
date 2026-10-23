@@ -505,11 +505,14 @@ export function avaliarEnsaioTitan(
  * the full eth_call is intentionally executed at latest and verifies current
  * profit instead. This only permits doing that READ-ONLY check, never sending
  * based on an old quote: executarTitan re-simulates and guards block/nonce.
+ * Allow the same 60-block freshness bound used by the paid executor: the
+ * original 20-block limit rejected viable READ-ONLY probes after slow
+ * indexing/market discovery, before any latest-state EVM simulation.
  */
 export function blocoValidoParaProvaAtomica(blocoDaCotacao:number,blocoAtual:number):boolean{
     return Number.isSafeInteger(blocoDaCotacao)&&blocoDaCotacao>0
         &&Number.isSafeInteger(blocoAtual)&&blocoAtual>=blocoDaCotacao
-        &&blocoAtual-blocoDaCotacao<=20;
+        &&blocoAtual-blocoDaCotacao<=60;
 }
 
 const metadadosSonda = new CacheLeituraRpc<readonly [string,string,string,string,string|null]>(15_000);
@@ -569,7 +572,7 @@ export async function simularTitanAoVivo(
         if(!block?.baseFeePerGas || block.baseFeePerGas<=0n)throw Error('baseFee indisponivel');
         bloco=block.number;
         if(!blocoValidoParaProvaAtomica(plano.bloco,bloco))
-            return{situacao:'desconhecido',motivo:'cotacao anterior a 20 blocos; prova atomica cancelada',bloco};
+            return{situacao:'desconhecido',motivo:'cotacao anterior a 60 blocos; prova atomica cancelada',bloco};
         const data=ABI_TITAN.encodeFunctionData('executarRota',[
             plano.rota,plano.quantia,0n
         ]);
