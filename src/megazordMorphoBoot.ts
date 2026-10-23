@@ -27,7 +27,8 @@ type CacheContratos={version:1;owner:string;v3?:string;aero?:string};
 function arquivoCache(env:NodeJS.ProcessEnv):string|undefined{
  const diary=env.MEGAZORD_DIARIO;
  if(!diary)return undefined;
- if(!path.isAbsolute(diary)||!path.resolve(diary).startsWith('/app/data/'))
+ if(!path.isAbsolute(diary)
+   ||(env.MEGAZORD_MODO==='execucao'&&!path.resolve(diary).startsWith('/app/data/')))
    throw Error('cache de contratos requer MEGAZORD_DIARIO em volume persistente');
  return diary+'.contratos.json';
 }
