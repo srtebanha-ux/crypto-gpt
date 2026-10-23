@@ -384,9 +384,28 @@ async function logsEmUmRpc<T>(
                                 params:[{...filtro,fromBlock:filtro.toBlock}]}),
                             signal:AbortSignal.timeout(limite),
                         });
-                        if(controle.ok){const c=await controle.json() as {result?:unknown;error?:unknown};
-                            controlePassou=!c.error&&Array.isArray(c.result);}
-                    }catch{ /* inconclusive control cannot loosen range policy */ }
+                        if(controle.status===429){
+                            const ra=controle.headers?.get('retry-after');
+                            const segundos=Number(ra);
+                            const ms=Number.isFinite(segundos)?segundos*1000:Math.max(0,Date.parse(ra??'')-Date.now());
+                            historica.recusar(Number.isFinite(ms)?ms:0);
+                            agendaRpc(url).recusar(Number.isFinite(ms)?ms:0);
+                        }
+                        if(!controle.ok&&controle.status!==401&&controle.status!==403)
+                            throw Error('controle inconclusivo HTTP '+controle.status);
+                        if(controle.ok){
+                            const c=await controle.json() as {result?:unknown;error?:unknown};
+                            if(c.error)throw Error(ehSaturacaoRpc(c.error)
+                                ?'controle inconclusivo: rate limit':'controle JSON-RPC inconclusivo');
+                            if(!Array.isArray(c.result))throw Error('controle JSON-RPC sem lista');
+                            controlePassou=true;
+                        }
+                    }catch(e){
+                        const causa=e instanceof Error?e.message:'falha de rede';
+                        if(ehSaturacaoRpc(causa)){historica.recusar();agendaRpc(url).recusar();
+                            throw Error('controle de faixa inconclusivo: rate limit (429)');}
+                        throw Error('controle de faixa inconclusivo: transporte/JSON sem prova de acesso');
+                    }
                     if(controlePassou)throw Error('block range rejected: controle de 1 bloco passou no mesmo RPC');
                 }
                 throw new Error('HTTP '+resposta.status);

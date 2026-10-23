@@ -4929,7 +4929,8 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
                     async()=>{throw new Error('censo dedicado: usar apenas RPC historico');},
                     filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
                         urlsAlternativas:REDE_ESCOLHIDA==='base'
-                            ?[...RPCS_PARA_TENTAR.base,'https://base-mainnet.g.alchemy.com/public']:[],
+                            ?[...RPCS_PARA_TENTAR.base,'https://base-mainnet.g.alchemy.com/public',
+                                'https://rpc.swiftnodes.io/rpc/base']:[],
                         verificarFaixaRecusada:REDE_ESCOLHIDA==='base',
                         chainIdEsperado:REDE_ESCOLHIDA==='base'?8453:undefined,
                         tempoLimiteMs:6000},
@@ -5303,7 +5304,8 @@ export async function iniciarLiquidante(): Promise<'parar' | void> {
                 () => chamar<typeof logs>('eth_getLogs',[filtro],1,'demorada','historico'),
                 filtro,{urlSecundaria:process.env.CACA_HISTORICO_RPC_URL,
                     urlsAlternativas:REDE_ESCOLHIDA==='base'
-                            ?[...RPCS_PARA_TENTAR.base,'https://base-mainnet.g.alchemy.com/public']:[],
+                            ?[...RPCS_PARA_TENTAR.base,'https://base-mainnet.g.alchemy.com/public',
+                                'https://rpc.swiftnodes.io/rpc/base']:[],
                         verificarFaixaRecusada:REDE_ESCOLHIDA==='base',
                     chainIdEsperado:REDE_ESCOLHIDA==='base'?8453:undefined},
             );
