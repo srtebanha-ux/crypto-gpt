@@ -127,3 +127,32 @@ test('Morpho: leitura desconhecida sem orcamento jamais e interpretada como zero
     assert.equal(falha.posicao,null);
     assert.equal(falha.tentouDireto,true);
 });
+
+test('Morpho: reserva os maiores livros de divida sem impedir rotacao dos demais',async()=>{
+ const {CursoresMorpho}=await import('./morphoCursores');
+ const fs=await import('node:fs/promises');
+ const os=await import('node:os');
+ const path=await import('node:path');
+ const id=(n:number)=>'0x'+n.toString(16).padStart(64,'0');
+ const pasta=await fs.mkdtemp(path.join(os.tmpdir(),'test-morpho-'));
+ try{
+  const c=new CursoresMorpho(path.join(pasta,'posicoes.json'));
+  const markets=Array.from({length:24},(_,i)=>({id:id(i+1)}));
+  const rank=[id(24),id(23),id(22)];
+  const visitados=new Set<string>();
+  for(let ronda=0;ronda<4;ronda++){
+   const escolhidos=c.selecionarMercados(markets,rank,8);
+   assert.equal(escolhidos.length,8);
+   assert.deepEqual(escolhidos.slice(0,2).map(m=>m.id),[id(24),id(23)]);
+   for(const m of escolhidos){
+    visitados.add(m.id);
+    await c.marcarTentativa(m.id);
+   }
+  }
+  assert.equal(visitados.size,24);
+  const reiniciado=new CursoresMorpho(path.join(pasta,'posicoes.json'));
+  await reiniciado.carregar();
+  assert.deepEqual(reiniciado.selecionarMercados(markets,rank,8)
+    .slice(0,2).map(m=>m.id),[id(24),id(23)]);
+ }finally{await fs.rm(pasta,{recursive:true,force:true});}
+});
