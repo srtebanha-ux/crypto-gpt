@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {Transaction,keccak256,type TransactionResponse} from 'ethers';
+import {Transaction,keccak256,Wallet,type TransactionResponse} from 'ethers';
 import {ExecutorMegazord,conferirIdentidadeMegazord,
  type RedeMegazord,type PoliticaMegazord} from './megazordExecutor';
 const key='0x'+'11'.repeat(32); // Offline fixture only, never funded.
@@ -123,7 +123,7 @@ test('corrupted journal is rejected before execution',()=>{
 
 test('execution reuses only the authorized wallet and mounted journal',()=>{
  const valid={MEGAZORD_CHAVE_PRIVADA:key,
-   MEGAZORD_ENDERECO_PUBLICO:new (require('ethers').Wallet)(key).address as string,
+   MEGAZORD_ENDERECO_PUBLICO:new Wallet(key).address,
    MEGAZORD_DIARIO:'/app/data/megazord-diario.json'};
  const verified=conferirIdentidadeMegazord(valid);
  assert.equal(verified.address.toLowerCase(),valid.MEGAZORD_ENDERECO_PUBLICO.toLowerCase());
