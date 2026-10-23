@@ -53,6 +53,17 @@ export function registrarQuenteMorpho(
  limparQuentesMorpho(agora);
  return true;
 }
+/** Renew only an existing near position after the worker decoded market,
+ * oracle and position successfully at the same block. No API insertion here. */
+export function renovarQuenteMorphoPorLeitura(
+ mercadoId:string,usuario:string,distanciaBps:bigint,agora=Date.now(),
+):boolean{
+ const a=alvos.get(mercadoId.toLowerCase()+'|'+usuario.toLowerCase());
+ if(!a||agora<a.atualizadoEm||agora-a.atualizadoEm>TTL_MS||distanciaBps>500n)return false;
+ a.distanciaBps=distanciaBps;
+ a.atualizadoEm=agora;
+ return true;
+}
 export function limparQuentesMorpho(agora=Date.now()):number{
  for(const [k,a] of alvos){
    if(agora-a.atualizadoEm>TTL_MS)alvos.delete(k);
@@ -173,6 +184,8 @@ async function verificarBlocoMorphoHot():Promise<void>{
        alvos.delete(chave(a));continue;
      }
      if(state.situacao!=='cruzou-estimado'&&state.situacao!=='proxima')continue;
+     if(state.distanciaBps!==null)renovarQuenteMorphoPorLeitura(
+       a.mercado.id,a.usuario,state.distanciaBps,agora);
      if(state.situacao==='cruzou-estimado')cruzaram++;
      // Only one V3 transaction candidate at a time: shared wallet/nonce.
      if(emProva>0)continue;
