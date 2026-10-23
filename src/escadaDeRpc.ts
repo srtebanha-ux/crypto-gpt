@@ -288,7 +288,7 @@ export async function logsComRpcHistorico<T>(
         try {
             const resposta=await (opcoes.buscar??fetch)(url,{
                 method:'POST',
-                headers:{'content-type':'application/json'},
+                headers:{'content-type':'application/json','accept-encoding':'identity'},
                 body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_getLogs',params:[filtro]}),
                 signal:abortar.signal,
             });
