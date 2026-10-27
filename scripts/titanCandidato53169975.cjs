@@ -26,7 +26,7 @@ function classeRevertPublica(error){
      // it is public revert data. Bound printable text and never publish
      // arbitrary provider errors (which may include private RPC URLs).
      const safe=typeof reason==='string'&&reason.length<=160
-       &&/^[\\x20-\\x7e]+$/.test(reason)?reason:null;
+       &&/^[\x20-\x7e]+$/.test(reason)?reason:null;
      return {tipo:reason==='position is healthy'?'saudavel_no_liquidate':
        'revert_com_mensagem',selector,razaoPublica:safe};
     }catch{}
