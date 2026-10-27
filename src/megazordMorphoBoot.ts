@@ -25,7 +25,9 @@ const abi=new Interface([
 ]);
 type Tipo='v3'|'aero';
 export function rotasSelecionadasMegazord(env:NodeJS.ProcessEnv):Tipo[]{
- const names=(env.MEGAZORD_MORPHO_ROTAS??'v3,aero').split(',').map(x=>x.trim());
+ // Liquidation-first default: V3 works without an Aerodrome executor.
+ // Aero is an explicitly selected additional route, not a startup dependency.
+ const names=(env.MEGAZORD_MORPHO_ROTAS??'v3').split(',').map(x=>x.trim());
  if(names.length===1&&names[0]==='none'){
    // A route-less Morpho boot is ONLY an explicit CPAMM-only mode. Never
    // silently fall back here when a Morpho contract is absent/invalid.
