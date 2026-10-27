@@ -8,6 +8,7 @@ on:
       - 'scripts/titanCandidato53169975.test.cjs'
       - 'scripts/titanDescobrirExecutorPublico.cjs'
       - 'scripts/titanDescobrirExecutorPublico.test.cjs'
+      - 'scripts/titanLocalizarFlashArbV2.cjs'
       - 'src/titanMorphoRadar.ts'
       - 'src/morphoApi.ts'
   workflow_dispatch:
@@ -25,6 +26,17 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Compile exact FlashArb V2 executable identity
+        run: node scripts/gerarProvaFlashArb.cjs
+      - name: Audit existing V2 contracts against this source on Base
+        run: node scripts/titanLocalizarFlashArbV2.cjs > flasharb-v2-publico.json
+      - name: Upload existing owner-operated FlashArb V2 identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-base-flasharb-v2-identity
+          path: flasharb-v2-publico.json
+          retention-days: 7
+          if-no-files-found: error
       - name: Historical probe error-classification regressions
         run: node --test scripts/titanCandidato53169975.test.cjs scripts/titanDescobrirExecutorPublico.test.cjs
       - name: Search existing executor deployments on the public Base chain
