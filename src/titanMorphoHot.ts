@@ -41,6 +41,18 @@ let ultimoBloco=0;
 let contagem=0;
 let ultimoLog=0;
 let rpc:JsonRpcProvider|null=null;
+let rpcHotUrl:string|null=null;
+/** Use the verified financial RPC before falling back to the rate-limited public endpoint.
+ * Keep the block trigger and the full executor probe on the same configured endpoint.
+ * Never log the RPC URL: it can contain credentials.
+ */
+export function resolverRpcMorphoHot(env:NodeJS.ProcessEnv):string{
+  return env.CACA_MORPHO_V3_RPC_URL?.trim()
+    ||env.MEGAZORD_RPC_URL?.trim()
+    ||env.TITAN_EXECUTOR_RPC_URL?.trim()
+    ||env.CACA_RPC_URL?.trim()
+    ||'https://mainnet.base.org';
+}
 function chave(a:Alvo):string {return a.mercado.id.toLowerCase()+'|'+a.usuario.toLowerCase();}
 export function registrarQuenteMorpho(
  mercado:MercadoDaApi,usuario:string,distanciaBps:bigint,agora=Date.now(),
@@ -194,7 +206,7 @@ async function verificarBlocoMorphoHot():Promise<void>{
      const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
      const {via,resultado:result,primeiroMotivo}=await avaliarSaidasMorpho({
        mercado:a.mercado,usuario:a.usuario,signal:AbortSignal.timeout(20_000),
-       rpcUrl:process.env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org',
+       rpcUrl:rpcHotUrl??resolverRpcMorphoHot(process.env),
      });
      // An existent pool is not liquid. If ALL executor sizes reverted from
      // the canonical DEX output floor, give its market a short cooling period.
@@ -246,7 +258,8 @@ async function verificarBlocoMorphoHot():Promise<void>{
 export function iniciarGatilhoQuenteMorpho(env:NodeJS.ProcessEnv=process.env):void{
  if(iniciado||!rotasMorphoHabilitadas(env))return;
  iniciado=true;
- const url=env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org';
+ const url=resolverRpcMorphoHot(env);
+ rpcHotUrl=url;
  rpc=new JsonRpcProvider(url,8453,{staticNetwork:true});
  log.info('[TITAN/MORPHO-HOT] Gatilho de execucao por bloco iniciado.',{
    intervaloMs:INT_MS,maxPosicoes:MAX_QUENTES,ttlMs:TTL_MS,
