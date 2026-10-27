@@ -28,6 +28,9 @@ function erroRpcSeguro(error:unknown):string{
  if(/^RPC HTTP 5\d\d$/.test(m))return 'http5xx';
  if(/^RPC HTTP 4\d\d$/.test(m))return 'http4xx';
  if(m==='preflight RPC: transporte indisponivel')return 'transporte';
+ // A valid HTTP reply can still contain a transient JSON-RPC error, often
+ // caused by provider throttling; never interpret it as a successful read.
+ if(m==='resposta RPC invalida')return 'resposta_rpc';
  if(/^RPC [01]: bloco ausente ou antigo$/.test(m))return 'bloco_antigo';
  if(m==='RPCs discordam sobre nonce/bloco')return 'divergencia_nonce_bloco';
  if(m==='configuracao publica incompleta')return 'configuracao_publica';
@@ -53,7 +56,7 @@ export async function selecionarRpcSecundarioMegazord(
      }catch(error){
        const kind=erroRpcSeguro(error);
        reasons.push(kind);
-       const retryable=new Set(['http429','http5xx','transporte','bloco_antigo','divergencia_nonce_bloco']);
+       const retryable=new Set(['http429','http5xx','transporte','resposta_rpc','bloco_antigo','divergencia_nonce_bloco']);
        if(!retryable.has(kind)||tentativa===2)break;
        await esperar(400*(tentativa+1));
      }
