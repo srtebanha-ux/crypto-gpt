@@ -1,0 +1,53 @@
+name: TITAN public Base candidate (read only)
+on:
+  pull_request:
+    branches: [CHAT]
+    paths:
+      - '.github/workflows/titan-candidato-real.yml'
+      - 'scripts/titanCandidato53169975.cjs'
+      - 'src/titanMorphoRadar.ts'
+      - 'src/morphoApi.ts'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  historical-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Read Base archive candidate without a signer
+        id: probe
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Use only public RPC endpoints. No wallet, signer, environment
+          # secrets, deployments, eth_sendRawTransaction, or paid operations.
+          for endpoint in https://mainnet.base.org https://base-rpc.publicnode.com; do
+            if BASE_FORK_RPC_URL="$endpoint" timeout 70s node scripts/titanCandidato53169975.cjs > candidate.json; then
+              echo "historical_public_probe=success" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          rm -f candidate.json
+          echo "historical_public_probe=unavailable" >> "$GITHUB_OUTPUT"
+          # An unavailable archive RPC is not evidence of a healthy position.
+          # Do not make third-party RPC availability a blocking CI gate.
+          exit 0
+      - name: Upload public proof when verified
+        if: steps.probe.outputs.historical_public_probe == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-base-candidate-53169975
+          path: candidate.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Report inconclusive external access
+        if: steps.probe.outputs.historical_public_probe != 'success'
+        run: echo "Historical eligibility unknown (public archive RPC unavailable); no financial action taken."
