@@ -10,13 +10,31 @@ const candidato={mercado:'0x8138047cee79f3f79c35d50e2c296f6f24e6789f38c255c67125
 const tag='0x'+candidato.bloco.toString(16);
 const abi=new Interface(['function price() view returns(uint256)',
  'function liquidate((address loanToken,address collateralToken,address oracle,address irm,uint256 lltv),address,uint256,uint256,bytes) returns(uint256 seizedAssets,uint256 repaidAssets)']);
+function classeRevertPublica(error){
+ // Read only public RPC revert data, not its raw error message or URL.
+ // A provider may nest eth_call error.data inside multiple RPC wrappers.
+ const candidates=[error?.data,error?.error?.data,error?.info?.error?.data,
+  error?.info?.error?.error?.data,error?.error?.error?.data];
+ for(const x of candidates){
+  const data=typeof x==='string'?x:typeof x?.data==='string'?x.data:null;
+  if(data&&/^0x(?:[0-9a-f]{2})+$/i.test(data)&&data.length>=10){
+   const selector=data.slice(0,10).toLowerCase();
+   if(selector==='0x08c379a0'){
+    try{
+     const reason=AbiCoder.defaultAbiCoder().decode(['string'],'0x'+data.slice(10))[0];
+     return {tipo:reason==='position is healthy'?'saudavel_no_liquidate':
+       'revert_com_mensagem',selector,razaoPublica:
+       reason==='position is healthy'?'position is healthy':null};
+    }catch{}
+   }
+   return {tipo:'revert_sem_classificacao',selector,razaoPublica:null};
+  }
+ }
+ return {tipo:'sem_revert_decodificavel',selector:null,razaoPublica:null};
+}
 function classificarRevert(error){
- const data=error?.data??error?.error?.data??error?.info?.error?.data;
- try{
-  const decoded=abi.parseError(data);
-  if(decoded?.name==='Error'&&decoded.args[0]==='position is healthy')return 'saudavel_no_liquidate';
- }catch{}
- return 'inconclusiva'; // Repayment/callback/provider failure does not prove eligibility.
+ const d=classeRevertPublica(error);
+ return d.tipo==='saudavel_no_liquidate'?d.tipo:'inconclusiva';
 }
 async function investigar(rpc){
  if(BigInt(await rpc('eth_chainId',[]))!==8453n)throw Error('rede diferente da Base');
@@ -35,6 +53,7 @@ async function investigar(rpc){
  if(!position||!market)throw Error('snapshot historico incompleto');
  const risco=examinarSaudeMorpho({...position,...market,precoOracle:price,lltvWad:tuple[4]});
  let elegibilidade=position.borrowShares===0n?'sem_divida':'inconclusiva';
+ let diagnosticoRevert=null;
  if(position.borrowShares>0n){
   // liquidate accrues interest itself. One share tests its real eligibility gate;
   // a repayment failure remains inconclusive, never a claimed successful route.
@@ -43,15 +62,16 @@ async function investigar(rpc){
     data:abi.encodeFunctionData('liquidate',[tuple,candidato.usuario,0n,1n,'0x'])},tag]);
    abi.decodeFunctionResult('liquidate',result);
    elegibilidade='uma_share_liquidavel_em_eth_call';
-  }catch(e){elegibilidade=classificarRevert(e);}
+  }catch(e){elegibilidade=classificarRevert(e);
+   diagnosticoRevert=classeRevertPublica(e);}
  }
  if((await rpc('eth_getBlockByNumber',[tag,false]))?.hash!==block.hash)throw Error('bloco mudou durante leituras');
  return {somenteLeitura:true,...candidato,blockHash:block.hash,timestamp:block.timestamp,
-  params:{...params,lltv:params.lltv.toFixed()},position,market,price,risco,elegibilidade,
+  params:{...params,lltv:params.lltv.toFixed()},position,market,price,risco,elegibilidade,diagnosticoRevert,
   executorPronto:false,lucroComprovado:false,
   limite:'Sonda direta Morpho; nao substitui o preflight integral do executor V3.'};
 }
-module.exports={candidato,classificarRevert,investigar};
+module.exports={candidato,classificarRevert,classeRevertPublica,investigar};
 if(require.main===module){
  const url=process.env.BASE_FORK_RPC_URL??process.env.MEGAZORD_RPC_URL;
  if(!url){console.error('Defina BASE_FORK_RPC_URL com acesso de arquivo; nenhuma consulta executada.');process.exitCode=1;}
