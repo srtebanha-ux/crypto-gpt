@@ -20,22 +20,48 @@ export function candidatosRpcSecundario(env:NodeJS.ProcessEnv):string[]{
      seen.add(u);return true;
    });
 }
+/** Retry only bounded transport/freshness faults; never weaken quorum, nonce,
+ * wallet or bytecode checks. Reasons are allowlisted and never contain RPC URLs. */
+function erroRpcSeguro(error:unknown):string{
+ const m=error instanceof Error?error.message:'';
+ if(/^RPC HTTP 429$/.test(m))return 'http429';
+ if(/^RPC HTTP 5\\d\\d$/.test(m))return 'http5xx';
+ if(/^RPC HTTP 4\\d\\d$/.test(m))return 'http4xx';
+ if(m==='preflight RPC: transporte indisponivel')return 'transporte';
+ if(/^RPC [01]: bloco ausente ou antigo$/.test(m))return 'bloco_antigo';
+ if(m==='RPCs discordam sobre nonce/bloco')return 'divergencia_nonce_bloco';
+ if(m==='configuracao publica incompleta')return 'configuracao_publica';
+ if(/^RPC [01]: (nonce pendente|rede diferente da Base|destino sem bytecode valido|saldo de gas zerado)$/.test(m))
+  return 'invariante_rejeitada';
+ return 'outra_rejeicao';
+}
 export async function selecionarRpcSecundarioMegazord(
  env:NodeJS.ProcessEnv,
  preflight:Preflight=conferirRedeMegazord,
+ esperar:(ms:number)=>Promise<void>=ms=>new Promise(r=>setTimeout(r,ms)),
 ):Promise<unknown>{
  if(!env.MEGAZORD_RPC_URL)throw Error('RPC principal ausente');
  let attempted=0;
+ const reasons:string[]=[];
  for(const secondary of candidatosRpcSecundario(env)){
    attempted++;
-   try{
-     const result=await preflight({...env,MEGAZORD_RPC_SECUNDARIO:secondary});
-     env.MEGAZORD_RPC_SECUNDARIO=secondary;
-     return result;
-   }catch{
-     // Provider failures can contain API keys in their URLs; never log these.
+   for(let tentativa=0;tentativa<3;tentativa++){
+     try{
+       const result=await preflight({...env,MEGAZORD_RPC_SECUNDARIO:secondary});
+       env.MEGAZORD_RPC_SECUNDARIO=secondary;
+       return result;
+     }catch(error){
+       const kind=erroRpcSeguro(error);
+       reasons.push(kind);
+       const retryable=new Set(['http429','http5xx','transporte','bloco_antigo','divergencia_nonce_bloco']);
+       if(!retryable.has(kind)||tentativa===2)break;
+       await esperar(400*(tentativa+1));
+     }
    }
  }
+ const counts=Object.entries(reasons.reduce<Record<string,number>>((a,kind)=>{
+  a[kind]=(a[kind]??0)+1;return a;
+ },{})).map(([kind,n])=>kind+':'+n).join(',');
  throw Error('preflight bloqueado: '+attempted+
-   ' RPCs secundarios independentes indisponiveis, sem fallback inseguro ao principal');
+   ' RPCs secundarios independentes indisponiveis, sem fallback inseguro ao principal ['+counts+']');
 }
