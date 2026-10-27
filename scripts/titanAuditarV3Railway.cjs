@@ -10,6 +10,36 @@ const expected={
  fabricaV3:'0x33128a8fC17869897dcE68Ed026d694621f6FDfD',
 };
 const abi=new Interface([...Object.keys(expected).map(k=>'function '+k+'() view returns(address)'),'function versaoRotas() view returns(uint256)']);
+const fs=require('node:fs');
+const solc=require('solc');
+function executorCompiladoIgual(codigo){
+ try{
+  const source=fs.readFileSync('contracts/TitanCacadorMorphoV3.sol','utf8');
+  const input={language:'Solidity',sources:{'TitanCacadorMorphoV3.sol':{content:source}},
+   settings:{optimizer:{enabled:true,runs:200},outputSelection:{'*':{'*':[
+    'evm.deployedBytecode.object','evm.deployedBytecode.immutableReferences']}}}};
+  const output=JSON.parse(solc.compile(JSON.stringify(input)));
+  if(output.errors?.some(x=>x.severity==='error'))return false;
+  const obj=output.contracts['TitanCacadorMorphoV3.sol'].TitanCacadorMorphoV3.evm.deployedBytecode;
+  const refs=Object.values(obj.immutableReferences).flat();
+  if(refs.length<5||refs.some(x=>!Number.isSafeInteger(x.start)||x.length!==32))return false;
+  function executable(code){
+   if(!/^(?:[0-9a-f]{2})+$/i.test(code))return null;
+   const length=parseInt(code.slice(-4),16),cut=code.length-(length+2)*2;
+   if(length<8||length>1024||cut<0||!/^a[0-9a-f]/i.test(code.slice(cut,cut+2)))return null;
+   return code.slice(0,cut).toLowerCase();
+  }
+  const original=executable(obj.object),actual=executable(codigo.slice(2));
+  if(!original||!actual||original.length!==actual.length)return false;
+  const mask=(hex)=>{let x=hex;for(const ref of refs){
+    if((ref.start+ref.length)*2>x.length)return null;
+    x=x.slice(0,ref.start*2)+'0'.repeat(ref.length*2)+x.slice((ref.start+ref.length)*2);
+   }return x;};
+  const cleanCompiled=mask(original),cleanChain=mask(actual);
+  return cleanCompiled!==null&&cleanCompiled===cleanChain;
+ }catch{return false;}
+}
+
 let rid=0;
 async function rpc(url,method,params=[]){
  const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},
@@ -37,7 +67,7 @@ async function audit(primary,secondary){
     values[name]=typeof v==='bigint'?v.toString():getAddress(v);
    }catch{values[name]=null}
   }
-  checks.push({hash:keccak256(code),sizeBytes:(code.length-2)/2,values});
+  checks.push({hash:keccak256(code),sizeBytes:(code.length-2)/2,code,values});
  }
  const equalHashes=checks[0].hash===checks[1].hash;
  const compatible=equalHashes&&checks.every(x=>x.values.versaoRotas==='2'&&
@@ -48,6 +78,7 @@ async function audit(primary,secondary){
   checks:Object.fromEntries(Object.keys(expected).map(k=>[k,{expected:expected[k],actual:checks[0].values[k],
    matches:checks.every(x=>x.values[k]?.toLowerCase()===expected[k].toLowerCase())}])),
   compatibleWithCurrentMegazordRoute:compatible,
+  compiledExecutableMatchesOnchain:executorCompiladoIgual(checks[0].code),
   insufficientToAuthorizePaidTx:true,
   note:'Mesmo que os imutaveis coincidam, comparar bytecode com artefato auditado, diario e assinador antes do envio.'};
 }
