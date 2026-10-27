@@ -270,3 +270,20 @@ test('SIGINT fecha executor somente uma vez e remove lock sem trabalho pendente'
  assert.equal(fechamentos,1);
  assert.equal(exits,1);
 });
+
+test('um segundo processo no mesmo volume não adquire a carteira reservada',async()=>{
+ const {execFileSync}=await import('node:child_process');
+ const f=fixture();try{
+  const script=`const {ExecutorMegazord}=require('./src/megazordExecutor');
+   try {new ExecutorMegazord('0x'+'11'.repeat(32),{}, {}, JSON.parse(process.argv[1]),async()=>1n);
+     process.exitCode=2;
+   }catch(e){if(!/executor ja reservado/.test(e.message))throw e;process.stdout.write('blocked');}`;
+  const policy={...f.policy,maxDailyWei:String(f.policy.maxDailyWei),maxPerTxWei:String(f.policy.maxPerTxWei)};
+  // Revive only the two budget fields; never provide a funded key or real RPC.
+  const code=script.replace('JSON.parse(process.argv[1])',
+   "JSON.parse(process.argv[1],(k,v)=>k==='maxDailyWei'||k==='maxPerTxWei'?BigInt(v):v)");
+  const result=execFileSync(process.execPath,['--require','ts-node/register','-e',code,JSON.stringify(policy)],
+   {cwd:process.cwd(),encoding:'utf8',timeout:15000});
+  assert.equal(result,'blocked');assert.equal(f.sent.length,0);
+ }finally{f.cleanup();}
+});

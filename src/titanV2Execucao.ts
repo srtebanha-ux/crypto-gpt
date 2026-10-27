@@ -1,3 +1,4 @@
+import {lucroWethDoRecibo} from './titanReciboEconomico';
 import {comExecutorMegazord,carteiraMegazord,transmitirMegazord,contextoExecutorMegazord} from './megazordExecutor';
 /**
  * FlashArb V2 paid execution. Strictly separate from read-only virtual probes.
@@ -6,7 +7,7 @@ import {comExecutorMegazord,carteiraMegazord,transmitirMegazord,contextoExecutor
  */
 import fs from 'node:fs';
 import {ocultarSegredos} from './logger';
-import {Interface,JsonRpcProvider,getAddress,keccak256} from 'ethers';
+import {Interface,JsonRpcProvider,Transaction,getAddress,keccak256} from 'ethers';
 import {identidadeDeProvaV2} from './titanV2Identidade';
 import {pisoConservadorV2,correspondeFlashArb,WETH_BASE,type CandidatoV2Prova} from './titanV2Prova';
 import {ORACULO_DE_GAS_L1} from './custoDaBase';
@@ -22,7 +23,7 @@ const i=new Interface([
 type Artifact={runtime:string;creation:string;
  ownerReferences:Array<{start:number;length:number}>};
 export type ResultadoV2Pago={status:'desligado'|'recusado'|'enviado'|'confirmado'|'revertido'|'desconhecido';
- motivo:string;hash?:string;lucroWei?:string;gasL2Wei?:string;gasL1Wei?:string;};
+ motivo:string;hash?:string;lucroWei?:string;gasL2Wei?:string;gasL1Wei?:string;lucroLiquidoWei?:string;};
 
 export function habilitacaoV2(env:NodeJS.ProcessEnv):string|null{
  if(env.TITAN_V2_ENVIAR!=='1'||env.TITAN_ENVIAR!=='1'
@@ -109,11 +110,11 @@ async function executarFlashArbV2Interno(
    const gorjeta=BigInt(env.TITAN_GORJETA_WEI??'20000000');
    const gasLimit=gasEstimado+gasEstimado/5n;
    const maxFee=2n*ultimo.baseFeePerGas+gorjeta;
-   const assinadaProvisorio=await wallet.signTransaction({
+   const naoAssinada=Transaction.from({
       chainId:8453,type:2,nonce,to:contrato,data:dadosZero,
       gasLimit,maxFeePerGas:maxFee,maxPriorityFeePerGas:gorjeta,value:0n,
    });
-   const l1Data=i.encodeFunctionData('getL1Fee',[assinadaProvisorio]);
+   const l1Data=i.encodeFunctionData('getL1Fee',[naoAssinada.unsignedSerialized]);
    const l1Wei=BigInt(i.decodeFunctionResult('getL1Fee',await rpc.call({
      to:ORACULO_DE_GAS_L1,data:l1Data}))[0]);
    const politica=pisoConservadorV2(gasEstimado,
@@ -146,17 +147,22 @@ async function executarFlashArbV2Interno(
      throw Error('hash de envio nao coincide com assinatura');
    const receipt=await tx.wait(1,60000);
    if(!receipt)return{status:'enviado',hash,motivo:'sem recibo; NAO repetir'};
-   const depois=BigInt(await rpc.call({to:WETH_BASE,data:saldoData}));
-   const lucro=depois>antes?depois-antes:0n;
    const gasL2=receipt.gasUsed*receipt.gasPrice;
-   fecharTitanContinuo(env,hash,receipt.status===1?'confirmado':'revertido',
-     gasL2,receipt.status===1?lucro:undefined);
+   const brutoRpc=await rpc.send('eth_getTransactionReceipt',[hash]).catch(()=>null);
+   const l1Real=brutoRpc?.transactionHash?.toLowerCase()===hash.toLowerCase()
+     &&brutoRpc.blockHash?.toLowerCase()===receipt.blockHash.toLowerCase()
+     &&typeof brutoRpc.l1Fee==='string'&&/^0x[0-9a-f]+$/i.test(brutoRpc.l1Fee)
+       ?BigInt(brutoRpc.l1Fee):null;
+   const resultado=lucroWethDoRecibo(contrato,receipt.status,receipt.logs,gasL2,l1Real);
+   fecharTitanContinuo(env,hash,receipt.status===1?'confirmado':'revertido',gasL2,
+     resultado.liquidoWei!==null&&resultado.liquidoWei>0n?resultado.brutoWei!:undefined,
+     {gasRealL1Wei:l1Real,lucroLiquidoWei:resultado.liquidoWei});
    return{status:receipt.status===1?'confirmado':'revertido',hash,
-      motivo:receipt.status===1
-       ? 'recibo status=1; compare lucro WETH com custo L1+L2'
-       : 'transacao revertida; circuito interrompido',
-      lucroWei:lucro.toString(),gasL2Wei:gasL2.toString(),
-      gasL1Wei:l1Wei.toString()};
+      motivo:resultado.liquidoWei===null
+       ?'recibo obtido; lucro liquido desconhecido: falta taxa L1 real ou transferencias verificaveis'
+       :'resultado reconciliado por Transfer WETH do recibo e gas L1+L2 real',
+      lucroWei:resultado.brutoWei?.toString(),lucroLiquidoWei:resultado.liquidoWei?.toString(),
+      gasL2Wei:gasL2.toString(),gasL1Wei:l1Real?.toString()};
  }catch(e){
    return{status:hash?'desconhecido':'recusado',hash,
      motivo:hash?'hash reservado ou transmitido: reconciliar, NAO reenviar':

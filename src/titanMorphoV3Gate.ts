@@ -1,10 +1,11 @@
+import {lerRiscoEconomico,margemLiquidaDinamica,type RiscoEconomico} from './titanRiscoEconomico';
 import {contextoExecutorMegazord} from './megazordExecutor';
 /**
  * Morpho V3 - policy and economic gate. No RPC, keys or side effects.
  * The solver can only spend gas when an entire transaction was simulated.
  */
 export type MorphoV3Policy = Readonly<{
-  armed:boolean; maxGas:bigint; maxCostWei:bigint; tipWei:bigint;
+  risco?:RiscoEconomico; armed:boolean; maxGas:bigint; maxCostWei:bigint; tipWei:bigint;
   minReturnBps:bigint; minNetWethWei:bigint; maxAgeBlocks:number;
 }>;
 function positiveBigInt(s:string|undefined,defaultValue:string,max:bigint):bigint{
@@ -33,6 +34,7 @@ export function politicaMorphoV3(
       &&Date.now()>=usdTimestamp&&Date.now()-usdTimestamp<=90000);
   return {
     // CACA Aave and Morpho MUST NOT sign simultaneously with one wallet.
+    risco:lerRiscoEconomico(env)??undefined,
     armed:usdFresh&&env.CACA_MORPHO_V3_ENVIAR==='1'
       &&env.CACA_MORPHO_V3_CONFIRMAR==='OPERAR_MORPHO_BASE'
       &&env.CACA_MORPHO_V3_NONCE_EXCLUSIVO==='1'
@@ -83,5 +85,6 @@ export function pisoEconomicoMorphoV3(
   return{pisoToken,aprovado:pisoToken>0n
     &&pisoEmWeth>custoWei
     &&pisoEmWeth-custoWei>=policy.minNetWethWei
+    &&(!policy.risco||pisoEmWeth-custoWei>=margemLiquidaDinamica(custoWei,policy.risco))
     &&pisoEmWeth*10000n>=custoWei*policy.minReturnBps};
 }

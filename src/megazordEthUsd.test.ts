@@ -62,3 +62,13 @@ test('failed oracle refresh resets readiness before rejecting',async()=>{
  await assert.rejects(atualizarPisoUsdMegazord(env,mock(-198000,-200000)),/diverge/);
  assert.equal(env.MEGAZORD_COTACAO_ATUALIZADA_EM_MS,'0');
 });
+
+test('piso dinamico dispensa o padrao USD fixo, sem zerar piso ou apagar limite explicito',async()=>{
+ const risk={MEGAZORD_PISO_DINAMICO:'1',MEGAZORD_FALHA_MAX_BPS:'2000',MEGAZORD_MARGEM_RISCO_BPS:'500'};
+ const env:NodeJS.ProcessEnv={...risk};
+ assert.equal((await atualizarPisoUsdMegazord(env,mock())).minimoWei,'1');
+ assert.ok(Number(env.MEGAZORD_COTACAO_ATUALIZADA_EM_MS)>0);
+ const explicit:NodeJS.ProcessEnv={...risk,MEGAZORD_LUCRO_MIN_USD:'0.35'};
+ assert.ok(BigInt((await atualizarPisoUsdMegazord(explicit,mock())).minimoWei)>1n);
+ await assert.rejects(atualizarPisoUsdMegazord({...risk,MEGAZORD_FALHA_MAX_BPS:undefined},mock()),/exige/);
+});

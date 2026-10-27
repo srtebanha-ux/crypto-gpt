@@ -1,3 +1,4 @@
+import {avaliarEExecutarCpammMegazord} from './titanCpammMegazord';
 import { agendaRpc, ehSaturacaoRpc, resumoRpcCoordenado } from './rpcCoordenado';
 /**
  * ENTREGA 2 — O CACADOR DE ARBITRAGEM CONTINUO.
@@ -3133,6 +3134,11 @@ export async function iniciarArbitragem(): Promise<void> {
                     pendente.candidato.venda.endereco;
                 ultimaProvaV2.set(k,Date.now());
                 ultimoEnsaioV2Em=Date.now();
+                if(process.env.TITAN_CPAMM_ATOMICO==='1'){
+                    const resultado=await avaliarEExecutarCpammMegazord(pendente.candidato,
+                        process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                    log.info('[TITAN/CPAMM-MEGAZORD] Prova e emissor unificados.',{rota:k,resultado});
+                }else{
                 const prova=await provarV2Atomico(pendente.candidato,
                     process.env.TITAN_EXECUTOR_RPC_URL??rpc);
                 if(prova.estado==='inviavel'&&reprovacaoDePoolTravadoV2(prova.motivo)){
@@ -3168,6 +3174,7 @@ export async function iniciarArbitragem(): Promise<void> {
                         rota:k,resultado:resultadoPago,
                         nota:'somente recibo confirma operacao; gas sempre tem risco residual',
                     });
+                }
                 }
             }
         }

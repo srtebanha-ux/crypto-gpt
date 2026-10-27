@@ -1,3 +1,4 @@
+import {lerRiscoEconomico} from './titanRiscoEconomico';
 /** Base Uniswap V3 WETH/USDC 30-minute TWAP. No signing or paid calls. */
 import Decimal from 'decimal.js';
 import {Interface,JsonRpcProvider,getAddress} from 'ethers';
@@ -84,8 +85,10 @@ export async function atualizarPisoUsdMegazord(
  // quote authorized. The policy checks this timestamp before every shot.
  env.MEGAZORD_COTACAO_ATUALIZADA_EM_MS='0';
  const ethUsd=await consultarEthUsdBase(ler);
- const usd=env.MEGAZORD_LUCRO_MIN_USD??'0.35';
- const floor=usdParaWethWei(usd,ethUsd);
+ const dinamico=lerRiscoEconomico(env);
+ const usd=env.MEGAZORD_LUCRO_MIN_USD??(dinamico?undefined:'0.35');
+ // A margem proporcional é calculada por tentativa; nunca um piso zero.
+ const floor=usd===undefined?1n:usdParaWethWei(usd,ethUsd);
  const original=env.MEGAZORD_LUCRO_MIN_WETH_ORIGINAL
    ??env.CACA_MORPHO_V3_LUCRO_MIN_WETH_WEI??'0';
  if(!/^\d+$/.test(original))throw Error('piso WETH original invalido');

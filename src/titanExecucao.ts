@@ -1,3 +1,4 @@
+import {lerRiscoEconomico,margemLiquidaDinamica} from './titanRiscoEconomico';
 import { CacheLeituraRpc, ProviderSondaRpc } from './rpcCoordenado';
 import {comExecutorMegazord,carteiraMegazord,transmitirMegazord,contextoExecutorMegazord} from './megazordExecutor';
 /**
@@ -165,6 +166,14 @@ export function calcularPisoTitan(
     custoMaximoWei: bigint, ambiente: NodeJS.ProcessEnv,
 ): { margemWei: bigint; lucroBrutoMinimoWei: bigint; margemBps: bigint | null } {
     if (custoMaximoWei <= 0n) throw new Error('custo total de gas invalido');
+    const risco=lerRiscoEconomico(ambiente);
+    if(risco){
+        const margem=margemLiquidaDinamica(custoMaximoWei,risco);
+        const fixo=ambiente.TITAN_MIN_LUCRO_WEI;
+        if(fixo!==undefined&&!/^\d+$/.test(fixo))throw Error('piso explicito invalido');
+        const margemWei=fixo&&BigInt(fixo)>margem?BigInt(fixo):margem;
+        return {margemWei,lucroBrutoMinimoWei:custoMaximoWei+margemWei,margemBps:risco.margemBps};
+    }
     const percentual = ambiente.TITAN_LUCRO_GAS_BPS;
     if (percentual !== undefined) {
         if (!/^\d+$/.test(percentual)) throw new Error('lucro percentual invalido');

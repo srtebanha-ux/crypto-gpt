@@ -15,6 +15,8 @@ interface Registro {
     enviadoEm: string;
     lucroRealizadoWei?: string;
     gasRealL2Wei?: string;
+    gasRealL1Wei?: string;
+    lucroLiquidoWei?: string;
 }
 interface Diario {
     versao: 1;
@@ -146,6 +148,7 @@ export function reservarTitanContinuo(
 export function fecharTitanContinuo(
     env: NodeJS.ProcessEnv, hash: string, estado: 'confirmado' | 'revertido',
     gasRealL2Wei?: bigint, lucroRealizadoWei?: bigint,
+    economia?: {gasRealL1Wei:bigint|null;lucroLiquidoWei:bigint|null},
 ): void {
     const { arquivo } = parametrosTitanContinuo(env);
     travar(arquivo, () => {
@@ -153,6 +156,8 @@ export function fecharTitanContinuo(
         const r = dados.registros.find(x=>x.hash.toLowerCase()===hash.toLowerCase());
         if (!r || r.estado !== 'pendente') throw new Error('hash nao pendente no diario');
         r.estado=estado;
+        if(economia?.gasRealL1Wei!=null)r.gasRealL1Wei=economia.gasRealL1Wei.toString();
+        if(economia?.lucroLiquidoWei!=null)r.lucroLiquidoWei=economia.lucroLiquidoWei.toString();
         if (gasRealL2Wei!==undefined) r.gasRealL2Wei=gasRealL2Wei.toString();
         if (lucroRealizadoWei!==undefined) r.lucroRealizadoWei=lucroRealizadoWei.toString();
         salvarDiario(arquivo,dados);
