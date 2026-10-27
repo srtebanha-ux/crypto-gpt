@@ -25,8 +25,8 @@ export function candidatosRpcSecundario(env:NodeJS.ProcessEnv):string[]{
 function erroRpcSeguro(error:unknown):string{
  const m=error instanceof Error?error.message:'';
  if(/^RPC HTTP 429$/.test(m))return 'http429';
- if(/^RPC HTTP 5\\d\\d$/.test(m))return 'http5xx';
- if(/^RPC HTTP 4\\d\\d$/.test(m))return 'http4xx';
+ if(/^RPC HTTP 5\d\d$/.test(m))return 'http5xx';
+ if(/^RPC HTTP 4\d\d$/.test(m))return 'http4xx';
  if(m==='preflight RPC: transporte indisponivel')return 'transporte';
  if(/^RPC [01]: bloco ausente ou antigo$/.test(m))return 'bloco_antigo';
  if(m==='RPCs discordam sobre nonce/bloco')return 'divergencia_nonce_bloco';
