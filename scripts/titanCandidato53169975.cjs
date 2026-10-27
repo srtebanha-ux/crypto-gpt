@@ -38,7 +38,15 @@ function classeRevertPublica(error){
 }
 function classificarRevert(error){
  const d=classeRevertPublica(error);
- return d.tipo==='saudavel_no_liquidate'?d.tipo:'inconclusiva';
+ if(d.tipo==='saudavel_no_liquidate')return d.tipo;
+ // Canonical Morpho Blue liquidate checks HEALTHY_POSITION before transferring
+ // seized collateral, calling the callback, and safeTransferFrom of loanToken.
+ // This is strong historical evidence that the eligibility gate was passed;
+ // it is NOT a successful liquidation or proof that our route can repay.
+ if(d.razaoPublica==='transferFrom reverted'
+    ||d.razaoPublica==='transferFrom returned false')
+   return 'gate_saude_passou_mas_repagamento_falhou';
+ return 'inconclusiva';
 }
 async function investigar(rpc){
  if(BigInt(await rpc('eth_chainId',[]))!==8453n)throw Error('rede diferente da Base');
