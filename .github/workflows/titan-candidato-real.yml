@@ -6,6 +6,8 @@ on:
       - '.github/workflows/titan-candidato-real.yml'
       - 'scripts/titanCandidato53169975.cjs'
       - 'scripts/titanCandidato53169975.test.cjs'
+      - 'scripts/titanDescobrirExecutorPublico.cjs'
+      - 'scripts/titanDescobrirExecutorPublico.test.cjs'
       - 'src/titanMorphoRadar.ts'
       - 'src/morphoApi.ts'
   workflow_dispatch:
@@ -24,7 +26,16 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Historical probe error-classification regressions
-        run: node --test scripts/titanCandidato53169975.test.cjs
+        run: node --test scripts/titanCandidato53169975.test.cjs scripts/titanDescobrirExecutorPublico.test.cjs
+      - name: Search existing executor deployments on the public Base chain
+        run: node scripts/titanDescobrirExecutorPublico.cjs > executor-publico.json
+      - name: Upload non-sensitive owner/deployment discovery
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-base-owner-executors
+          path: executor-publico.json
+          retention-days: 7
+          if-no-files-found: error
       - name: Read Base archive candidate without a signer
         id: probe
         shell: bash
