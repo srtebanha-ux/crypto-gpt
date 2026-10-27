@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/titan-candidato-real.yml'
       - 'scripts/titanCandidato53169975.cjs'
+      - 'scripts/titanCandidato53169975.test.cjs'
       - 'src/titanMorphoRadar.ts'
       - 'src/morphoApi.ts'
   workflow_dispatch:
@@ -22,6 +23,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Historical probe error-classification regressions
+        run: node --test scripts/titanCandidato53169975.test.cjs
       - name: Read Base archive candidate without a signer
         id: probe
         shell: bash
