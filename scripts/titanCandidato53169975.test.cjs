@@ -16,7 +16,7 @@ test('repayment revert is recorded but never asserted to prove liquidation',()=>
  const e={error:{error:{data:reasonError('ERC20: insufficient allowance')}}};
  assert.equal(classificarRevert(e),'inconclusiva');
  assert.deepEqual(classeRevertPublica(e),{
-  tipo:'revert_com_mensagem',selector:'0x08c379a0',razaoPublica:null});
+  tipo:'revert_com_mensagem',selector:'0x08c379a0',razaoPublica:'ERC20: insufficient allowance'});
 });
 test('custom error selector and missing revert data cannot claim eligibility',()=>{
  assert.equal(classificarRevert({data:'0x12345678'}),'inconclusiva');
