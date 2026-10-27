@@ -22,9 +22,13 @@ function classeRevertPublica(error){
    if(selector==='0x08c379a0'){
     try{
      const reason=AbiCoder.defaultAbiCoder().decode(['string'],'0x'+data.slice(10))[0];
+     // This string comes from EVM Error(string), not from an RPC exception:
+     // it is public revert data. Bound printable text and never publish
+     // arbitrary provider errors (which may include private RPC URLs).
+     const safe=typeof reason==='string'&&reason.length<=160
+       &&/^[\\x20-\\x7e]+$/.test(reason)?reason:null;
      return {tipo:reason==='position is healthy'?'saudavel_no_liquidate':
-       'revert_com_mensagem',selector,razaoPublica:
-       reason==='position is healthy'?'position is healthy':null};
+       'revert_com_mensagem',selector,razaoPublica:safe};
     }catch{}
    }
    return {tipo:'revert_sem_classificacao',selector,razaoPublica:null};
