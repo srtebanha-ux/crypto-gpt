@@ -26,8 +26,21 @@ const abi=new Interface([
 type Tipo='v3'|'aero';
 export function rotasSelecionadasMegazord(env:NodeJS.ProcessEnv):Tipo[]{
  const names=(env.MEGAZORD_MORPHO_ROTAS??'v3,aero').split(',').map(x=>x.trim());
+ if(names.length===1&&names[0]==='none'){
+   // A route-less Morpho boot is ONLY an explicit CPAMM-only mode. Never
+   // silently fall back here when a Morpho contract is absent/invalid.
+   // The pinned onchain V2 audit and CPAMM per-candidate proof still apply.
+   const v2=env.TITAN_V2_CONTRATO;
+   const allowed=(env.MEGAZORD_CONTRATOS??'').split(',').map(x=>x.trim().toLowerCase());
+   if(env.MEGAZORD_AUTO_DEPLOY==='1'||env.TITAN_CPAMM_ATOMICO!=='1'
+      ||!v2||!/^0x[0-9a-f]{40}$/i.test(v2)||!allowed.includes(v2.toLowerCase())
+      ||!/^0x[0-9a-f]{64}$/i.test(env.FLASH_ARB_CODEHASH??'')
+      ||!env.FLASH_ARB_CPAMM_FACTORIES)
+     throw Error('Morpho none exige CPAMM atomico com executor V2 na allowlist e codehash verificado');
+   return [];
+ }
  if(!names.length||names.some(x=>x!=='v3'&&x!=='aero')||new Set(names).size!==names.length)
-   throw Error('MEGAZORD_MORPHO_ROTAS deve selecionar v3, aero ou v3,aero');
+   throw Error('MEGAZORD_MORPHO_ROTAS deve selecionar v3, aero, v3,aero ou none (CPAMM completo)');
  return names as Tipo[];
 }
 type CacheContratos={version:1;owner:string;v3?:string;aero?:string};
