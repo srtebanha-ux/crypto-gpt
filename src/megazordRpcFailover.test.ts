@@ -59,3 +59,30 @@ test('sanitized diagnostic retains HTTP class but not any private provider URL',
  },async()=>{}),err=>err instanceof Error&&!err.message.includes('https://')
   &&err.message.includes('outra_rejeicao'));
 });
+
+test('JSON-RPC error response retries without accepting invalid results or weakening nonce',async()=>{
+ const env:NodeJS.ProcessEnv={
+  MEGAZORD_RPC_URL:'https://mainnet.base.org',
+  MEGAZORD_RPC_SECUNDARIO:'https://base-rpc.publicnode.com',
+ };
+ let attempts=0;
+ const result=await selecionarRpcSecundarioMegazord(env,async current=>{
+  assert.equal(current.MEGAZORD_RPC_SECUNDARIO,'https://base-rpc.publicnode.com');
+  attempts++;
+  if(attempts<3)throw Error('resposta RPC invalida');
+  return {verified:true};
+ },async()=>{});
+ assert.equal(attempts,3);
+ assert.deepEqual(result,{verified:true});
+});
+test('persistent invalid JSON-RPC replies fail closed without signer authorization',async()=>{
+ const env:NodeJS.ProcessEnv={
+  MEGAZORD_RPC_URL:'https://mainnet.base.org',
+  MEGAZORD_RPC_SECUNDARIO:'https://base-rpc.publicnode.com',
+ };
+ let attempts=0;
+ await assert.rejects(selecionarRpcSecundarioMegazord(env,async()=>{
+  attempts++;throw Error('resposta RPC invalida');
+ },async()=>{}),/sem fallback inseguro ao principal/);
+ assert.equal(attempts,5);
+});
