@@ -13,7 +13,7 @@ const aero='0x'+'33'.repeat(20);
 function env():NodeJS.ProcessEnv{
  return {MEGAZORD_CHAVE_PRIVADA:key,MEGAZORD_ENDERECO_PUBLICO:owner,
    MEGAZORD_RPC_URL:'https://rpc.invalid',
-   MEGAZORD_EXCLUSIVO:'1',MEGAZORD_CONTRATOS:'0x'+'44'.repeat(20)};
+   MEGAZORD_EXCLUSIVO:'1',MEGAZORD_MORPHO_ROTAS:'v3,aero',MEGAZORD_CONTRATOS:'0x'+'44'.repeat(20)};
 }
 function mocked(seen:string[]):DependenciasMorphoBoot{
  return {
@@ -146,4 +146,22 @@ test('CPAMM-only cannot bypass empty allowlist, V2 identity, or paid deploy rest
  for(const e of variants)
   await assert.rejects(prepararMorphoMegazord(e,mocked([])),/Morpho none exige CPAMM atomico/);
  await assert.rejects(prepararMorphoMegazord({...base,MEGAZORD_MORPHO_ROTAS:'none,v3'},mocked([])),/ROTAS/);
+});
+
+test('default liquidation boot selects only Morpho V3 without requiring Aerodrome',async()=>{
+ const e:NodeJS.ProcessEnv={...env(),MEGAZORD_MORPHO_ROTAS:undefined,
+  CACA_MORPHO_V3_CONTRATO:v3};
+ const seen:string[]=[];
+ const prepared=await prepararMorphoMegazord(e,mocked(seen));
+ assert.deepEqual(seen,['check:v3']);
+ assert.deepEqual(prepared,{v3,aero:'',novos:0});
+ assert.equal(e.CACA_MORPHO_V3_CONTRATO,v3);
+ assert.equal(e.CACA_MORPHO_AERO_CONTRATO,'');
+ assert.ok(e.MEGAZORD_CONTRATOS?.includes(v3));
+});
+test('default V3 still fails closed if onchain V3 executor is missing',async()=>{
+ const e={...env(),MEGAZORD_MORPHO_ROTAS:undefined};
+ const seen:string[]=[];
+ await assert.rejects(prepararMorphoMegazord(e,mocked(seen)),/executor Morpho v3 ausente/);
+ assert.deepEqual(seen,[]);
 });
