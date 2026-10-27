@@ -12,7 +12,8 @@ const expected={
 const abi=new Interface([...Object.keys(expected).map(k=>'function '+k+'() view returns(address)'),'function versaoRotas() view returns(uint256)']);
 const fs=require('node:fs');
 const solc=require('solc');
-function executorCompiladoIgual(codigo){
+function executorCompiladoIgual(codigo,diagnostico){
+ diagnostico.compiler=solc.version();
  try{
   const source=fs.readFileSync('contracts/TitanCacadorMorphoV3.sol','utf8');
   const input={language:'Solidity',sources:{'TitanCacadorMorphoV3.sol':{content:source}},
@@ -22,7 +23,8 @@ function executorCompiladoIgual(codigo){
   if(output.errors?.some(x=>x.severity==='error'))return false;
   const obj=output.contracts['TitanCacadorMorphoV3.sol'].TitanCacadorMorphoV3.evm.deployedBytecode;
   const refs=Object.values(obj.immutableReferences).flat();
-  if(refs.length<5||refs.some(x=>!Number.isSafeInteger(x.start)||x.length!==32))return false;
+  diagnostico.references=refs.length;
+  if(refs.length<5||refs.some(x=>!Number.isSafeInteger(x.start)||x.length!==32)){diagnostico.error='bad_immutables';return false;}
   function executable(code){
    if(!/^(?:[0-9a-f]{2})+$/i.test(code))return null;
    const length=parseInt(code.slice(-4),16),cut=code.length-(length+2)*2;
@@ -30,12 +32,20 @@ function executorCompiladoIgual(codigo){
    return code.slice(0,cut).toLowerCase();
   }
   const original=executable(obj.object),actual=executable(codigo.slice(2));
-  if(!original||!actual||original.length!==actual.length)return false;
+  diagnostico.compiledExecutableBytes=original?.length/2??null;
+  diagnostico.onchainExecutableBytes=actual?.length/2??null;
+  if(!original||!actual||original.length!==actual.length){diagnostico.error='length_or_metadata';return false;}
   const mask=(hex)=>{let x=hex;for(const ref of refs){
     if((ref.start+ref.length)*2>x.length)return null;
     x=x.slice(0,ref.start*2)+'0'.repeat(ref.length*2)+x.slice((ref.start+ref.length)*2);
    }return x;};
   const cleanCompiled=mask(original),cleanChain=mask(actual);
+  if(cleanCompiled!==null&&cleanChain!==null){
+   diagnostico.firstDifferenceByte=Array.from({length:cleanCompiled.length/2},(_,i)=>i)
+    .find(i=>cleanCompiled.slice(i*2,i*2+2)!==cleanChain.slice(i*2,i*2+2))??null;
+   diagnostico.differenceCount=Array.from({length:cleanCompiled.length/2},(_,i)=>i)
+    .filter(i=>cleanCompiled.slice(i*2,i*2+2)!==cleanChain.slice(i*2,i*2+2)).length;
+  }
   return cleanCompiled!==null&&cleanCompiled===cleanChain;
  }catch{return false;}
 }
@@ -78,7 +88,7 @@ async function audit(primary,secondary){
   checks:Object.fromEntries(Object.keys(expected).map(k=>[k,{expected:expected[k],actual:checks[0].values[k],
    matches:checks.every(x=>x.values[k]?.toLowerCase()===expected[k].toLowerCase())}])),
   compatibleWithCurrentMegazordRoute:compatible,
-  compiledExecutableMatchesOnchain:executorCompiladoIgual(checks[0].code),
+  compiledExecutableMatchesOnchain:artifactMatch,compiledExecutableComparison:diagnosticoBytecode,
   insufficientToAuthorizePaidTx:true,
   note:'Mesmo que os imutaveis coincidam, comparar bytecode com artefato auditado, diario e assinador antes do envio.'};
 }
