@@ -60,8 +60,23 @@ async function inspectDirectDeploys(url1,url2,address,limit=128){
    const codeHash=keccak256(code);
    const owner=await safeMethod(url1,predicted,'dono');
    const versao=await safeMethod(url1,predicted,'versaoRotas');
+   // Audit older contracts too: V1 implementations may lack versaoRotas().
+   // Read every immutable before rejecting an address. Never send any tx.
+   const publicImmutables={};
+   for(const name of ['cofre','morpho','routerV3','fabricaV3','aerodromeRouter','aerodromeFactory'])
+    publicImmutables[name]=await safeMethod(url1,predicted,name);
+   const canonMorpho='0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb';
+   const canonCofre='0x3dffA934170bdD491724747Be2c4F56E3f1512A7';
+   const canonV3Factory='0x33128a8fC17869897dcE68Ed026d694621f6FDfD';
+   const canonV3Router='0x2626664c2603336E57B271c5C0b26F421741e481';
+   const compatV3=Boolean(owner&&owner.toLowerCase()===address.toLowerCase()
+    &&publicImmutables.morpho?.toLowerCase()===canonMorpho.toLowerCase()
+    &&publicImmutables.cofre?.toLowerCase()===canonCofre.toLowerCase()
+    &&publicImmutables.routerV3?.toLowerCase()===canonV3Router.toLowerCase()
+    &&publicImmutables.fabricaV3?.toLowerCase()===canonV3Factory.toLowerCase());
    withCode.push({nonce,address:predicted,codeHash,bytes:(code.length-2)/2,
-    dono:owner,versaoRotas:versao,
+    dono:owner,versaoRotas:versao,publicImmutables,
+    parametrosCompativeisComMorphoV3:compatV3,
     candidatoMorphoReconhecido:Boolean(owner&&owner.toLowerCase()===address.toLowerCase()&&versao!==null)});
    if(!owner||owner.toLowerCase()!==address.toLowerCase()||versao===null)continue;
    let secondCode=null;
