@@ -22,6 +22,7 @@ import {
     discoverPairsAcrossFactories,
     discoverTokensFromFactory,
     chunkedEthCall,
+    cycleInputReserveLimit,
 } from './dexArbitrageSniffer';
 import { SELECTORS } from './evmAbi';
 import { findTwoPoolCycles, hopsForCycle } from './dexGraph';
@@ -224,6 +225,45 @@ test('pools alinhados: pipeline completo NÃO inventa oportunidade', async () =>
             });
             assert.ok(!evaluation.profitable, 'pools alinhados não podem produzir lucro em sentido nenhum');
         }
+    } finally {
+        restore();
+    }
+});
+
+test('teto do ciclo USDC/WETH/USDC permanece em USDC após normalizar 6 e 18 decimais', async () => {
+    const p1 = { address: '0xaaa'.padEnd(42, '1'), token0: WETH, token1: USDC, reserve0: '1000', reserve1: '3000000' };
+    const p2 = { address: '0xbbb'.padEnd(42, '2'), token0: WETH, token1: USDC, reserve0: '1000', reserve1: '3100000' };
+    const restore = installFakeRpc([p1, p2], DECIMALS);
+    try {
+        const pools = await loadPools('http://fake', [p1.address, p2.address], new Decimal('0.003'));
+        const cycle = findTwoPoolCycles(pools, USDC).find(c => c.pools[0].address === p1.address)!;
+        const hops = hopsForCycle(cycle);
+        const teto = cycleInputReserveLimit(hops, new Decimal('0.1'));
+        assert.equal(teto.toString(), '300000');
+        const evaluation = evaluateCycle(hops, teto, {
+            flashLoanFeeFraction: new Decimal('0.0005'),
+            gasCostInToken: new Decimal(1),
+        });
+        assert.ok(evaluation.profitable);
+        // O menor número de reserva era 1000 WETH. Tratá-lo como USDC
+        // truncava a busca em 100 USDC e perdia o tamanho economicamente útil.
+        assert.ok(evaluation.amountIn.gt(100));
+        assert.ok(evaluation.amountIn.lte(teto));
+
+        // Mudar apenas a unidade intermediária para milliWETH não muda o
+        // teto, a quantidade de USDC ótima nem o lucro econômico.
+        const emMilliWeth = [
+            { ...hops[0], reserveOut: hops[0].reserveOut.mul(1000) },
+            { ...hops[1], reserveIn: hops[1].reserveIn.mul(1000) },
+        ];
+        const outroTeto = cycleInputReserveLimit(emMilliWeth, new Decimal('0.1'));
+        const outra = evaluateCycle(emMilliWeth, outroTeto, {
+            flashLoanFeeFraction: new Decimal('0.0005'),
+            gasCostInToken: new Decimal(1),
+        });
+        assert.equal(outroTeto.toString(), teto.toString());
+        assert.equal(outra.amountIn.toFixed(8), evaluation.amountIn.toFixed(8));
+        assert.equal(outra.netProfit.toFixed(8), evaluation.netProfit.toFixed(8));
     } finally {
         restore();
     }
