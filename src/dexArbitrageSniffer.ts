@@ -24,18 +24,12 @@
 // olhando — e com flash loan isso é acessível, já que o risco clássico de
 // ficar preso num token ilíquido desaparece quando a transação reverte.
 import { Decimal } from 'decimal.js';
+import {prepararCpammAtomico, type ConfigCpammAtomico} from './titanCpammAtomico';
 import { createLogger } from './logger';
 import { cycleSpotRatio, type CycleEvaluation, type Hop } from './ammMath';
 import { avaliarCicloComSementeCpamm } from './titanCpammSniffer';
 import { findTriangularCycles, findTwoPoolCycles, hopsForCycle, type Cycle, type PoolInfo } from './dexGraph';
-import {
-    ensaiarExecucao,
-    enviarExecucao,
-    lerSaldoDoContrato,
-    lerDonoDoContrato,
-    montarCalldata,
-    planejarExecucao,
-} from './flashArbExecutor';
+import {paraUnidadesCruas} from './flashArbExecutor';
 import { encodeAddress, SELECTORS, decodeAddressWord, decodeDecimals, decodeReserves, decodeUintWord, encodeUint256, fromRawUnits } from './evmAbi';
 import { assertPlausiblePoolCount, parseScanMode, selectPoolIndices } from './poolDiscovery';
 import { exigirAtivacao } from './ativacao';
@@ -49,6 +43,15 @@ const DEFAULT_BASE_TOKEN = '0x4200000000000000000000000000000000000006';
 const DEFAULT_RPC_URL = 'https://mainnet.base.org';
 /** Gas típico de uma arbitragem com flash loan (2-3 swaps + callback). */
 const DEFAULT_GAS_UNITS = 450_000;
+
+/** Teto no token de entrada; reservas de outros hops têm unidades diferentes. */
+export function cycleInputReserveLimit(hops: Hop[], maxFraction: Decimal): Decimal {
+    if (hops.length === 0 || !maxFraction.isFinite() || maxFraction.lte(0)
+        || maxFraction.gt(1) || !hops[0].reserveIn.isFinite() || hops[0].reserveIn.lte(0)) {
+        return new Decimal(0);
+    }
+    return hops[0].reserveIn.mul(maxFraction);
+}
 
 interface RpcCall {
     to: string;
@@ -750,88 +753,63 @@ async function main() {
     // dentro da EVM. Sobra zero é token que não se deixa vender.
     // ------------------------------------------------------------------
     const contratoFlash = process.env.FLASH_ARB_CONTRACT?.trim();
-    const chavePrivada = process.env.FLASH_ARB_PRIVATE_KEY?.trim();
     const flashLive = process.env.FLASH_ARB_LIVE === 'true';
-    // Abaixo de 1 de propósito: as reservas mudam entre a leitura e a
-    // execução, e exigir on-chain o lucro inteiro estimado faria a transação
-    // reverter a qualquer movimento a favor de outro participante — gás
-    // gasto sem operação. Metade preserva a garantia e sobrevive ao ruído.
-    const margemDeSeguranca = new Decimal(process.env.FLASH_ARB_SAFETY_FRACTION ?? '0.5');
-    if (flashLive) {
-        if (process.env.FLASH_ARB_CONFIRM !== 'I_UNDERSTAND_THE_RISK') {
-            log.error('FLASH_ARB_LIVE=true exige FLASH_ARB_CONFIRM=I_UNDERSTAND_THE_RISK.');
-            process.exit(1);
-        }
-        if (!contratoFlash || !chavePrivada) {
-            log.error('FLASH_ARB_LIVE=true exige FLASH_ARB_CONTRACT e FLASH_ARB_PRIVATE_KEY.');
-            process.exit(1);
-        }
-    }
     if (contratoFlash) {
-        log.warn(`Execução de flash swap ARMADA em ${flashLive ? 'MODO REAL — TRANSAÇÕES SERÃO ENVIADAS' : 'ENSAIO (eth_call, nada é enviado)'}.`, {
-            contrato: contratoFlash,
-            margemDeSeguranca: margemDeSeguranca.toString(),
-            garantiaOnChain:
-                'O contrato confere lucroMinimo no fim do callback e reverte se não bater. ' +
-                'O pior caso de uma tentativa é o gás, nunca o capital emprestado.',
+        log.info('Validação CPAMM atômica em modo somente simulação.', {
+            contrato: contratoFlash, envio: 'nenhum',
+            motivo: 'transmissão exige integração ao emissor único do Caçador',
         });
     }
 
-    /**
-     * Ensaia — e, se armado para valer, executa — um ciclo lucrativo.
-     *
-     * Nunca lança: uma falha aqui não pode derrubar o scanner, que precisa
-     * seguir varrendo. O que ela produz é diagnóstico.
-     */
-    const tentarExecutar = async (cycle: Cycle, hops: Hop[], evaluation: CycleEvaluation): Promise<void> => {
+    /** Falhas são recusas de candidatos; não derrubam o scanner. */
+    const tentarExecutar = async (cycle: Cycle, hops: Hop[]): Promise<void> => {
         if (!contratoFlash) return;
         try {
-            // O contrato confere `balanceOf(address(this))`, não o lucro desta
-            // operação. Com saldo anterior parado nele, um piso igual ao lucro
-            // esperado passaria até numa operação que PERDEU — a garantia
-            // on-chain viraria decoração. Somar o saldo devolve o sentido dela.
-            const saldoAtualDoLucro = await lerSaldoDoContrato(rpcUrl, cycle.path[0], contratoFlash);
-            const plano = planejarExecucao({
-                cycle,
-                hops,
-                evaluation,
-                decimaisPorToken,
-                margemDeSeguranca,
-                saldoAtualDoLucro,
+            const factoriesTexto = process.env.FLASH_ARB_CPAMM_FACTORIES;
+            const executorCodeHash = process.env.FLASH_ARB_CODEHASH;
+            if (!factoriesTexto || !executorCodeHash) {
+                log.info('Sinal apenas teórico: falta identidade auditada do executor/pools.', {
+                    etapa: 'teorica', ciclo: describeCycle(cycle),
+                    requisitos: 'FLASH_ARB_CODEHASH e FLASH_ARB_CPAMM_FACTORIES',
+                });
+                return;
+            }
+            const decBase = decimaisPorToken.get(cycle.path[0].toLowerCase());
+            if (decBase === undefined) return;
+            const config: ConfigCpammAtomico = {
+                executor: contratoFlash, executorCodeHash,
+                factories: JSON.parse(factoriesTexto),
+                minimoLiquidoWei: BigInt(process.env.FLASH_ARB_MIN_NET_WEI ?? '1000000000000'),
+            };
+            const oferta = await prepararCpammAtomico(async(method, params) => {
+                const r = await fetch(rpcUrl, {
+                    method: 'POST', headers: {'content-type':'application/json'},
+                    body: JSON.stringify({jsonrpc:'2.0',id:1,method,params}),
+                    signal: AbortSignal.timeout(10000),
+                });
+                if (!r.ok) throw Error(`RPC ${method}: HTTP ${r.status}`);
+                const body = await r.json() as {result?:unknown;error?:unknown};
+                if (body.error || body.result === undefined) throw Error(`RPC ${method}: resposta inválida`);
+                return body.result;
+            }, config, cycle.pools.map(p=>p.address), cycle.path[0],
+                paraUnidadesCruas(cycleInputReserveLimit(hops, new Decimal(
+                    process.env.DEX_MAX_RESERVE_FRACTION ?? '0.1')), decBase));
+            if (!oferta) {
+                log.info('Candidato reprovado na validação econômica atômica.', {
+                    etapa:'reprovada', ciclo:describeCycle(cycle),
+                });
+                return;
+            }
+            log.info('CPAMM simulada: piso líquido positivo no snapshot; nenhum envio.', {
+                etapa:oferta.etapa, bloco:oferta.bloco,
+                ciclo:describeCycle(cycle), custoMaximoWei:oferta.custoMaximoWei.toString(),
+                lucroMinimoWei:oferta.lucroMinimoWei.toString(), simulacoes:oferta.simulacoes,
             });
-            if ('motivo' in plano) {
-                log.info('Ciclo lucrativo NÃO executável por este contrato.', { ciclo: describeCycle(cycle), motivo: plano.motivo });
-                return;
-            }
-
-            const calldata = montarCalldata(plano);
-            const dono = await lerDonoDoContrato(rpcUrl, contratoFlash);
-            const ensaio = await ensaiarExecucao(rpcUrl, contratoFlash, dono, calldata);
-            if (!ensaio.ok) {
-                log.warn('ENSAIO REPROVADO — nada foi enviado, nenhum gás gasto.', {
-                    ciclo: describeCycle(cycle),
-                    oQueAconteceriaDeVerdade: ensaio.motivo,
-                });
-                return;
-            }
-
-            if (!flashLive) {
-                log.info('*** SIMULAÇÃO APROVADA — sem envio ou lucro realizado ***', {
-                    etapa: 'simulada',
-                    ciclo: describeCycle(cycle),
-                    quantidadeEmprestada: plano.quantidade.toString(),
-                    lucroMinimoExigido: plano.lucroMinimo.toString(),
-                    paraExecutar: 'FLASH_ARB_LIVE=true e FLASH_ARB_CONFIRM=I_UNDERSTAND_THE_RISK',
-                });
-                return;
-            }
-
-            const recibo = await enviarExecucao({ rpcUrl, chavePrivada: chavePrivada!, contrato: contratoFlash, calldata });
-            log.info(recibo.sucesso ? '*** ARBITRAGEM EXECUTADA ***' : 'Transação enviada mas revertida na cadeia.', {
-                etapa: recibo.sucesso ? 'confirmada_sem_reconciliacao' : 'revertida',
-                ciclo: describeCycle(cycle),
-                hash: recibo.hash,
-                gasUsado: recibo.gasUsado.toString(),
+            // A carteira não pode disputar nonce com o Caçador em outro serviço.
+            // Um flag local não prova exclusividade entre máquinas do Railway.
+            // Até integrar ao transmissor único, este scanner não faz broadcast.
+            if (flashLive) log.warn('Envio recusado: falta integração ao transmissor único de nonce.', {
+                etapa:'simulada_sem_envio', lucroRealizado:false,
             });
         } catch (err) {
             log.warn('Falha ao tentar executar o ciclo; o scanner segue.', {
@@ -895,9 +873,10 @@ async function main() {
         });
         process.exit(0);
     }
-    // Teto de entrada: fração das reservas do menor pool do ciclo. Não faz
-    // sentido propor um empréstimo maior do que o pool consegue absorver — o
-    // slippage já teria destruído o lucro muito antes.
+    // Teto de entrada: fração da reserva de entrada do PRIMEIRO pool, na
+    // unidade do token base. Reservas de outros hops não são comparáveis
+    // diretamente (ex.: USDC e WETH). O modelo ainda desconta o slippage de
+    // todos os pools, e a execução depende do ensaio atômico.
     const maxFraction = new Decimal(process.env.DEX_MAX_RESERVE_FRACTION ?? '0.1');
     const watchIntervalSec = Number(process.env.DEX_WATCH_INTERVAL_SEC ?? '0');
 
@@ -935,6 +914,11 @@ async function main() {
             : fromRawUnits(gasWei.mul(gasUnits), 18);
 
         let profitableCount = 0;
+        let simulacoesTentadas = 0;
+        const candidatosAtomicos: {cycle:Cycle;hops:Hop[];evaluation:CycleEvaluation}[] = [];
+        const limiteSimulacoes = Number(process.env.FLASH_ARB_MAX_SIMULATIONS_PER_SCAN ?? '12');
+        if (!Number.isSafeInteger(limiteSimulacoes) || limiteSimulacoes < 1 || limiteSimulacoes > 128)
+            throw Error('FLASH_ARB_MAX_SIMULATIONS_PER_SCAN deve estar entre 1 e 128');
         let bestNet = new Decimal(0);
         let bestDescription = 'nenhum';
         // Só o que é LUCRATIVO entra na projeção. Somar margem negativa
@@ -945,16 +929,8 @@ async function main() {
 
         for (const cycle of freshCycles) {
             const hops = hopsForCycle(cycle);
-            const smallestReserveIn = hops.reduce(
-                (min, h) => (h.reserveIn.lessThan(min) ? h.reserveIn : min),
-                hops[0].reserveIn,
-            );
-            // 2-pool CPAMM BigInt analytic size is a theoretical SEED only.
-            // Existing optimizer remains the fallback (3+ hops, unsupported fees).
-            // This doesn't authorize a transaction: tentarExecutar still
-            // demands a current eth_call of the actual onchain executor.
             const tamanho = avaliarCicloComSementeCpamm(
-                cycle, hops, smallestReserveIn.mul(maxFraction), {
+                cycle, hops, cycleInputReserveLimit(hops, maxFraction), {
                     flashLoanFeeFraction: flashLoanFee,
                     gasCostInToken: gasInToken,
                 }, decimaisPorToken,
@@ -981,10 +957,21 @@ async function main() {
                     lucroLiquido: evaluation.netProfit.toFixed(8),
                     razaoSpot: cycleSpotRatio(hops).toFixed(8),
                 });
-                await tentarExecutar(cycle, hops, evaluation);
+                candidatosAtomicos.push({cycle,hops,evaluation});
+                candidatosAtomicos.sort((a,b)=>b.evaluation.netProfit.cmp(a.evaluation.netProfit));
+                if (candidatosAtomicos.length > limiteSimulacoes) candidatosAtomicos.pop();
             }
         }
 
+        for (const candidato of candidatosAtomicos) {
+            simulacoesTentadas++;
+            await tentarExecutar(candidato.cycle,candidato.hops);
+        }
+        if (contratoFlash && profitableCount > simulacoesTentadas) {
+            log.info('Orçamento de simulações da varredura atingido.', {
+                etapa:'teorica', simulacoesTentadas, naoSimuladas:profitableCount-simulacoesTentadas,
+            });
+        }
         if (profitableCount > 0) scansWithOpportunity += 1;
         // Ciclos que sumiram nesta varredura deixam de acumular persistência.
         for (const [chave, registro] of vistas) {

@@ -5,8 +5,8 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { ContractFactory, Interface, JsonRpcProvider, Wallet, getAddress } from 'ethers';
-import { ORACULO_DE_GAS_L1 } from './custoDaBase';
+import { ContractFactory, Interface, JsonRpcProvider, Wallet, Transaction, getAddress } from 'ethers';
+import { ORACULO_DE_GAS_L1, codificarGetL1Fee } from './custoDaBase';
 import { MORPHO_FLASH_BASE, ABI_MULTI, FABRICA_SLIPSTREAM_BASE, POOL_SLIPSTREAM_EURC_USDC } from './titanPonteMultiHop';
 import { COFRE_ESPERADO } from './caca';
 import { REDES } from './liquidacoes';
@@ -82,9 +82,8 @@ export async function implantarMultiHop(env: NodeJS.ProcessEnv = process.env):Pr
             throw new Error('gas do deploy excede o teto');
         const pedido={...tx,chainId:8453,type:2 as const,nonce,
             maxFeePerGas:maxFee,maxPriorityFeePerGas:gorjeta,gasLimit};
-        const assinado=await carteira.signTransaction(pedido);
         const retorno=await rpc.call({to:ORACULO_DE_GAS_L1,
-            data:oracle.encodeFunctionData('getL1Fee',[assinado])});
+            data:codificarGetL1Fee(Transaction.from(pedido).unsignedSerialized)});
         const l1=oracle.decodeFunctionResult('getL1Fee',retorno)[0] as bigint;
         if (gasLimit*maxFee+2n*l1>BigInt(tetoTexto))
             throw new Error('deploy excede orcamento total L1+L2');

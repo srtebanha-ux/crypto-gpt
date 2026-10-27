@@ -19,7 +19,7 @@
  * Isso NAO autoriza ignora-lo aqui: 0,11% de um premio de centavos decide.
  */
 import Decimal from 'decimal.js';
-import { id } from 'ethers';
+import { id, Transaction } from 'ethers';
 
 /** O oraculo de gas da OP Stack. Predeploy: o endereco e parte da rede. */
 export const ORACULO_DE_GAS_L1 = '0x420000000000000000000000000000000000000F';
@@ -188,14 +188,19 @@ export function julgar(lucroBrutoWei: bigint, custo: CustoTotal): JulgamentoEcon
 }
 
 /**
- * O calldata de `getL1Fee(bytes)` para uma transacao SERIALIZADA.
+ * O calldata de `getL1Fee(bytes)` para uma transacao SERIALIZADA SEM ASSINATURA.
  *
- * Serializada, e nao o calldata da chamada: a correcao esta medida no CLAUDE.md
- * e o fator foi 1,35x. Quem chama passa a transacao assinada ou uma estimativa
- * do tamanho dela — e se passar o calldata, subestima.
+ * GasPriceOracle recebe RLP nao assinado; no Fjord acrescenta 68 bytes para
+ * estimar a assinatura. Passar a transacao assinada contabiliza essa parcela
+ * duas vezes. A estimativa deve usar o envelope real, nao apenas calldata.
+ * Fonte: optimism/packages/contracts-bedrock/src/L2/GasPriceOracle.sol.
  */
 export function codificarGetL1Fee(txSerializada: string): string {
-    const sem0x = txSerializada.startsWith('0x') ? txSerializada.slice(2) : txSerializada;
+    const tx = Transaction.from(txSerializada);
+    if (tx.isSigned() || tx.unsignedSerialized.toLowerCase() !== txSerializada.toLowerCase()) {
+        throw new Error('getL1Fee exige transacao RLP canonica sem assinatura.');
+    }
+    const sem0x = tx.unsignedSerialized.slice(2);
     const bytes = sem0x.length / 2;
     const corpo = sem0x + '0'.repeat((32 - (bytes % 32)) % 32 * 2);
     // O SELETOR E DERIVADO, nao lembrado. Eu o escrevi de cabeca na primeira
