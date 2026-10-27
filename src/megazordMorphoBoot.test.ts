@@ -115,3 +115,35 @@ test('V3 selecionado nao exige nem implanta Aero ausente',async()=>{
  assert.equal(r.novos,0);
  await assert.rejects(prepararMorphoMegazord({...e,MEGAZORD_MORPHO_ROTAS:'typo'},mocked([])),/ROTAS/);
 });
+
+test('explicit CPAMM-only boot needs verified V2, never deploys or arms Morpho',async()=>{
+ const e:NodeJS.ProcessEnv={...env(),
+  MEGAZORD_MORPHO_ROTAS:'none',TITAN_CPAMM_ATOMICO:'1',
+  TITAN_V2_CONTRATO:'0x'+'44'.repeat(20),
+  FLASH_ARB_CODEHASH:'0x'+'66'.repeat(32),FLASH_ARB_CPAMM_FACTORIES:'[]',
+  CACA_MORPHO_V3_CONTRATO:v3,CACA_MORPHO_AERO_CONTRATO:aero};
+ const called:string[]=[];
+ const result=await prepararMorphoMegazord(e,mocked(called));
+ assert.deepEqual(called,[]);
+ assert.deepEqual(result,{v3:'',aero:'',novos:0});
+ assert.equal(e.CACA_MORPHO_V3_CONTRATO,'');
+ assert.equal(e.CACA_MORPHO_AERO_CONTRATO,'');
+ assert.equal(e.MEGAZORD_CONTRATOS,'0x'+'44'.repeat(20));
+});
+
+test('CPAMM-only cannot bypass empty allowlist, V2 identity, or paid deploy restriction',async()=>{
+ const base:NodeJS.ProcessEnv={...env(),MEGAZORD_MORPHO_ROTAS:'none',TITAN_CPAMM_ATOMICO:'1',
+  TITAN_V2_CONTRATO:'0x'+'44'.repeat(20),FLASH_ARB_CODEHASH:'0x'+'66'.repeat(32),
+  FLASH_ARB_CPAMM_FACTORIES:'[]'};
+ const variants=[
+  {...base,TITAN_CPAMM_ATOMICO:'0'},
+  {...base,TITAN_V2_CONTRATO:undefined},
+  {...base,MEGAZORD_CONTRATOS:''},
+  {...base,FLASH_ARB_CODEHASH:undefined},
+  {...base,FLASH_ARB_CPAMM_FACTORIES:undefined},
+  {...base,MEGAZORD_AUTO_DEPLOY:'1'},
+ ];
+ for(const e of variants)
+  await assert.rejects(prepararMorphoMegazord(e,mocked([])),/Morpho none exige CPAMM atomico/);
+ await assert.rejects(prepararMorphoMegazord({...base,MEGAZORD_MORPHO_ROTAS:'none,v3'},mocked([])),/ROTAS/);
+});
