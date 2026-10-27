@@ -5,6 +5,7 @@ const {Interface,getCreateAddress,getAddress,keccak256}=require('ethers');
 const wallet='0x3D310384d674532f5D41cF2D43B03001F3515AE8';
 const endpoints=['https://mainnet.base.org','https://base-rpc.publicnode.com'];
 const abi=new Interface([
+ 'function owner() view returns(address)',
  'function dono() view returns(address)',
  'function versaoRotas() view returns(uint256)',
  'function cofre() view returns(address)',
@@ -59,6 +60,7 @@ async function inspectDirectDeploys(url1,url2,address,limit=128){
    if(!code||code==='0x')continue;
    const codeHash=keccak256(code);
    const owner=await safeMethod(url1,predicted,'dono');
+   const ownerV2=await safeMethod(url1,predicted,'owner');
    const versao=await safeMethod(url1,predicted,'versaoRotas');
    // Audit older contracts too: V1 implementations may lack versaoRotas().
    // Read every immutable before rejecting an address. Never send any tx.
@@ -75,7 +77,7 @@ async function inspectDirectDeploys(url1,url2,address,limit=128){
     &&publicImmutables.routerV3?.toLowerCase()===canonV3Router.toLowerCase()
     &&publicImmutables.fabricaV3?.toLowerCase()===canonV3Factory.toLowerCase());
    withCode.push({nonce,address:predicted,codeHash,bytes:(code.length-2)/2,
-    dono:owner,versaoRotas:versao,publicImmutables,
+    dono:owner,ownerV2,versaoRotas:versao,publicImmutables,
     parametrosCompativeisComMorphoV3:compatV3,
     candidatoMorphoReconhecido:Boolean(owner&&owner.toLowerCase()===address.toLowerCase()&&versao!==null)});
    if(!owner||owner.toLowerCase()!==address.toLowerCase()||versao===null)continue;
