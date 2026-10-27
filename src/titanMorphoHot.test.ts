@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
@@ -153,4 +153,18 @@ test('renovacao nao insere desconhecido nem prolonga posicao distante ou expirad
  assert.equal(renovarQuenteMorphoPorLeitura(m.id,user1,501n,now+20*60_000),false);
  assert.equal(renovarQuenteMorphoPorLeitura(m.id,user1,1n,now+26*60_000),false);
  assert.equal(resumoQuentesMorpho(now+26*60_000).posicoes,0);
+});
+
+test('HOT reuses the configured Megazord RPC and avoids public fallback unless necessary',()=>{
+ const configured={MEGAZORD_RPC_URL:'https://verified-rpc.example/private'};
+ assert.equal(resolverRpcMorphoHot(configured),configured.MEGAZORD_RPC_URL);
+ assert.equal(resolverRpcMorphoHot({...configured,CACA_MORPHO_V3_RPC_URL:'https://specific.example/rpc'}),
+  'https://specific.example/rpc');
+ assert.equal(resolverRpcMorphoHot({TITAN_EXECUTOR_RPC_URL:'https://executor.example/rpc'}),
+  'https://executor.example/rpc');
+ assert.equal(resolverRpcMorphoHot({CACA_RPC_URL:'https://caca.example/rpc'}),
+  'https://caca.example/rpc');
+ assert.equal(resolverRpcMorphoHot({}), 'https://mainnet.base.org');
+ assert.equal(resolverRpcMorphoHot({...configured,CACA_MORPHO_V3_RPC_URL:'  '}),
+  configured.MEGAZORD_RPC_URL);
 });
