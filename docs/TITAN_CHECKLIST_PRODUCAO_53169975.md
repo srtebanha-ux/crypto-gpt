@@ -13,10 +13,44 @@
 | Bloco | `53169975` / `0x32b4f37` | Bloco solicitado; hash/timestamp ainda não obtidos |
 | Elegibilidade real | **Indeterminada** | RPCs mainnet.base.org e base-rpc.publicnode.com bloqueados pelo proxy, CONNECT HTTP 403 |
 | Executor Morpho V3 / codehash | **Não identificados** | Não confundir ausência de configuração/marcador com ausência onchain |
-| Carteira, serviços e volume | **Não identificados neste ambiente** | Sem acesso Railway; inventário público pendente |
+| Carteira, serviços e volume | Identificados pelo operador no manifesto público vinculado abaixo | Leitura atual, inventário completo e integridade ainda pendentes |
 
 Os horários acima seguem o relato do operador, em São Paulo. Nenhum valor desta
 tabela comprova lucro realizado. O candidato não foi declarado liquidável.
+
+## Dados de infraestrutura recebidos do operador
+
+O [manifesto público](titan-producao-publico.json) contém os IDs exatos. Carteira
+informada: `0x3D310384d674532f5D41cF2D43B03001F3515AE8`.
+
+- Projeto: `da583e14-f520-4090-9a9c-0de528ffea5c`.
+- Ambiente production: `dd7ffbb5-0a0d-4aa7-b65a-9384a79d3ed5`.
+- Serviço de destino titan-arbitragem: `3f298314-e80f-419f-bdcc-04e038c59317`.
+- Outro assinador conhecido, renewed-sparkle: `ef919d74-5f8f-4457-9ce5-f769576fa4ed`.
+- Volume titan-memoria: `27c07a9a-39d3-4358-969e-c812e7db6c9e`, mount informado `/app/data`.
+- Diário anteriormente configurado: `/app/data/megazord-diario.json`.
+
+Esses valores são informação do operador, não uma leitura independente do estado
+atual. O marcador V3 foi identificado anteriormente, mas seu conteúdo segue
+pendente. A lista de dois serviços não prova que inexistam outros assinadores.
+
+A coleta agora usa somente módulos nativos do Node, **não acessa chaves privadas**
+e inclui uma impressão SHA-256 dos arquivos lidos para comparar evidências. O
+checksum identifica o conteúdo observado; não prova integridade histórica nem
+reconciliação onchain. O caminho histórico do diário é consultado mesmo quando
+MEGAZORD_DIARIO não está presente no processo antigo. Nenhum arquivo é criado.
+
+Em um terminal com Railway CLI autenticado, no checkout desta PR, a coleta
+somente leitura pode ser executada nos dois serviços existentes:
+
+```sh
+railway ssh --project da583e14-f520-4090-9a9c-0de528ffea5c --environment dd7ffbb5-0a0d-4aa7-b65a-9384a79d3ed5 --service 3f298314-e80f-419f-bdcc-04e038c59317 -- node -e "$(cat scripts/titanInventarioPublico.cjs)" > titan-inventario.json
+railway ssh --project da583e14-f520-4090-9a9c-0de528ffea5c --environment dd7ffbb5-0a0d-4aa7-b65a-9384a79d3ed5 --service ef919d74-5f8f-4457-9ce5-f769576fa4ed -- node -e "$(cat scripts/titanInventarioPublico.cjs)" > cacador-inventario.json
+```
+
+Comandos preparados, não executados neste ambiente: não há conector Railway
+nem sessão autenticada disponível. Os JSONs resultantes permitem avançar sem
+solicitar segredos ou fazer deploy. Auditar também os demais serviços do projeto.
 
 ## Fechamento dos dados faltantes, sem deploy
 
@@ -25,7 +59,7 @@ tabela comprova lucro realizado. O candidato não foi declarado liquidável.
    arquivo temporariamente; não trocar o deployment para obter o inventário.
    O script só lê ambiente, mountinfo e JSONs conhecidos. Não escreve arquivos,
    chama RPC, assina ou transmite. Não enviar dump de ambiente.
-2. Agrupar os resultados por `identidadesPublicasDerivadas`. Registrar todos os
+2. Agrupar os resultados pelos endereços públicos configurados. A coleta não lê chaves privadas e não comprova criptograficamente a identidade do signer. Registrar todos os
    service IDs com a mesma carteira, mesmo se `*_ENVIAR=0`. Conferir Start Command
    no painel, pois APP_ENTRY não revela overrides do Railway. Registrar também
    jobs/serviços pausados que possam reiniciar com essa carteira.
@@ -79,11 +113,11 @@ alterar estado; registrar essa limitação, sem inventar implantação históric
 | Config path | `railway.megazord.json` |
 | Start Command efetivo | `node dist/megazord.js` |
 | Réplicas | `1` |
-| Volume | `/app/data`; ID real ainda pendente |
-| `MEGAZORD_DIARIO` | Caminho do diário persistente existente/reconciliado; ainda pendente |
+| Volume | `/app/data`; ID `27c07a9a-39d3-4358-969e-c812e7db6c9e`, informado; mount atual pendente |
+| `MEGAZORD_DIARIO` | `/app/data/megazord-diario.json`; conteúdo/reconciliação pendentes |
 | `MEGAZORD_MORPHO_ROTAS` | `v3`, somente após auditoria do V3 |
 | `MEGAZORD_AUTO_DEPLOY` | `0` |
-| Carteira / contrato / codehash | Valores reais ainda pendentes; não preencher placeholders |
+| Carteira / contrato / codehash | Carteira no manifesto; contrato V3 e codehash ainda pendentes |
 | RPC primário/secundário | Dois endpoints Base verificados, ainda pendentes |
 | Aliases RPC | Alinhar CACA_RPC_URL, ARB_RPC_URL e TITAN_EXECUTOR_RPC_URL ao primário verificado |
 | `MEGAZORD_MAX_TX_DIA`, `CACA_MAX_ENVIOS` | Proposta: `1` / `1` |
