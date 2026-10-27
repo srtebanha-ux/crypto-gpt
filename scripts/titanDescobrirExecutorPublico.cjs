@@ -47,6 +47,7 @@ async function inspectDirectDeploys(url1,url2,address,limit=128){
  const count=Number(BigInt(await rpc(url1,'eth_getTransactionCount',[address,'latest'])));
  const nonces=noncesToInspect(count,limit);
  const found=[];
+ const withCode=[];
  let cursor=0;
  async function worker(){
   while(cursor<nonces.length){
@@ -56,10 +57,13 @@ async function inspectDirectDeploys(url1,url2,address,limit=128){
    try{code=await rpc(url1,'eth_getCode',[predicted,'latest']);}
    catch{continue;}
    if(!code||code==='0x')continue;
+   const codeHash=keccak256(code);
    const owner=await safeMethod(url1,predicted,'dono');
    const versao=await safeMethod(url1,predicted,'versaoRotas');
+   withCode.push({nonce,address:predicted,codeHash,bytes:(code.length-2)/2,
+    dono:owner,versaoRotas:versao,
+    candidatoMorphoReconhecido:Boolean(owner&&owner.toLowerCase()===address.toLowerCase()&&versao!==null)});
    if(!owner||owner.toLowerCase()!==address.toLowerCase()||versao===null)continue;
-   const codeHash=keccak256(code);
    let secondCode=null;
    if(secondaryValid)secondCode=await rpc(url2,'eth_getCode',[predicted,'latest']).catch(()=>null);
    const invariants={};
@@ -74,9 +78,10 @@ async function inspectDirectDeploys(url1,url2,address,limit=128){
  }
  await Promise.all(Array.from({length:6},()=>worker()));
  found.sort((a,b)=>a.nonce-b.nonce);
+ withCode.sort((a,b)=>a.nonce-b.nonce);
  return {chainId:8453,carteira:address,totalNoncesEOA:count,noncesLidos:nonces.length,
   coberturaCompleta:nonces.length===count,secundarioChain8453:secondaryValid,
-  enderecosCreateDiretos:found,aptoParaEnvio:false,
+  createDiretosComBytecode:withCode,enderecosCreateDiretos:found,aptoParaEnvio:false,
   limites:'Busca somente CREATE direto da carteira; não encontra CREATE2/factory. Métodos e codehash não substituem identidade, artefato auditado, marcador e diário.'};
 }
 async function main(){
