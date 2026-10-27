@@ -10,6 +10,7 @@ on:
       - 'scripts/titanDescobrirExecutorPublico.test.cjs'
       - 'scripts/titanLocalizarFlashArbV2.cjs'
       - 'scripts/titanMorphoV3CustoDeploy.cjs'
+      - 'scripts/titanAuditarV3Railway.cjs'
       - 'src/titanMorphoRadar.ts'
       - 'src/morphoApi.ts'
   workflow_dispatch:
@@ -27,6 +28,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Audit V3 executor configured on Railway against two public Base RPCs
+        run: node scripts/titanAuditarV3Railway.cjs > executor-v3-railway.json
+      - name: Upload V3 executor immutable verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-existing-v3-railway-audit
+          path: executor-v3-railway.json
+          retention-days: 7
+          if-no-files-found: error
       - name: Compile Morpho V3 artifact for read-only deployment cost estimate
         run: npx hardhat compile
       - name: Estimate the existing wallet's V3 deployment gas without broadcasting
