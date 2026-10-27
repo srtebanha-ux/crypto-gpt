@@ -84,5 +84,5 @@ test('persistent invalid JSON-RPC replies fail closed without signer authorizati
  await assert.rejects(selecionarRpcSecundarioMegazord(env,async()=>{
   attempts++;throw Error('resposta RPC invalida');
  },async()=>{}),/sem fallback inseguro ao principal/);
- assert.equal(attempts,5);
+ assert.equal(attempts,9);
 });
