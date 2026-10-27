@@ -24,3 +24,12 @@ test('custom error selector and missing revert data cannot claim eligibility',()
  assert.equal(classificarRevert({message:'https://secret.example/key'}),'inconclusiva');
  assert.equal(classeRevertPublica({message:'https://secret.example/key'}).selector,null);
 });
+
+test('Morpho liquidate passed health check when revert originates at token repayment',()=>{
+ for(const reason of ['transferFrom reverted','transferFrom returned false']){
+  const e={data:reasonError(reason)};
+  assert.equal(classificarRevert(e),'gate_saude_passou_mas_repagamento_falhou');
+  assert.equal(classeRevertPublica(e).razaoPublica,reason);
+ }
+ assert.equal(classificarRevert({data:reasonError('position is healthy')}),'saudavel_no_liquidate');
+});
