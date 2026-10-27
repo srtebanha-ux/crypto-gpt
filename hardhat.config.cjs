@@ -21,7 +21,7 @@ module.exports = {
     networks: {
         hardhat: {
             forking: {
-                url: 'https://mainnet.base.org',
+                url: process.env.BASE_FORK_RPC_URL || 'https://mainnet.base.org',
                 ...(process.env.ARB_BLOCO ? { blockNumber: Number(process.env.ARB_BLOCO) } : {}),
             },
             chainId: 8453,

@@ -2,6 +2,11 @@
 import type {MercadoDaApi} from './morphoApi';
 import {avaliarELiquidarMorphoV3} from './titanMorphoV3Tiro';
 import {avaliarELiquidarMorphoAero} from './titanMorphoAeroTiro';
+export function bloqueioRotaMorphoV3(env:NodeJS.ProcessEnv):string|null {
+ if(env.CACA_MORPHO_V3_AVALIAR==='0')return 'CACA_MORPHO_V3_AVALIAR=0: preflight V3 desabilitado';
+ if(!env.CACA_MORPHO_V3_CONTRATO)return 'CACA_MORPHO_V3_CONTRATO ausente: informar executor TitanCacadorMorphoV3 implantado e verificado';
+ return null;
+}
 type Entrada={mercado:MercadoDaApi;usuario:string;rpcUrl:string;signal?:AbortSignal};
 type Resultado=Awaited<ReturnType<typeof avaliarELiquidarMorphoV3>>;
 export type TentativaMorpho={via:'Uniswap V3'|'Aerodrome';resultado:Resultado;primeiroMotivo?:string};
@@ -16,7 +21,7 @@ export async function avaliarSaidasMorpho(e:Entrada,env:NodeJS.ProcessEnv=proces
  if(ocupado)return{via:'Uniswap V3',resultado:{status:'descartada',motivo:'outro preflight Morpho ocupa a unica carteira'}};
  ocupado=true;
  try {
-   let v3:Resultado={status:'descartada',motivo:'rota V3 ausente ou desabilitada'};
+   let v3:Resultado={status:'descartada',motivo:bloqueioRotaMorphoV3(env)??'preflight V3 ainda nao executado'};
    if(env.CACA_MORPHO_V3_CONTRATO&&env.CACA_MORPHO_V3_AVALIAR!=='0')
      v3=await sondadores.v3(e,env);
    // Hash is a stop even if a future adapter returns an unexpected status.

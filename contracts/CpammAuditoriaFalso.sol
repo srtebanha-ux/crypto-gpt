@@ -3,13 +3,17 @@ pragma solidity ^0.8.26;
 // SOMENTE TESTES: tokens e pares controlados para reproduzir falhas de pagamento.
 interface ICallbackCpammTeste {function uniswapV2Call(address,uint256,uint256,bytes calldata) external;}
 contract TokenCpammTeste {
+    event Transfer(address indexed from,address indexed to,uint256 value);
     mapping(address=>uint256) public balanceOf;
     address public destinoTaxado;
-    function mint(address to,uint256 n) external {balanceOf[to]+=n;}
+    function mint(address to,uint256 n) external {balanceOf[to]+=n;emit Transfer(address(0),to,n);}
     function taxar(address to) external {destinoTaxado=to;}
     function transfer(address to,uint256 n) external returns(bool){
         require(balanceOf[msg.sender]>=n,"balance");balanceOf[msg.sender]-=n;
-        balanceOf[to]+=to==destinoTaxado?n*95/100:n;return true;
+        uint256 recebido=to==destinoTaxado?n*95/100:n;
+        balanceOf[to]+=recebido;emit Transfer(msg.sender,to,recebido);
+        if(recebido<n)emit Transfer(msg.sender,address(0),n-recebido);
+        return true;
     }
 }
 contract ParCpammTeste {

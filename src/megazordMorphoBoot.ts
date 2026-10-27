@@ -24,6 +24,12 @@ const abi=new Interface([
  'function aerodromeFactory() view returns(address)',
 ]);
 type Tipo='v3'|'aero';
+export function rotasSelecionadasMegazord(env:NodeJS.ProcessEnv):Tipo[]{
+ const names=(env.MEGAZORD_MORPHO_ROTAS??'v3,aero').split(',').map(x=>x.trim());
+ if(!names.length||names.some(x=>x!=='v3'&&x!=='aero')||new Set(names).size!==names.length)
+   throw Error('MEGAZORD_MORPHO_ROTAS deve selecionar v3, aero ou v3,aero');
+ return names as Tipo[];
+}
 type CacheContratos={version:1;owner:string;v3?:string;aero?:string};
 function arquivoCache(env:NodeJS.ProcessEnv):string|undefined{
  const diary=env.MEGAZORD_DIARIO;
@@ -141,13 +147,14 @@ export async function prepararMorphoMegazord(
    throw Error('Megazord: carteira diverge na preparacao de contratos');
  if(env.CACA_ENVIAR==='1'&&env.MEGAZORD_AUTO_DEPLOY==='1')
    throw Error('auto-deploy nao pode coexistir com CACA_ENVIAR');
- const found={} as Record<Tipo,string>;
+ const selecionadas=rotasSelecionadasMegazord(env);
+ const found:Record<Tipo,string>={v3:'',aero:''};
  const cached=lerCache(env,owner);
  const planned:Partial<Record<Tipo,string>>={};
  let novos=0;
- // Resolve BOTH markers/caches and validate existing executors/caps before
- // spending on either missing contract. An invalid Aero must not cost a V3 deploy.
- for(const tipo of ['v3','aero'] as const){
+ // Resolve all SELECTED markers/caches and validate existing executors/caps
+ // before any deployment. Unselected engines cannot block or trigger a deploy.
+ for(const tipo of selecionadas){
    const c=config(tipo,owner);
    const fromEnv=env[c.env];
    const fromMarker=await deps.recuperar(c.marker,env);
@@ -171,7 +178,7 @@ export async function prepararMorphoMegazord(
      planned[tipo]=getAddress(address);
    }
  }
- for(const tipo of ['v3','aero'] as const){
+ for(const tipo of selecionadas){
    let address=planned[tipo];
    if(!address){
      const local:NodeJS.ProcessEnv={...env,
@@ -195,12 +202,11 @@ export async function prepararMorphoMegazord(
    cached[tipo]=found[tipo];
    guardarCache(env,cached);
  }
- // Only expose runtime addresses AFTER both executors passed immutable and
- // version checks. No partial permission to send.
+ // Expose runtime addresses only after all selected executors passed checks.
  env.CACA_MORPHO_V3_CONTRATO=found.v3;
  env.CACA_MORPHO_AERO_CONTRATO=found.aero;
  const whitelist=new Set((env.MEGAZORD_CONTRATOS??'').split(',').map(x=>x.trim()).filter(Boolean));
- whitelist.add(found.v3);whitelist.add(found.aero);
+ for(const tipo of selecionadas)whitelist.add(found[tipo]);
  env.MEGAZORD_CONTRATOS=[...whitelist].join(',');
  return {v3:found.v3,aero:found.aero,novos};
 }

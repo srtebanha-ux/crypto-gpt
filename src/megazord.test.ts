@@ -27,6 +27,7 @@ function bootFixture(){
    MEGAZORD_GAS_MAX_TX_WEI:'100',MEGAZORD_GAS_MAX_DIA_WEI:'200'};
  let checks=0;
  const deps:DependenciasBootMegazord={
+   identidades:async()=>{events.push('identidades');},
    rede:async e=>{
      events.push('rede');checks++;
      assert.notEqual(e.CACA_MORPHO_V3_ENVIAR,'1');
@@ -72,7 +73,7 @@ test('network and price failures happen before any paid contract preparation',as
 test('pre-deploy readiness is repeated for actual executors and price before arming',async()=>{
  const f=bootFixture();
  await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),/liquidacoes encerrou/);
- assert.deepEqual(f.events,['rede','preco','deploy-morpho','aave','rede','preco','atualizacao','engines']);
+ assert.deepEqual(f.events,['rede','preco','deploy-morpho','aave','rede','identidades','preco','atualizacao','engines']);
  assert.equal(f.env.CACA_MAX_ENVIOS,'1');
  assert.equal(f.env.CACA_CHAVE_PRIVADA,f.env.MEGAZORD_CHAVE_PRIVADA);
 });
@@ -139,4 +140,10 @@ test('Megazord entrypoint aligns CACA window to global 250 daily cap before CACA
  const observer:NodeJS.ProcessEnv={MEGAZORD_MODO:'observacao',MEGAZORD_MAX_TX_DIA:'250'};
  alinharMaxEnviosMegazord(observer);
  assert.equal(observer.CACA_MAX_ENVIOS,undefined,'observation has no live defaults');
+});
+
+ test('codehash audit failure stops boot before arming or loading engines',async()=>{
+ const f=bootFixture();f.deps.identidades=async()=>{throw Error('bytecode diverge');};
+ await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),/bytecode diverge/);
+ assert.notEqual(f.env.CACA_MORPHO_V3_ENVIAR,'1');assert.ok(!f.events.includes('engines'));
 });

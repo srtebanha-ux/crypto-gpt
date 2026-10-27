@@ -5,7 +5,9 @@
 FROM node:22-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+# Optional corporate CA for local validation behind a TLS proxy. Never disable TLS.
+RUN --mount=type=secret,id=npm_ca \
+    if [ -f /run/secrets/npm_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/npm_ca; fi; npm ci
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 COPY contracts ./contracts
@@ -23,7 +25,8 @@ FROM node:22-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN --mount=type=secret,id=npm_ca \
+    if [ -f /run/secrets/npm_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/npm_ca; fi; npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 # Artefatos de verificacao de contrato, somente leitura ate os gates aprovarem.
 COPY --from=build /app/.tmp/artifacts/FlashArbProva.json ./.tmp/artifacts/FlashArbProva.json

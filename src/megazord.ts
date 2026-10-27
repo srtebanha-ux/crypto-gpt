@@ -1,4 +1,5 @@
 /** Combined scanners with optional shared financial executor. */
+import {auditarContratosMegazord} from './megazordContratosPreflight';
 import {createLogger} from './logger';
 import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord} from './megazordExecutor';
 import {normalizarCredenciaisMegazord} from './megazordCredenciais';
@@ -10,6 +11,7 @@ import {JsonRpcProvider} from 'ethers';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 type RedeVerificada=Awaited<ReturnType<typeof import('./megazordPreflight').conferirRedeMegazord>>;
 export type DependenciasBootMegazord={
+ identidades:(env:NodeJS.ProcessEnv)=>Promise<void>;
  rede:(env:NodeJS.ProcessEnv)=>Promise<RedeVerificada>;
  preco:(env:NodeJS.ProcessEnv)=>Promise<{ethUsd:string;minimoWei:string}>;
  morpho:typeof prepararMorphoMegazord;
@@ -17,6 +19,10 @@ export type DependenciasBootMegazord={
  atualizar:typeof iniciarAtualizacaoPisoUsd;
 };
 const boot:DependenciasBootMegazord={
+ identidades:async env=>{
+   // Pools are candidate-specific and audited again by the atomic CPAMM proof.
+   await auditarContratosMegazord({...env,TITAN_CPAMM_ATOMICO:'0'});
+ },
  rede:async env=>await selecionarRpcSecundarioMegazord(env) as RedeVerificada,
  preco:async env=>{
    const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true});
@@ -108,13 +114,14 @@ export async function iniciarMegazord(
    const multi=await deps.aave(env);
    if(multi)env.MEGAZORD_CONTRATOS=[env.MEGAZORD_CONTRATOS,multi].filter(Boolean).join(',');
    const rede=await deps.rede(env);
+   await deps.identidades(env); // pinned bytecode and invariants on both RPCs before arming
    // Deploy confirmation can take time: do not arm from the pre-deploy quote.
    const lucroUsd=await deps.preco(env);
    log.info('Preflight de execucao aprovado (somente leitura).',{
      endereco:rede.address,
      rpcs:rede.checks.length,
      escopo:rede.scope,
-     executoresMorphoConferidos:2,
+     executoresMorphoConferidos:[contratos.v3,contratos.aero].filter(Boolean).length,
      implantesNestaInicializacao:contratos.novos,
      lucroMinimoWethWei:lucroUsd.minimoWei,
      precoReferenciaEthUsd:lucroUsd.ethUsd,
@@ -122,7 +129,12 @@ export async function iniciarMegazord(
    // Automatic Morpho LIVE only when the service was expressly configured
    // for MEGAZORD_MODO=execucao and every onchain + wallet gate passed.
    // Strategies still execute full eth_call/gas/profit gates per candidate.
-   for(const kind of ['V3','AERO']){
+   for(const kind of ['V3','AERO'] as const){
+     if(!contratos[kind==='V3'?'v3':'aero']){
+       env['CACA_MORPHO_'+kind+'_AVALIAR']='0';
+       env['CACA_MORPHO_'+kind+'_ENVIAR']='0';
+       continue;
+     }
      env['CACA_MORPHO_'+kind+'_AVALIAR']='1';
      env['CACA_MORPHO_'+kind+'_ENVIAR']='1';
      env['CACA_MORPHO_'+kind+'_CONFIRMAR']='OPERAR_MORPHO_BASE';

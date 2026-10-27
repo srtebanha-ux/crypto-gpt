@@ -27,7 +27,7 @@ type Journal={version:1;address:string;pending:Pending|null;
  days:Record<string,{reservedWei:string;creditedWei?:string;attempts:number}>;
  receipts:Array<Pending&{status:number;block:number}>};
 export type PoliticaMegazord={journal:string;maxDailyWei:bigint;maxPerTxWei:bigint;
- maxDailyTx:number;contracts:readonly string[]};
+ maxDailyTx:number;contracts:readonly string[];canaryUntilMs?:number};
 
 /** Conservatively value USDC earnings in WETH wei using two independently
  * verified 30-minute onchain ETH/USDC TWAPs. Never assume USD peg.
@@ -200,6 +200,13 @@ export class ExecutorMegazord {
    this.tail=task.catch(()=>{});
    try{return await task;}finally{this.queued--;}
  }
+ private conferirCanario():void{
+   if(this.policy.canaryUntilMs===undefined)return;
+   if(!Number.isFinite(this.policy.canaryUntilMs)||Date.now()>=this.policy.canaryUntilMs)
+     throw Error('canario expirado');
+   if(Object.values(this.state.days).some(d=>d.attempts>0))
+     throw Error('canario ja consumiu sua unica tentativa persistente');
+ }
  private async nonceLivre():Promise<number>{
    const inspect=async(p:RedeMegazord)=>{
      const [net,b,latest,pending]=await Promise.all([p.getNetwork(),p.getBlock('latest'),
@@ -214,6 +221,7 @@ export class ExecutorMegazord {
  }
  async sign(tx:TransactionRequest):Promise<string>{
    if(!this.inContext)throw Error('assinatura fora da fila Megazord');
+   this.conferirCanario();
    return this.signer.signTransaction(tx);
  }
  async broadcast(raw:string):Promise<TransactionResponse>{
@@ -224,6 +232,7 @@ export class ExecutorMegazord {
  private async broadcastLocked(raw:string):Promise<TransactionResponse>{
    if(!this.inContext)throw Error('contexto de envio expirou');
    await this.reconcile();
+   this.conferirCanario();
    const tx=Transaction.from(raw);
    if(tx.from?.toLowerCase()!==this.address.toLowerCase()||tx.chainId!==8453n
      ||tx.type!==2||tx.value!==0n||!tx.to||tx.data==='0x'
@@ -242,6 +251,7 @@ export class ExecutorMegazord {
    if(cost>this.policy.maxPerTxWei||uncovered+cost>this.policy.maxDailyWei
      ||used.attempts>=this.policy.maxDailyTx)throw Error('orcamento global Megazord excedido');
    if(tx.nonce!==await this.nonceLivre())throw Error('nonce mudou no pre-broadcast');
+   this.conferirCanario(); // deadline may expire while RPC preflight runs
    const next=structuredClone(this.state),hash=keccak256(raw);
    next.pending={hash,nonce:tx.nonce,strategy:this.context.getStore()!.strategy,
      day,reservedWei:String(cost),to:tx.to};
@@ -351,6 +361,7 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
  const s=new JsonRpcProvider(env.MEGAZORD_RPC_SECUNDARIO);
  try{
    active=new ExecutorMegazord(key,p,s,{
+     canaryUntilMs:env.MEGAZORD_CANARIO_ATE_UTC?Date.parse(env.MEGAZORD_CANARIO_ATE_UTC):undefined,
      journal:file,maxDailyWei:BigInt(env.MEGAZORD_GAS_MAX_DIA_WEI??'2000000000000000'),
      maxPerTxWei:BigInt(env.MEGAZORD_GAS_MAX_TX_WEI??'0'),
      maxDailyTx:Number(env.MEGAZORD_MAX_TX_DIA??'0'),
@@ -376,6 +387,12 @@ export function conferirOrcamentoMegazord(env:NodeJS.ProcessEnv):void{
    ||BigInt(perTx)<=0n||BigInt(daily)<=0n||BigInt(perTx)>BigInt(daily)
    ||!Number.isSafeInteger(count)||count<1||count>250)
    throw Error('orcamento Megazord invalido: confira tetos por transacao, por dia e quantidade');
+ if(env.MEGAZORD_CANARIO_ATE_UTC!==undefined){
+   const deadline=Date.parse(env.MEGAZORD_CANARIO_ATE_UTC);
+   if(!Number.isFinite(deadline)||deadline<=Date.now()||deadline>Date.now()+3600000
+     ||count!==1||env.MEGAZORD_AUTO_DEPLOY==='1'||env.MEGAZORD_GAS_MAX_DIA_WEI===undefined)
+     throw Error('canario exige prazo futuro de ate 1h, uma tentativa, teto diario explicito e deploy desligado');
+ }
  if(env.TITAN_SNOWBALL_REINVESTIR==='1')
    throw Error('reinvestimento precisa de migracao separada');
 }

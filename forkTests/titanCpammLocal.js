@@ -44,6 +44,42 @@ describe('TITAN CPAMM: simulação real na EVM local, sem broadcast na Base',fun
   assert.ok(r.lucroMinimoWei>0n);assert.ok(r.custoMaximoWei>0n);
   assert.equal((await read(alt,'balanceOf',[executor.address]))[0],0n,'eth_call não altera saldos');
  });
+ it('candidato passa na prova, emissor unico transmite na EVM e reconcilia recibo',async()=>{
+  const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+  const {BrowserProvider,Wallet}=require('ethers');
+  const {ExecutorMegazord}=require('../src/megazordExecutor');
+  const {lucroWethDoRecibo}=require('../src/titanReciboEconomico');
+  const wallet=Wallet.fromPhrase('test test test test test test test test test test test junk');
+  assert.equal(wallet.address.toLowerCase(),owner.toLowerCase());
+  const a=new BrowserProvider(p,undefined,{cacheTimeout:-1});
+  const b=new BrowserProvider(p,undefined,{cacheTimeout:-1});
+  a.pollingInterval=b.pollingInterval=10;
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cpamm-emissor-'));
+  const journal=path.join(dir,'journal.json');let emitter;
+  try{
+   emitter=new ExecutorMegazord(wallet.privateKey,a,b,{journal,
+    maxDailyWei:U,maxPerTxWei:U,maxDailyTx:1,contracts:[executor.address],
+    canaryUntilMs:Date.now()+60000},async()=>1000000000n);
+   await emitter.run('cpamm-canario-local',async()=>{
+    const offer=await prepararCpammAtomico(rpc,config,pairs,WETH,8n*U);
+    assert.ok(offer);assert.equal(offer.etapa,'simulada');
+    const nonce=await a.getTransactionCount(owner,'pending');
+    const gasPrice=BigInt(await rpc('eth_gasPrice',[]));
+    const prepared={chainId:8453,type:2,nonce,to:offer.contrato,data:offer.calldata,
+     gasLimit:offer.gasLimit,maxFeePerGas:gasPrice,maxPriorityFeePerGas:gasPrice,value:0n};
+    await a.call({...prepared,from:owner});
+    const sent=await emitter.broadcast(await emitter.sign(prepared));
+    const receipt=await sent.wait();assert.equal(receipt.status,1);
+    const result=lucroWethDoRecibo(executor.address,receipt.status,receipt.logs,
+     receipt.gasUsed*receipt.gasPrice,null);
+    assert.ok(result.brutoWei>0n);assert.equal(result.liquidoWei,null,'EVM local nao tem taxa L1 real');
+    await emitter.reconcile();
+    const saved=JSON.parse(fs.readFileSync(journal,'utf8'));
+    assert.equal(saved.pending,null);assert.equal(saved.receipts[0].hash,sent.hash);
+    assert.equal(saved.receipts[0].nonce,nonce);
+   });
+  }finally{emitter?.close();a.destroy();b.destroy();fs.rmSync(dir,{recursive:true,force:true});}
+ });
  it('reproduz margem teórica positiva que reverte em K por fee-on-transfer',async()=>{
   await send(alt,'taxar',[pairs[1]]);
   const first={reservaEntrada:100n*U,reservaSaida:300000n*U,taxaNumerador:997n,taxaDenominador:1000n};

@@ -2,14 +2,6 @@ name: TITAN CPAMM atomic integration (CHAT)
 on:
   pull_request:
     branches: [CHAT]
-    paths:
-      - 'src/titanCpammAtomico.ts'
-      - 'src/titanCpammAtomico.test.ts'
-      - 'src/dexArbitrageSniffer.ts'
-      - 'src/dexArbitrageSniffer.test.ts'
-      - 'src/ammMath.ts'
-      - 'src/ammMath.test.ts'
-      - '.github/workflows/titan-cpamm-chat.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -33,4 +25,9 @@ jobs:
       - name: EVM local, contracts and fee-on-transfer regression
         run: |
           npx hardhat compile
-          npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanCpammLocal.js
+          npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanCpammLocal.js forkTests/titanMorphoV3Local.js
+          npm run megazord:test-local
+      - name: Railway runtime image and offline unified boot
+        run: |
+          docker build -t titan-ci .
+          docker run --rm --network none --entrypoint node -v "$PWD/scripts/validarMegazordRuntime.cjs:/tmp/check.cjs:ro" titan-ci /tmp/check.cjs

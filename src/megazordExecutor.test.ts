@@ -287,3 +287,18 @@ test('um segundo processo no mesmo volume não adquire a carteira reservada',asy
   assert.equal(result,'blocked');assert.equal(f.sent.length,0);
  }finally{f.cleanup();}
 });
+
+test('canario permite uma tentativa total e preserva limite apos reinicio',async()=>{
+ const f=fixture({canaryUntilMs:Date.now()+60000});try{
+  await f.e.run('canario',async()=>{const tx=await f.e.broadcast(await f.raw(0));await tx.wait();});
+  await f.e.reconcile();f.e.close();const restarted=f.build();
+  try{await assert.rejects(restarted.run('canario',()=>restarted.sign({})),/unica tentativa/);}
+  finally{restarted.close();}
+  assert.equal(f.sent.length,1);
+ }finally{f.cleanup();}
+});
+test('canario vencido nao assina nem transmite',async()=>{
+ const f=fixture({canaryUntilMs:Date.now()-1});try{
+  await assert.rejects(f.e.run('canario',()=>f.raw(0)),/expirado/);assert.equal(f.sent.length,0);
+ }finally{f.cleanup();}
+});

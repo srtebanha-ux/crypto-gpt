@@ -107,3 +107,11 @@ test('restart reads addresses atomically from diary cache without a second paid 
   assert.equal(second.CACA_MORPHO_AERO_CONTRATO,aero);
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('V3 selecionado nao exige nem implanta Aero ausente',async()=>{
+ const e={...env(),MEGAZORD_MORPHO_ROTAS:'v3',CACA_MORPHO_V3_CONTRATO:v3};
+ const seen:string[]=[];const r=await prepararMorphoMegazord(e,mocked(seen));
+ assert.deepEqual(seen,['check:v3']);assert.equal(r.v3,v3);assert.equal(r.aero,'');
+ assert.equal(r.novos,0);
+ await assert.rejects(prepararMorphoMegazord({...e,MEGAZORD_MORPHO_ROTAS:'typo'},mocked([])),/ROTAS/);
+});

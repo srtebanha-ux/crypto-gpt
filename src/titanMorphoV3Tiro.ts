@@ -49,7 +49,8 @@ const quoteAbi=new Interface([
 ]);
 const oracleAbi=new Interface(['function price() view returns(uint256)']);
 type Entrada={mercado:MercadoDaApi;usuario:string;rpcUrl:string;signal?:AbortSignal};
-type Resposta={status:'descartada'|'inviavel'|'aprovada-simulada'|'enviada'|'confirmada'|'revertida'|'desconhecida';motivo:string;hash?:string};
+export type TransacaoMorphoPreparada={chainId:8453;type:2;from:string;to:string;data:string;nonce:number;value:string;gasLimit:string;maxFeePerGas:string;maxPriorityFeePerGas:string;bloco:number;custoMaximoWei:string;pisoToken:string;pisoWethWei:string;executorCodeHash:string};
+type Resposta={transacaoPreparada?:TransacaoMorphoPreparada;status:'descartada'|'inviavel'|'aprovada-simulada'|'enviada'|'confirmada'|'revertida'|'desconhecida';motivo:string;hash?:string};
 const cooldown=new Map<string,number>();
 const elapsed=(key:string)=>{const t=cooldown.get(key)??0;return t>Date.now();};
 const mark=(key:string,ms:number)=>cooldown.set(key,Date.now()+ms);
@@ -88,8 +89,11 @@ export async function loanValueInWeth(p:JsonRpcProvider,token:string,amount:bigi
   if(valores.length)return valores.reduce((a,b)=>a>b?a:b);
   return null;
 }
-async function validateExecutor(p:JsonRpcProvider,addr:string,owner:string):Promise<void>{
-  if(await p.getCode(addr)==='0x')throw Error('executor Morpho V3 sem bytecode na Base');
+async function validateExecutor(p:JsonRpcProvider,addr:string,owner:string,expectedHash?:string):Promise<string>{
+  const code=await p.getCode(addr);
+  if(code==='0x')throw Error('executor Morpho V3 sem bytecode na Base');
+  const hash=keccak256(code);
+  if(expectedHash&&hash.toLowerCase()!==expectedHash.toLowerCase())throw Error('codehash Morpho V3 diverge do artefato auditado');
   for(const [method,expected] of [
     ['dono',owner],['cofre',COFRE_ESPERADO],
     ['morpho',MORPHO_FLASH_BASE],['routerV3',ROUTER],['fabricaV3',FABRICA_V3_BASE],
@@ -97,6 +101,7 @@ async function validateExecutor(p:JsonRpcProvider,addr:string,owner:string):Prom
     if(!same(await readAddress(p,addr,method),expected))
       throw Error('executor Morpho V3 diverge no imutavel '+method);
   }
+  return hash;
 }
 function journalPath(env:NodeJS.ProcessEnv):string{
   const j=env.CACA_MORPHO_V3_JOURNAL??'/app/data/titanMorphoV3Tx.json';
@@ -151,7 +156,7 @@ async function avaliarELiquidarMorphoV3Interno(
     const addr=getAddress(contrato),owner=getAddress(dono);
     const user=getAddress(e.usuario);
     if(BigInt(await p.send('eth_chainId',[]))!==8453n)throw Error('RPC nao e Base 8453');
-    await validateExecutor(p,addr,owner);
+    const executorCodeHash=await validateExecutor(p,addr,owner,env.CACA_MORPHO_V3_CODEHASH);
     const block=await p.getBlock('latest');
     if(!block?.baseFeePerGas||block.baseFeePerGas<=0n)throw Error('baseFee nao mensuravel');
     const tag=block.number;
@@ -259,8 +264,23 @@ async function avaliarELiquidarMorphoV3Interno(
     const nowBlock=await p.getBlockNumber();
     if(nowBlock>pricedBlock.number+policy.maxAgeBlocks)
       return{status:'descartada',motivo:'bloco mudou depois do preflight final'};
-    if(!policy.armed)return{status:'aprovada-simulada',
-      motivo:'callback V3+lucro e gas verificados; falta autorizacao exclusiva de envio'};
+    if(!policy.armed){
+      const latest=await p.getTransactionCount(owner,'latest');
+      const pending=await p.getTransactionCount(owner,'pending');
+      if(latest!==pending)throw Error('nonce pendente: transacao nao preparada');
+      if(await p.getBalance(owner)<feePlan.custo)throw Error('saldo insuficiente para pior gas');
+      const transacaoPreparada:TransacaoMorphoPreparada={chainId:8453,type:2,from:owner,to:addr,
+        data:finalData,nonce:pending,value:'0',gasLimit:feePlan.gasLimit.toString(),
+        maxFeePerGas:feePlan.maxFee.toString(),maxPriorityFeePerGas:policy.tipWei.toString(),
+        bloco:nowBlock,custoMaximoWei:feePlan.custo.toString(),pisoToken:economic.pisoToken.toString(),
+        pisoWethWei:floorEth!.toString(),executorCodeHash};
+      await p.call({to:addr,from:owner,data:finalData,gasLimit:feePlan.gasLimit,
+        maxFeePerGas:feePlan.maxFee,maxPriorityFeePerGas:policy.tipWei});
+      if(await p.getBlockNumber()!==nowBlock||await p.getTransactionCount(owner,'pending')!==pending)
+        throw Error('estado mudou na preparacao: repetir apenas preflight');
+      return{status:'aprovada-simulada',transacaoPreparada,
+        motivo:'callback, economia, nonce e transacao final revalidados; sem assinatura ou envio'};
+    }
     if(!chave)throw Error('chave do CACA indisponivel');
     const wallet=carteiraMegazord(chave,p);
     if(!same(wallet.address,owner))throw Error('signer difere de owner');
