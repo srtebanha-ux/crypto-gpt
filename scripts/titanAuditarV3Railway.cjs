@@ -1,7 +1,7 @@
 // Exact read-only onchain identity for the Morpho V3 contract recorded in Railway.
 // Only public addresses, no keys, no eth_send* method. Mismatches fail closed.
 const {Interface,keccak256,getAddress}=require('ethers');
-const target='0x4628b37Ad534cB382ed56bC5d8801D12f86A7dCb';
+const target='0x8F5268D7cBb4597321EB886c4Ef0CE75a6C8C317';
 const expected={
  dono:'0x3D310384d674532f5D41cF2D43B03001F3515AE8',
  cofre:'0x3dffA934170bdD491724747Be2c4F56E3f1512A7',
