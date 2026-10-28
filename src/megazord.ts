@@ -4,6 +4,7 @@ import {createLogger} from './logger';
 import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord,
  recuperarLockOrfaoMegazord} from './megazordExecutor';
 import {normalizarCredenciaisMegazord} from './megazordCredenciais';
+import {politicaMorphoV3} from './titanMorphoV3Gate';
 import {diagnosticarFioRpcMegazord} from './megazordRpcWireDiagnostico';
 import {auditarPersistenciaMegazord} from './megazordAuditoriaPersistencia';
 import {selecionarParRpcMegazord} from './megazordRpcFailover';
@@ -170,6 +171,17 @@ export async function iniciarMegazord(
      env['CACA_MORPHO_'+kind+'_CONFIRMAR']='OPERAR_MORPHO_BASE';
      env['CACA_MORPHO_'+kind+'_NONCE_EXCLUSIVO']='1';
    }
+   // Economic feasibility: a price-positive position can still be denied by
+   // the global transaction cap. Show the absolute best-case limit; real
+   // baseFee/L1 make it STRICTLY smaller. Never authorize spending here.
+   const custoTip=politicaMorphoV3(env).tipWei;
+   const tetoWei=BigInt(env.MEGAZORD_GAS_MAX_TX_WEI!);
+   log.info('[TITAN/VIABILIDADE-GAS-READONLY]',{
+     tipConfiguradoWei:custoTip.toString(),
+     tetoPorTransacaoWei:tetoWei.toString(),
+     gasMaximoTeoricoSemBaseNemL1:(tetoWei/custoTip).toString(),
+     explicacao:'Limite matematico superior; baseFee e L1 positivos reduzem o gas realmente possivel. Nenhum gasto ou envio nesta verificacao.',
+   });
    if(multi)habilitarAaveMultiHopMegazord(env,multi);
    else{
      // No compatible Aave multi-hop contract: keep legacy V1/V2 disarmed,
