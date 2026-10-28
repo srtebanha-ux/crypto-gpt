@@ -7,7 +7,8 @@ test('tries separate RPC providers in order, never accepts the primary twice',as
  const env:NodeJS.ProcessEnv={MEGAZORD_RPC_URL:'https://mainnet.base.org',
   MEGAZORD_RPC_SECUNDARIO:'https://mainnet.base.org/'};
  assert.deepEqual(candidatosRpcSecundario(env),
-   ['https://base.llamarpc.com','https://1rpc.io/base']);
+   ['https://base.llamarpc.com','https://1rpc.io/base',
+    'https://base-rpc.publicnode.com','https://base.drpc.org']);
  const seen:string[]=[];
  const response=await selecionarRpcSecundarioMegazord(env,async e=>{
    seen.push(e.MEGAZORD_RPC_SECUNDARIO!);
@@ -25,7 +26,7 @@ test('preflight disagreement cannot be bypassed by using primary as secondary',a
  await assert.rejects(selecionarRpcSecundarioMegazord(env,async()=>{
    calls++;throw Error('nonce divergence or rate limit');
  }),/sem fallback inseguro ao principal/);
- assert.equal(calls,2);
+ assert.equal(calls,4);
  assert.equal(env.MEGAZORD_RPC_SECUNDARIO,undefined);
 });
 test('explicit secure secondary takes priority and never sends raw RPC URL in failure',async()=>{
@@ -84,7 +85,7 @@ test('persistent invalid JSON-RPC replies fail closed without signer authorizati
  await assert.rejects(selecionarRpcSecundarioMegazord(env,async()=>{
   attempts++;throw Error('resposta RPC invalida');
  },async()=>{}),/sem fallback inseguro ao principal/);
- assert.equal(attempts,9);
+ assert.equal(attempts,15);
 });
 
 test('aliases on one host cannot serve as independent witness; configured alternatives precede public ones',()=>{
@@ -142,4 +143,28 @@ test('primary failover cannot bypass financial nonce disagreement',async()=>{
  },async()=>{}),/invariante financeira divergente/);
  assert.equal(calls,1);
  assert.equal(env.MEGAZORD_RPC_URL,'https://broken.example/key');
+});
+
+test('eight-primary fallback reaches publicnode + dRPC only after full independent preflight',async()=>{
+ const {FalhaLeituraRede}=await import('./megazordPreflight');
+ const {FalhaRpcLeitura}=await import('./megazordRpcLeitura');
+ const env:NodeJS.ProcessEnv={
+   MEGAZORD_RPC_URL:'https://broken1.example/secret',
+   MEGAZORD_RPC_SECUNDARIO:'https://broken2.example/secret',
+   MEGAZORD_RPC_ALTERNATIVOS:'https://broken3.example/secret,https://broken4.example/secret',
+ };
+ let attempted=0;
+ const response=await selecionarParRpcMegazord(env,async e=>{
+   attempted++;
+   if(e.MEGAZORD_RPC_URL!=='https://base-rpc.publicnode.com')
+     throw new FalhaLeituraRede(0,
+       new FalhaRpcLeitura('private upstream body','eth_getBlockByNumber','body_invalido',3));
+   if(e.MEGAZORD_RPC_SECUNDARIO!=='https://base.drpc.org')
+     throw Error('preflight semantic failure');
+   return {ready:true,independent:true};
+ },async()=>{});
+ assert.deepEqual(response,{ready:true,independent:true});
+ assert.ok(attempted>=7);
+ assert.equal(env.MEGAZORD_RPC_URL,'https://base-rpc.publicnode.com');
+ assert.equal(env.MEGAZORD_RPC_SECUNDARIO,'https://base.drpc.org');
 });
