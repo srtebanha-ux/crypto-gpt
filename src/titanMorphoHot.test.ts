@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,exigeSondaIntegralMorphoHot,semRotaExecutavelMorpho,compararPrioridadeMorphoHot} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,exigeSondaIntegralMorphoHot,semRotaExecutavelMorpho,compararPrioridadeMorphoHot,criarPortaoProvaMorphoHot} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
@@ -201,4 +201,37 @@ test('same block crossed borrower outranks a nearer but still healthy candidate'
  ];
  candidates.sort(compararPrioridadeMorphoHot);
  assert.deepEqual(candidates.map(x=>x.id),['second','third','first']);
+});
+
+test('hot worker can continue snapshot scheduling while a slow liquidation proof is pending',async()=>{
+ const gate=criarPortaoProvaMorphoHot();
+ let liberar!:()=>void;
+ const unresolved=new Promise<void>(resolve=>{liberar=resolve;});
+ let launches=0;
+ assert.equal(gate.executar(async()=>{launches++;await unresolved;}),true);
+ assert.equal(gate.ocupada(),true);
+ // Non-blocking: a new block sees gate busy and does not launch a second
+ // signing proof, but can still calculate its own independent risk snapshot.
+ const nextBlock=()=>({riskChecked:true,canLaunch:gate.executar(async()=>{launches++;})});
+ const second=nextBlock();
+ assert.equal(second.riskChecked,true);
+ assert.equal(second.canLaunch,false);
+ await Promise.resolve();
+ assert.equal(launches,1);
+ liberar();
+ await new Promise<void>(resolve=>setImmediate(resolve));
+ assert.equal(gate.ocupada(),false);
+ assert.equal(gate.executar(async()=>{launches++;}),true);
+ await new Promise<void>(resolve=>setImmediate(resolve));
+ assert.equal(launches,2);
+ assert.equal(gate.ocupada(),false);
+});
+test('single-flight gate recovers from a rejected read-only proof without deadlocking',async()=>{
+ const gate=criarPortaoProvaMorphoHot();
+ assert.equal(gate.executar(async()=>{throw new Error('temporary RPC failure');}),true);
+ await new Promise<void>(resolve=>setImmediate(resolve));
+ assert.equal(gate.ocupada(),false);
+ assert.equal(gate.executar(async()=>{}),true);
+ await new Promise<void>(resolve=>setImmediate(resolve));
+ assert.equal(gate.ocupada(),false);
 });
