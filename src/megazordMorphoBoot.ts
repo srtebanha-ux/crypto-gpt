@@ -128,7 +128,7 @@ export type DependenciasMorphoBoot={
  recuperar:(file:string,env:NodeJS.ProcessEnv)=>string|undefined|Promise<string|undefined>;
 };
 async function verificarContrato(tipo:Tipo,address:string,owner:string,rpcUrl:string):Promise<void>{
- const p=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true});
+ const p=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true,batchMaxCount:1});
  try{
    if(BigInt(await p.send('eth_chainId',[]))!==8453n)throw Error('RPC nao e Base');
    if(await p.getCode(address)==='0x')throw Error('contrato Morpho sem bytecode');
