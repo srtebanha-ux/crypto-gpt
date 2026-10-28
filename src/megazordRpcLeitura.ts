@@ -43,8 +43,9 @@ export function criarRpcPreflight({fetcher=fetch,
          continue;
        }
        if(!response.ok)throw Error('RPC HTTP '+response.status);
-       let body:{result?:unknown;error?:unknown}|null=null;
-       try{body=await response.json() as typeof body;}catch{/* no upstream error text */}
+       type RpcBody={result?:unknown;error?:unknown};
+       let body:RpcBody|null=null;
+       try{body=await response.json() as RpcBody;}catch{/* no upstream error text */}
        if(!body||typeof body!=='object'||body.error||body.result===undefined){
          // Providers sometimes send HTTP 200 containing temporary RPC errors.
          // Never accept these as valid onchain values: retry the same read
