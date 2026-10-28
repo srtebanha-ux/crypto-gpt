@@ -10,6 +10,8 @@ on:
       - "src/titanMorphoHot.test.ts"
       - "src/cacarArbitragem.ts"
       - "src/transporteRpc.test.ts"
+      - "src/megazordExecutor.ts"
+      - "src/megazordExecutor.test.ts"
       - ".github/workflows/titan-active-hunt-ci.yml"
   workflow_dispatch:
 permissions:
@@ -29,4 +31,4 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm run typecheck
-      - run: node --require ts-node/register --test src/morphoApi.test.ts src/titanMorphoHot.test.ts src/transporteRpc.test.ts
+      - run: node --require ts-node/register --test src/morphoApi.test.ts src/titanMorphoHot.test.ts src/transporteRpc.test.ts src/megazordExecutor.test.ts

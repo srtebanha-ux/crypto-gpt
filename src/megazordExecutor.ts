@@ -342,7 +342,8 @@ export function conferirIdentidadeMegazord(env:NodeJS.ProcessEnv):{address:strin
  return {address,journal};
 }
 /** One-shot repair of an orphaned lock, ONLY after a confirmed two-RPC
- * live/pending nonce quorum. Never touch a journal or a recent/same-host lock.
+ * live/pending nonce quorum. Never touch a journal, recent lock, or a lock
+ * with a proven live owner, INCLUDING across restarts on the same host.
  * Keep a hard-link audit copy; no RPC side effects, signing or nonce mutation.
  */
 export function recuperarLockOrfaoMegazord(
@@ -367,10 +368,32 @@ export function recuperarLockOrfaoMegazord(
  let owner:{pid?:unknown;host?:unknown;token?:unknown};
  try{owner=JSON.parse(fs.readFileSync(lock,'utf8')) as typeof owner;}
  catch{throw Error('recuperacao recusada: lock ilegivel');}
- if(typeof owner.host!=='string'||!owner.host||owner.host===hostname
+ if(typeof owner.host!=='string'||!owner.host
    ||!Number.isSafeInteger(owner.pid)||Number(owner.pid)<=0
    ||typeof owner.token!=='string'||!/^[-0-9a-f]{20,64}$/i.test(owner.token))
    throw Error('recuperacao recusada: posse do lock nao demonstrada obsoleta');
+ // A Railway worker can restart with the SAME hostname. The old strict
+ // hostname veto kept a genuine orphan lock forever after a crash. Probe
+ // same-host PIDs without signals that terminate, alter or unlock the owner.
+ // ESRCH is the only acceptable proof of process absence; EPERM and any
+ // unexpected result fail closed, preserving wallet/nonce exclusivity.
+ if(owner.host===hostname){
+   // Container PIDs are reused after restart (often PID 1). If the saved
+   // owner PID equals our own, prove the file PREDATES this process boot;
+   // otherwise a live current-process lock must never be removed.
+   if(owner.pid===process.pid){
+     const startMs=agora-process.uptime()*1000;
+     if(s.mtimeMs>=startMs-5_000)
+       throw Error('recuperacao recusada: lock pertence ao processo atual');
+   }else{
+     try{
+       process.kill(Number(owner.pid),0);
+       throw Error('recuperacao recusada: processo dono do lock ainda ativo');
+     }catch(e){
+       if((e as NodeJS.ErrnoException).code!=='ESRCH')throw e;
+     }
+   }
+ }
  const s2=fs.lstatSync(lock);
  if(s2.ino!==s.ino||s2.dev!==s.dev||s2.mtimeMs!==s.mtimeMs||s2.size!==s.size)
    throw Error('recuperacao recusada: lock mudou durante leitura');

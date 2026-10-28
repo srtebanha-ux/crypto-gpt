@@ -314,7 +314,7 @@ test('orphan lock recovery is denied without quorum, recent lock or absent owner
  const t=Date.now();
  const quorum=[{nonce:'42',block:53100000},{nonce:'42',block:53100001}];
  try{
-   fs.writeFileSync(lock,JSON.stringify({pid:31,host:'old-deployment-host',
+   fs.writeFileSync(lock,JSON.stringify({pid:process.ppid,host:'old-deployment-host',
      token:'12345678-1234-4123-8123-123456789abc'}));
    const old=new Date(t-200000);
    fs.utimesSync(lock,old,old);
@@ -332,6 +332,67 @@ test('orphan lock recovery is denied without quorum, recent lock or absent owner
 });
 
 
+
+test('Railway same-host crash recovers only an old lock with a provably absent owner',async()=>{
+ const {recuperarLockOrfaoMegazord}=await import('./megazordExecutor');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-same-host-orphan-'));
+ const journal=path.join(dir,'finance.json'),lock=journal+'.lock';
+ const now=Date.now(),old=new Date(now-240_000);
+ const pair=[{nonce:'7',block:53200000},{nonce:'7',block:53200001}];
+ const owner={pid:999_999_999,host:os.hostname(),
+   token:'12345678-1234-4123-8123-123456789abc'};
+ try{
+   fs.writeFileSync(lock,JSON.stringify(owner));fs.utimesSync(lock,old,old);
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,[
+     {nonce:'7',block:53200000},{nonce:'8',block:53200001}],now),
+     /quorum/);
+   assert.equal(fs.existsSync(lock),true);
+   fs.writeFileSync(journal,JSON.stringify({version:1,pending:{hash:'unknown'}}));
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,pair,now),/diario existente/);
+   assert.equal(fs.existsSync(lock),true);
+   fs.unlinkSync(journal);
+   const r=recuperarLockOrfaoMegazord(journal,pair,now);
+   assert.deepEqual(r,{recuperado:true,categoria:'lock_obsoleto_arquivado'});
+   assert.equal(fs.existsSync(lock),false);
+   assert.equal(fs.existsSync(journal),false);
+   assert.equal(fs.readdirSync(dir).filter(x=>x.includes('.orphan-')).length,1);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('Railway same-host lock with living process or fresh metadata is never stolen',async()=>{
+ const {recuperarLockOrfaoMegazord}=await import('./megazordExecutor');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-live-lock-'));
+ const journal=path.join(dir,'finance.json'),lock=journal+'.lock';
+ const now=Date.now(),pair=[{nonce:'7',block:53200000},{nonce:'7',block:53200001}];
+ try{
+   fs.writeFileSync(lock,JSON.stringify({pid:process.ppid,host:os.hostname(),
+     token:'12345678-1234-4123-8123-123456789abc'}));
+   fs.utimesSync(lock,new Date(now-240_000),new Date(now-240_000));
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,pair,now),/ainda ativo/);
+   assert.equal(fs.existsSync(lock),true);
+   fs.writeFileSync(lock,JSON.stringify({pid:999_999_999,host:os.hostname(),
+     token:'12345678-1234-4123-8123-123456789abc'}));
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,pair,now),/lock recente/);
+   assert.equal(fs.existsSync(lock),true);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('Railway restart with reused PID 1 can recover file predating current boot',async()=>{
+ const {recuperarLockOrfaoMegazord}=await import('./megazordExecutor');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-reused-pid-'));
+ const journal=path.join(dir,'finance.json'),lock=journal+'.lock';
+ const now=Date.now();
+ const olderThanThisProcess=new Date(now-Math.max(240_000,process.uptime()*1000+15_000));
+ const pair=[{nonce:'9',block:53200000},{nonce:'9',block:53200001}];
+ try{
+   fs.writeFileSync(lock,JSON.stringify({pid:process.pid,host:os.hostname(),
+      token:'12345678-1234-4123-8123-123456789abc'}));
+   fs.utimesSync(lock,olderThanThisProcess,olderThanThisProcess);
+   const result=recuperarLockOrfaoMegazord(journal,pair,now);
+   assert.equal(result.recuperado,true);
+   assert.equal(fs.existsSync(lock),false);
+   assert.equal(fs.existsSync(journal),false);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
 test('continuous mode refuses unlimited gas, but ignores stale one-shot canary when explicitly capped',async()=>{
  const {conferirOrcamentoMegazord}=await import('./megazordExecutor');
  const env:NodeJS.ProcessEnv={
