@@ -1,0 +1,59 @@
+# TITAN / MEGAZORD — staging seguro de migracao Railway -> Render.
+# Ativar a Blueprint cria um serviço PAGO no Render. Leia docs/MIGRACAO_TITAN_RENDER.md.
+# Este worker inicial NÃO pode enviar transações; cutover exige reconciliacao.
+services:
+  - type: worker
+    name: titan-megazord
+    runtime: docker
+    repo: https://github.com/srtebanha-ux/crypto-gpt
+    branch: feat/titan-cpamm-atomico-chat-20261027
+    region: virginia
+    plan: 1c-2g
+    dockerfilePath: ./Dockerfile.railway
+    dockerContext: .
+    dockerCommand: node dist/megazord.js
+    autoDeployTrigger: 'off'
+    maxShutdownDelaySeconds: 120
+    disk:
+      name: titan-memoria
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_ENTRY
+        value: megazord
+      # Primeira inicializacao SOMENTE LEITURA. Nunca copiar modo execucao
+      # ou chaves privadas automaticamente de um Railway ainda ativo.
+      - key: MEGAZORD_MODO
+        value: observacao
+      - key: MEGAZORD_CONTINUO
+        value: '0'
+      - key: MEGAZORD_RECUPERAR_LOCK_OBSOLETO
+        value: '0'
+      - key: MEGAZORD_AUTO_DEPLOY
+        value: '0'
+      - key: ENVIAR
+        value: '0'
+      - key: ARB_ENVIAR
+        value: '0'
+      - key: CACA_ENVIAR
+        value: '0'
+      - key: CACA_MORPHO_V3_ENVIAR
+        value: '0'
+      - key: CACA_MORPHO_AERO_ENVIAR
+        value: '0'
+      - key: TITAN_ENVIAR
+        value: '0'
+      - key: TITAN_V2_ENVIAR
+        value: '0'
+      # Valores são inseridos no painel Render, nunca versionados.
+      # Os dois endpoints devem ser distintos e ter cota suficiente.
+      - key: MEGAZORD_RPC_URL
+        sync: false
+      - key: MEGAZORD_RPC_SECUNDARIO
+        sync: false
+      - key: ARB_RPC_URL
+        sync: false
+      - key: CACA_MORPHO_API
+        sync: false
