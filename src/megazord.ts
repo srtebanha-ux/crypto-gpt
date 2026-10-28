@@ -146,6 +146,16 @@ export async function iniciarMegazord(
      lucroMinimoWethWei:lucroUsd.minimoWei,
      precoReferenciaEthUsd:lucroUsd.ethUsd,
    });
+   if(env.MEGAZORD_CONTINUO==='1'){
+     log.info('[TITAN/OPERACAO-24H]',{
+       autorizado:true,canarioHorarioDesligado:true,
+       tentativasMaximasPorDia:env.MEGAZORD_MAX_TX_DIA,
+       gasMaximoPorDiaWei:env.MEGAZORD_GAS_MAX_DIA_WEI,
+       perdaAcumuladaMaximaWei:env.MEGAZORD_PERDA_MAX_TOTAL_WEI,
+       exigencias:'quorum de dois RPCs, nonce, gas L1+L2, piso de lucro, recibo e cofre',
+       custoAdicionalAutorizado:false,
+     });
+   }
    // Automatic Morpho LIVE only when the service was expressly configured
    // for MEGAZORD_MODO=execucao and every onchain + wallet gate passed.
    // Strategies still execute full eth_call/gas/profit gates per candidate.
