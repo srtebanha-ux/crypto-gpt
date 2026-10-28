@@ -1,3 +1,4 @@
+import {randomInt} from 'node:crypto';
 /** Bounded read-only transport. No signing, broadcasts or upstream error text. */
 type Rpc=(url:string,method:string,params:unknown[])=>Promise<unknown>;
 type Opcoes={fetcher?:typeof fetch;esperar?:(ms:number)=>Promise<void>;agora?:()=>number};
@@ -13,7 +14,9 @@ export class FalhaRpcLeitura extends Error {
 export function criarRpcPreflight({fetcher=fetch,
  esperar=ms=>new Promise(r=>setTimeout(r,ms)),agora=Date.now}:Opcoes={}):Rpc{
  const queues=new Map<string,Promise<unknown>>();
- let requestId=0;
+ // Avoid reused small IDs across restarts and intermediaries that cache block replies.
+ // The response must still echo the exact numeric ID; never accept stale data.
+ let requestId=randomInt(100000000,2000000000);
  const notBefore=new Map<string,number>();
  return (url,method,params)=>{
    if(!methods.has(method))return Promise.reject(Error('metodo fora do preflight somente leitura'));
@@ -81,7 +84,14 @@ export function criarRpcPreflight({fetcher=fetch,
        }
        if(!envelope||body!.error!==undefined||body!.result===undefined||body!.result===null){
          const permanent=code===-32600||code===-32601||code===-32602;
-         const category=!envelope?'envelope':code!==undefined?'jsonrpc_'+code:'resultado_ausente';
+         // Report only fixed protocol categories. Never include response bodies,
+         // URLs, actual IDs or upstream error strings in production logs.
+         const category=!body||typeof body!=='object'||Array.isArray(body)?'body_invalido'
+           :body.jsonrpc!=='2.0'?'versao_invalida'
+           :!Object.hasOwn(body,'id')?'id_ausente'
+           :typeof body.id!=='number'?'tipo_id_invalido'
+           :body.id!==id?'id_divergente'
+           :code!==undefined?'jsonrpc_'+code:'resultado_ausente';
          if(attempt===2||permanent)throw new FalhaRpcLeitura('resposta RPC invalida ['+method+']',method,category,attempt+1,code);
          await esperar(400*(attempt+1));continue;
        }
