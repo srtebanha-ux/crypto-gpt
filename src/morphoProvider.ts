@@ -6,7 +6,7 @@ export class ProviderMorphoRpc extends JsonRpcProvider {
  private operacoes=0;
  private readonly agente=process.env.HTTPS_PROXY?new ProxyAgent(process.env.HTTPS_PROXY):undefined;
  constructor(private readonly urlMorpho:string,private readonly sinal?:AbortSignal){
-  super(urlMorpho,8453,{staticNetwork:true,batchMaxCount:16,batchStallTime:0,cacheTimeout:0});
+  super(urlMorpho,8453,{staticNetwork:true,batchMaxCount:1,batchStallTime:0,cacheTimeout:0});
  }
  override async _send(payload:JsonRpcPayload|JsonRpcPayload[]):Promise<JsonRpcResult[]>{
   this.sinal?.throwIfAborted();
@@ -30,7 +30,7 @@ export class ProviderMorphoRpc extends JsonRpcProvider {
   try{
    const response=await fetch(this.urlMorpho,{
     ...(this.agente?{dispatcher:this.agente}:{}),method:'POST',
-    headers:{'content-type':'application/json'},body:JSON.stringify(payload),signal,
+    headers:{'content-type':'application/json','accept':'application/json','accept-encoding':'identity'},body:JSON.stringify(payload),signal,
    });
    if(!response.ok)throw Error('RPC HTTP '+response.status);
    const raw=await response.json();

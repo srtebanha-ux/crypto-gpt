@@ -1,3 +1,4 @@
+import {CursoresMorpho} from './morphoCursores';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
@@ -6,7 +7,7 @@ import {
     soOsQuePagam, mercadosParaSondagem, lerIdToMarketParams, lerPosition, lerMarket, sharesParaAtivos,
     apiConfereComACorrente, codificarIdToMarketParams, codificarPosition, codificarMarket,
     consultaDeDevedores, lerDevedores, paraCache, doCache, cursorDeCache, idadeDoIndice, comoLerADescoberta,
-    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
+    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,consultaRiscoGlobalMorpho,lerRiscoGlobalMorpho,
     selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
     CHAIN_ID_DA_BASE, POR_PAGINA, TETO_DE_PAGINAS, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
@@ -707,4 +708,99 @@ test('Morpho: mercados com LLTV 94,5% e bonus positivo podem entrar na TRIAGEM, 
       'nenhuma cotacao da API torna o mercado comprovado na Base');
     assert.equal(mercadosParaSondagem([{...mercados[0]!,lltv:new Decimal(1)}]).length,0);
     assert.equal(mercadosParaSondagem([{...mercados[0]!,bonusPct:null}]).length,0);
+});
+
+test('global health-factor feed uses Morpho-documented schema and Base-only discovery',()=>{
+ const q=JSON.parse(consultaRiscoGlobalMorpho()) as {query:string;variables:{chainIds:number[];hfLte:number}};
+ assert.deepEqual(q.variables.chainIds,[8453]);
+ assert.equal(q.variables.hfLte,1.02);
+ assert.equal(JSON.parse(consultaRiscoGlobalMorpho()).variables.first,1000);
+ assert.match(q.query,/healthFactor_lte/);
+ assert.match(q.query,/orderBy:HealthFactor/);
+ assert.match(q.query,/orderDirection:Desc/);
+ const proxima=JSON.parse(consultaRiscoGlobalMorpho(1000));
+ assert.equal(proxima.variables.skip,1000);
+ assert.throws(()=>consultaRiscoGlobalMorpho(-1),/offset/);
+ assert.throws(()=>consultaRiscoGlobalMorpho(1_000_001),/offset/);
+ const market='0x'+'11'.repeat(32),user='0x'+'22'.repeat(20);
+ const parsed=lerRiscoGlobalMorpho({data:{marketPositions:{
+   pageInfo:{count:2,countTotal:5},
+   items:[
+     {market:{marketId:market},user:{address:user}},
+     {market:{marketId:market.toUpperCase().replace('0X','0x')},user:{address:user}}
+   ]
+ }}});
+ assert.deepEqual(parsed?.candidatos,[{mercado:market,usuario:user}]);
+ assert.equal(parsed?.total,5);
+ assert.equal(lerRiscoGlobalMorpho({errors:[{message:'schema changed'}]}),null);
+ assert.equal(lerRiscoGlobalMorpho({data:{marketPositions:{pageInfo:{count:4},items:[]}}}),null);
+});
+test('risk queue gives precedence to critical markets without starving rotation',()=>{
+ const queue=new CursoresMorpho('/tmp/titan-global-risk-test.json');
+ const ids=[...Array(16)].map((_,i)=>'0x'+(i+1).toString(16).padStart(64,'0'));
+ const markets=ids.map(id=>({id}));
+ const got=queue.selecionarMercados(markets,ids.slice(0,8),8,[ids[15]!,ids[14]!,ids[15]!]);
+ assert.deepEqual(got.slice(0,2).map(m=>m.id),[ids[15],ids[14]]);
+ assert.equal(got.length,8);
+ assert.equal(new Set(got.map(m=>m.id)).size,8);
+ assert.ok(got.some(m=>!new Set([ids[14],ids[15]]).has(m.id)));
+});
+
+test('urgent global Morpho positions rotate across cycles instead of starving risk markets',async()=>{
+ const {mkdtempSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const dir=mkdtempSync(join(tmpdir(),'titan-risk-'));
+ try{
+   const q=new CursoresMorpho(join(dir,'cursor.json'));
+   const ids=[...Array(15)].map((_,i)=>'0x'+(i+1).toString(16).padStart(64,'0'));
+   const markets=ids.map(id=>({id}));
+   const first=q.selecionarMercados(markets,null,8,ids);
+   assert.deepEqual(first.slice(0,2).map(x=>x.id),[ids[0],ids[1]]);
+   await q.marcarTentativa(ids[1]!);
+   const next=q.selecionarMercados(markets,null,8,ids);
+   assert.deepEqual(next.slice(0,2).map(x=>x.id),[ids[0],ids[2]]);
+ }finally{rmSync(dir,{force:true,recursive:true});}
+});
+
+test('global risk page cursor persists and wraps without advancing after failure',async()=>{
+ const {mkdtempSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const dir=mkdtempSync(join(tmpdir(),'titan-global-risk-cursor-'));
+ try{
+   const file=join(dir,'cursor.json');
+   const a=new CursoresMorpho(file);
+   assert.equal(a.obterPaginaRiscoGlobal(3100),1000);
+   await a.avancarPaginaRiscoGlobal(1000,3100);
+   assert.equal(a.obterPaginaRiscoGlobal(3100),2000);
+   const restored=new CursoresMorpho(file);
+   await restored.carregar();
+   assert.equal(restored.obterPaginaRiscoGlobal(3100),2000);
+   await restored.avancarPaginaRiscoGlobal(2000,3100);
+   assert.equal(restored.obterPaginaRiscoGlobal(3100),3000);
+   await restored.avancarPaginaRiscoGlobal(3000,3100);
+   assert.equal(restored.obterPaginaRiscoGlobal(3100),1000);
+   assert.equal(restored.obterPaginaRiscoGlobal(1200),1000);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('risk ranking near HF=1 does not waste the lead on deep bad debt',()=>{
+ const addr=(n:number)=>'0x'+n.toString(16).padStart(40,'0');
+ const m='0x'+'ab'.repeat(32);
+ const factors=[0.10,0.999,1.01,0.8,1.0001,0.998,0.5,1.019];
+ const rows=factors.map((healthFactor,i)=>({
+   healthFactor,market:{marketId:m},user:{address:addr(i+1)}
+ }));
+ const parsed=lerRiscoGlobalMorpho({data:{marketPositions:{
+   pageInfo:{count:rows.length,countTotal:rows.length},items:rows
+ }}});
+ assert.deepEqual(parsed?.candidatos.map(c=>c.healthFactor),
+   [1.0001,0.999,0.998,1.01,1.019,0.8,0.5,0.10]);
+ // Bad index values do not promote risk, and missing HF keeps former fallback.
+ const noHF=lerRiscoGlobalMorpho({data:{marketPositions:{items:[
+   {market:{marketId:m},user:{address:addr(1)}},
+   {market:{marketId:m},user:{address:addr(2)},healthFactor:'NaN'}
+ ]}}});
+ assert.deepEqual(noHF?.candidatos.map(c=>c.usuario),[addr(1),addr(2)]);
 });

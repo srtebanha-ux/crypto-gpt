@@ -270,3 +270,171 @@ test('SIGINT fecha executor somente uma vez e remove lock sem trabalho pendente'
  assert.equal(fechamentos,1);
  assert.equal(exits,1);
 });
+
+test('um segundo processo no mesmo volume não adquire a carteira reservada',async()=>{
+ const {execFileSync}=await import('node:child_process');
+ const f=fixture();try{
+  const script=`const {ExecutorMegazord}=require('./src/megazordExecutor');
+   try {new ExecutorMegazord('0x'+'11'.repeat(32),{}, {}, JSON.parse(process.argv[1]),async()=>1n);
+     process.exitCode=2;
+   }catch(e){if(!/executor ja reservado/.test(e.message))throw e;process.stdout.write('blocked');}`;
+  const policy={...f.policy,maxDailyWei:String(f.policy.maxDailyWei),maxPerTxWei:String(f.policy.maxPerTxWei)};
+  // Revive only the two budget fields; never provide a funded key or real RPC.
+  const code=script.replace('JSON.parse(process.argv[1])',
+   "JSON.parse(process.argv[1],(k,v)=>k==='maxDailyWei'||k==='maxPerTxWei'?BigInt(v):v)");
+  const result=execFileSync(process.execPath,['--require','ts-node/register','-e',code,JSON.stringify(policy)],
+   {cwd:process.cwd(),encoding:'utf8',timeout:15000});
+  assert.equal(result,'blocked');assert.equal(f.sent.length,0);
+ }finally{f.cleanup();}
+});
+
+test('canario permite uma tentativa total e preserva limite apos reinicio',async()=>{
+ const f=fixture({canaryUntilMs:Date.now()+60000});try{
+  await f.e.run('canario',async()=>{const tx=await f.e.broadcast(await f.raw(0));await tx.wait();});
+  await f.e.reconcile();f.e.close();const restarted=f.build();
+  try{await assert.rejects(restarted.run('canario',()=>restarted.sign({})),/unica tentativa/);}
+  finally{restarted.close();}
+  assert.equal(f.sent.length,1);
+ }finally{f.cleanup();}
+});
+test('canario vencido nao assina nem transmite',async()=>{
+ const f=fixture({canaryUntilMs:Date.now()-1});try{
+  await assert.rejects(f.e.run('canario',()=>f.raw(0)),/expirado/);assert.equal(f.sent.length,0);
+ }finally{f.cleanup();}
+});
+
+
+test('orphan lock recovery is denied without quorum, recent lock or absent ownership proof',async()=>{
+ const fs=await import('node:fs');
+ const os=await import('node:os');
+ const path=await import('node:path');
+ const {recuperarLockOrfaoMegazord}=await import('./megazordExecutor');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-lock-'));
+ const journal=path.join(dir,'journal.json'),lock=journal+'.lock';
+ const t=Date.now();
+ const quorum=[{nonce:'42',block:53100000},{nonce:'42',block:53100001}];
+ try{
+   fs.writeFileSync(lock,JSON.stringify({pid:process.ppid,host:'old-deployment-host',
+     token:'12345678-1234-4123-8123-123456789abc'}));
+   const old=new Date(t-200000);
+   fs.utimesSync(lock,old,old);
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,[{nonce:'42',block:2},{nonce:'43',block:2}],t,'new-host'),/quorum/);
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,quorum,t,'old-deployment-host'),/recusada/);
+   fs.writeFileSync(journal,JSON.stringify({pending:{hash:'sensitive'}}));
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,quorum,t,'new-host'),/diario existente/);
+   fs.unlinkSync(journal);
+   const recovered=recuperarLockOrfaoMegazord(journal,quorum,t,'new-host');
+   assert.equal(recovered.recuperado,true);
+   assert.equal(fs.existsSync(lock),false);
+   assert.equal(fs.readdirSync(dir).filter(x=>x.includes('.orphan-')).length,1);
+   assert.equal(fs.existsSync(journal),false);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+
+
+test('Railway same-host crash recovers only an old lock with a provably absent owner',async()=>{
+ const {recuperarLockOrfaoMegazord}=await import('./megazordExecutor');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-same-host-orphan-'));
+ const journal=path.join(dir,'finance.json'),lock=journal+'.lock';
+ const now=Date.now(),old=new Date(now-240_000);
+ const pair=[{nonce:'7',block:53200000},{nonce:'7',block:53200001}];
+ const owner={pid:999_999_999,host:os.hostname(),
+   token:'12345678-1234-4123-8123-123456789abc'};
+ try{
+   fs.writeFileSync(lock,JSON.stringify(owner));fs.utimesSync(lock,old,old);
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,[
+     {nonce:'7',block:53200000},{nonce:'8',block:53200001}],now),
+     /quorum/);
+   assert.equal(fs.existsSync(lock),true);
+   fs.writeFileSync(journal,JSON.stringify({version:1,pending:{hash:'unknown'}}));
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,pair,now),/diario existente/);
+   assert.equal(fs.existsSync(lock),true);
+   fs.unlinkSync(journal);
+   const r=recuperarLockOrfaoMegazord(journal,pair,now);
+   assert.deepEqual(r,{recuperado:true,categoria:'lock_obsoleto_arquivado'});
+   assert.equal(fs.existsSync(lock),false);
+   assert.equal(fs.existsSync(journal),false);
+   assert.equal(fs.readdirSync(dir).filter(x=>x.includes('.orphan-')).length,1);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('Railway same-host lock with living process or fresh metadata is never stolen',async()=>{
+ const {recuperarLockOrfaoMegazord}=await import('./megazordExecutor');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-live-lock-'));
+ const journal=path.join(dir,'finance.json'),lock=journal+'.lock';
+ const now=Date.now(),pair=[{nonce:'7',block:53200000},{nonce:'7',block:53200001}];
+ try{
+   fs.writeFileSync(lock,JSON.stringify({pid:process.ppid,host:os.hostname(),
+     token:'12345678-1234-4123-8123-123456789abc'}));
+   fs.utimesSync(lock,new Date(now-240_000),new Date(now-240_000));
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,pair,now),/ainda ativo/);
+   assert.equal(fs.existsSync(lock),true);
+   fs.writeFileSync(lock,JSON.stringify({pid:999_999_999,host:os.hostname(),
+     token:'12345678-1234-4123-8123-123456789abc'}));
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,pair,now),/lock recente/);
+   assert.equal(fs.existsSync(lock),true);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('Railway restart with reused PID 1 can recover file predating current boot',async()=>{
+ const {recuperarLockOrfaoMegazord}=await import('./megazordExecutor');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-reused-pid-'));
+ const journal=path.join(dir,'finance.json'),lock=journal+'.lock';
+ const now=Date.now();
+ const olderThanThisProcess=new Date(now-Math.max(240_000,process.uptime()*1000+15_000));
+ const pair=[{nonce:'9',block:53200000},{nonce:'9',block:53200001}];
+ try{
+   fs.writeFileSync(lock,JSON.stringify({pid:process.pid,host:os.hostname(),
+      token:'12345678-1234-4123-8123-123456789abc'}));
+   fs.utimesSync(lock,olderThanThisProcess,olderThanThisProcess);
+   const result=recuperarLockOrfaoMegazord(journal,pair,now);
+   assert.equal(result.recuperado,true);
+   assert.equal(fs.existsSync(lock),false);
+   assert.equal(fs.existsSync(journal),false);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('continuous mode refuses unlimited gas, but ignores stale one-shot canary when explicitly capped',async()=>{
+ const {conferirOrcamentoMegazord}=await import('./megazordExecutor');
+ const env:NodeJS.ProcessEnv={
+   MEGAZORD_MODO:'execucao',MEGAZORD_CONFIRMAR:'OPERAR_BASE_REAL',
+   MEGAZORD_EXCLUSIVO:'1',MEGAZORD_AUTO_DEPLOY:'0',
+   MEGAZORD_CONTINUO:'1',MEGAZORD_CANARIO_ATE_UTC:'2020-01-01T00:00:00Z',
+   MEGAZORD_GAS_MAX_DIA_WEI:'10000000000000',
+   MEGAZORD_GAS_MAX_TX_WEI:'10000000000000',
+   MEGAZORD_MAX_TX_DIA:'5',MEGAZORD_PERDA_MAX_TOTAL_WEI:'10000000000000'
+ };
+ assert.doesNotThrow(()=>conferirOrcamentoMegazord(env));
+ assert.throws(()=>conferirOrcamentoMegazord({...env,MEGAZORD_CONTINUO:'0'}),/prazo_expirado/);
+ assert.throws(()=>conferirOrcamentoMegazord({...env,MEGAZORD_PERDA_MAX_TOTAL_WEI:undefined}),/teto de perda acumulada/);
+ assert.throws(()=>conferirOrcamentoMegazord({...env,MEGAZORD_AUTO_DEPLOY:'1'}),/teto de perda acumulada/);
+ assert.throws(()=>conferirOrcamentoMegazord({...env,MEGAZORD_PERDA_MAX_TOTAL_WEI:'9999999999999'}),/teto de perda acumulada/);
+});
+
+test('continuous lifetime uncovered gas cap survives UTC day rollover and restart',async()=>{
+ const f=fixture({maxDailyWei:100000n,maxDailyTx:5,
+   maxUncoveredLifetimeWei:30000n});
+ try{
+   await f.e.run('morpho',async()=>{
+     const tx=await f.e.broadcast(await f.raw(0));await tx.wait();
+   });
+   await f.e.reconcile();
+   f.e.close();
+   const journal=JSON.parse(fs.readFileSync(f.policy.journal,'utf8'));
+   const day=new Date().toISOString().slice(0,10);
+   assert.equal(journal.days[day].reservedWei,'21002');
+   // The previous day's unpaid gas is NOT forgiven at midnight.
+   const prior='2020-10-27';
+   journal.days[prior]=journal.days[day];delete journal.days[day];
+   fs.writeFileSync(f.policy.journal,JSON.stringify(journal));
+   const restarted=f.build();
+   try{
+     await assert.rejects(restarted.run('morpho',async()=>{
+       const raw=await restarted.sign({chainId:8453,type:2,nonce:1,
+         to:target,data:'0x1234',value:0n,gasLimit:21000n,
+         maxFeePerGas:1n,maxPriorityFeePerGas:1n});
+       return restarted.broadcast(raw);
+     }),/teto acumulado de gas sem lucro comprovado/);
+     assert.deepEqual(f.sent,[0]);
+   }finally{restarted.close();}
+ }finally{f.cleanup();}
+});

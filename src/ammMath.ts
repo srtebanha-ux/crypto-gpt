@@ -65,30 +65,35 @@ export interface OptimalCycle {
 /**
  * Acha o tamanho de entrada que maximiza o lucro do ciclo.
  *
- * Usa busca ternária em vez da fórmula fechada de propósito. A forma fechada
- * para 2 pools existe, mas erra fácil e não generaliza para 3+ hops nem para
- * taxas diferentes por pool — e um erro aqui não aparece como exceção, aparece
- * como um número plausível e errado, que é o pior modo de falha numa
- * ferramenta cuja função é decidir se vale investir semanas construindo o
- * resto. A busca ternária é obviamente correta sobre função unimodal, e o
- * lucro É unimodal em `amountIn`: sobe enquanto a ineficiência compensa o
- * slippage, e cai depois disso.
+ * A busca ternária usa a concavidade do modelo CPAMM: o lucro sobe enquanto
+ * a ineficiência compensa o slippage e cai depois disso. A fórmula fechada
+ * também existe para vários hops e taxas diferentes, mas exige o mesmo
+ * modelo de produto constante; nenhum dos dois métodos modela ticks de V3.
  *
  * `maxAmountIn` deve refletir o teto real (liquidez do flash loan, ou uma
  * fração das reservas) — a busca nunca propõe acima disso.
  */
 export function findOptimalCycleInput(hops: Hop[], maxAmountIn: Decimal, iterations = 200): OptimalCycle {
+    return findOptimalCycleInputAfterFee(hops, maxAmountIn, new Decimal(0), iterations);
+}
+
+/** A taxa proporcional altera o tamanho ótimo; gas fixo não altera. */
+function findOptimalCycleInputAfterFee(
+    hops: Hop[], maxAmountIn: Decimal, flashLoanFeeFraction: Decimal, iterations = 200,
+): OptimalCycle {
     if (hops.length === 0 || maxAmountIn.lessThanOrEqualTo(0)) {
         return { amountIn: new Decimal(0), grossProfit: new Decimal(0) };
     }
 
+    const profitAfterFee = (amount: Decimal): Decimal =>
+        grossCycleProfit(amount, hops).minus(amount.mul(flashLoanFeeFraction));
     let low = new Decimal(0);
     let high = maxAmountIn;
     for (let i = 0; i < iterations; i++) {
         const third = high.minus(low).dividedBy(3);
         const m1 = low.plus(third);
         const m2 = high.minus(third);
-        if (grossCycleProfit(m1, hops).lessThan(grossCycleProfit(m2, hops))) {
+        if (profitAfterFee(m1).lessThan(profitAfterFee(m2))) {
             low = m1;
         } else {
             high = m2;
@@ -101,7 +106,7 @@ export function findOptimalCycleInput(hops: Hop[], maxAmountIn: Decimal, iterati
     // Um ciclo sem ineficiência tem ótimo em zero: a busca converge para um
     // valor minúsculo com lucro negativo. Reportar isso como "oportunidade de
     // tamanho ~0" seria ruído; reportar zero é a leitura honesta.
-    if (grossProfit.lessThanOrEqualTo(0)) {
+    if (profitAfterFee(amountIn).lessThanOrEqualTo(0)) {
         return { amountIn: new Decimal(0), grossProfit: new Decimal(0) };
     }
     return { amountIn, grossProfit };
@@ -133,7 +138,7 @@ export interface CycleEvaluation {
  * a arbitragem triangular parecer viável no papel.
  */
 export function evaluateCycle(hops: Hop[], maxAmountIn: Decimal, costs: FlashLoanCosts): CycleEvaluation {
-    const optimal = findOptimalCycleInput(hops, maxAmountIn);
+    const optimal = findOptimalCycleInputAfterFee(hops, maxAmountIn, costs.flashLoanFeeFraction);
     const flashLoanFee = optimal.amountIn.mul(costs.flashLoanFeeFraction);
     const netProfit = optimal.grossProfit.minus(flashLoanFee).minus(costs.gasCostInToken);
 

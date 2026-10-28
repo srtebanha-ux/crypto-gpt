@@ -24,6 +24,27 @@ const abi=new Interface([
  'function aerodromeFactory() view returns(address)',
 ]);
 type Tipo='v3'|'aero';
+export function rotasSelecionadasMegazord(env:NodeJS.ProcessEnv):Tipo[]{
+ // Liquidation-first default: V3 works without an Aerodrome executor.
+ // Aero is an explicitly selected additional route, not a startup dependency.
+ const names=(env.MEGAZORD_MORPHO_ROTAS??'v3').split(',').map(x=>x.trim());
+ if(names.length===1&&names[0]==='none'){
+   // A route-less Morpho boot is ONLY an explicit CPAMM-only mode. Never
+   // silently fall back here when a Morpho contract is absent/invalid.
+   // The pinned onchain V2 audit and CPAMM per-candidate proof still apply.
+   const v2=env.TITAN_V2_CONTRATO;
+   const allowed=(env.MEGAZORD_CONTRATOS??'').split(',').map(x=>x.trim().toLowerCase());
+   if(env.MEGAZORD_AUTO_DEPLOY==='1'||env.TITAN_CPAMM_ATOMICO!=='1'
+      ||!v2||!/^0x[0-9a-f]{40}$/i.test(v2)||!allowed.includes(v2.toLowerCase())
+      ||!/^0x[0-9a-f]{64}$/i.test(env.FLASH_ARB_CODEHASH??'')
+      ||!env.FLASH_ARB_CPAMM_FACTORIES)
+     throw Error('Morpho none exige CPAMM atomico com executor V2 na allowlist e codehash verificado');
+   return [];
+ }
+ if(!names.length||names.some(x=>x!=='v3'&&x!=='aero')||new Set(names).size!==names.length)
+   throw Error('MEGAZORD_MORPHO_ROTAS deve selecionar v3, aero, v3,aero ou none (CPAMM completo)');
+ return names as Tipo[];
+}
 type CacheContratos={version:1;owner:string;v3?:string;aero?:string};
 function arquivoCache(env:NodeJS.ProcessEnv):string|undefined{
  const diary=env.MEGAZORD_DIARIO;
@@ -107,7 +128,7 @@ export type DependenciasMorphoBoot={
  recuperar:(file:string,env:NodeJS.ProcessEnv)=>string|undefined|Promise<string|undefined>;
 };
 async function verificarContrato(tipo:Tipo,address:string,owner:string,rpcUrl:string):Promise<void>{
- const p=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true});
+ const p=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true,batchMaxCount:1});
  try{
    if(BigInt(await p.send('eth_chainId',[]))!==8453n)throw Error('RPC nao e Base');
    if(await p.getCode(address)==='0x')throw Error('contrato Morpho sem bytecode');
@@ -141,13 +162,14 @@ export async function prepararMorphoMegazord(
    throw Error('Megazord: carteira diverge na preparacao de contratos');
  if(env.CACA_ENVIAR==='1'&&env.MEGAZORD_AUTO_DEPLOY==='1')
    throw Error('auto-deploy nao pode coexistir com CACA_ENVIAR');
- const found={} as Record<Tipo,string>;
+ const selecionadas=rotasSelecionadasMegazord(env);
+ const found:Record<Tipo,string>={v3:'',aero:''};
  const cached=lerCache(env,owner);
  const planned:Partial<Record<Tipo,string>>={};
  let novos=0;
- // Resolve BOTH markers/caches and validate existing executors/caps before
- // spending on either missing contract. An invalid Aero must not cost a V3 deploy.
- for(const tipo of ['v3','aero'] as const){
+ // Resolve all SELECTED markers/caches and validate existing executors/caps
+ // before any deployment. Unselected engines cannot block or trigger a deploy.
+ for(const tipo of selecionadas){
    const c=config(tipo,owner);
    const fromEnv=env[c.env];
    const fromMarker=await deps.recuperar(c.marker,env);
@@ -171,7 +193,7 @@ export async function prepararMorphoMegazord(
      planned[tipo]=getAddress(address);
    }
  }
- for(const tipo of ['v3','aero'] as const){
+ for(const tipo of selecionadas){
    let address=planned[tipo];
    if(!address){
      const local:NodeJS.ProcessEnv={...env,
@@ -195,12 +217,11 @@ export async function prepararMorphoMegazord(
    cached[tipo]=found[tipo];
    guardarCache(env,cached);
  }
- // Only expose runtime addresses AFTER both executors passed immutable and
- // version checks. No partial permission to send.
+ // Expose runtime addresses only after all selected executors passed checks.
  env.CACA_MORPHO_V3_CONTRATO=found.v3;
  env.CACA_MORPHO_AERO_CONTRATO=found.aero;
  const whitelist=new Set((env.MEGAZORD_CONTRATOS??'').split(',').map(x=>x.trim()).filter(Boolean));
- whitelist.add(found.v3);whitelist.add(found.aero);
+ for(const tipo of selecionadas)whitelist.add(found[tipo]);
  env.MEGAZORD_CONTRATOS=[...whitelist].join(',');
  return {v3:found.v3,aero:found.aero,novos};
 }

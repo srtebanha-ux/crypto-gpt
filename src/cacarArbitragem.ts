@@ -1,3 +1,4 @@
+import {avaliarEExecutarCpammMegazord} from './titanCpammMegazord';
 import { agendaRpc, ehSaturacaoRpc, resumoRpcCoordenado } from './rpcCoordenado';
 /**
  * ENTREGA 2 — O CACADOR DE ARBITRAGEM CONTINUO.
@@ -631,19 +632,27 @@ export function montarTransporteRpc(opcoes: {
     const comRecuo = async (corpo: string, metodos: string[]): Promise<
     { tipo: 'corpo'; texto: string } | { tipo: 'falha'; porque: string }
     > => {
+        // Unknown broadcasts must NOT be repeated after a network timeout.
+        // Large eth_call batches get a fast single attempt; a timed-out
+        // response is recovered with one bounded split, not 3 slow retries
+        // of the same oversized batch.
+        const soLeituraEmLote=metodos.length>1&&metodos.every(m=>m==='eth_call');
+        const limiteTentativas=soLeituraEmLote
+            ||metodos.some(m=>/^(?:eth_send|personal_send|eth_submit)/i.test(m))
+            ? 1 : tentativas;
         let ultima = 'nenhuma tentativa';
-        for (let t = 0; t < tentativas; t += 1) {
+        for (let t = 0; t < limiteTentativas; t += 1) {
             // eslint-disable-next-line no-await-in-loop
             const r = await umaIda(corpo, metodos);
             if (r.tipo === 'corpo') return r;
             ultima = r.porque;
-            if (t + 1 >= tentativas) break;
+            if (t + 1 >= limiteTentativas) break;
             conta.tentativasExtras += 1;
             // eslint-disable-next-line no-await-in-loop
             await esperar(r.esperarMs ?? recuoBase * 2 ** t);
         }
         conta.desistencias += 1;
-        return { tipo: 'falha', porque: `${ultima} — desisti após ${tentativas} tentativa(s)` };
+        return { tipo: 'falha', porque: `${ultima} — desisti após ${limiteTentativas} tentativa(s)` };
     };
 
     /** O corpo veio: e JSON-RPC de verdade? */
@@ -678,6 +687,7 @@ export function montarTransporteRpc(opcoes: {
     /** Um lote, com UMA resposta por id pedido. */
     const umLote = async (
         pedidos: Array<{ metodo: string; params: unknown[] }>,
+        divisao=0,
     ): Promise<RespostaDeLote[]> => {
         const corpo = JSON.stringify(pedidos.map((q, i) => ({
             jsonrpc: '2.0', id: i + 1, method: q.metodo, params: q.params,
@@ -686,8 +696,21 @@ export function montarTransporteRpc(opcoes: {
         conta.maiorLote = Math.max(conta.maiorLote, pedidos.length);
         const r = await comRecuo(corpo, pedidos.map((q) => q.metodo));
         if (r.tipo === 'falha') {
-            // UMA FALHA DE LOTE NAO E N REVERSOES. Todo pedido sai marcado como
-            // transporte, e nenhum deles pode ser lido como resposta da EVM.
+            // Salvage a timed-out READ-ONLY batch with at most one split.
+            // Never duplicate broadcasts, and never amplify provider 429/5xx.
+            // Each half is still subject to the same HTTP/RPS/hour caps.
+            if (divisao===0 && pedidos.length>1
+                &&pedidos.every(p=>p.metodo==='eth_call')
+                &&/falha de rede ou timeout/i.test(r.porque)
+                &&!/(?:teto de|HTTP 429|HTTP 5\\d\\d)/i.test(r.porque)) {
+                const meio=Math.floor(pedidos.length/2);
+                const [esquerda,direita]=await Promise.all([
+                    umLote(pedidos.slice(0,meio),1),
+                    umLote(pedidos.slice(meio),1),
+                ]);
+                return [...esquerda,...direita];
+            }
+            // No proof of EVM execution: never call this a contract revert.
             return pedidos.map(() => ({ ok: false, dados: null, falhaDeTransporte: r.porque }));
         }
         const j = lerJson(r.texto);
@@ -3133,6 +3156,11 @@ export async function iniciarArbitragem(): Promise<void> {
                     pendente.candidato.venda.endereco;
                 ultimaProvaV2.set(k,Date.now());
                 ultimoEnsaioV2Em=Date.now();
+                if(process.env.TITAN_CPAMM_ATOMICO==='1'){
+                    const resultado=await avaliarEExecutarCpammMegazord(pendente.candidato,
+                        process.env.TITAN_EXECUTOR_RPC_URL??rpc);
+                    log.info('[TITAN/CPAMM-MEGAZORD] Prova e emissor unificados.',{rota:k,resultado});
+                }else{
                 const prova=await provarV2Atomico(pendente.candidato,
                     process.env.TITAN_EXECUTOR_RPC_URL??rpc);
                 if(prova.estado==='inviavel'&&reprovacaoDePoolTravadoV2(prova.motivo)){
@@ -3168,6 +3196,7 @@ export async function iniciarArbitragem(): Promise<void> {
                         rota:k,resultado:resultadoPago,
                         nota:'somente recibo confirma operacao; gas sempre tem risco residual',
                     });
+                }
                 }
             }
         }

@@ -704,6 +704,21 @@ export function lerMarket(dados: string): {
     } catch { return null; }
 }
 
+/** Full market struct for bounded interest-accrual hints. The legacy
+ * lerMarket contract stays backward-compatible for the other callers.
+ */
+export function lerMarketComTempo(dados:string):
+ ((NonNullable<ReturnType<typeof lerMarket>>)&{lastUpdate:bigint;fee:bigint})|null{
+ const base=lerMarket(dados);
+ if(!base)return null;
+ try{
+   const decoded=coder.decode(
+     ['uint128','uint128','uint128','uint128','uint128','uint128'],dados,
+   ) as unknown as bigint[];
+   return {...base,lastUpdate:decoded[4]!,fee:decoded[5]!};
+ }catch{return null;}
+}
+
 /**
  * Shares -> ativos, ARREDONDANDO PARA CIMA, como o Morpho faz na divida.
  *
@@ -749,6 +764,69 @@ export function apiConfereComACorrente(
             porque: `a API divergiu da corrente em ${divergem.join(', ')} — mercado RECUSADO, `
                 + 'porque índice de terceiro não decide tiro',
         };
+}
+
+/** Global health-factor feed from the Morpho API. This is only an
+ * over-inclusive discovery hint; every market and borrower is rechecked onchain
+ * before any paid transaction. The API does not authorize execution.
+ * Based on the public Morpho Blue bot's marketPositions schema.
+ */
+export type CandidatoGlobalMorpho={mercado:string;usuario:string;healthFactor?:number};
+export function consultaRiscoGlobalMorpho(skip=0):string{
+ // Collect index hints on both sides of the liquidation boundary.
+ // Client-side ranking below favors liquidatable debt *near* HF 1,
+ // then nearly liquidatable debt, ahead of deep insolvent bad debt.
+ // All of these are hints, never permission to transact.
+ if(!Number.isSafeInteger(skip)||skip<0||skip>1_000_000)
+   throw Error('offset do feed de risco Morpho invalido');
+ return JSON.stringify({
+   query:`query RiskOnBase($chainIds:[Int!],$hfLte:Float!,$first:Int!,$skip:Int!){
+     marketPositions(
+       where:{chainId_in:$chainIds,healthFactor_lte:$hfLte,marketListed:true}
+       orderBy:HealthFactor,orderDirection:Desc,first:$first,skip:$skip
+     ){pageInfo{count countTotal}items{healthFactor market{marketId}user{address}}}
+   }`,
+   variables:{chainIds:[8453],hfLte:1.02,first:1000,skip},
+ });
+}
+export function lerRiscoGlobalMorpho(corpo:unknown):
+ {candidatos:CandidatoGlobalMorpho[];total:number|null}|null {
+ if(!corpo||typeof corpo!=='object')return null;
+ const o=corpo as Record<string,unknown>;
+ if(Array.isArray(o.errors)&&o.errors.length)return null;
+ const data=o.data as Record<string,unknown>|undefined;
+ const mp=data?.marketPositions as Record<string,unknown>|undefined;
+ if(!Array.isArray(mp?.items))return null;
+ const info=mp.pageInfo as Record<string,unknown>|undefined;
+ if(info&&typeof info.count==='number'&&info.count!==mp.items.length)return null;
+ const seen=new Set<string>(),candidatos:CandidatoGlobalMorpho[]=[];
+ for(const raw of mp.items.slice(0,1000)){
+   if(!raw||typeof raw!=='object')continue;
+   const item=raw as Record<string,unknown>;
+   const mercado=(item.market as Record<string,unknown>|undefined)?.marketId;
+   const usuario=(item.user as Record<string,unknown>|undefined)?.address;
+   if(typeof mercado!=='string'||!/^0x[0-9a-f]{64}$/i.test(mercado)
+     ||typeof usuario!=='string'||!/^0x[0-9a-f]{40}$/i.test(usuario))continue;
+   const key=mercado.toLowerCase()+'|'+usuario.toLowerCase();
+   if(seen.has(key))continue;
+   seen.add(key);
+   const rawHf=item.healthFactor;
+   const hf=typeof rawHf==='number'?rawHf:
+     typeof rawHf==='string'&&rawHf.trim()!==''?Number(rawHf):NaN;
+   candidatos.push({mercado:mercado.toLowerCase(),usuario:usuario.toLowerCase(),
+     ...(Number.isFinite(hf)&&hf>=0&&hf<=1.02?{healthFactor:hf}:{})});
+ }
+ // Rank by absolute distance to the liquidation line, not merely HF
+ // ascending/descending. Deep bad debt must not outrank a borrower at 1.0001.
+ // At equal distance, a currently below-line borrower is tested first.
+ // Stable ties retain the API order. Unknown HF remains last.
+ candidatos.sort((a,b)=>{
+   if(a.healthFactor===undefined)return b.healthFactor===undefined?0:1;
+   if(b.healthFactor===undefined)return -1;
+   const da=Math.abs(1-a.healthFactor),db=Math.abs(1-b.healthFactor);
+   return da!==db?da-db:Number(a.healthFactor>1)-Number(b.healthFactor>1);
+ });
+ return{candidatos,total:typeof info?.countTotal==='number'?info.countTotal:null};
 }
 
 // ---------------------------------------------------------------------------

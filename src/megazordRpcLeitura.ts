@@ -1,13 +1,23 @@
+import {randomInt} from 'node:crypto';
 /** Bounded read-only transport. No signing, broadcasts or upstream error text. */
 type Rpc=(url:string,method:string,params:unknown[])=>Promise<unknown>;
 type Opcoes={fetcher?:typeof fetch;esperar?:(ms:number)=>Promise<void>;agora?:()=>number};
-const methods=new Set(['eth_chainId','eth_getBlockByNumber','eth_getTransactionCount',
+const methods=new Set(['eth_chainId','eth_blockNumber','eth_getBlockByNumber','eth_getTransactionCount',
  'eth_getBalance','eth_getCode']);
 const MAX_RETRY_AFTER_MS=5000;
+export class FalhaRpcLeitura extends Error {
+ constructor(message:string,readonly method:string,readonly categoria:string,
+   readonly tentativas:number,readonly rpcCode?:number){super(message);}
+}
+
 
 export function criarRpcPreflight({fetcher=fetch,
  esperar=ms=>new Promise(r=>setTimeout(r,ms)),agora=Date.now}:Opcoes={}):Rpc{
  const queues=new Map<string,Promise<unknown>>();
+ // Avoid the repeatedly reused IDs 1,2,3 while keeping a modest number,
+ // compatible with gateways that reject large JSON-RPC numeric request IDs.
+ // Successful replies must still echo the exact ID, never stale data.
+ let requestId=randomInt(1000,9000);
  const notBefore=new Map<string,number>();
  return (url,method,params)=>{
    if(!methods.has(method))return Promise.reject(Error('metodo fora do preflight somente leitura'));
@@ -15,16 +25,21 @@ export function criarRpcPreflight({fetcher=fetch,
    const task=previous.catch(()=>{}).then(async()=>{
      for(let attempt=0;attempt<3;attempt++){
        const cooldown=(notBefore.get(url)??0)-agora();
-       if(cooldown>MAX_RETRY_AFTER_MS)throw Error('RPC HTTP 429');
+       if(cooldown>MAX_RETRY_AFTER_MS)throw new FalhaRpcLeitura('RPC HTTP 429',method,'http429',attempt);
        if(cooldown>0)await esperar(cooldown);
        // Serialize each endpoint independently; do not burst all readiness reads.
-       await esperar(150);
+       await esperar(300);
        let response:Response;
+       const id=++requestId;
        try{
-         response=await fetcher(url,{method:'POST',headers:{'content-type':'application/json'},
-           body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),
+         response=await fetcher(url,{method:'POST',headers:{'content-type':'application/json','accept':'application/json',
+           'accept-encoding':'identity'},
+           body:JSON.stringify({jsonrpc:'2.0',id,method,params}),
            signal:AbortSignal.timeout(10000)});
-       }catch{throw Error('preflight RPC: transporte indisponivel');}
+       }catch{
+         if(attempt<2){await esperar(400*(attempt+1));continue;}
+         throw new FalhaRpcLeitura('preflight RPC: transporte indisponivel',method,'transporte',attempt+1);
+       }
        if(response.status===429){
          const header=response.headers.get('retry-after');
          let delay=300*(attempt+1);
@@ -39,16 +54,50 @@ export function criarRpcPreflight({fetcher=fetch,
          // server cooldown to fit the budget; fail over instead of hammering it.
          try{await response.body?.cancel();}catch{/* no payload in diagnostics */}
          notBefore.set(url,agora()+delay);
-         if(attempt===2||delay>MAX_RETRY_AFTER_MS)throw Error('RPC HTTP 429');
+         if(attempt===2||delay>MAX_RETRY_AFTER_MS)throw new FalhaRpcLeitura('RPC HTTP 429',method,'http429',attempt+1);
          continue;
        }
-       if(!response.ok)throw Error('RPC HTTP '+response.status);
-       let body:{result?:unknown;error?:unknown};
-       try{body=await response.json() as typeof body;}
-       catch{throw Error('resposta RPC invalida');}
-       if(!body||typeof body!=='object'||body.error||body.result===undefined)
-         throw Error('resposta RPC invalida');
-       return body.result;
+       if(!response.ok){
+         try{await response.body?.cancel();}catch{}
+         if(response.status>=500&&response.status<=599&&attempt<2){await esperar(400*(attempt+1));continue;}
+         throw new FalhaRpcLeitura('RPC HTTP '+response.status,method,
+           response.status>=500?'http5xx':'http4xx',attempt+1);
+       }
+       type RpcBody={jsonrpc?:unknown;id?:unknown;result?:unknown;error?:{code?:unknown}};
+       let body:RpcBody|null=null;
+       try{body=await response.json() as RpcBody;}catch{/* never log upstream bodies */}
+       const code=typeof body?.error?.code==='number'&&Number.isSafeInteger(body.error.code)?body.error.code:undefined;
+       const envelope=!!body&&typeof body==='object'&&!Array.isArray(body)
+         &&body.jsonrpc==='2.0'&&body.id===id;
+       // Some Base gateways emit HTTP 200 + JSON-RPC -32029 (quota exhausted)
+       // with id:null, even for a well-formed request. The *error* is never
+       // trusted as success. Honor its bounded retry_after_ms and fail closed
+       // if the provider still cannot return a matching successful envelope.
+       if(code===-32029){
+         const data=body?.error&&typeof body.error==='object'
+           ?(body.error as {data?:{retry_after_ms?:unknown}}).data:undefined;
+         const hint=data?.retry_after_ms;
+         const delay=typeof hint==='number'&&Number.isFinite(hint)&&hint>0
+           ?Math.ceil(hint):3000;
+         if(attempt===2||delay>MAX_RETRY_AFTER_MS)
+           throw new FalhaRpcLeitura('resposta RPC invalida ['+method+']',method,'limite_jsonrpc',attempt+1,code);
+         await esperar(Math.max(1000,delay));
+         continue;
+       }
+       if(!envelope||body!.error!==undefined||body!.result===undefined||body!.result===null){
+         const permanent=code===-32600||code===-32601||code===-32602;
+         // Report only fixed protocol categories. Never include response bodies,
+         // URLs, actual IDs or upstream error strings in production logs.
+         const category=!body||typeof body!=='object'||Array.isArray(body)?'body_invalido'
+           :body.jsonrpc!=='2.0'?'versao_invalida'
+           :!Object.prototype.hasOwnProperty.call(body,'id')?'id_ausente'
+           :typeof body.id!=='number'?'tipo_id_invalido'
+           :body.id!==id?'id_divergente'
+           :code!==undefined?'jsonrpc_'+code:'resultado_ausente';
+         if(attempt===2||permanent)throw new FalhaRpcLeitura('resposta RPC invalida ['+method+']',method,category,attempt+1,code);
+         await esperar(400*(attempt+1));continue;
+       }
+       return body!.result;
      }
      throw Error('RPC HTTP 429');
    });

@@ -7,11 +7,16 @@ export class CursoresMorpho {
  private registros=new Map<string,Registro>();
  private tentativas=new Map<string,number>();
  private sequencia=0;
+ private proximaPaginaRiscoGlobal=1000;
  constructor(private readonly arquivo:string){}
  async carregar():Promise<void>{
   try{
-   const raw=JSON.parse(await fs.readFile(this.arquivo,'utf8')) as {versao?:number;mercados?:Record<string,Registro>;tentativas?:Record<string,number>};
+   const raw=JSON.parse(await fs.readFile(this.arquivo,'utf8')) as {versao?:number;mercados?:Record<string,Registro>;tentativas?:Record<string,number>;proximaPaginaRiscoGlobal?:number};
    if(raw.versao!==1||!raw.mercados)return;
+   if(Number.isSafeInteger(raw.proximaPaginaRiscoGlobal)
+      &&raw.proximaPaginaRiscoGlobal!>=1000
+      &&raw.proximaPaginaRiscoGlobal!<=1_000_000)
+     this.proximaPaginaRiscoGlobal=raw.proximaPaginaRiscoGlobal!;
    for(const [id,n] of Object.entries(raw.tentativas??{})){
     if(/^0x[0-9a-f]{64}$/i.test(id)&&Number.isSafeInteger(n)&&n>0){
      this.tentativas.set(id.toLowerCase(),n);this.sequencia=Math.max(this.sequencia,n);
@@ -24,21 +29,54 @@ export class CursoresMorpho {
    }
   }catch{/* Missing/corrupt cache means explicit rediscovery, never executable API data. */}
  }
+ /** Always inspect the first near-threshold page; rotate an EXTRA page
+  * beyond the API's first 1000 candidates across rounds and deployments. */
+ obterPaginaRiscoGlobal(total:number):number{
+  if(!Number.isSafeInteger(total)||total<=1000)return 1000;
+  const max=1000*Math.ceil((total-1000)/1000);
+  return this.proximaPaginaRiscoGlobal<=max?this.proximaPaginaRiscoGlobal:1000;
+ }
+ async avancarPaginaRiscoGlobal(offset:number,total:number):Promise<void>{
+  if(!Number.isSafeInteger(offset)||offset<1000||offset>1_000_000
+     ||!Number.isSafeInteger(total)||total<0)return;
+  this.proximaPaginaRiscoGlobal=offset+1000>=total?1000:offset+1000;
+  await this.persistir();
+ }
  obter(id:string):Registro{return this.registros.get(id.toLowerCase())??{proximo:0,devedores:[]};}
  /** One durable queue from market validation to borrower collection. Ranking only
   * breaks ties: a large book cannot starve a smaller book across restarts. */
- selecionarMercados<T extends {id:string}>(mercados:readonly T[],ranking:readonly string[]|null,limite:number):T[]{
+ selecionarMercados<T extends {id:string}>(mercados:readonly T[],ranking:readonly string[]|null,limite:number,riscoGlobal:readonly string[]=[]):T[]{
   if(!Number.isSafeInteger(limite)||limite<=0)return[];
   const ranks=new Map((ranking??[]).map((id,i)=>[id.toLowerCase(),i]));
   const unicos=[...new Map(mercados.map(m=>[m.id.toLowerCase(),m])).values()];
+  const known=new Map(unicos.map(m=>[m.id.toLowerCase(),m]));
+  const urgent:T[]=[];
+  const urgentIds=new Set<string>();
+  const riskRank=new Map<string,number>();
+  for(const raw of riscoGlobal){
+    const id=raw.toLowerCase();
+    if(known.has(id)&&!riskRank.has(id))riskRank.set(id,riskRank.size);
+  }
+  const riskMarkets=[...riskRank.keys()];
+  const quota=Math.floor(limite/4),fixed=Math.ceil(quota/2);
+  const first=riskMarkets.slice(0,fixed);
+  // Preserve the worst health-factor slots, but rotate the remaining risk
+  // markets across cycles by last actual attempt (persistent over restarts).
+  const rotated=riskMarkets.slice(fixed).sort((a,b)=>
+    (this.tentativas.get(a)??0)-(this.tentativas.get(b)??0)
+    ||riskRank.get(a)!-riskRank.get(b)!);
+  for(const id of [...first,...rotated]){
+    if(urgentIds.has(id)||urgent.length>=quota)break;
+    urgent.push(known.get(id)!);urgentIds.add(id);
+  }
   // Reserve 25% of each round for markets with the largest indexed debt.
   // Previously the least-recent-attempted sort dominated every ranking entry,
   // revisiting large active debt only after thousands of other markets.
   // Keep 75% rotating fairly so small books can still become candidates.
-  const quentes=unicos.filter(m=>ranks.has(m.id.toLowerCase()))
+  const quentes=unicos.filter(m=>!urgentIds.has(m.id.toLowerCase())&&ranks.has(m.id.toLowerCase()))
    .sort((a,b)=>ranks.get(a.id.toLowerCase())!-ranks.get(b.id.toLowerCase())!)
-   .slice(0,Math.min(Math.floor(limite/4),unicos.length));
-  const reservados=new Set(quentes.map(m=>m.id.toLowerCase()));
+   .slice(0,Math.min(Math.floor((limite-urgent.length)/4),unicos.length));
+  const reservados=new Set([...urgentIds,...quentes.map(m=>m.id.toLowerCase())]);
   const rotativos=unicos.filter(m=>!reservados.has(m.id.toLowerCase()));
   rotativos.sort((a,b)=>{
    const ai=a.id.toLowerCase(),bi=b.id.toLowerCase();
@@ -46,7 +84,7 @@ export class CursoresMorpho {
     ||(ranks.get(ai)??Number.MAX_SAFE_INTEGER)-(ranks.get(bi)??Number.MAX_SAFE_INTEGER)
     ||ai.localeCompare(bi);
   });
-  return [...quentes,...rotativos].slice(0,limite);
+  return [...urgent,...quentes,...rotativos].slice(0,limite);
  }
  /** An attempted read is NOT successful coverage. Failure rotates fairly but
   * never changes the pagination cursor or the discovered borrower addresses. */
@@ -66,7 +104,8 @@ export class CursoresMorpho {
   await fs.mkdir(path.dirname(this.arquivo),{recursive:true});
   const tmp=this.arquivo+'.tmp';
   await fs.writeFile(tmp,JSON.stringify({versao:1,mercados:Object.fromEntries(this.registros),
-    tentativas:Object.fromEntries(this.tentativas)},
+    tentativas:Object.fromEntries(this.tentativas),
+    proximaPaginaRiscoGlobal:this.proximaPaginaRiscoGlobal},
     (_,v)=>typeof v==='bigint'?v.toString():v));
   await fs.rename(tmp,this.arquivo);
  }

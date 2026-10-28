@@ -27,7 +27,8 @@ type Journal={version:1;address:string;pending:Pending|null;
  days:Record<string,{reservedWei:string;creditedWei?:string;attempts:number}>;
  receipts:Array<Pending&{status:number;block:number}>};
 export type PoliticaMegazord={journal:string;maxDailyWei:bigint;maxPerTxWei:bigint;
- maxDailyTx:number;contracts:readonly string[]};
+ maxDailyTx:number;contracts:readonly string[];canaryUntilMs?:number;
+ maxUncoveredLifetimeWei?:bigint};
 
 /** Conservatively value USDC earnings in WETH wei using two independently
  * verified 30-minute onchain ETH/USDC TWAPs. Never assume USD peg.
@@ -106,7 +107,10 @@ export class ExecutorMegazord {
    this.signer=new Wallet(normalizarChaveMegazord(key));
    if(policy.maxDailyWei<=0n||policy.maxPerTxWei<=0n||policy.maxPerTxWei>policy.maxDailyWei
      ||!Number.isSafeInteger(policy.maxDailyTx)||policy.maxDailyTx<1
-     ||policy.contracts.length===0||policy.contracts.some(x=>!/^0x[0-9a-f]{40}$/i.test(x)))
+     ||policy.contracts.length===0||policy.contracts.some(x=>!/^0x[0-9a-f]{40}$/i.test(x))
+     ||(policy.maxUncoveredLifetimeWei!==undefined&&
+       (policy.maxUncoveredLifetimeWei<policy.maxPerTxWei||
+         policy.maxUncoveredLifetimeWei>100000000000000n)))
      throw Error('politica Megazord invalida');
    this.lock=policy.journal+'.lock';
    // Missing parent directories can be created. Never use /tmp fallback
@@ -200,6 +204,13 @@ export class ExecutorMegazord {
    this.tail=task.catch(()=>{});
    try{return await task;}finally{this.queued--;}
  }
+ private conferirCanario():void{
+   if(this.policy.canaryUntilMs===undefined)return;
+   if(!Number.isFinite(this.policy.canaryUntilMs)||Date.now()>=this.policy.canaryUntilMs)
+     throw Error('canario expirado');
+   if(Object.values(this.state.days).some(d=>d.attempts>0))
+     throw Error('canario ja consumiu sua unica tentativa persistente');
+ }
  private async nonceLivre():Promise<number>{
    const inspect=async(p:RedeMegazord)=>{
      const [net,b,latest,pending]=await Promise.all([p.getNetwork(),p.getBlock('latest'),
@@ -214,6 +225,7 @@ export class ExecutorMegazord {
  }
  async sign(tx:TransactionRequest):Promise<string>{
    if(!this.inContext)throw Error('assinatura fora da fila Megazord');
+   this.conferirCanario();
    return this.signer.signTransaction(tx);
  }
  async broadcast(raw:string):Promise<TransactionResponse>{
@@ -224,6 +236,7 @@ export class ExecutorMegazord {
  private async broadcastLocked(raw:string):Promise<TransactionResponse>{
    if(!this.inContext)throw Error('contexto de envio expirou');
    await this.reconcile();
+   this.conferirCanario();
    const tx=Transaction.from(raw);
    if(tx.from?.toLowerCase()!==this.address.toLowerCase()||tx.chainId!==8453n
      ||tx.type!==2||tx.value!==0n||!tx.to||tx.data==='0x'
@@ -241,7 +254,22 @@ export class ExecutorMegazord {
    const uncovered=BigInt(used.reservedWei)-BigInt(used.creditedWei??'0');
    if(cost>this.policy.maxPerTxWei||uncovered+cost>this.policy.maxDailyWei
      ||used.attempts>=this.policy.maxDailyTx)throw Error('orcamento global Megazord excedido');
+   // Continuous mode is NOT an unlimited spending mandate. Conservatively
+   // sum all unrecovered reservations across UTC days, INCLUDING pending.
+   // Proof of WETH/USDC treasury transfers may credit a reservation ONLY
+   // through the existing dual-RPC receipt reconciliation.
+   if(this.policy.maxUncoveredLifetimeWei!==undefined){
+     let exposure=0n;
+     for(const d of Object.values(this.state.days)){
+       const reserved=BigInt(d.reservedWei),credit=BigInt(d.creditedWei??'0');
+       if(credit>reserved)throw Error('diario financeiro corrompido');
+       exposure+=reserved-credit;
+     }
+     if(exposure+cost>this.policy.maxUncoveredLifetimeWei)
+       throw Error('circuit breaker Megazord: teto acumulado de gas sem lucro comprovado');
+   }
    if(tx.nonce!==await this.nonceLivre())throw Error('nonce mudou no pre-broadcast');
+   this.conferirCanario(); // deadline may expire while RPC preflight runs
    const next=structuredClone(this.state),hash=keccak256(raw);
    next.pending={hash,nonce:tx.nonce,strategy:this.context.getStore()!.strategy,
      day,reservedWei:String(cost),to:tx.to};
@@ -313,6 +341,76 @@ export function conferirIdentidadeMegazord(env:NodeJS.ProcessEnv):{address:strin
    throw Error('chave nao corresponde ao endereco PUBLICO autorizado da carteira existente');
  return {address,journal};
 }
+/** One-shot repair of an orphaned lock, ONLY after a confirmed two-RPC
+ * live/pending nonce quorum. Never touch a journal, recent lock, or a lock
+ * with a proven live owner, INCLUDING across restarts on the same host.
+ * Keep a hard-link audit copy; no RPC side effects, signing or nonce mutation.
+ */
+export function recuperarLockOrfaoMegazord(
+ journal:string,checks:readonly {nonce:string;block:number}[],
+ agora=Date.now(),hostname=os.hostname()
+):{recuperado:boolean;categoria:string}{
+ if(checks.length!==2||checks[0]?.nonce!==checks[1]?.nonce
+   ||!/^[0-9]+$/.test(checks[0]?.nonce??'')
+   ||!Number.isSafeInteger(checks[0]?.block)
+   ||!Number.isSafeInteger(checks[1]?.block)
+   ||Math.abs(checks[0]!.block-checks[1]!.block)>3)
+   throw Error('recuperacao recusada: quorum de nonce incompleto');
+ const lock=journal+'.lock';
+ if(fs.existsSync(journal))throw Error('recuperacao recusada: diario existente requer reconciliacao');
+ let s:fs.Stats;
+ try{s=fs.lstatSync(lock);}
+ catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')
+   return {recuperado:false,categoria:'sem_lock'};throw e;}
+ if(!s.isFile()||s.nlink!==1||s.size>4096
+   ||s.mtimeMs>agora-180_000||s.mtimeMs>agora)
+   throw Error('recuperacao recusada: lock recente ou formato inseguro');
+ let owner:{pid?:unknown;host?:unknown;token?:unknown};
+ try{owner=JSON.parse(fs.readFileSync(lock,'utf8')) as typeof owner;}
+ catch{throw Error('recuperacao recusada: lock ilegivel');}
+ if(typeof owner.host!=='string'||!owner.host
+   ||!Number.isSafeInteger(owner.pid)||Number(owner.pid)<=0
+   ||typeof owner.token!=='string'||!/^[-0-9a-f]{20,64}$/i.test(owner.token))
+   throw Error('recuperacao recusada: posse do lock nao demonstrada obsoleta');
+ // A Railway worker can restart with the SAME hostname. The old strict
+ // hostname veto kept a genuine orphan lock forever after a crash. Probe
+ // same-host PIDs without signals that terminate, alter or unlock the owner.
+ // ESRCH is the only acceptable proof of process absence; EPERM and any
+ // unexpected result fail closed, preserving wallet/nonce exclusivity.
+ if(owner.host===hostname){
+   // Container PIDs are reused after restart (often PID 1). If the saved
+   // owner PID equals our own, prove the file PREDATES this process boot;
+   // otherwise a live current-process lock must never be removed.
+   if(owner.pid===process.pid){
+     const startMs=agora-process.uptime()*1000;
+     if(s.mtimeMs>=startMs-5_000)
+       throw Error('recuperacao recusada: lock pertence ao processo atual');
+   }else{
+     try{
+       process.kill(Number(owner.pid),0);
+       throw Error('recuperacao recusada: processo dono do lock ainda ativo');
+     }catch(e){
+       if((e as NodeJS.ErrnoException).code!=='ESRCH')throw e;
+     }
+   }
+ }
+ const s2=fs.lstatSync(lock);
+ if(s2.ino!==s.ino||s2.dev!==s.dev||s2.mtimeMs!==s.mtimeMs||s2.size!==s.size)
+   throw Error('recuperacao recusada: lock mudou durante leitura');
+ const backup=lock+'.orphan-'+Math.floor(agora).toString(36)+'-'+randomUUID().slice(0,8);
+ fs.linkSync(lock,backup); // exclusive creation, preserves the original record
+ try{
+   const current=fs.lstatSync(lock);
+   if(current.ino!==s.ino||current.dev!==s.dev||current.mtimeMs!==s.mtimeMs
+     ||fs.existsSync(journal))
+     throw Error('recuperacao recusada: lock ou diario mudou');
+   fs.unlinkSync(lock);
+   const fd=fs.openSync(path.dirname(lock),'r');
+   try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+ }catch(e){try{fs.unlinkSync(backup);}catch{}throw e;}
+ return {recuperado:true,categoria:'lock_obsoleto_arquivado'};
+}
+
 /** Railway terminates workers with SIGTERM, not a normal JS exit.
  * Releasing lock is synchronous and token-checked; when a transaction
  * callback is still running close() retains it for manual reconciliation.
@@ -347,10 +445,14 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
  if(!env.MEGAZORD_RPC_URL||!env.MEGAZORD_RPC_SECUNDARIO
    ||env.MEGAZORD_RPC_URL===env.MEGAZORD_RPC_SECUNDARIO)throw Error('configuracao Megazord incompleta');
  if(env.TITAN_SNOWBALL_REINVESTIR==='1')throw Error('reinvestimento precisa de migracao separada');
- const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL);
- const s=new JsonRpcProvider(env.MEGAZORD_RPC_SECUNDARIO);
+ const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL,undefined,{batchMaxCount:1});
+ const s=new JsonRpcProvider(env.MEGAZORD_RPC_SECUNDARIO,undefined,{batchMaxCount:1});
  try{
    active=new ExecutorMegazord(key,p,s,{
+     canaryUntilMs:env.MEGAZORD_CONTINUO==='1'?undefined:
+       env.MEGAZORD_CANARIO_ATE_UTC?Date.parse(env.MEGAZORD_CANARIO_ATE_UTC):undefined,
+     maxUncoveredLifetimeWei:env.MEGAZORD_CONTINUO==='1'
+       ?BigInt(env.MEGAZORD_PERDA_MAX_TOTAL_WEI??'0'):undefined,
      journal:file,maxDailyWei:BigInt(env.MEGAZORD_GAS_MAX_DIA_WEI??'2000000000000000'),
      maxPerTxWei:BigInt(env.MEGAZORD_GAS_MAX_TX_WEI??'0'),
      maxDailyTx:Number(env.MEGAZORD_MAX_TX_DIA??'0'),
@@ -376,6 +478,30 @@ export function conferirOrcamentoMegazord(env:NodeJS.ProcessEnv):void{
    ||BigInt(perTx)<=0n||BigInt(daily)<=0n||BigInt(perTx)>BigInt(daily)
    ||!Number.isSafeInteger(count)||count<1||count>250)
    throw Error('orcamento Megazord invalido: confira tetos por transacao, por dia e quantidade');
+ // A persistent, explicit continuous authorization replaces the expiring
+ // one-shot canary. All daily, per-TX, lifetime, profit, nonce and receipt
+ // guards still apply on EVERY broadcast. Stale canary is ignored only here.
+ if(env.MEGAZORD_CONTINUO==='1'){
+   const cap=env.MEGAZORD_PERDA_MAX_TOTAL_WEI;
+   if(env.MEGAZORD_MODO!=='execucao'||
+     env.MEGAZORD_CONFIRMAR!=='OPERAR_BASE_REAL'||
+     env.MEGAZORD_EXCLUSIVO!=='1'||env.MEGAZORD_AUTO_DEPLOY==='1'||
+     env.MEGAZORD_GAS_MAX_DIA_WEI===undefined||
+     !cap||!/^\d+$/.test(cap)||
+     BigInt(cap)<BigInt(perTx)||BigInt(cap)>100000000000000n)
+     throw Error('modo continuo exige exclusividade, confirmacao e teto de perda acumulada');
+ }else if(env.MEGAZORD_CANARIO_ATE_UTC!==undefined){
+   const deadline=Date.parse(env.MEGAZORD_CANARIO_ATE_UTC);
+   const causes:string[]=[];
+   if(!Number.isFinite(deadline))causes.push('prazo_invalido');
+   else if(deadline<=Date.now())causes.push('prazo_expirado');
+   else if(deadline>Date.now()+3600000)causes.push('prazo_maior_que_1h');
+   if(count!==1)causes.push('max_tx_dia_diferente_de_1');
+   if(env.MEGAZORD_AUTO_DEPLOY==='1')causes.push('auto_deploy_ligado');
+   if(env.MEGAZORD_GAS_MAX_DIA_WEI===undefined)causes.push('teto_diario_nao_explicito');
+   if(causes.length)throw Error(
+     'canario exige prazo futuro de ate 1h, uma tentativa, teto diario explicito e deploy desligado; causas='+causes.join(','));
+ }
  if(env.TITAN_SNOWBALL_REINVESTIR==='1')
    throw Error('reinvestimento precisa de migracao separada');
 }

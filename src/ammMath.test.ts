@@ -158,6 +158,43 @@ test('taxa do flash loan entra sobre o valor emprestado, não sobre o lucro', ()
     assert.equal(aave.netProfit.toString(), aave.grossProfit.minus(aave.flashLoanFee).toString());
 });
 
+test('taxa proporcional reduz o tamanho ótimo e preserva oportunidade perdida pelo ótimo bruto', () => {
+    const hops = [hop('1000000', '1000000'), hop('1000000', '1050000')];
+    const teto = new Decimal('100000');
+    const taxa = new Decimal('0.03');
+    const bruto = findOptimalCycleInput(hops, teto);
+    const liquido = evaluateCycle(hops, teto, {
+        flashLoanFeeFraction: taxa,
+        gasCostInToken: new Decimal(1),
+    });
+
+    // Neste caso, só subtrair a taxa depois de maximizar o bruto descarta
+    // uma oportunidade que se torna lucrativa com um empréstimo menor.
+    assert.ok(bruto.grossProfit.minus(bruto.amountIn.mul(taxa)).lt(0));
+    assert.ok(liquido.profitable);
+    assert.ok(liquido.amountIn.lt(bruto.amountIn));
+    let melhorGrade = new Decimal(0);
+    for (let i = 1; i <= 2000; i++) {
+        const entrada = teto.mul(i).div(2000);
+        const lucro = grossCycleProfit(entrada, hops).minus(entrada.mul(taxa)).minus(1);
+        if (lucro.gt(melhorGrade)) melhorGrade = lucro;
+    }
+    assert.ok(liquido.netProfit.gte(melhorGrade));
+    assert.equal(liquido.grossProfit.toString(), grossCycleProfit(liquido.amountIn, hops).toString());
+});
+
+test('taxa de empréstimo acima da margem marginal elimina qualquer tamanho lucrativo', () => {
+    const hops = [hop('1000000', '1000000'), hop('1000000', '1050000')];
+    const evaluation = evaluateCycle(hops, new Decimal('100000'), {
+        flashLoanFeeFraction: new Decimal('0.05'),
+        gasCostInToken: new Decimal(1),
+    });
+    assert.equal(evaluation.amountIn.toString(), '0');
+    assert.equal(evaluation.flashLoanFee.toString(), '0');
+    assert.equal(evaluation.netProfit.toString(), '-1');
+    assert.equal(evaluation.profitable, false);
+});
+
 test('Balancer (taxa zero) rende mais que Aave no mesmo ciclo', () => {
     const hops = [hop('1000000', '1000000'), hop('1000000', '1050000')];
     const custoGas = { gasCostInToken: new Decimal('1') };

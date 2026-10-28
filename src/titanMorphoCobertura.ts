@@ -24,8 +24,9 @@ function numeroLimitado(
 export function politicaDeCoberturaMorpho(
     env:NodeJS.ProcessEnv=process.env,
 ):PoliticaCoberturaMorpho {
-    // Antes: 24 mercados, oito mercados com devedores, cinco posicoes por
-    // mercado, UMA unica rotacao a cada quinze minutos.
+    // Amplia os mercados visitados na janela de 3 minutos (20 -> 32) sem
+    // alterar os tetos de RPC/HTTP, o prazo, os limites de gas ou o envio.
+    // A fila persistente prioriza 25% por divida e 75% por rodizio.
     const mercadosPorRodada=numeroLimitado(
         env.CACA_MORPHO_MERCADOS_POR_RODADA,36,12,72);
     return {
@@ -33,7 +34,7 @@ export function politicaDeCoberturaMorpho(
             env.CACA_MORPHO_INTERVALO_MS,180_000,120_000,3_600_000),
         mercadosPorRodada,
         mercadosComDevedores:Math.min(mercadosPorRodada,numeroLimitado(
-            env.CACA_MORPHO_MERCADOS_COM_DEVEDORES,20,1,36)),
+            env.CACA_MORPHO_MERCADOS_COM_DEVEDORES,32,1,36)),
         posicoesPorMercado:numeroLimitado(
             env.CACA_MORPHO_POSICOES_POR_MERCADO,36,1,60),
         requisicoesHttp:numeroLimitado(

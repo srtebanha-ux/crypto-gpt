@@ -27,8 +27,8 @@ import {rotasMorphoHabilitadas} from './titanMorphoDiretorDeRota';
 // (a chave fica na variavel de ambiente; ela nao vai para log nenhum — o unico
 // lugar onde o endereco do RPC aparece e o host, sem o caminho.)
 import { Decimal } from 'decimal.js';
-import { examinarSaudeMorpho } from './titanMorphoRadar';
-import { id, AbiCoder } from 'ethers';
+import { examinarSaudeMorpho,precisaPreflightIntegralMorpho,totalBorrowComJurosMorpho } from './titanMorphoRadar';
+import { id, AbiCoder, Interface } from 'ethers';
 import { MULTICALL3, codificarAggregate3, decodificarAggregate3Rapido } from './multicall';
 import { ProxyAgent, fetch } from 'undici';
 import { createLogger } from './logger';
@@ -39,6 +39,10 @@ import { incentivoDeLiquidacao, bonusPct, saudeNoMorpho, ESCALA_DO_ORACULO } fro
 
 const log = createLogger('morpho');
 const coder = AbiCoder.defaultAbiCoder();
+const irmBorrowRateView=new Interface([
+    'function borrowRateView((address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) marketParams,(uint128 totalSupplyAssets,uint128 totalSupplyShares,uint128 totalBorrowAssets,uint128 totalBorrowShares,uint128 lastUpdate,uint128 fee) market) view returns(uint256)',
+]);
+
 const sel = (a: string) => id(a).slice(0, 10);
 const MP = '(address,address,address,address,uint256)';
 
@@ -98,9 +102,9 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
  */
 import {
     enumerarMercados, enumerarDevedores, soOsQuePagam, mercadosParaSondagem, soDaBase, codificarIdToMarketParams,
-    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,
+    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,consultaRiscoGlobalMorpho,lerRiscoGlobalMorpho,
     selecionarDevedoresPorRisco,
-    codificarPosition, codificarMarket, lerMarket, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
+    codificarPosition, codificarMarket, lerMarket, lerMarketComTempo, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, cursorDeCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
 import {
@@ -524,13 +528,73 @@ export async function descobrirMorphoPorApi(
                 lerRankingMercadosMorpho(JSON.parse(await resp.text()));
         }catch{/* Sem ranking nunca vira "sem mercado"; existe fallback. */}
     }
+    // Always sample the 1000 borrowers closest to the liquidation edge.
+    // A second durable page rotates through deeper results so no position
+    // disappears permanently behind the API's first-page cap.
+    let riscoGlobal:ReturnType<typeof lerRiscoGlobalMorpho>=null;
+    let riscoPaginaExtra=0, riscoExtraColetados=0;
+    const endpointRisco='https://api.morpho.org/graphql';
+    if(candidatosParaSondagem.length>0&&orcamento.pedir()){
+        try{
+            const resp=await buscar(endpointRisco,{
+                method:'POST',
+                headers:{'content-type':'application/json','accept':'application/json'},
+                body:consultaRiscoGlobalMorpho(),signal:orcamento.sinal,
+            });
+            if(resp.status===200)riscoGlobal=lerRiscoGlobalMorpho(JSON.parse(await resp.text()));
+        }catch{/* The read-only risk API must not block normal discovery. */}
+    }
+    let riscoMercadosPriorizados=riscoGlobal?.candidatos.map(x=>x.mercado)??[];
+    if(riscoGlobal?.total!==null && riscoGlobal!==null
+        &&riscoGlobal.total>1000 &&orcamento.pedir()){
+        const offset=cursores.obterPaginaRiscoGlobal(riscoGlobal.total);
+        try{
+            const resp=await buscar(endpointRisco,{
+                method:'POST',
+                headers:{'content-type':'application/json','accept':'application/json'},
+                body:consultaRiscoGlobalMorpho(offset),signal:orcamento.sinal,
+            });
+            if(resp.status===200){
+                const extra=lerRiscoGlobalMorpho(JSON.parse(await resp.text()));
+                if(extra!==null){
+                    riscoPaginaExtra=offset;
+                    riscoExtraColetados=extra.candidatos.length;
+                    const original=riscoGlobal.candidatos;
+                    const seen=new Set(original.map(x=>x.mercado+'|'+x.usuario));
+                    for(const item of extra.candidatos){
+                        const k=item.mercado+'|'+item.usuario;
+                        if(!seen.has(k)){original.push(item);seen.add(k);}
+                    }
+                    // Preserve one first-page priority; reserve another
+                    // chance for markets unseen in that page.
+                    riscoMercadosPriorizados=[
+                        ...original.slice(0,1).map(x=>x.mercado),
+                        ...extra.candidatos.map(x=>x.mercado),
+                        ...original.slice(1).map(x=>x.mercado),
+                    ];
+                    await cursores.avancarPaginaRiscoGlobal(offset,riscoGlobal.total);
+                }
+            }
+        }catch{/* Keep the stored offset for a future, successful request. */}
+    }
+    log.info('[MORPHO/RISCO-GLOBAL] Sinal priorizado, ainda sem comprovacao onchain.',{
+        apiValida:riscoGlobal!==null,
+        candidatos:riscoGlobal?.candidatos.length??0,
+        totalApi:riscoGlobal?.total??null,
+        paginaExtra:riscoPaginaExtra,
+        candidatosNaPaginaExtra:riscoExtraColetados,
+        coberturaParcial:riscoGlobal!==null&&
+            riscoGlobal.total!==null&&riscoGlobal.total>riscoGlobal.candidatos.length,
+        regra:'API nao autoriza liquidacao; validar cinco parametros, posicao, oracle, eth_call e lucro',
+    });
     // A single durable queue chooses the markets that can ALSO collect borrowers.
     // Two wall-clock rotations used to validate a market and discard it before
     // enumeration. No cursor advanced for that market, so a known market was
     // incorrectly treated as effective borrower coverage.
     const rodada=opcoes.indiceDaRodada ?? Math.floor(Date.now()/900_000);
     const escolhidos=cursores.selecionarMercados(candidatosParaSondagem,rankingDeDividas,
-        tetoDev===0?tetoValid:Math.min(tetoValid,tetoDev));
+        tetoDev===0?tetoValid:Math.min(tetoValid,tetoDev),
+        riscoMercadosPriorizados);
     log.info('[MORPHO/API] Selecao de mercados para conferir na Base.',{
         mercadosEnumerados:candidatosParaSondagem.length,
         llTvAte77PorCento:quePagam.length,
@@ -581,6 +645,17 @@ export async function descobrirMorphoPorApi(
     const morpho=snapshot?.morpho??'0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb';
     const url=snapshot?.url??escada[0]!;
     const blocoDoRadar=snapshot?.bloco??null;
+    // Same pinned block as all market and position reads. If an RPC fails or
+    // the header is malformed, we fall back to stale-market classification;
+    // the executor still performs its mandatory complete eth_call.
+    let timestampDoRadar:bigint|null=null;
+    if(blocoDoRadar!==null)try{
+        const header=await pedirRpc(url,'eth_getBlockByNumber',[blocoDoRadar,false]) as
+            {timestamp?:unknown}|null;
+        if(typeof header?.timestamp==='string'
+            &&/^0x[0-9a-f]+$/i.test(header.timestamp))
+            timestampDoRadar=BigInt(header.timestamp);
+    }catch{/* no timestamp: never fabricate accrued interest */}
     const rpcMudo=snapshot===null;
     const porqueNaoValidou=rpcMudo?'nenhum RPC confirmou Base, superficie e snapshot Morpho':null;
     const chamarRpc=async(data:string,alvo=morpho):Promise<string|null>=>
@@ -619,6 +694,7 @@ export async function descobrirMorphoPorApi(
     // Every confirmed selection has a borrower slot. Hot positions keep their
     // independent per-block worker; this queue broadens discovery fairly.
     const mercadosComDevedores=tetoDev===0?[]:escolhidos.filter(x=>x.confirmadoNaCorrente);
+    let irmViewsConsultadas=0,jurosAplicados=0;
     for (const m of mercadosComDevedores) {
         // A deadline must not falsely advance markets that were never queried.
         if(orcamento.sinal.aborted||orcamento.gastas>=orcamento.tetoDeRequisicoes)break;
@@ -629,7 +705,50 @@ export async function descobrirMorphoPorApi(
         // can be used. Oracle address is from those confirmed parameters.
         if(blocoDoRadar !== null) {
             const estado=await chamarRpc(codificarMarket(m.id));
-            totais=estado===null?null:lerMarket(estado);
+            const mercadoCompleto=estado===null?null:lerMarketComTempo(estado);
+            totais=mercadoCompleto??(estado===null?null:lerMarket(estado));
+            // Restrict IRM overhead to the first 8 confirmed markets
+            // (global risk first). Never assume zero interest if view fails.
+            if(mercadoCompleto&&timestampDoRadar!==null
+              &&irmViewsConsultadas<8
+              &&/^0x[0-9a-fA-F]{40}$/.test(m.irm)
+              && !/^0x0{40}$/i.test(m.irm)
+              &&mercadoCompleto.totalBorrowAssets>0n
+              &&mercadoCompleto.lastUpdate>0n
+              &&timestampDoRadar>mercadoCompleto.lastUpdate){
+                irmViewsConsultadas++;
+                try{
+                    const lltv=BigInt(m.lltv.mul('1000000000000000000').floor().toFixed(0));
+                    const data=irmBorrowRateView.encodeFunctionData('borrowRateView',[
+                        [m.loanToken,m.collateralToken,m.oracle,m.irm,lltv],
+                        [mercadoCompleto.totalSupplyAssets,mercadoCompleto.totalSupplyShares,
+                         mercadoCompleto.totalBorrowAssets,mercadoCompleto.totalBorrowShares,
+                         mercadoCompleto.lastUpdate,mercadoCompleto.fee],
+                    ]);
+                    const answer=await chamarRpc(data,m.irm);
+                    if(answer!==null){
+                        const rate=irmBorrowRateView.decodeFunctionResult('borrowRateView',answer)[0] as bigint;
+                        // Reasonable non-negative WAD rates. Bad or unavailable
+                        // IRMs cannot promote candidates into paid execution.
+                        if(rate>=0n&&rate<=10n**18n){
+                            const accrued=totalBorrowComJurosMorpho(
+                                mercadoCompleto.totalBorrowAssets,rate,
+                                mercadoCompleto.lastUpdate,timestampDoRadar);
+                            if(accrued){
+                                totais={...mercadoCompleto,
+                                    totalBorrowAssets:accrued.totalBorrowAssets};
+                                jurosAplicados++;
+                                log.info('[MORPHO/JUROS-ESTIMADOS] BorrowRateView de bloco fixado.',{
+                                    mercado:m.id,bloco:blocoDoRadar,
+                                    jurosCru:accrued.juros.toString(),
+                                    segundos:(timestampDoRadar-mercadoCompleto.lastUpdate).toString(),
+                                    observacao:'estimativa para triagem; eth_call integral e obrigatorio',
+                                });
+                            }
+                        }
+                    }
+                }catch{/* unknown accrual: retain old snapshot, no paid permission */}
+            }
             if(/^0x[0-9a-fA-F]{40}$/.test(m.oracle)
                 && !/^0x0{40}$/i.test(m.oracle)){
                 const preco=await chamarRpc(id('price()').slice(0,10),m.oracle);
@@ -659,7 +778,19 @@ export async function descobrirMorphoPorApi(
         // Multicall3 faz ate 60 verificacoes de devedor num UNICO eth_call
         // no mesmo bloco do preco do oracle e dos totais. Antes isto eram
         // dezenas de round trips e a fila parava no primeiro HTTP 429.
-        const candidatos=selecionarDevedoresPorRisco(cursores.obter(m.id).devedores,m.lltv,tetoPosicoes,rodada);
+        // Reserve up to a quarter of position reads for the globally riskiest
+        // borrowers, even if the per-market BorrowShares pages missed them.
+        // Address came from API; position(), oracle() and market() decide truth.
+        const urgentes=(riscoGlobal?.candidatos??[])
+            .filter(x=>x.mercado===m.id.toLowerCase())
+            .slice(0,Math.ceil(tetoPosicoes/4))
+            .map(x=>({endereco:x.usuario,borrowSharesDaApi:null,
+                borrowAssetsUsd:null,collateralUsd:null}));
+        const vistosUrgentes=new Set(urgentes.map(x=>x.endereco.toLowerCase()));
+        const outros=selecionarDevedoresPorRisco(
+            cursores.obter(m.id).devedores.filter(x=>!vistosUrgentes.has(x.endereco.toLowerCase())),
+            m.lltv,Math.max(0,tetoPosicoes-urgentes.length),rodada);
+        const candidatos=[...urgentes,...outros];
         const dadosLote=candidatos.length>0
             ?await chamarRpc(codificarAggregate3(candidatos.map(d=>({
                 alvo:morpho,dados:codificarPosition(m.id,d.endereco),
@@ -712,12 +843,24 @@ export async function descobrirMorphoPorApi(
                         if(m.confirmadoNaCorrente){
                             const alvo={mercado:m,usuario:d.endereco};
                             if(risco.situacao==='cruzou-estimado')liquidaveisParaPreflight.unshift(alvo);
-                            else if(liquidaveisParaPreflight.length<3)liquidaveisParaPreflight.push(alvo);
+                            else if(precisaPreflightIntegralMorpho(risco)&&liquidaveisParaPreflight.length<3)
+                                liquidaveisParaPreflight.push(alvo);
                             if(liquidaveisParaPreflight.length>3)liquidaveisParaPreflight.pop();
                         }
                         if(risco.situacao==='proxima')pertoDoLimiar+=1;
                         else {
                             cruzaramEstimado+=1;
+                            // A capped shortlist is not evidence for every
+                            // crossed position; log each crossing separately.
+                            log.warn('[MORPHO/RADAR-CRUZAMENTO] Limite estimado cruzado.',{
+                                bloco:blocoDoRadar??'desconhecido',
+                                mercado:m.id,usuario:d.endereco,
+                                distanciaBps:risco.distanciaBps?.toString()??null,
+                                dividaCrua:risco.dividaCrua?.toString()??null,
+                                confirmadoNaCorrente:m.confirmadoNaCorrente,
+                                estado:'estimado com juros IRM se disponiveis; exige eth_call integral',
+                                regra:'nao e liquidacao real, exige eth_call e recibo',
+                            });
                         }
                         if(alvosDeRisco.length<20&&risco.distanciaBps!==null
                             &&risco.dividaCrua!==null)
@@ -743,6 +886,7 @@ export async function descobrirMorphoPorApi(
         mercadosComDevedores:mercadosComDevedores.length,
         posicoesComDividaValidadas:validados,
         maximoDePosicoesOnchain:tetoPosicoes*mercadosComDevedores.length,
+        mercadosComTaxaConsultada:irmViewsConsultadas,mercadosComJurosEstimados:jurosAplicados,
         saudesCalculadas:posicoesAvaliadas,
         proximas:pertoDoLimiar,
         cruzadasEstimadas:cruzaramEstimado,

@@ -3,7 +3,7 @@ name: Build TITAN runtime image
 on:
   workflow_dispatch:
   push:
-    branches: [CHAT, codex/titan-container-build-20261023]
+    branches: [CHAT, codex/titan-container-build-20261023, feat/titan-cpamm-atomico-chat-20261027]
     paths:
       - '.github/workflows/titan-container.yml'
       - 'Dockerfile'

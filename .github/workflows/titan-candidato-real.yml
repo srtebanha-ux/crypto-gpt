@@ -1,0 +1,115 @@
+name: TITAN public Base candidate (read only)
+on:
+  pull_request:
+    branches: [CHAT]
+    paths:
+      - '.github/workflows/titan-candidato-real.yml'
+      - 'scripts/titanCandidato53169975.cjs'
+      - 'scripts/titanCandidato53169975.test.cjs'
+      - 'scripts/titanDescobrirExecutorPublico.cjs'
+      - 'scripts/titanDescobrirExecutorPublico.test.cjs'
+      - 'scripts/titanLocalizarFlashArbV2.cjs'
+      - 'scripts/titanMorphoV3CustoDeploy.cjs'
+      - 'scripts/titanAuditarV3Railway.cjs'
+      - 'scripts/titanAuditarV3Railway.test.cjs'
+      - 'scripts/titanRpcEnvelopePublico.cjs'
+      - 'src/titanMorphoRadar.ts'
+      - 'src/morphoApi.ts'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  historical-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Compile canonical Paris artifact and test V3 bytecode audit
+        run: |
+          npx hardhat compile
+          node --test scripts/titanAuditarV3Railway.test.cjs
+      - name: Verify strict JSON-RPC envelope shape from public Base gateways
+        run: node scripts/titanRpcEnvelopePublico.cjs > rpc-envelope-publico.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: titan-base-rpc-envelope
+          path: rpc-envelope-publico.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Audit V3 executor configured on Railway against two public Base RPCs
+        run: node scripts/titanAuditarV3Railway.cjs > executor-v3-railway.json
+      - name: Upload V3 executor immutable verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-existing-v3-railway-audit
+          path: executor-v3-railway.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Compile Morpho V3 artifact for read-only deployment cost estimate
+        run: npx hardhat compile
+      - name: Estimate the existing wallet's V3 deployment gas without broadcasting
+        run: node scripts/titanMorphoV3CustoDeploy.cjs > morpho-v3-gas-readonly.json
+      - name: Publish read-only Morpho V3 deployment estimate
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-morpho-v3-deploy-estimate
+          path: morpho-v3-gas-readonly.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Compile exact FlashArb V2 executable identity
+        run: node scripts/gerarProvaFlashArb.cjs
+      - name: Audit existing V2 contracts against this source on Base
+        run: node scripts/titanLocalizarFlashArbV2.cjs > flasharb-v2-publico.json
+      - name: Upload existing owner-operated FlashArb V2 identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-base-flasharb-v2-identity
+          path: flasharb-v2-publico.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Historical probe error-classification regressions
+        run: node --test scripts/titanCandidato53169975.test.cjs scripts/titanDescobrirExecutorPublico.test.cjs
+      - name: Search existing executor deployments on the public Base chain
+        run: node scripts/titanDescobrirExecutorPublico.cjs > executor-publico.json
+      - name: Upload non-sensitive owner/deployment discovery
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-base-owner-executors
+          path: executor-publico.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Read Base archive candidate without a signer
+        id: probe
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Use only public RPC endpoints. No wallet, signer, environment
+          # secrets, deployments, eth_sendRawTransaction, or paid operations.
+          for endpoint in https://mainnet.base.org https://base-rpc.publicnode.com; do
+            if BASE_FORK_RPC_URL="$endpoint" timeout 70s node scripts/titanCandidato53169975.cjs > candidate.json; then
+              echo "historical_public_probe=success" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          rm -f candidate.json
+          echo "historical_public_probe=unavailable" >> "$GITHUB_OUTPUT"
+          # An unavailable archive RPC is not evidence of a healthy position.
+          # Do not make third-party RPC availability a blocking CI gate.
+          exit 0
+      - name: Upload public proof when verified
+        if: steps.probe.outputs.historical_public_probe == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: titan-base-candidate-53169975
+          path: candidate.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Report inconclusive external access
+        if: steps.probe.outputs.historical_public_probe != 'success'
+        run: echo "Historical eligibility unknown (public archive RPC unavailable); no financial action taken."

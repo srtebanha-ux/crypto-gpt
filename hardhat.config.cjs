@@ -16,12 +16,12 @@ subtask(TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD, async (args, hre, runSuper) => ({
 }));
 
 module.exports = {
-    solidity: { version: '0.8.26', settings: { optimizer: { enabled: true, runs: 200 } } },
+    solidity: { version: '0.8.26', settings: { evmVersion: 'paris', optimizer: { enabled: true, runs: 200 } } },
     paths: { sources: './contracts', tests: './forkTests', cache: './.tmp/hhcache', artifacts: './.tmp/artifacts' },
     networks: {
         hardhat: {
             forking: {
-                url: 'https://mainnet.base.org',
+                url: process.env.BASE_FORK_RPC_URL || 'https://mainnet.base.org',
                 ...(process.env.ARB_BLOCO ? { blockNumber: Number(process.env.ARB_BLOCO) } : {}),
             },
             chainId: 8453,

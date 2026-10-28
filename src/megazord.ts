@@ -1,15 +1,22 @@
 /** Combined scanners with optional shared financial executor. */
+import {auditarContratosMegazord} from './megazordContratosPreflight';
 import {createLogger} from './logger';
-import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord} from './megazordExecutor';
+import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord,
+ recuperarLockOrfaoMegazord} from './megazordExecutor';
 import {normalizarCredenciaisMegazord} from './megazordCredenciais';
-import {selecionarRpcSecundarioMegazord} from './megazordRpcFailover';
+import {politicaMorphoV3} from './titanMorphoV3Gate';
+import {diagnosticarFioRpcMegazord} from './megazordRpcWireDiagnostico';
+import {auditarPersistenciaMegazord} from './megazordAuditoriaPersistencia';
+import {selecionarParRpcMegazord} from './megazordRpcFailover';
 import {prepararMorphoMegazord} from './megazordMorphoBoot';
 import {prepararAaveMultiHopMegazord,habilitarAaveMultiHopMegazord} from './megazordAaveMultiBoot';
 import {atualizarPisoUsdMegazord,iniciarAtualizacaoPisoUsd} from './megazordEthUsd';
 import {JsonRpcProvider} from 'ethers';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
+import {auditarAeroImplantadoSomenteLeitura} from './megazordAeroRuntimeAudit';
 type RedeVerificada=Awaited<ReturnType<typeof import('./megazordPreflight').conferirRedeMegazord>>;
 export type DependenciasBootMegazord={
+ identidades:(env:NodeJS.ProcessEnv)=>Promise<void>;
  rede:(env:NodeJS.ProcessEnv)=>Promise<RedeVerificada>;
  preco:(env:NodeJS.ProcessEnv)=>Promise<{ethUsd:string;minimoWei:string}>;
  morpho:typeof prepararMorphoMegazord;
@@ -17,9 +24,13 @@ export type DependenciasBootMegazord={
  atualizar:typeof iniciarAtualizacaoPisoUsd;
 };
 const boot:DependenciasBootMegazord={
- rede:async env=>await selecionarRpcSecundarioMegazord(env) as RedeVerificada,
+ identidades:async env=>{
+   // Pools are candidate-specific and audited again by the atomic CPAMM proof.
+   await auditarContratosMegazord({...env,TITAN_CPAMM_ATOMICO:'0'});
+ },
+ rede:async env=>await selecionarParRpcMegazord(env) as RedeVerificada,
  preco:async env=>{
-   const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true});
+   const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true,batchMaxCount:1});
    try{return await atualizarPisoUsdMegazord(env,p);}finally{p.destroy();}
  },
  morpho:prepararMorphoMegazord,aave:prepararAaveMultiHopMegazord,
@@ -88,6 +99,9 @@ export async function iniciarMegazord(
    // Fails closed if the contract is not deployed, RPCs disagree, wallet differs,
    // gas balance is zero or a non-durable journal was configured.
    conferirIdentidadeMegazord(env);
+   // No signer loaded or transaction sent here. Read-only evidence survives
+   // even when all public RPC gateways reject the subsequent readiness gate.
+   log.info('[TITAN/AUDITORIA-PERSISTENCIA-READONLY]',auditarPersistenciaMegazord(env));
    normalizarCredenciaisMegazord(env);
    // Align BEFORE loading the CACA module, which snapshots its env on import.
    // Invalid quotas abort before deploying contracts or loading signers.
@@ -97,9 +111,26 @@ export async function iniciarMegazord(
    // deploy. The canonical Morpho address is only a readiness witness here,
    // never added to the financial executor's destination allowlist.
    const preliminar:NodeJS.ProcessEnv={...env,MEGAZORD_CONTRATOS:MORPHO_FLASH_BASE};
-   await deps.rede(preliminar);
+   try{await deps.rede(preliminar);}catch(e){
+     throw Error('fase=rede_pre_contratos: '+(e instanceof Error?e.message:'falha'));
+   }
+   // The selected PRIMARY must be retained for all later price and signer RPCs.
+   env.MEGAZORD_RPC_URL=preliminar.MEGAZORD_RPC_URL;
    env.MEGAZORD_RPC_SECUNDARIO=preliminar.MEGAZORD_RPC_SECUNDARIO;
    await deps.preco(env);
+   // Only a diagnostic: the pre-existing V3 signer stays unchanged.
+   if(env.TITAN_AERO_AUDITAR_READONLY==='1'){
+     try{
+       const report=await auditarAeroImplantadoSomenteLeitura(env);
+       log.info('[TITAN/AERO-RUNTIME-AUDIT-READONLY] Compilacao, immutables e recibos conciliados.',report);
+     }catch(e){
+       const msg=e instanceof Error?e.message:'erro';
+       log.warn('[TITAN/AERO-RUNTIME-AUDIT-READONLY] Auditoria incompleta; rota Aero permanece bloqueada.',{
+         somenteLeitura:true,
+         motivo:/^[a-z0-9-]{5,85}$/.test(msg)?msg:'rpc-ou-manifesto-indisponivel',
+       });
+     }
+   }
    // Deploy is strictly opt-in with a per-contract gas cap. An unresolved
    // marker, unknown nonce or mismatching immutable fails the WHOLE boot.
    const contratos=await deps.morpho(env);
@@ -107,27 +138,74 @@ export async function iniciarMegazord(
    // whitelisted. The complete readiness check still follows before arming.
    const multi=await deps.aave(env);
    if(multi)env.MEGAZORD_CONTRATOS=[env.MEGAZORD_CONTRATOS,multi].filter(Boolean).join(',');
-   const rede=await deps.rede(env);
+   const rede=await deps.rede(env).catch(e=>{
+     throw Error('fase=rede_pos_contratos: '+(e instanceof Error?e.message:'falha'));
+   });
+   await deps.identidades(env); // pinned bytecode and invariants on both RPCs before arming
    // Deploy confirmation can take time: do not arm from the pre-deploy quote.
    const lucroUsd=await deps.preco(env);
+   // Only after two independent providers agreed on nonce/blocks and both
+   // price/contract gates passed, a single explicitly authorized archived-lock
+   // recovery may happen. Never delete a pending journal or a recent lock.
+   if(env.MEGAZORD_RECUPERAR_LOCK_OBSOLETO==='1'){
+     const {journal}=conferirIdentidadeMegazord(env);
+     const recovered=recuperarLockOrfaoMegazord(journal,rede.checks);
+     log.info('[TITAN/LOCK-RECUPERACAO-CONTROLADA]',recovered);
+   }
+   // Public wallet balance is not a spending authorization. Report the
+   // verified balance separately from the independent per-tx/day/lifetime caps
+   // so adding ETH never silently raises the bot's spending policy.
+   log.info('[TITAN/GAS-CARTEIRA-READONLY]',{
+     saldoWeiPorRpc:rede.checks.map(x=>x.balanceWei),
+     limitePorTxWei:env.MEGAZORD_GAS_MAX_TX_WEI,
+     limiteDiaWei:env.MEGAZORD_GAS_MAX_DIA_WEI,
+     perdaAcumuladaMaxWei:env.MEGAZORD_PERDA_MAX_TOTAL_WEI,
+     aviso:'Saldo presente nao prova alvo ou lucro; autorizacao permanece sujeita a tetos',
+   });
    log.info('Preflight de execucao aprovado (somente leitura).',{
      endereco:rede.address,
      rpcs:rede.checks.length,
      escopo:rede.scope,
-     executoresMorphoConferidos:2,
+     executoresMorphoConferidos:[contratos.v3,contratos.aero].filter(Boolean).length,
      implantesNestaInicializacao:contratos.novos,
      lucroMinimoWethWei:lucroUsd.minimoWei,
      precoReferenciaEthUsd:lucroUsd.ethUsd,
    });
+   if(env.MEGAZORD_CONTINUO==='1'){
+     log.info('[TITAN/OPERACAO-24H]',{
+       autorizado:true,canarioHorarioDesligado:true,
+       tentativasMaximasPorDia:env.MEGAZORD_MAX_TX_DIA,
+       gasMaximoPorDiaWei:env.MEGAZORD_GAS_MAX_DIA_WEI,
+       perdaAcumuladaMaximaWei:env.MEGAZORD_PERDA_MAX_TOTAL_WEI,
+       exigencias:'quorum de dois RPCs, nonce, gas L1+L2, piso de lucro, recibo e cofre',
+       custoAdicionalAutorizado:false,
+     });
+   }
    // Automatic Morpho LIVE only when the service was expressly configured
    // for MEGAZORD_MODO=execucao and every onchain + wallet gate passed.
    // Strategies still execute full eth_call/gas/profit gates per candidate.
-   for(const kind of ['V3','AERO']){
+   for(const kind of ['V3','AERO'] as const){
+     if(!contratos[kind==='V3'?'v3':'aero']){
+       env['CACA_MORPHO_'+kind+'_AVALIAR']='0';
+       env['CACA_MORPHO_'+kind+'_ENVIAR']='0';
+       continue;
+     }
      env['CACA_MORPHO_'+kind+'_AVALIAR']='1';
      env['CACA_MORPHO_'+kind+'_ENVIAR']='1';
      env['CACA_MORPHO_'+kind+'_CONFIRMAR']='OPERAR_MORPHO_BASE';
      env['CACA_MORPHO_'+kind+'_NONCE_EXCLUSIVO']='1';
    }
+   // Economic feasibility: a price-positive position can still be denied by
+   // the global transaction cap. Show the absolute best-case limit; real
+   // baseFee/L1 make it STRICTLY smaller. Never authorize spending here.
+   const custoTip=politicaMorphoV3(env).tipWei;
+   const tetoWei=BigInt(env.MEGAZORD_GAS_MAX_TX_WEI!);
+   log.info('[TITAN/VIABILIDADE-GAS-READONLY]',{
+     tipConfiguradoWei:custoTip.toString(),
+     tetoPorTransacaoWei:tetoWei.toString(),
+     gasMaximoTeoricoSemBaseNemL1:(tetoWei/custoTip).toString(),
+     explicacao:'Limite matematico superior; baseFee e L1 positivos reduzem o gas realmente possivel. Nenhum gasto ou envio nesta verificacao.',
+   });
    if(multi)habilitarAaveMultiHopMegazord(env,multi);
    else{
      // No compatible Aave multi-hop contract: keep legacy V1/V2 disarmed,
@@ -150,7 +228,11 @@ export async function iniciarMegazord(
 }
 
 if(require.main===module){
- void iniciarMegazord(process.env,async()=>{
+ // Diagnoses the ACTUAL Railway egress; only fixed-shape metadata is logged.
+ // No signer, key, secret-bearing URL, RPC payload or financial write.
+ void diagnosticarFioRpcMegazord(process.env).then(report=>{
+   log.info('[TITAN/RPC-FIO-READONLY]',report);
+   return iniciarMegazord(process.env,async()=>{
    if(process.env.MEGAZORD_MODO==='execucao'){
      instalarExecutorMegazord(process.env);
      for(const k of ['CACA_CHAVE_PRIVADA','TITAN_CHAVE_PRIVADA']){
@@ -164,6 +246,7 @@ if(require.main===module){
      executorFinanceiroUnificado:process.env.MEGAZORD_MODO==='execucao',
    });
    return {liquidacoes:()=>manterLiquidanteMegazord(caca.iniciarLiquidante),arbitragem:arb.iniciarArbitragem};
+   });
  }).catch(e=>{
    log.error('Megazord interrompido.',{motivo:e instanceof Error?e.message:'falha'});
    // Stop both engines and their timers after failure; do not run degraded.

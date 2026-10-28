@@ -1,0 +1,33 @@
+name: TITAN CPAMM atomic integration (CHAT)
+on:
+  pull_request:
+    branches: [CHAT]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+      - name: TS full suite, bounded concurrency
+        run: node --require ts-node/register --test --test-concurrency=2 src/*.test.ts
+      - name: EVM local, contracts and fee-on-transfer regression
+        run: |
+          npx hardhat compile
+          npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanCpammLocal.js forkTests/titanMorphoV3Local.js
+          npm run megazord:test-local
+      - name: Railway runtime image and offline unified boot
+        run: |
+          docker build -t titan-ci .
+          docker run --rm --network none --entrypoint node -v "$PWD/scripts/validarMegazordRuntime.cjs:/tmp/check.cjs:ro" titan-ci /tmp/check.cjs

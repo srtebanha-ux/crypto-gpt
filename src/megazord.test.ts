@@ -27,6 +27,7 @@ function bootFixture(){
    MEGAZORD_GAS_MAX_TX_WEI:'100',MEGAZORD_GAS_MAX_DIA_WEI:'200'};
  let checks=0;
  const deps:DependenciasBootMegazord={
+   identidades:async()=>{events.push('identidades');},
    rede:async e=>{
      events.push('rede');checks++;
      assert.notEqual(e.CACA_MORPHO_V3_ENVIAR,'1');
@@ -72,7 +73,7 @@ test('network and price failures happen before any paid contract preparation',as
 test('pre-deploy readiness is repeated for actual executors and price before arming',async()=>{
  const f=bootFixture();
  await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),/liquidacoes encerrou/);
- assert.deepEqual(f.events,['rede','preco','deploy-morpho','aave','rede','preco','atualizacao','engines']);
+ assert.deepEqual(f.events,['rede','preco','deploy-morpho','aave','rede','identidades','preco','atualizacao','engines']);
  assert.equal(f.env.CACA_MAX_ENVIOS,'1');
  assert.equal(f.env.CACA_CHAVE_PRIVADA,f.env.MEGAZORD_CHAVE_PRIVADA);
 });
@@ -139,4 +140,38 @@ test('Megazord entrypoint aligns CACA window to global 250 daily cap before CACA
  const observer:NodeJS.ProcessEnv={MEGAZORD_MODO:'observacao',MEGAZORD_MAX_TX_DIA:'250'};
  alinharMaxEnviosMegazord(observer);
  assert.equal(observer.CACA_MAX_ENVIOS,undefined,'observation has no live defaults');
+});
+
+ test('codehash audit failure stops boot before arming or loading engines',async()=>{
+ const f=bootFixture();f.deps.identidades=async()=>{throw Error('bytecode diverge');};
+ await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),/bytecode diverge/);
+ assert.notEqual(f.env.CACA_MORPHO_V3_ENVIAR,'1');assert.ok(!f.events.includes('engines'));
+});
+
+test('full boot can pass preliminary read gate but fail the executor read; reports exact phase without arming',async()=>{
+ const {criarRpcPreflight}=await import('./megazordRpcLeitura');
+ const {conferirRedeMegazord}=await import('./megazordPreflight');
+ const {selecionarRpcSecundarioMegazord}=await import('./megazordRpcFailover');
+ const f=bootFixture();
+ f.env.MEGAZORD_RPC_URL='https://primary.example/secret';f.env.MEGAZORD_RPC_SECUNDARIO='https://secondary.example/secret';
+ let witnessReads=0,executorReads=0;
+ const rpc=criarRpcPreflight({esperar:async()=>{},fetcher:(async(_u,init)=>{
+  const {id,method,params}=JSON.parse(String(init?.body));let result:unknown;
+  if(method==='eth_chainId')result='0x2105';
+  else if(method==='eth_getBlockByNumber')result={number:'0x64',timestamp:'0x'+Math.floor(Date.now()/1000).toString(16)};
+  else if(method==='eth_getTransactionCount')result='0x0';
+  else if(method==='eth_getBalance')result='0x1';
+  else if(method==='eth_getCode'){
+   if(params[0]!==MORPHO_FLASH_BASE){executorReads++;return new Response(JSON.stringify({jsonrpc:'2.0',id,error:{code:-32602,message:'secret'}}));}
+   witnessReads++;result='0x6000';
+  }else throw Error('unexpected method');
+  return new Response(JSON.stringify({jsonrpc:'2.0',id,result}));
+ }) as typeof fetch});
+ f.deps.rede=async e=>await selecionarRpcSecundarioMegazord(e,x=>conferirRedeMegazord(x,rpc),async()=>{}) as Awaited<ReturnType<typeof conferirRedeMegazord>>;
+ await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),e=>e instanceof Error
+  &&e.message.includes('fase=rede_pos_contratos')&&e.message.includes('preflight requisicao RPC invalida: sem envio')
+  &&!e.message.includes('secret'));
+ assert.equal(witnessReads,2);assert.equal(executorReads,1);
+ assert.notEqual(f.env.CACA_MORPHO_V3_ENVIAR,'1');assert.ok(!f.events.includes('engines'));
+ assert.equal(f.env.MEGAZORD_RPC_URL,'https://primary.example/secret','credential normalization must not mutate URL');
 });

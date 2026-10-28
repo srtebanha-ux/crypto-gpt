@@ -31,3 +31,61 @@ test('old blocks and pending nonces never become readiness approvals',async()=>{
  await assert.rejects(conferirRedeMegazord(env,async(u,m)=>
    m==='eth_getBlockByNumber'?{number:'0x64',timestamp:'0x1'}:rpc(u,m)),/bloco ausente ou antigo/);
 });
+
+test('two RPC witnesses are checked sequentially to avoid shared rate-limit bursts',async()=>{
+ const seen:string[]=[];
+ const result=await conferirRedeMegazord(env,async(u,m,p)=>{
+  seen.push(u);
+  return rpc(u,m);
+ });
+ assert.equal(result.checks.length,2);
+ assert.ok(seen.length>=12);
+ const firstOther=seen.indexOf('rpc-b');
+ assert.ok(firstOther>0);
+ assert.ok(seen.slice(0,firstOther).every(x=>x==='rpc-a'));
+ assert.ok(seen.slice(firstOther).every(x=>x==='rpc-b'));
+});
+
+test('readiness never overlaps calls to a rate-limited Base provider',async()=>{
+ let active=0,maximum=0;
+ await conferirRedeMegazord(env,async(u,m,p)=>{
+  active++;maximum=Math.max(maximum,active);
+  await Promise.resolve();
+  try{return await rpc(u,m);}finally{active--;}
+ });
+ assert.equal(maximum,1);
+});
+
+
+test('null latest block must recover only through a valid numbered block on each independent RPC',async()=>{
+ const {FalhaLeituraRede}=await import('./megazordPreflight');
+ const {FalhaRpcLeitura}=await import('./megazordRpcLeitura');
+ const calls:string[]=[];
+ const result=await conferirRedeMegazord(env,async(u,m,p)=>{
+   calls.push(u+':'+m+':'+String(p?.[0]??''));
+   if(m==='eth_getBlockByNumber'&&p[0]==='latest')
+     throw new FalhaLeituraRede(u==='rpc-a'?0:1,
+       new FalhaRpcLeitura('null latest','eth_getBlockByNumber','body_invalido',3));
+   if(m==='eth_blockNumber')return '0x66';
+   if(m==='eth_getBlockByNumber'){
+     assert.equal(p[0],'0x65');
+     return {number:'0x65',timestamp:'0x'+Math.floor(Date.now()/1000).toString(16)};
+   }
+   return rpc(u,m);
+ });
+ assert.equal(result.checks[0].block,101);
+ assert.equal(result.checks[1].block,101);
+ assert.equal(calls.filter(x=>x.includes(':eth_blockNumber:')).length,2);
+});
+test('numbered block fallback cannot legalize an old block or a failed RPC',async()=>{
+ const {FalhaLeituraRede}=await import('./megazordPreflight');
+ const {FalhaRpcLeitura}=await import('./megazordRpcLeitura');
+ await assert.rejects(conferirRedeMegazord(env,async(u,m,p)=>{
+   if(m==='eth_getBlockByNumber'&&p[0]==='latest')
+     throw new FalhaLeituraRede(u==='rpc-a'?0:1,
+       new FalhaRpcLeitura('null','eth_getBlockByNumber','resultado_ausente',3));
+   if(m==='eth_blockNumber')return '0x66';
+   if(m==='eth_getBlockByNumber')return {number:'0x65',timestamp:'0x1'};
+   return rpc(u,m);
+ }),/bloco ausente ou antigo/);
+});

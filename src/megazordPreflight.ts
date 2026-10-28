@@ -1,8 +1,14 @@
 /** Read-only deployment checks. Never imports a signer or broadcasts. */
 import {isAddress} from 'ethers';
-import {criarRpcPreflight} from './megazordRpcLeitura';
+import {criarRpcPreflight,FalhaRpcLeitura} from './megazordRpcLeitura';
 type Rpc=(url:string,method:string,params:unknown[])=>Promise<unknown>;
 const call:Rpc=criarRpcPreflight();
+export class FalhaLeituraRede extends Error {
+ constructor(readonly rpcIndex:number,readonly detalhe:FalhaRpcLeitura){
+  super('RPC '+rpcIndex+' ['+detalhe.method+';'+detalhe.categoria+';tentativas='+detalhe.tentativas+']');
+ }
+}
+
 function quantity(value:unknown):bigint{
  if(typeof value!=='string'||!/^0x[0-9a-f]+$/i.test(value))throw Error('quantidade RPC invalida');
  return BigInt(value);
@@ -13,14 +19,39 @@ export async function conferirRedeMegazord(env:NodeJS.ProcessEnv,rpc:Rpc=call){
  const contracts=(env.MEGAZORD_CONTRATOS??'').split(',').map(x=>x.trim()).filter(Boolean);
  if(!urls[0]||!urls[1]||urls[0]===urls[1]||!address||!isAddress(address)
    ||!contracts.length||contracts.some(x=>!isAddress(x)))throw Error('configuracao publica incompleta');
- const results=await Promise.all(urls.map(async(url,index)=>{
-   const [chain,block,latest,pending,balance,...codes]=await Promise.all([
-     rpc(url!,'eth_chainId',[]),rpc(url!,'eth_getBlockByNumber',['latest',false]),
-     rpc(url!,'eth_getTransactionCount',[address,'latest']),
-     rpc(url!,'eth_getTransactionCount',[address,'pending']),
-     rpc(url!,'eth_getBalance',[address,'latest']),
-     ...contracts.map(a=>rpc(url!,'eth_getCode',[a,'latest'])),
-   ]);
+ // Public RPCs can share egress quotas. Validate one independent witness at
+ // a time instead of bursting both simultaneously, without skipping any check.
+ const results=[] as Array<{rpc:number;block:number;nonce:string;balanceWei:string;contractsWithCode:number}>;
+ for(const [index,url] of urls.entries()){
+   const read=async(method:string,params:unknown[])=>{
+     try{return await rpc(url!,method,params);}
+     catch(e){if(e instanceof FalhaRpcLeitura)throw new FalhaLeituraRede(index,e);throw e;}
+   };
+   // Public Base RPC gateways rate-limit bursts even from one client.
+   // Preflight is infrequent: serialize each method per provider, preserving
+   // every invariant and each provider's independent nonce/block witness.
+   const chain=await read('eth_chainId',[]);
+   let block:unknown;
+   try{
+     block=await read('eth_getBlockByNumber',['latest',false]);
+   }catch(e){
+     // Some gateways return HTTP 200 + null for latest while a numbered,
+     // already-mined block is available. Never accept null or skip the
+     // block/timestamp check: retry with a specific height from the SAME RPC.
+     const recoverable=e instanceof FalhaLeituraRede
+       &&e.detalhe.method==='eth_getBlockByNumber'
+       &&['body_invalido','resultado_ausente'].includes(e.detalhe.categoria);
+     if(!recoverable)throw e;
+     const tip=quantity(await read('eth_blockNumber',[]));
+     if(tip<2n)throw Error('RPC '+index+': bloco ausente ou antigo');
+     block=await read('eth_getBlockByNumber',['0x'+(tip-1n).toString(16),false]);
+   }
+   const latest=await read('eth_getTransactionCount',[address,'latest']);
+   const pending=await read('eth_getTransactionCount',[address,'pending']);
+   const balance=await read('eth_getBalance',[address,'latest']);
+   const codes:string[]=[];
+   for(const contract of contracts)
+     codes.push(await read('eth_getCode',[contract,'latest']) as string);
    if(quantity(chain)!==8453n)throw Error('RPC '+index+': rede diferente da Base');
    const b=block as {number?:unknown;timestamp?:unknown}|null;
    if(!b||Math.abs(Date.now()/1000-Number(quantity(b.timestamp)))>20)
@@ -29,9 +60,9 @@ export async function conferirRedeMegazord(env:NodeJS.ProcessEnv,rpc:Rpc=call){
    if(codes.some(c=>typeof c!=='string'||!/^0x[0-9a-f]+$/i.test(c)||c==='0x0'))
      throw Error('RPC '+index+': destino sem bytecode valido');
    if(quantity(balance)===0n)throw Error('RPC '+index+': saldo de gas zerado');
-   return {rpc:index,block:Number(quantity(b.number)),nonce:quantity(latest).toString(),
-     balanceWei:quantity(balance).toString(),contractsWithCode:codes.length};
- }));
+   results.push({rpc:index,block:Number(quantity(b.number)),nonce:quantity(latest).toString(),
+     balanceWei:quantity(balance).toString(),contractsWithCode:codes.length});
+ }
  if(results[0].nonce!==results[1].nonce||Math.abs(results[0].block-results[1].block)>3)
    throw Error('RPCs discordam sobre nonce/bloco');
  return {readOnly:true,address,checks:results,

@@ -6,7 +6,7 @@ test('Morpho: revisita mercados e mais posicoes por rodada, sem mudar sender',()
  const x=politicaDeCoberturaMorpho({});
  assert.equal(x.intervaloMs,180_000);
  assert.equal(x.mercadosPorRodada,36);
- assert.equal(x.mercadosComDevedores,20);
+ assert.equal(x.mercadosComDevedores,32);
  assert.equal(x.posicoesPorMercado,36);
  assert.equal(x.requisicoesHttp,95);
  assert.equal(x.prazoMs,75_000);
@@ -37,4 +37,14 @@ test('Morpho: indice avanca a cada ciclo, nao continua preso em 15 minutos',()=>
  assert.equal(indiceDeRodadaMorpho(900_000+intervalo,intervalo),a+1);
  assert.throws(()=>indiceDeRodadaMorpho(-1,intervalo),/validos/);
  assert.throws(()=>indiceDeRodadaMorpho(5,0),/validos/);
+});
+
+test('capacidade ampliada atende 32 mercados sem ampliar HTTP, RPC nem tempo',()=>{
+ const x=politicaDeCoberturaMorpho({});
+ assert.equal(x.mercadosPorRodada,36);
+ assert.equal(x.mercadosComDevedores,32);
+ assert.equal(x.requisicoesHttp,95);
+ assert.equal(x.prazoMs,75000);
+ const explicito=politicaDeCoberturaMorpho({CACA_MORPHO_MERCADOS_COM_DEVEDORES:'20'});
+ assert.equal(explicito.mercadosComDevedores,20,'quota explícita sempre prevalece');
 });

@@ -25,7 +25,51 @@ const MAX_QUENTES=24;
 const TTL_MS=25*60_000;
 const INT_MS=2_250;
 const EXCLUIR_TEMP_MS=45_000;
+const PAUSA_MERCADO_SEM_ROTA_MS=15*60_000;
+const PAUSA_POSICAO_SAUDAVEL_MS=90_000;
+const LIMIAR_SONDA_PROXIMA_BPS=75n;
+/** Recheck health every block even when an expensive complete probe is cooling down. */
+export function exigeSondaIntegralMorphoHot(
+ situacao:string,distanciaBps:bigint|null,bloqueadoAte:number,agora:number,
+):boolean {
+ // Honor target cooldown for crossed borrowers too; keep per-block reads active.
+ if(bloqueadoAte>agora)return false;
+ if(situacao==='cruzou-estimado')return true;
+ return situacao==='proxima'&&distanciaBps!==null
+   &&distanciaBps<=LIMIAR_SONDA_PROXIMA_BPS;
+}
+/** The same-block risk result decides priority, never an API snapshot. */
+export function compararPrioridadeMorphoHot(
+ a:{situacao:string;distanciaBps:bigint|null},
+ b:{situacao:string;distanciaBps:bigint|null},
+):number{
+ const crossed=Number(b.situacao==='cruzou-estimado')-Number(a.situacao==='cruzou-estimado');
+ if(crossed!==0)return crossed;
+ const da=a.distanciaBps??999999n,db=b.distanciaBps??999999n;
+ return da<db?-1:da>db?1:0;
+}
+export function semRotaExecutavelMorpho(
+ via:'Uniswap V3'|'Aerodrome',status:string,motivo:string,primeiroMotivo?:string,
+):boolean {
+ const semRota=(s:string)=>s.includes('sem rota direta ou multihop comprovada garantia -> divida')
+   ||s.includes('rota_nao_suportada: sem pool direta')
+   ||s.includes('sem pool V3 comprovada')||s.includes('sem pool Aerodrome comprovada');
+ return status==='inviavel'&&semRota(motivo)
+   &&(via==='Uniswap V3'||semRota(primeiroMotivo??''));
+}
 const aguardando=new Map<string,number>();
+// A liquidation may be past LLTV yet have too few safe repay shares to
+// liquidate economically. Keep scanning every block but rotate expensive
+// full proofs until solvency improves or a bounded cooldown expires.
+const insolventes=new Map<string,{ate:number;distanciaBps:bigint}>();
+const PAUSA_INSOLVENTE_MS=5*60_000;
+export function pausaDeInsolvenciaMorpho(
+  paused:{ate:number;distanciaBps:bigint}|undefined,
+  riscoAtual:bigint|null,agora:number,
+):boolean{
+ return !!paused&&agora<paused.ate&&riscoAtual!==null
+   &&riscoAtual<paused.distanciaBps+100n;
+}
 // Assets without any verified direct V3 or Aerodrome exit cannot repay the
 // Morpho debt. Block the WHOLE market temporarily, not just one borrower.
 const mercadosSemSaida=new Map<string,number>();
@@ -37,10 +81,127 @@ export function bloquearMercadoSemSaida(marketId:string,agora=Date.now(),duracao
 }
 let iniciado=false;
 let emCurso=false;
+// The expensive liquidation eth_call must NEVER block the next-block
+// read-only snapshot. Keep exactly ONE proof in flight per signer/wallet.
+/** One asynchronous complete proof at a time. The block snapshot never
+ * awaits it. Unexpected failures keep the gate consistent and are observable.
+ */
+export function criarPortaoProvaMorphoHot(){
+ let ocupada=false;
+ return {
+   ocupada:()=>ocupada,
+   executar:(trabalho:()=>Promise<void>):boolean=>{
+     if(ocupada)return false;
+     ocupada=true;
+     void Promise.resolve().then(trabalho).catch(e=>{
+       log.warn('[TITAN/MORPHO-HOT/AGENDADOR]',{
+         classe:e instanceof Error?e.name:'erro',
+         desfecho:'desconhecido, exigida conciliacao no executor',
+       });
+     }).finally(()=>{ocupada=false;});
+     return true;
+   },
+ };
+}
+const portaoProvaMorphoHot=criarPortaoProvaMorphoHot();
+async function executarSondaMorphoHot(a:Alvo,block:number):Promise<void>{
+ try{
+     aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
+     const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
+     const {via,resultado:result,primeiroMotivo}=await avaliarSaidasMorpho({
+       mercado:a.mercado,usuario:a.usuario,signal:AbortSignal.timeout(20_000),
+       rpcUrl:rpcHotUrl??resolverRpcMorphoHot(process.env),
+     });
+     // Losing the single-signer preflight lock is NOT evidence the borrower
+     // is healthy or economically invalid. Retry on the next block instead
+     // of honoring the provisional 45-second per-position cooldown.
+     if(result.status==='descartada'&&result.motivo.includes('outro preflight Morpho ocupa')){
+       aguardando.delete(chave(a));
+       log.info('[TITAN/MORPHO-HOT/REAGENDAR]',{
+         mercado:a.mercado.id,bloco:block,
+         motivo:'executor ocupado; proximo bloco, nenhum gas gasto',
+       });
+     }
+     // An existent pool is not liquid. If ALL executor sizes reverted from
+     // the canonical DEX output floor, give its market a short cooling period.
+     // The slow radar keeps discovering other users/markets as usual.
+     if(semRotaExecutavelMorpho(via,result.status,result.motivo,primeiroMotivo)){
+       bloquearMercadoSemSaida(a.mercado.id,Date.now(),PAUSA_MERCADO_SEM_ROTA_MS);
+       log.info('[TITAN/MORPHO-HOT/ROTACAO]',{
+         mercado:a.mercado.id,motivo:'sem caminho DEX executavel no contrato atual',
+         pausaMinutos:PAUSA_MERCADO_SEM_ROTA_MS/60_000,
+         estrategia:'liberar vagas para outros mercados; revalidar depois',
+       });
+     }
+     if(result.status==='inviavel'&&result.motivo.includes('position is healthy'))
+       aguardando.set(chave(a),Date.now()+PAUSA_POSICAO_SAUDAVEL_MS);
+     if(result.status==='inviavel'
+       &&result.motivo.includes('garantia insuficiente para qualquer parcela segura de divida')){
+       insolventes.set(chave(a),{
+         ate:Date.now()+PAUSA_INSOLVENTE_MS,distanciaBps:a.distanciaBps,
+       });
+       log.info('[TITAN/MORPHO-HOT/INSOLVENTE]',{
+         bloco:block,mercado:a.mercado.id,usuario:a.usuario,
+         pausaSegundos:PAUSA_INSOLVENTE_MS/1000,
+         reativacao:'apos prazo ou melhora do LLTV superior a 100 bps',
+         politica:'seguir leitura por bloco e liberar preflight para outros devedores',
+       });
+     }
+     const semLiquidezDeSaida=primeiroMotivo?.includes('nenhuma rota passou')
+       &&result.motivo.includes('nenhuma rota passou')
+       &&(result.motivo.includes('0x42301c23')
+           ||result.motivo.includes('InsufficientOutputAmount'));
+     if(semLiquidezDeSaida){
+       bloquearMercadoSemSaida(a.mercado.id,Date.now(),10*60_000);
+       aguardando.set(chave(a),Date.now()+10*60_000);
+       log.warn('[TITAN/MORPHO-HOT] Mercado com saida DEX insuficiente; rotacionar.',{
+         mercado:a.mercado.id,motivo:'todos eth_call falharam por output insuficiente',
+         pausaMinutos:10,
+       });
+     }
+     if(primeiroMotivo?.includes('sem pool V3 comprovada')
+       &&result.motivo.includes('sem pool Aerodrome comprovada')){
+       bloquearMercadoSemSaida(a.mercado.id);
+       aguardando.set(chave(a),Date.now()+30*60_000);
+     }
+     log.warn('[TITAN/MORPHO-HOT/TIRO] Posicao cruzada ou proxima sondada com liquidacao integral.',{
+       bloco:block,mercado:a.mercado.id,usuario:a.usuario,
+       via,resultado:result,
+       primeiroV3:primeiroMotivo,
+     });
+     if(['enviada','confirmada','desconhecida'].includes(result.status)){
+       // Reconciliation must happen before any attempt against same target.
+       aguardando.set(chave(a),Date.now()+30*60_000);
+     }
+
+ }catch(e){
+   // Exceptions do not prove that a transaction was never broadcast.
+   // Continue read-only monitoring and require journal/nonce reconciliation.
+   // Avoid logging exceptions (provider URLs may embed credentials).
+   // Pause this target until journal/nonce reconciliation has completed.
+   aguardando.set(chave(a),Date.now()+30*60_000);
+   log.warn('[TITAN/MORPHO-HOT/PROVA-FALHOU]',{
+     bloco:block,mercado:a.mercado.id,classe:e instanceof Error?e.name:'erro',
+     resultado:'desconhecido; consultar diario e recibo antes de nova tentativa',
+   });
+ }
+}
 let ultimoBloco=0;
 let contagem=0;
 let ultimoLog=0;
 let rpc:JsonRpcProvider|null=null;
+let rpcHotUrl:string|null=null;
+/** Use the verified financial RPC before falling back to the rate-limited public endpoint.
+ * Keep the block trigger and the full executor probe on the same configured endpoint.
+ * Never log the RPC URL: it can contain credentials.
+ */
+export function resolverRpcMorphoHot(env:NodeJS.ProcessEnv):string{
+  return env.CACA_MORPHO_V3_RPC_URL?.trim()
+    ||env.MEGAZORD_RPC_URL?.trim()
+    ||env.TITAN_EXECUTOR_RPC_URL?.trim()
+    ||env.CACA_RPC_URL?.trim()
+    ||'https://mainnet.base.org';
+}
 function chave(a:Alvo):string {return a.mercado.id.toLowerCase()+'|'+a.usuario.toLowerCase();}
 export function registrarQuenteMorpho(
  mercado:MercadoDaApi,usuario:string,distanciaBps:bigint,agora=Date.now(),
@@ -66,7 +227,11 @@ export function renovarQuenteMorphoPorLeitura(
 }
 export function limparQuentesMorpho(agora=Date.now()):number{
  for(const [k,a] of alvos){
-   if(agora-a.atualizadoEm>TTL_MS)alvos.delete(k);
+   if(agora-a.atualizadoEm>TTL_MS){
+     alvos.delete(k);
+     insolventes.delete(k);
+     aguardando.delete(k);
+   }
  }
  const sorted=[...alvos.values()].sort((a,b)=>
    a.distanciaBps<b.distanciaBps?-1:a.distanciaBps>b.distanciaBps?1:b.atualizadoEm-a.atualizadoEm);
@@ -151,8 +316,8 @@ async function verificarBlocoMorphoHot():Promise<void>{
    if(block<=ultimoBloco)return;
    ultimoBloco=block;
    const agora=Date.now();
+   // Cheap snapshot every block for ALL candidates; only full proofs use cooldown.
    const selecionados=[...alvos.values()]
-     .filter(a=>(aguardando.get(chave(a))??0)<=agora)
      .sort((a,b)=>Number(b.distanciaBps<=0n)-Number(a.distanciaBps<=0n)
        ||(aguardando.get(chave(a))??0)-(aguardando.get(chave(b))??0));
    if(!selecionados.length)return;
@@ -163,7 +328,10 @@ async function verificarBlocoMorphoHot():Promise<void>{
    const decoded=multicall.decodeFunctionResult('aggregate3',retorno)[0] as
      Array<{success:boolean;returnData:string}>;
    let validadas=0,cruzaram=0,emProva=0;
+   const avaliaveis:Array<{a:Alvo;situacao:string;distanciaBps:bigint|null}>=[];
    for(const a of selecionados){
+     // A route proven unavailable earlier in THIS block releases all its remaining slots.
+     if((mercadosSemSaida.get(a.mercado.id.toLowerCase())??0)>agora)continue;
      const idx=lote.indices.get(chave(a));
      if(!idx)continue;
      const mm=decoded[idx.market],oo=decoded[idx.oracle],pp=decoded[idx.position];
@@ -186,52 +354,40 @@ async function verificarBlocoMorphoHot():Promise<void>{
      if(state.situacao!=='cruzou-estimado'&&state.situacao!=='proxima')continue;
      if(state.distanciaBps!==null)renovarQuenteMorphoPorLeitura(
        a.mercado.id,a.usuario,state.distanciaBps,agora);
-     if(state.situacao==='cruzou-estimado')cruzaram++;
-     // Only one V3 transaction candidate at a time: shared wallet/nonce.
-     if(emProva>0)continue;
-     emProva++;
-     aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
-     const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
-     const {via,resultado:result,primeiroMotivo}=await avaliarSaidasMorpho({
-       mercado:a.mercado,usuario:a.usuario,signal:AbortSignal.timeout(20_000),
-       rpcUrl:process.env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org',
-     });
-     // An existent pool is not liquid. If ALL executor sizes reverted from
-     // the canonical DEX output floor, give its market a short cooling period.
-     // The slow radar keeps discovering other users/markets as usual.
-     const semLiquidezDeSaida=primeiroMotivo?.includes('nenhuma rota passou')
-       &&result.motivo.includes('nenhuma rota passou')
-       &&(result.motivo.includes('0x42301c23')
-           ||result.motivo.includes('InsufficientOutputAmount'));
-     if(semLiquidezDeSaida){
-       bloquearMercadoSemSaida(a.mercado.id,Date.now(),10*60_000);
-       aguardando.set(chave(a),Date.now()+10*60_000);
-       log.warn('[TITAN/MORPHO-HOT] Mercado com saida DEX insuficiente; rotacionar.',{
-         mercado:a.mercado.id,motivo:'todos eth_call falharam por output insuficiente',
-         pausaMinutos:10,
+     if(state.situacao==='cruzou-estimado'){
+       cruzaram++;
+       // Every crossing is recorded before the slow complete liquidation
+       // proof, even if a single-wallet preflight is already in progress.
+       log.warn('[TITAN/MORPHO-HOT/CRUZAMENTO]',{
+         bloco:block,mercado:a.mercado.id,usuario:a.usuario,
+         distanciaBps:state.distanciaBps?.toString()??null,
+         provaJaOcupada:portaoProvaMorphoHot.ocupada(),
+         regra:'estimativa onchain; nao autoriza envio ou lucro',
        });
      }
-     if(primeiroMotivo?.includes('sem pool V3 comprovada')
-       &&result.motivo.includes('sem pool Aerodrome comprovada')){
-       bloquearMercadoSemSaida(a.mercado.id);
-       aguardando.set(chave(a),Date.now()+30*60_000);
-     }
-     log.warn('[TITAN/MORPHO-HOT/TIRO] Posicao cruzada ou proxima sondada com liquidacao integral.',{
-       bloco:block,mercado:a.mercado.id,usuario:a.usuario,
-       via,resultado:result,
-       primeiroV3:primeiroMotivo,
-     });
-     if(['enviada','confirmada','desconhecida'].includes(result.status)){
-       // Reconciliation must happen before any attempt against same target.
-       aguardando.set(chave(a),Date.now()+30*60_000);
-     }
+     const paused=insolventes.get(chave(a));
+     const stillInsolvent=pausaDeInsolvenciaMorpho(paused,state.distanciaBps,agora);
+     if(paused&&!stillInsolvent)insolventes.delete(chave(a));
+     if(!stillInsolvent&&exigeSondaIntegralMorphoHot(
+       state.situacao,state.distanciaBps,aguardando.get(chave(a))??0,agora))
+       avaliaveis.push({a,situacao:state.situacao,distanciaBps:state.distanciaBps});
    }
+   // Crossed borrowers come first even if another target appeared first
+   // in the old snapshot. The one-wallet gate remains unchanged.
+   avaliaveis.sort(compararPrioridadeMorphoHot);
+   // One signer, one complete proof; new block snapshots run independently
+   // while that proof is waiting on RPCs/DEX route discovery.
+   const first=avaliaveis.find(({a})=>
+     (mercadosSemSaida.get(a.mercado.id.toLowerCase())??0)<=agora);
+   if(first&&portaoProvaMorphoHot.executar(()=>
+     executarSondaMorphoHot(first.a,block)))emProva=1;
    contagem++;
    if(cruzaram>0||contagem%30===0||Date.now()-ultimoLog>120_000){
      ultimoLog=Date.now();
      log.info('[TITAN/MORPHO-HOT] Bloco processado, gatilho ativo.',{
        bloco:block,mercados:[...new Set(selecionados.map(a=>token(a.mercado.id)))].length,
-       observadas:selecionados.length,validadas,cruzaram,preflights:emProva,
+       observadas:selecionados.length,validadas,cruzaram,preflightsIniciados:emProva,
+       preflightEmCurso:portaoProvaMorphoHot.ocupada(),
        intervaloMs:INT_MS,via:'Multicall3 no bloco; V3 eth_call antes de assinar',
      });
    }
@@ -246,8 +402,9 @@ async function verificarBlocoMorphoHot():Promise<void>{
 export function iniciarGatilhoQuenteMorpho(env:NodeJS.ProcessEnv=process.env):void{
  if(iniciado||!rotasMorphoHabilitadas(env))return;
  iniciado=true;
- const url=env.CACA_MORPHO_V3_RPC_URL??'https://mainnet.base.org';
- rpc=new JsonRpcProvider(url,8453,{staticNetwork:true});
+ const url=resolverRpcMorphoHot(env);
+ rpcHotUrl=url;
+ rpc=new JsonRpcProvider(url,8453,{staticNetwork:true,batchMaxCount:1});
  log.info('[TITAN/MORPHO-HOT] Gatilho de execucao por bloco iniciado.',{
    intervaloMs:INT_MS,maxPosicoes:MAX_QUENTES,ttlMs:TTL_MS,
    envioConfigurado:env.CACA_MORPHO_V3_ENVIAR==='1',

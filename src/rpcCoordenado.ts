@@ -11,7 +11,7 @@ export class AgendaRpc {
     private reservas=0;
     private recusasTotal=0;
     private esperaMs=0;
-    constructor(private readonly limite = 20,
+    constructor(private readonly limite = 6,
         private readonly agora = () => Date.now(),
         private readonly esperar = (ms:number) => new Promise<void>(r=>setTimeout(r,ms))) {
         if (!Number.isSafeInteger(limite) || limite < 1) throw Error('limite RPC invalido');
@@ -84,7 +84,7 @@ export class CacheLeituraRpc<T> {
 export class ProviderSondaRpc extends JsonRpcProvider {
     private readonly agenda:AgendaRpc;
     constructor(url:string){
-        super(url,8453,{staticNetwork:true,batchMaxCount:16,batchStallTime:0,cacheTimeout:0});
+        super(url,8453,{staticNetwork:true,batchMaxCount:1,batchStallTime:0,cacheTimeout:0});
         this.agenda=agendaRpc(url);
     }
     override async _send(payload:JsonRpcPayload|JsonRpcPayload[]):Promise<JsonRpcResult[]>{

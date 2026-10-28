@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,exigeSondaIntegralMorphoHot,semRotaExecutavelMorpho,compararPrioridadeMorphoHot,criarPortaoProvaMorphoHot,pausaDeInsolvenciaMorpho} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
+import {avaliarSaidasMorpho,recusaIndependenteDeRotaMorpho,type SondadoresMorpho} from './titanMorphoDiretorDeRota';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
 const oracle='0x'+'55'.repeat(20);
@@ -153,4 +154,136 @@ test('renovacao nao insere desconhecido nem prolonga posicao distante ou expirad
  assert.equal(renovarQuenteMorphoPorLeitura(m.id,user1,501n,now+20*60_000),false);
  assert.equal(renovarQuenteMorphoPorLeitura(m.id,user1,1n,now+26*60_000),false);
  assert.equal(resumoQuentesMorpho(now+26*60_000).posicoes,0);
+});
+
+test('HOT reuses the configured Megazord RPC and avoids public fallback unless necessary',()=>{
+ const configured={MEGAZORD_RPC_URL:'https://verified-rpc.example/private'};
+ assert.equal(resolverRpcMorphoHot(configured),configured.MEGAZORD_RPC_URL);
+ assert.equal(resolverRpcMorphoHot({...configured,CACA_MORPHO_V3_RPC_URL:'https://specific.example/rpc'}),
+  'https://specific.example/rpc');
+ assert.equal(resolverRpcMorphoHot({TITAN_EXECUTOR_RPC_URL:'https://executor.example/rpc'}),
+  'https://executor.example/rpc');
+ assert.equal(resolverRpcMorphoHot({CACA_RPC_URL:'https://caca.example/rpc'}),
+  'https://caca.example/rpc');
+ assert.equal(resolverRpcMorphoHot({}), 'https://mainnet.base.org');
+ assert.equal(resolverRpcMorphoHot({...configured,CACA_MORPHO_V3_RPC_URL:'  '}),
+  configured.MEGAZORD_RPC_URL);
+});
+
+test('HOT honors cooldown for crossed borrowers while retaining fresh block monitoring',()=>{
+ const now=block+12*60*60_000;
+ assert.equal(exigeSondaIntegralMorphoHot('proxima',249n,0,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('proxima',75n,0,now),true);
+ assert.equal(exigeSondaIntegralMorphoHot('proxima',74n,now+30000,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-1n,now+90000,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-1n,now,now),true);
+ assert.equal(exigeSondaIntegralMorphoHot('segura',10n,0,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('proxima',null,0,now),false);
+});
+test('HOT classifies only structural no-exit errors for market rotation, not healthy or transient',()=>{
+ assert.equal(semRotaExecutavelMorpho('Uniswap V3','inviavel',
+  'sem rota direta ou multihop comprovada garantia -> divida'),true);
+ assert.equal(semRotaExecutavelMorpho('Uniswap V3','inviavel',
+  'rota_nao_suportada: sem pool direta; executor implantado sem suporte multihop'),true);
+ assert.equal(semRotaExecutavelMorpho('Uniswap V3','inviavel',
+  'nenhuma rota passou no liquidar(): position is healthy'),false);
+ assert.equal(semRotaExecutavelMorpho('Uniswap V3','descartada',
+  'sem rota direta ou multihop comprovada garantia -> divida'),false);
+ assert.equal(semRotaExecutavelMorpho('Aerodrome','inviavel',
+  'sem pool Aerodrome comprovada','nenhuma rota passou no liquidar(): healthy'),false);
+ assert.equal(semRotaExecutavelMorpho('Aerodrome','inviavel',
+  'sem pool Aerodrome comprovada','sem rota direta ou multihop comprovada garantia -> divida'),true);
+});
+
+test('same block crossed borrower outranks a nearer but still healthy candidate',()=>{
+ const candidates=[
+  {id:'first',situacao:'proxima',distanciaBps:5n},
+  {id:'second',situacao:'cruzou-estimado',distanciaBps:-1n},
+  {id:'third',situacao:'proxima',distanciaBps:2n},
+ ];
+ candidates.sort(compararPrioridadeMorphoHot);
+ assert.deepEqual(candidates.map(x=>x.id),['second','third','first']);
+});
+
+test('hot worker can continue snapshot scheduling while a slow liquidation proof is pending',async()=>{
+ const gate=criarPortaoProvaMorphoHot();
+ let liberar!:()=>void;
+ const unresolved=new Promise<void>(resolve=>{liberar=resolve;});
+ let launches=0;
+ assert.equal(gate.executar(async()=>{launches++;await unresolved;}),true);
+ assert.equal(gate.ocupada(),true);
+ // Non-blocking: a new block sees gate busy and does not launch a second
+ // signing proof, but can still calculate its own independent risk snapshot.
+ const nextBlock=()=>({riskChecked:true,canLaunch:gate.executar(async()=>{launches++;})});
+ const second=nextBlock();
+ assert.equal(second.riskChecked,true);
+ assert.equal(second.canLaunch,false);
+ await Promise.resolve();
+ assert.equal(launches,1);
+ liberar();
+ await new Promise<void>(resolve=>setImmediate(resolve));
+ assert.equal(gate.ocupada(),false);
+ assert.equal(gate.executar(async()=>{launches++;}),true);
+ await new Promise<void>(resolve=>setImmediate(resolve));
+ assert.equal(launches,2);
+ assert.equal(gate.ocupada(),false);
+});
+test('single-flight gate recovers from a rejected read-only proof without deadlocking',async()=>{
+ const gate=criarPortaoProvaMorphoHot();
+ assert.equal(gate.executar(async()=>{throw new Error('temporary RPC failure');}),true);
+ await new Promise<void>(resolve=>setImmediate(resolve));
+ assert.equal(gate.ocupada(),false);
+ assert.equal(gate.executar(async()=>{}),true);
+ await new Promise<void>(resolve=>setImmediate(resolve));
+ assert.equal(gate.ocupada(),false);
+});
+
+test('deeply insolvent crossed borrower rotates out of costly full proofs but remains monitorable',()=>{
+ const now=1_806_000_000_000;
+ const paused={ate:now+300_000,distanciaBps:-6189n};
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6189n,now+30_000),true);
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6200n,now+30_000),true);
+ // A 99bp improvement is not enough to retry the expensive route search.
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6090n,now+30_000),true);
+ // Meaningful improvement in collateralization immediately releases the gate.
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6089n,now+30_000),false);
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6189n,now+300_000),false);
+ assert.equal(pausaDeInsolvenciaMorpho(paused,null,now+10),false);
+ assert.equal(pausaDeInsolvenciaMorpho(undefined,-6189n,now),false);
+ // A crossed borrower is high priority only once its cooldown has expired.
+ // Ignoring this gate was monopolizing paid-proof slots with bad debt.
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now+300_000),true);
+});
+
+test('Morpho director skips second DEX for healthy or no-safe-share protocol rejection',async()=>{
+ assert.equal(recusaIndependenteDeRotaMorpho('inviavel','4x Error(string) | position is healthy'),true);
+ assert.equal(recusaIndependenteDeRotaMorpho('inviavel','garantia insuficiente para qualquer parcela segura de divida'),true);
+ assert.equal(recusaIndependenteDeRotaMorpho('inviavel','sem rota direta ou multihop comprovada garantia -> divida'),false);
+ assert.equal(recusaIndependenteDeRotaMorpho('descartada','position is healthy'),false);
+ const env:NodeJS.ProcessEnv={
+   CACA_MORPHO_V3_CONTRATO:'0x'+'11'.repeat(20),
+   CACA_MORPHO_AERO_CONTRATO:'0x'+'22'.repeat(20),
+   CACA_MORPHO_V3_AVALIAR:'1',CACA_MORPHO_AERO_AVALIAR:'1',
+ };
+ const entry={mercado:mercado(true),usuario:user1,rpcUrl:'https://unit.test'};
+ let aero=0;
+ for(const reason of [
+   'nenhuma rota passou no liquidar() integral do executor (eth_call): 4x Error(string) | position is healthy',
+   'garantia insuficiente para qualquer parcela segura de divida',
+ ]){
+   const result=await avaliarSaidasMorpho(entry,env,{
+     v3:async()=>({status:'inviavel' as const,motivo:reason}),
+     aero:async()=>{aero++;return {status:'inviavel' as const,motivo:'not expected'};},
+   } as unknown as SondadoresMorpho);
+   assert.equal(result.via,'Uniswap V3');
+   assert.equal(result.resultado.motivo,reason);
+ }
+ assert.equal(aero,0);
+ const fallback=await avaliarSaidasMorpho(entry,env,{
+   v3:async()=>({status:'inviavel' as const,motivo:'sem rota direta ou multihop comprovada garantia -> divida'}),
+   aero:async()=>{aero++;return{status:'descartada' as const,motivo:'sem rota Aerodrome'};},
+ } as unknown as SondadoresMorpho);
+ assert.equal(fallback.via,'Aerodrome');
+ assert.equal(aero,1);
 });
