@@ -64,6 +64,21 @@ export function criarRpcPreflight({fetcher=fetch,
        const code=typeof body?.error?.code==='number'&&Number.isSafeInteger(body.error.code)?body.error.code:undefined;
        const envelope=!!body&&typeof body==='object'&&!Array.isArray(body)
          &&body.jsonrpc==='2.0'&&body.id===id;
+       // Some Base gateways emit HTTP 200 + JSON-RPC -32029 (quota exhausted)
+       // with id:null, even for a well-formed request. The *error* is never
+       // trusted as success. Honor its bounded retry_after_ms and fail closed
+       // if the provider still cannot return a matching successful envelope.
+       if(code===-32029){
+         const data=body?.error&&typeof body.error==='object'
+           ?(body.error as {data?:{retry_after_ms?:unknown}}).data:undefined;
+         const hint=data?.retry_after_ms;
+         const delay=typeof hint==='number'&&Number.isFinite(hint)&&hint>0
+           ?Math.ceil(hint):3000;
+         if(attempt===2||delay>MAX_RETRY_AFTER_MS)
+           throw new FalhaRpcLeitura('resposta RPC invalida ['+method+']',method,'limite_jsonrpc',attempt+1,code);
+         await esperar(Math.max(1000,delay));
+         continue;
+       }
        if(!envelope||body!.error!==undefined||body!.result===undefined||body!.result===null){
          const permanent=code===-32600||code===-32601||code===-32602;
          const category=!envelope?'envelope':code!==undefined?'jsonrpc_'+code:'resultado_ausente';
