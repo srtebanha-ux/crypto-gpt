@@ -5,6 +5,7 @@ import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
   montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,exigeSondaIntegralMorphoHot,semRotaExecutavelMorpho,compararPrioridadeMorphoHot,criarPortaoProvaMorphoHot,pausaDeInsolvenciaMorpho} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
+import {avaliarSaidasMorpho,recusaIndependenteDeRotaMorpho,type SondadoresMorpho} from './titanMorphoDiretorDeRota';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
 const oracle='0x'+'55'.repeat(20);
@@ -250,4 +251,36 @@ test('deeply insolvent crossed borrower rotates out of costly full proofs but re
  assert.equal(pausaDeInsolvenciaMorpho(undefined,-6189n,now),false);
  // Ordinary crossed borrower is still preferred over merely near healthy risk.
  assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now),true);
+});
+
+test('Morpho director skips second DEX for healthy or no-safe-share protocol rejection',async()=>{
+ assert.equal(recusaIndependenteDeRotaMorpho('inviavel','4x Error(string) | position is healthy'),true);
+ assert.equal(recusaIndependenteDeRotaMorpho('inviavel','garantia insuficiente para qualquer parcela segura de divida'),true);
+ assert.equal(recusaIndependenteDeRotaMorpho('inviavel','sem rota direta ou multihop comprovada garantia -> divida'),false);
+ assert.equal(recusaIndependenteDeRotaMorpho('descartada','position is healthy'),false);
+ const env:NodeJS.ProcessEnv={
+   CACA_MORPHO_V3_CONTRATO:'0x'+'11'.repeat(20),
+   CACA_MORPHO_AERO_CONTRATO:'0x'+'22'.repeat(20),
+   CACA_MORPHO_V3_AVALIAR:'1',CACA_MORPHO_AERO_AVALIAR:'1',
+ };
+ const entry={mercado:mercado(true),usuario:user1,rpcUrl:'https://unit.test'};
+ let aero=0;
+ for(const reason of [
+   'nenhuma rota passou no liquidar() integral do executor (eth_call): 4x Error(string) | position is healthy',
+   'garantia insuficiente para qualquer parcela segura de divida',
+ ]){
+   const result=await avaliarSaidasMorpho(entry,env,{
+     v3:async()=>({status:'inviavel' as const,motivo:reason}),
+     aero:async()=>{aero++;return {status:'inviavel' as const,motivo:'not expected'};},
+   } as unknown as SondadoresMorpho);
+   assert.equal(result.via,'Uniswap V3');
+   assert.equal(result.resultado.motivo,reason);
+ }
+ assert.equal(aero,0);
+ const fallback=await avaliarSaidasMorpho(entry,env,{
+   v3:async()=>({status:'inviavel' as const,motivo:'sem rota direta ou multihop comprovada garantia -> divida'}),
+   aero:async()=>{aero++;return{status:'descartada' as const,motivo:'sem rota Aerodrome'};},
+ } as unknown as SondadoresMorpho);
+ assert.equal(fallback.via,'Aerodrome');
+ assert.equal(aero,1);
 });
