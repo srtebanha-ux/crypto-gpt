@@ -143,3 +143,27 @@ test('primary failover cannot bypass financial nonce disagreement',async()=>{
  assert.equal(calls,1);
  assert.equal(env.MEGAZORD_RPC_URL,'https://broken.example/key');
 });
+
+
+test('four-primary quorum failure names safe categories without leaking RPC secrets',async()=>{
+ const {FalhaLeituraRede}=await import('./megazordPreflight');
+ const {FalhaRpcLeitura}=await import('./megazordRpcLeitura');
+ const env:NodeJS.ProcessEnv={
+   MEGAZORD_RPC_URL:'https://primary.example/PRIVATE_TOKEN',
+   MEGAZORD_RPC_SECUNDARIO:'https://secondary.example/SECRET',
+   MEGAZORD_RPC_ALTERNATIVOS:'https://tertiary.example/KEY',
+ };
+ let tries=0;
+ await assert.rejects(selecionarParRpcMegazord(env,async()=>{
+   tries++;
+   throw new FalhaLeituraRede(0,new FalhaRpcLeitura(
+     'upstream URL PRIVATE_TOKEN','eth_getBlockByNumber','body_invalido',3));
+ },async()=>{}),err=>err instanceof Error
+   &&err.message.includes('4 primarios')
+   &&err.message.includes('p1_eth_getBlockByNumber_body_invalido')
+   &&err.message.includes('p4_eth_getBlockByNumber_body_invalido')
+   &&!err.message.includes('PRIVATE_TOKEN')
+   &&!err.message.includes('SECRET')
+   &&!err.message.includes('https://'));
+ assert.equal(tries,4);
+});
