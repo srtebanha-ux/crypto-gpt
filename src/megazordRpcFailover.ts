@@ -81,3 +81,50 @@ export async function selecionarRpcSecundarioMegazord(
  throw Error('preflight bloqueado: '+attempted+
    ' RPCs secundarios independentes indisponiveis, sem fallback inseguro ao principal ['+counts+']');
 }
+
+/** Re-establish two independent witnesses when the configured PRIMARY is
+ * unresponsive to block reads. No provider is ever its own witness; each pair
+ * passes the complete nonce/block/balance/bytecode preflight before use.
+ * This function never signs, broadcasts, or mutates persistent state.
+ */
+export async function selecionarParRpcMegazord(
+ env:NodeJS.ProcessEnv,
+ preflight:Preflight=conferirRedeMegazord,
+ esperar:(ms:number)=>Promise<void>=ms=>new Promise(r=>setTimeout(r,ms)),
+):Promise<unknown>{
+ if(!env.MEGAZORD_RPC_URL)throw Error('RPC principal ausente');
+ const candidates=[env.MEGAZORD_RPC_URL,env.MEGAZORD_RPC_SECUNDARIO,
+   ...(env.MEGAZORD_RPC_ALTERNATIVOS??'').split(','),
+   'https://mainnet.base.org','https://1rpc.io/base'];
+ const hosts=new Set<string>();
+ const primaries:string[]=[];
+ for(const candidate of candidates){
+   if(!candidate?.startsWith('https://'))continue;
+   try{
+     const h=new URL(candidate).hostname.toLowerCase();
+     if(!h||hosts.has(h))continue;
+     hosts.add(h);primaries.push(candidate);
+   }catch{/* unsafe URL is never used */}
+   if(primaries.length===4)break;
+ }
+ let attempted=0;
+ for(const primary of primaries){
+   attempted++;
+   const tmp={...env,MEGAZORD_RPC_URL:primary};
+   try{
+     const ready=await selecionarRpcSecundarioMegazord(tmp,preflight,esperar);
+     env.MEGAZORD_RPC_URL=tmp.MEGAZORD_RPC_URL;
+     env.MEGAZORD_RPC_SECUNDARIO=tmp.MEGAZORD_RPC_SECUNDARIO;
+     return ready;
+   }catch(error){
+     const m=error instanceof Error?error.message:'';
+     // Rotate ONLY after transport failure or exhaustion of independent
+     // witnesses. Never use alternative providers to bypass nonce, chain,
+     // ownership, gas, profitability or other invariant rejection.
+     if(!m.startsWith('preflight principal bloqueado:')
+       &&!m.startsWith('preflight bloqueado:'))throw error;
+   }
+ }
+ throw Error('preflight bloqueado: '+attempted+
+   ' primarios independentes indisponiveis para quorum de dois RPCs; sem envio');
+}
