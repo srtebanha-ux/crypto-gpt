@@ -4,7 +4,9 @@
  */
 type Probe={endpoint:string;method:string;http?:number;mime?:string;bytes?:number;
  json?:boolean;envelope?:boolean;idMatch?:boolean;resultPresent?:boolean;
- resultNull?:boolean;errorCode?:number|null;issue?:string};
+ resultNull?:boolean;errorCode?:number|null;issue?:string;firstKind?:string;
+ lastKind?:string;invalidUnicode?:boolean;parseProblem?:string;
+ reportedLength?:number;compressed?:boolean};
 function mimeType(value:string|null):string{
  const s=(value??'').toLowerCase();
  return s.includes('json')?'json':s.includes('html')?'html':
@@ -30,7 +32,8 @@ export async function diagnosticarFioRpcMegazord(env:NodeJS.ProcessEnv,
      const id=1417;
      try{
        const res=await fetcher(uri,{method:'POST',
-         headers:{'content-type':'application/json'},
+         headers:{'content-type':'application/json','accept':'application/json',
+           'accept-encoding':'identity'},
          body:JSON.stringify({jsonrpc:'2.0',id,method,
            params:method==='eth_chainId'?[]:['latest',false]}),
          signal:AbortSignal.timeout(6000)});
@@ -39,8 +42,26 @@ export async function diagnosticarFioRpcMegazord(env:NodeJS.ProcessEnv,
        // Cap bytes; do not print or persist content.
        const raw=await res.text();
        p.bytes=raw.length;
+       const trimmed=raw.trim();
+       const kind=(v:string):string=>v==='{ '?'object':
+         v==='{'?'object':v==='['?'array':v==='<'?'html':v==='}'?'object_end':
+         v===']'?'array_end':v===''?'empty':'other';
+       p.firstKind=kind(trimmed.slice(0,1));
+       p.lastKind=kind(trimmed.slice(-1));
+       p.invalidUnicode=raw.includes('\uFFFD');
+       const len=res.headers.get('content-length');
+       if(len&&/^\\d+$/.test(len))p.reportedLength=Number(len);
+       p.compressed=!!res.headers.get('content-encoding');
        let data:unknown=null;
-       try{data=JSON.parse(raw);p.json=true;}catch{p.json=false;}
+       try{data=JSON.parse(raw);p.json=true;}
+       catch(e){
+         p.json=false;
+         const m=e instanceof Error?e.message:'';
+         p.parseProblem=/end of JSON|Unterminated|Unexpected end/i.test(m)?
+           'truncated_or_unterminated':/after JSON/i.test(m)?
+           'trailing_content':/Unexpected token|Expected/i.test(m)?
+           'invalid_syntax':'unknown_syntax';
+       }
        if(data!==null&&typeof data==='object'&&!Array.isArray(data)){
          const obj=data as Record<string,unknown>;
          p.envelope=obj.jsonrpc==='2.0';
