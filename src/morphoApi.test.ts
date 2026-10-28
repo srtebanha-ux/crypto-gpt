@@ -740,3 +740,20 @@ test('risk queue gives precedence to critical markets without starving rotation'
  assert.equal(new Set(got.map(m=>m.id)).size,8);
  assert.ok(got.some(m=>!new Set([ids[14],ids[15]]).has(m.id)));
 });
+
+test('urgent global Morpho positions rotate across cycles instead of starving risk markets',async()=>{
+ const {mkdtempSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const dir=mkdtempSync(join(tmpdir(),'titan-risk-'));
+ try{
+   const q=new CursoresMorpho(join(dir,'cursor.json'));
+   const ids=[...Array(15)].map((_,i)=>'0x'+(i+1).toString(16).padStart(64,'0'));
+   const markets=ids.map(id=>({id}));
+   const first=q.selecionarMercados(markets,null,8,ids);
+   assert.deepEqual(first.slice(0,2).map(x=>x.id),[ids[0],ids[1]]);
+   await q.marcarTentativa(ids[1]!);
+   const next=q.selecionarMercados(markets,null,8,ids);
+   assert.deepEqual(next.slice(0,2).map(x=>x.id),[ids[0],ids[2]]);
+ }finally{rmSync(dir,{force:true,recursive:true});}
+});
