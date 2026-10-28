@@ -8,6 +8,7 @@ const MAX_RETRY_AFTER_MS=5000;
 export function criarRpcPreflight({fetcher=fetch,
  esperar=ms=>new Promise(r=>setTimeout(r,ms)),agora=Date.now}:Opcoes={}):Rpc{
  const queues=new Map<string,Promise<unknown>>();
+ let requestId=0;
  const notBefore=new Map<string,number>();
  return (url,method,params)=>{
    if(!methods.has(method))return Promise.reject(Error('metodo fora do preflight somente leitura'));
@@ -22,7 +23,7 @@ export function criarRpcPreflight({fetcher=fetch,
        let response:Response;
        try{
          response=await fetcher(url,{method:'POST',headers:{'content-type':'application/json'},
-           body:JSON.stringify({jsonrpc:'2.0',id:1,method,params}),
+           body:JSON.stringify({jsonrpc:'2.0',id:++requestId,method,params}),
            signal:AbortSignal.timeout(10000)});
        }catch{throw Error('preflight RPC: transporte indisponivel');}
        if(response.status===429){
