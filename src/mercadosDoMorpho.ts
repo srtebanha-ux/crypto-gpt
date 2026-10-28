@@ -753,6 +753,17 @@ export async function descobrirMorphoPorApi(
                         if(risco.situacao==='proxima')pertoDoLimiar+=1;
                         else {
                             cruzaramEstimado+=1;
+                            // A capped shortlist is not evidence for every
+                            // crossed position; log each crossing separately.
+                            log.warn('[MORPHO/RADAR-CRUZAMENTO] Limite estimado cruzado.',{
+                                bloco:blocoDoRadar??'desconhecido',
+                                mercado:m.id,usuario:d.endereco,
+                                distanciaBps:risco.distanciaBps?.toString()??null,
+                                dividaCrua:risco.dividaCrua?.toString()??null,
+                                confirmadoNaCorrente:m.confirmadoNaCorrente,
+                                estado:'estimado com market() antes do accrual',
+                                regra:'nao e liquidacao real, exige eth_call e recibo',
+                            });
                         }
                         if(alvosDeRisco.length<20&&risco.distanciaBps!==null
                             &&risco.dividaCrua!==null)
