@@ -345,7 +345,7 @@ test('429 nao divide lotes nem multiplica pedidos ao provedor',async()=>{
 test('timeout nao repete eth_sendRawTransaction mesmo em lote',async()=>{
  let chamadas=0;
  const t=montarTransporteRpc({
-   rpc:RPC,tentativas:1,esperar:semEspera,timeoutMs:0,
+   rpc:RPC,tentativas:3,esperar:semEspera,timeoutMs:0,
    fetchar:(async()=>{chamadas++;throw Error('ETIMEDOUT');}) as Fetchador,
  });
  const rs=await t.chamarEmLote([
