@@ -84,7 +84,7 @@ export class CacheLeituraRpc<T> {
 export class ProviderSondaRpc extends JsonRpcProvider {
     private readonly agenda:AgendaRpc;
     constructor(url:string){
-        super(url,8453,{staticNetwork:true,batchMaxCount:16,batchStallTime:0,cacheTimeout:0});
+        super(url,8453,{staticNetwork:true,batchMaxCount:1,batchStallTime:0,cacheTimeout:0});
         this.agenda=agendaRpc(url);
     }
     override async _send(payload:JsonRpcPayload|JsonRpcPayload[]):Promise<JsonRpcResult[]>{
