@@ -13,7 +13,6 @@ services:
     dockerContext: .
     dockerCommand: node dist/megazord.js
     autoDeployTrigger: 'off'
-    maxShutdownDelaySeconds: 120
     disk:
       name: titan-memoria
       mountPath: /app/data
