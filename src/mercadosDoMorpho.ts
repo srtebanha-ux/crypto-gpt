@@ -524,6 +524,27 @@ export async function descobrirMorphoPorApi(
                 lerRankingMercadosMorpho(JSON.parse(await resp.text()));
         }catch{/* Sem ranking nunca vira "sem mercado"; existe fallback. */}
     }
+    // Highest-risk global borrower feed: a discovery HINT, never send approval.
+    // It costs at most one API request within the existing HTTP budget.
+    let riscoGlobal:ReturnType<typeof lerRiscoGlobalMorpho>=null;
+    if(candidatosParaSondagem.length>0&&orcamento.pedir()){
+        try{
+            const resp=await buscar('https://api.morpho.org/graphql',{
+                method:'POST',
+                headers:{'content-type':'application/json','accept':'application/json'},
+                body:consultaRiscoGlobalMorpho(),signal:orcamento.sinal,
+            });
+            if(resp.status===200)riscoGlobal=lerRiscoGlobalMorpho(JSON.parse(await resp.text()));
+        }catch{/* Always preserve ordinary market rotation on API failure. */}
+    }
+    log.info('[MORPHO/RISCO-GLOBAL] Sinal priorizado, ainda sem comprovacao onchain.',{
+        apiValida:riscoGlobal!==null,
+        candidatos:riscoGlobal?.candidatos.length??0,
+        totalApi:riscoGlobal?.total??null,
+        coberturaParcial:riscoGlobal!==null&&
+            riscoGlobal.total!==null&&riscoGlobal.total>riscoGlobal.candidatos.length,
+        regra:'API nao autoriza liquidacao; validar cinco parametros, posicao, oracle, eth_call e lucro',
+    });
     // A single durable queue chooses the markets that can ALSO collect borrowers.
     // Two wall-clock rotations used to validate a market and discard it before
     // enumeration. No cursor advanced for that market, so a known market was
