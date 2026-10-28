@@ -15,6 +15,16 @@ export function rotasMorphoHabilitadas(env:NodeJS.ProcessEnv):boolean {
    (!!env.CACA_MORPHO_AERO_CONTRATO&&env.CACA_MORPHO_AERO_AVALIAR!=='0');
 }
 export type SondadoresMorpho={v3:typeof avaliarELiquidarMorphoV3;aero:typeof avaliarELiquidarMorphoAero};
+/** A second DEX cannot repair a protocol-level rejection. Allow the
+ * hot worker to scan next-block debtors instead of spending its single proof
+ * slot for another 20s on the same healthy/unsizeable borrower.
+ * A DEX route failure MUST still fall through to Aerodrome.
+ */
+export function recusaIndependenteDeRotaMorpho(status:string,motivo:string):boolean{
+ return status==='inviavel'
+   &&(motivo.includes('position is healthy')
+     ||motivo.includes('garantia insuficiente para qualquer parcela segura de divida'));
+}
 let ocupado=false;
 export async function avaliarSaidasMorpho(e:Entrada,env:NodeJS.ProcessEnv=process.env,
  sondadores:SondadoresMorpho={v3:avaliarELiquidarMorphoV3,aero:avaliarELiquidarMorphoAero}):Promise<TentativaMorpho>{
@@ -25,7 +35,9 @@ export async function avaliarSaidasMorpho(e:Entrada,env:NodeJS.ProcessEnv=proces
    if(env.CACA_MORPHO_V3_CONTRATO&&env.CACA_MORPHO_V3_AVALIAR!=='0')
      v3=await sondadores.v3(e,env);
    // Hash is a stop even if a future adapter returns an unexpected status.
-   if(v3.hash||!['inviavel','descartada'].includes(v3.status))return{via:'Uniswap V3',resultado:v3};
+   if(v3.hash||!['inviavel','descartada'].includes(v3.status)
+     ||recusaIndependenteDeRotaMorpho(v3.status,v3.motivo))
+     return{via:'Uniswap V3',resultado:v3};
    if(e.signal?.aborted||!env.CACA_MORPHO_AERO_CONTRATO||env.CACA_MORPHO_AERO_AVALIAR==='0')
      return{via:'Uniswap V3',resultado:v3};
    const aero=await sondadores.aero(e,env);
