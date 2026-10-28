@@ -607,6 +607,17 @@ export async function descobrirMorphoPorApi(
     const morpho=snapshot?.morpho??'0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb';
     const url=snapshot?.url??escada[0]!;
     const blocoDoRadar=snapshot?.bloco??null;
+    // Same pinned block as all market and position reads. If an RPC fails or
+    // the header is malformed, we fall back to stale-market classification;
+    // the executor still performs its mandatory complete eth_call.
+    let timestampDoRadar:bigint|null=null;
+    if(blocoDoRadar!==null)try{
+        const header=await pedirRpc(url,'eth_getBlockByNumber',[blocoDoRadar,false]) as
+            {timestamp?:unknown}|null;
+        if(typeof header?.timestamp==='string'
+            &&/^0x[0-9a-f]+$/i.test(header.timestamp))
+            timestampDoRadar=BigInt(header.timestamp);
+    }catch{/* no timestamp: never fabricate accrued interest */}
     const rpcMudo=snapshot===null;
     const porqueNaoValidou=rpcMudo?'nenhum RPC confirmou Base, superficie e snapshot Morpho':null;
     const chamarRpc=async(data:string,alvo=morpho):Promise<string|null>=>
