@@ -138,6 +138,16 @@ export async function iniciarMegazord(
      const recovered=recuperarLockOrfaoMegazord(journal,rede.checks);
      log.info('[TITAN/LOCK-RECUPERACAO-CONTROLADA]',recovered);
    }
+   // Public wallet balance is not a spending authorization. Report the
+   // verified balance separately from the independent per-tx/day/lifetime caps
+   // so adding ETH never silently raises the bot's spending policy.
+   log.info('[TITAN/GAS-CARTEIRA-READONLY]',{
+     saldoWeiPorRpc:rede.checks.map(x=>x.balanceWei),
+     limitePorTxWei:env.MEGAZORD_GAS_MAX_TX_WEI,
+     limiteDiaWei:env.MEGAZORD_GAS_MAX_DIA_WEI,
+     perdaAcumuladaMaxWei:env.MEGAZORD_PERDA_MAX_TOTAL_WEI,
+     aviso:'Saldo presente nao prova alvo ou lucro; autorizacao permanece sujeita a tetos',
+   });
    log.info('Preflight de execucao aprovado (somente leitura).',{
      endereco:rede.address,
      rpcs:rede.checks.length,
