@@ -302,3 +302,31 @@ test('canario vencido nao assina nem transmite',async()=>{
   await assert.rejects(f.e.run('canario',()=>f.raw(0)),/expirado/);assert.equal(f.sent.length,0);
  }finally{f.cleanup();}
 });
+
+
+test('orphan lock recovery is denied without quorum, recent lock or absent ownership proof',async()=>{
+ const fs=await import('node:fs');
+ const os=await import('node:os');
+ const path=await import('node:path');
+ const {recuperarLockOrfaoMegazord}=await import('./megazordExecutor');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-lock-'));
+ const journal=path.join(dir,'journal.json'),lock=journal+'.lock';
+ const t=Date.now();
+ const quorum=[{nonce:'42',block:53100000},{nonce:'42',block:53100001}];
+ try{
+   fs.writeFileSync(lock,JSON.stringify({pid:31,host:'old-deployment-host',
+     token:'12345678-1234-4123-8123-123456789abc'}));
+   const old=new Date(t-200000);
+   fs.utimesSync(lock,old,old);
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,[{nonce:'42',block:2},{nonce:'43',block:2}],t,'new-host'),/quorum/);
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,quorum,t,'old-deployment-host'),/recusada/);
+   fs.writeFileSync(journal,JSON.stringify({pending:{hash:'sensitive'}}));
+   assert.throws(()=>recuperarLockOrfaoMegazord(journal,quorum,t,'new-host'),/diario existente/);
+   fs.unlinkSync(journal);
+   const recovered=recuperarLockOrfaoMegazord(journal,quorum,t,'new-host');
+   assert.equal(recovered.recuperado,true);
+   assert.equal(fs.existsSync(lock),false);
+   assert.equal(fs.readdirSync(dir).filter(x=>x.includes('.orphan-')).length,1);
+   assert.equal(fs.existsSync(journal),false);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
