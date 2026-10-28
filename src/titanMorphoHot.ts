@@ -260,7 +260,7 @@ export function iniciarGatilhoQuenteMorpho(env:NodeJS.ProcessEnv=process.env):vo
  iniciado=true;
  const url=resolverRpcMorphoHot(env);
  rpcHotUrl=url;
- rpc=new JsonRpcProvider(url,8453,{staticNetwork:true});
+ rpc=new JsonRpcProvider(url,8453,{staticNetwork:true,batchMaxCount:1});
  log.info('[TITAN/MORPHO-HOT] Gatilho de execucao por bloco iniciado.',{
    intervaloMs:INT_MS,maxPosicoes:MAX_QUENTES,ttlMs:TTL_MS,
    envioConfigurado:env.CACA_MORPHO_V3_ENVIAR==='1',
