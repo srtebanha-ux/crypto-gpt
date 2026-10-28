@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,exigeSondaIntegralMorphoHot,semRotaExecutavelMorpho,compararPrioridadeMorphoHot,criarPortaoProvaMorphoHot} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,exigeSondaIntegralMorphoHot,semRotaExecutavelMorpho,compararPrioridadeMorphoHot,criarPortaoProvaMorphoHot,pausaDeInsolvenciaMorpho} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
@@ -234,4 +234,20 @@ test('single-flight gate recovers from a rejected read-only proof without deadlo
  assert.equal(gate.executar(async()=>{}),true);
  await new Promise<void>(resolve=>setImmediate(resolve));
  assert.equal(gate.ocupada(),false);
+});
+
+test('deeply insolvent crossed borrower rotates out of costly full proofs but remains monitorable',()=>{
+ const now=1_806_000_000_000;
+ const paused={ate:now+300_000,distanciaBps:-6189n};
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6189n,now+30_000),true);
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6200n,now+30_000),true);
+ // A 99bp improvement is not enough to retry the expensive route search.
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6090n,now+30_000),true);
+ // Meaningful improvement in collateralization immediately releases the gate.
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6089n,now+30_000),false);
+ assert.equal(pausaDeInsolvenciaMorpho(paused,-6189n,now+300_000),false);
+ assert.equal(pausaDeInsolvenciaMorpho(paused,null,now+10),false);
+ assert.equal(pausaDeInsolvenciaMorpho(undefined,-6189n,now),false);
+ // Ordinary crossed borrower is still preferred over merely near healthy risk.
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now),true);
 });
