@@ -27,7 +27,7 @@ export class CursoresMorpho {
  obter(id:string):Registro{return this.registros.get(id.toLowerCase())??{proximo:0,devedores:[]};}
  /** One durable queue from market validation to borrower collection. Ranking only
   * breaks ties: a large book cannot starve a smaller book across restarts. */
- selecionarMercados<T extends {id:string}>(mercados:readonly T[],ranking:readonly string[]|null,limite:number):T[]{
+ selecionarMercados<T extends {id:string}>(mercados:readonly T[],ranking:readonly string[]|null,limite:number,riscoGlobal:readonly string[]=[]):T[]{
   if(!Number.isSafeInteger(limite)||limite<=0)return[];
   const ranks=new Map((ranking??[]).map((id,i)=>[id.toLowerCase(),i]));
   const unicos=[...new Map(mercados.map(m=>[m.id.toLowerCase(),m])).values()];
