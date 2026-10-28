@@ -250,8 +250,10 @@ test('deeply insolvent crossed borrower rotates out of costly full proofs but re
  assert.equal(pausaDeInsolvenciaMorpho(paused,-6189n,now+300_000),false);
  assert.equal(pausaDeInsolvenciaMorpho(paused,null,now+10),false);
  assert.equal(pausaDeInsolvenciaMorpho(undefined,-6189n,now),false);
- // Ordinary crossed borrower is still preferred over merely near healthy risk.
- assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now),true);
+ // A crossed borrower is high priority only once its cooldown has expired.
+ // Ignoring this gate was monopolizing paid-proof slots with bad debt.
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now+300_000),true);
 });
 
 test('Morpho director skips second DEX for healthy or no-safe-share protocol rejection',async()=>{
