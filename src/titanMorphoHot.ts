@@ -149,9 +149,9 @@ async function executarSondaMorphoHot(a:Alvo,block:number):Promise<void>{
      }
 
  }catch(e){
-   // No paid submission in this catch path; keep read-only monitoring alive.
-   // Avoid logging exception strings (provider URLs may contain credentials).
-   // An exception is not proof that a transaction was NOT broadcast.
+   // Exceptions do not prove that a transaction was never broadcast.
+   // Continue read-only monitoring and require journal/nonce reconciliation.
+   // Avoid logging exceptions (provider URLs may embed credentials).
    // Pause this target until journal/nonce reconciliation has completed.
    aguardando.set(chave(a),Date.now()+30*60_000);
    log.warn('[TITAN/MORPHO-HOT/PROVA-FALHOU]',{
