@@ -667,7 +667,50 @@ export async function descobrirMorphoPorApi(
         // can be used. Oracle address is from those confirmed parameters.
         if(blocoDoRadar !== null) {
             const estado=await chamarRpc(codificarMarket(m.id));
-            totais=estado===null?null:lerMarket(estado);
+            const mercadoCompleto=estado===null?null:lerMarketComTempo(estado);
+            totais=mercadoCompleto??(estado===null?null:lerMarket(estado));
+            // Restrict IRM overhead to the first 8 confirmed markets
+            // (global risk first). Never assume zero interest if view fails.
+            if(mercadoCompleto&&timestampDoRadar!==null
+              &&irmViewsConsultadas<8
+              &&/^0x[0-9a-fA-F]{40}$/.test(m.irm)
+              && !/^0x0{40}$/i.test(m.irm)
+              &&mercadoCompleto.totalBorrowAssets>0n
+              &&mercadoCompleto.lastUpdate>0n
+              &&timestampDoRadar>mercadoCompleto.lastUpdate){
+                irmViewsConsultadas++;
+                try{
+                    const lltv=BigInt(m.lltv.mul('1000000000000000000').floor().toFixed(0));
+                    const data=irmBorrowRateView.encodeFunctionData('borrowRateView',[
+                        [m.loanToken,m.collateralToken,m.oracle,m.irm,lltv],
+                        [mercadoCompleto.totalSupplyAssets,mercadoCompleto.totalSupplyShares,
+                         mercadoCompleto.totalBorrowAssets,mercadoCompleto.totalBorrowShares,
+                         mercadoCompleto.lastUpdate,mercadoCompleto.fee],
+                    ]);
+                    const answer=await chamarRpc(data,m.irm);
+                    if(answer!==null){
+                        const rate=irmBorrowRateView.decodeFunctionResult('borrowRateView',answer)[0] as bigint;
+                        // Reasonable non-negative WAD rates. Bad or unavailable
+                        // IRMs cannot promote candidates into paid execution.
+                        if(rate>=0n&&rate<=10n**18n){
+                            const accrued=totalBorrowComJurosMorpho(
+                                mercadoCompleto.totalBorrowAssets,rate,
+                                mercadoCompleto.lastUpdate,timestampDoRadar);
+                            if(accrued){
+                                totais={...mercadoCompleto,
+                                    totalBorrowAssets:accrued.totalBorrowAssets};
+                                jurosAplicados++;
+                                log.info('[MORPHO/JUROS-ESTIMADOS] BorrowRateView de bloco fixado.',{
+                                    mercado:m.id,bloco:blocoDoRadar,
+                                    jurosCru:accrued.juros.toString(),
+                                    segundos:(timestampDoRadar-mercadoCompleto.lastUpdate).toString(),
+                                    observacao:'estimativa para triagem; eth_call integral e obrigatorio',
+                                });
+                            }
+                        }
+                    }
+                }catch{/* unknown accrual: retain old snapshot, no paid permission */}
+            }
             if(/^0x[0-9a-fA-F]{40}$/.test(m.oracle)
                 && !/^0x0{40}$/i.test(m.oracle)){
                 const preco=await chamarRpc(id('price()').slice(0,10),m.oracle);
