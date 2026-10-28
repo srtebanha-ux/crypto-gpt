@@ -2,7 +2,7 @@ import {randomInt} from 'node:crypto';
 /** Bounded read-only transport. No signing, broadcasts or upstream error text. */
 type Rpc=(url:string,method:string,params:unknown[])=>Promise<unknown>;
 type Opcoes={fetcher?:typeof fetch;esperar?:(ms:number)=>Promise<void>;agora?:()=>number};
-const methods=new Set(['eth_chainId','eth_getBlockByNumber','eth_getTransactionCount',
+const methods=new Set(['eth_chainId','eth_blockNumber','eth_getBlockByNumber','eth_getTransactionCount',
  'eth_getBalance','eth_getCode']);
 const MAX_RETRY_AFTER_MS=5000;
 export class FalhaRpcLeitura extends Error {
