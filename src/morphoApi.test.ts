@@ -796,7 +796,7 @@ test('risk ranking near HF=1 does not waste the lead on deep bad debt',()=>{
    pageInfo:{count:rows.length,countTotal:rows.length},items:rows
  }}});
  assert.deepEqual(parsed?.candidatos.map(c=>c.healthFactor),
-   [0.999,0.998,0.8,0.5,0.10,1.0001,1.01,1.019]);
+   [1.0001,0.999,0.998,1.01,1.019,0.8,0.5,0.10]);
  // Bad index values do not promote risk, and missing HF keeps former fallback.
  const noHF=lerRiscoGlobalMorpho({data:{marketPositions:{items:[
    {market:{marketId:m},user:{address:addr(1)}},
