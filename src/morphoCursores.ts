@@ -34,11 +34,22 @@ export class CursoresMorpho {
   const known=new Map(unicos.map(m=>[m.id.toLowerCase(),m]));
   const urgent:T[]=[];
   const urgentIds=new Set<string>();
+  const riskRank=new Map<string,number>();
   for(const raw of riscoGlobal){
-    const id=raw.toLowerCase(),m=known.get(id);
-    if(!m||urgentIds.has(id))continue;
-    urgent.push(m);urgentIds.add(id);
-    if(urgent.length>=Math.floor(limite/4))break;
+    const id=raw.toLowerCase();
+    if(known.has(id)&&!riskRank.has(id))riskRank.set(id,riskRank.size);
+  }
+  const riskMarkets=[...riskRank.keys()];
+  const quota=Math.floor(limite/4),fixed=Math.ceil(quota/2);
+  const first=riskMarkets.slice(0,fixed);
+  // Preserve the worst health-factor slots, but rotate the remaining risk
+  // markets across cycles by last actual attempt (persistent over restarts).
+  const rotated=riskMarkets.slice(fixed).sort((a,b)=>
+    (this.tentativas.get(a)??0)-(this.tentativas.get(b)??0)
+    ||riskRank.get(a)!-riskRank.get(b)!);
+  for(const id of [...first,...rotated]){
+    if(urgentIds.has(id)||urgent.length>=quota)break;
+    urgent.push(known.get(id)!);urgentIds.add(id);
   }
   // Reserve 25% of each round for markets with the largest indexed debt.
   // Previously the least-recent-attempted sort dominated every ranking entry,
