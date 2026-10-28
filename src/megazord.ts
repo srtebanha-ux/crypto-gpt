@@ -3,6 +3,7 @@ import {auditarContratosMegazord} from './megazordContratosPreflight';
 import {createLogger} from './logger';
 import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord} from './megazordExecutor';
 import {normalizarCredenciaisMegazord} from './megazordCredenciais';
+import {diagnosticarFioRpcMegazord} from './megazordRpcWireDiagnostico';
 import {auditarPersistenciaMegazord} from './megazordAuditoriaPersistencia';
 import {selecionarParRpcMegazord} from './megazordRpcFailover';
 import {prepararMorphoMegazord} from './megazordMorphoBoot';
@@ -172,7 +173,11 @@ export async function iniciarMegazord(
 }
 
 if(require.main===module){
- void iniciarMegazord(process.env,async()=>{
+ // Diagnoses the ACTUAL Railway egress; only fixed-shape metadata is logged.
+ // No signer, key, secret-bearing URL, RPC payload or financial write.
+ void diagnosticarFioRpcMegazord(process.env).then(report=>{
+   log.info('[TITAN/RPC-FIO-READONLY]',report);
+   return iniciarMegazord(process.env,async()=>{
    if(process.env.MEGAZORD_MODO==='execucao'){
      instalarExecutorMegazord(process.env);
      for(const k of ['CACA_CHAVE_PRIVADA','TITAN_CHAVE_PRIVADA']){
@@ -186,6 +191,7 @@ if(require.main===module){
      executorFinanceiroUnificado:process.env.MEGAZORD_MODO==='execucao',
    });
    return {liquidacoes:()=>manterLiquidanteMegazord(caca.iniciarLiquidante),arbitragem:arb.iniciarArbitragem};
+   });
  }).catch(e=>{
    log.error('Megazord interrompido.',{motivo:e instanceof Error?e.message:'falha'});
    // Stop both engines and their timers after failure; do not run degraded.
