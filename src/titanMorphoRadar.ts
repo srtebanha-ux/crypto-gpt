@@ -13,6 +13,17 @@ export type RadarMorpho={
  distanciaBps:bigint|null;
  motivo:string;
 };
+/** Full preflights are expensive and contend with the one signer. The
+ * continuous block-level monitor already tracks positions up to 500 bps.
+ * Reserve full contract probes for crossings or positions within 75 bps.
+ * This only prioritizes; an actual liquidate() plus gas/profit must still pass.
+ */
+export const PRE_FLIGHT_PERTINENTE_BPS=75n;
+export function precisaPreflightIntegralMorpho(risco:Pick<RadarMorpho,'situacao'|'distanciaBps'>):boolean{
+ return risco.situacao==='cruzou-estimado'
+   ||(risco.situacao==='proxima'&&risco.distanciaBps!==null
+     &&risco.distanciaBps<=PRE_FLIGHT_PERTINENTE_BPS);
+}
 export const WAD_MORPHO=10n**18n;
 export const ORACLE_SCALE_MORPHO=10n**36n;
 // Official Morpho Blue SharesMathLib: 1e6 virtual shares and one virtual asset.
