@@ -551,7 +551,8 @@ export async function descobrirMorphoPorApi(
     // incorrectly treated as effective borrower coverage.
     const rodada=opcoes.indiceDaRodada ?? Math.floor(Date.now()/900_000);
     const escolhidos=cursores.selecionarMercados(candidatosParaSondagem,rankingDeDividas,
-        tetoDev===0?tetoValid:Math.min(tetoValid,tetoDev));
+        tetoDev===0?tetoValid:Math.min(tetoValid,tetoDev),
+        riscoGlobal?.candidatos.map(x=>x.mercado)??[]);
     log.info('[MORPHO/API] Selecao de mercados para conferir na Base.',{
         mercadosEnumerados:candidatosParaSondagem.length,
         llTvAte77PorCento:quePagam.length,
