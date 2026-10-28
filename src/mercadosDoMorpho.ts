@@ -656,6 +656,7 @@ export async function descobrirMorphoPorApi(
     // Every confirmed selection has a borrower slot. Hot positions keep their
     // independent per-block worker; this queue broadens discovery fairly.
     const mercadosComDevedores=tetoDev===0?[]:escolhidos.filter(x=>x.confirmadoNaCorrente);
+    let irmViewsConsultadas=0,jurosAplicados=0;
     for (const m of mercadosComDevedores) {
         // A deadline must not falsely advance markets that were never queried.
         if(orcamento.sinal.aborted||orcamento.gastas>=orcamento.tetoDeRequisicoes)break;
