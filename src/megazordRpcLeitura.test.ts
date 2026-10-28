@@ -90,7 +90,7 @@ test('persistent HTTP-200 RPC errors fail closed after exactly three read attemp
   }) as typeof fetch,
  });
  await assert.rejects(rpc('https://rpc.invalid','eth_getCode',['0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb','latest']),
-  e=>e instanceof Error&&e.message==='resposta RPC invalida');
+  e=>e instanceof Error&&e.message==='resposta RPC invalida [eth_getCode]');
  assert.equal(attempts,3);
 });
 
