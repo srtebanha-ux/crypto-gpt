@@ -1,0 +1,29 @@
+name: TITAN PR122 isolated verification
+on:
+  push:
+    branches:
+      - fix/morpho-hot-prioridade-proximidade-20261028
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  readonly-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+      - name: HOT and RPC regression tests
+        run: node --require ts-node/register --test --test-concurrency=2 src/titanMorphoHot.test.ts src/megazordRpcFailover.test.ts
+      - name: Solidity compilation and local execution tests (no chain access)
+        run: |
+          npx hardhat compile
+          npx hardhat test --no-compile --config hardhat.morpho-local.cjs forkTests/titanCpammLocal.js forkTests/titanMorphoV3Local.js
