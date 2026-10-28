@@ -31,3 +31,17 @@ test('old blocks and pending nonces never become readiness approvals',async()=>{
  await assert.rejects(conferirRedeMegazord(env,async(u,m)=>
    m==='eth_getBlockByNumber'?{number:'0x64',timestamp:'0x1'}:rpc(u,m)),/bloco ausente ou antigo/);
 });
+
+test('two RPC witnesses are checked sequentially to avoid shared rate-limit bursts',async()=>{
+ const seen:string[]=[];
+ const result=await conferirRedeMegazord(env,async(u,m,p)=>{
+  seen.push(u);
+  return rpc(u,m);
+ });
+ assert.equal(result.checks.length,2);
+ assert.ok(seen.length>=12);
+ const firstOther=seen.indexOf('rpc-b');
+ assert.ok(firstOther>0);
+ assert.ok(seen.slice(0,firstOther).every(x=>x==='rpc-a'));
+ assert.ok(seen.slice(firstOther).every(x=>x==='rpc-b'));
+});
