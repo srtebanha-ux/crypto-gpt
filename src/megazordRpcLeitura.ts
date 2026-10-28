@@ -14,9 +14,10 @@ export class FalhaRpcLeitura extends Error {
 export function criarRpcPreflight({fetcher=fetch,
  esperar=ms=>new Promise(r=>setTimeout(r,ms)),agora=Date.now}:Opcoes={}):Rpc{
  const queues=new Map<string,Promise<unknown>>();
- // Avoid reused small IDs across restarts and intermediaries that cache block replies.
- // The response must still echo the exact numeric ID; never accept stale data.
- let requestId=randomInt(100000000,2000000000);
+ // Avoid the repeatedly reused IDs 1,2,3 while keeping a modest number,
+ // compatible with gateways that reject large JSON-RPC numeric request IDs.
+ // Successful replies must still echo the exact ID, never stale data.
+ let requestId=randomInt(1000,9000);
  const notBefore=new Map<string,number>();
  return (url,method,params)=>{
    if(!methods.has(method))return Promise.reject(Error('metodo fora do preflight somente leitura'));
