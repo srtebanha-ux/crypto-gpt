@@ -785,7 +785,7 @@ export function consultaRiscoGlobalMorpho(skip=0):string{
        orderBy:HealthFactor,orderDirection:Desc,first:$first,skip:$skip
      ){pageInfo{count countTotal}items{market{marketId}user{address}}}
    }`,
-   variables:{chainIds:[8453],hfLte:1.02,first:1000,skip},
+   variables:{chainIds:[8453],hfLte:1,first:1000,skip},
  });
 }
 export function lerRiscoGlobalMorpho(corpo:unknown):
