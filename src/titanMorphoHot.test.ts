@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,priorizarCandidatosMorphoHot} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
@@ -167,4 +167,27 @@ test('HOT reuses the configured Megazord RPC and avoids public fallback unless n
  assert.equal(resolverRpcMorphoHot({}), 'https://mainnet.base.org');
  assert.equal(resolverRpcMorphoHot({...configured,CACA_MORPHO_V3_RPC_URL:'  '}),
   configured.MEGAZORD_RPC_URL);
+});
+
+
+test('HOT probes the closest risk first rather than the oldest API entry',()=>{
+ const m=mercado(true,'0x'+'a7'.repeat(32));
+ const oldFar={mercado:m,usuario:user1,distanciaBps:366n,atualizadoEm:block};
+ const newNear={mercado:m,usuario:user2,distanciaBps:55n,atualizadoEm:block+100};
+ const crossed={mercado:m,usuario:'0x'+'77'.repeat(20),distanciaBps:-1n,atualizadoEm:block+200};
+ assert.deepEqual(
+   priorizarCandidatosMorphoHot([oldFar,newNear],new Map(),block),
+   [newNear,oldFar],
+ );
+ assert.deepEqual(
+   priorizarCandidatosMorphoHot([oldFar,newNear,crossed],new Map(),block),
+   [crossed,newNear,oldFar],
+ );
+ const waiting=new Map([[m.id.toLowerCase()+'|'+crossed.usuario.toLowerCase(),block+45_000]]);
+ assert.deepEqual(
+   priorizarCandidatosMorphoHot([oldFar,newNear,crossed],waiting,block),
+   [newNear,oldFar],
+ );
+ // The crossed target must immediately re-enter when its cooldown expires.
+ assert.equal(priorizarCandidatosMorphoHot([crossed],waiting,block+45_000)[0],crossed);
 });
