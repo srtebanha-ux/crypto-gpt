@@ -681,7 +681,19 @@ export async function descobrirMorphoPorApi(
         // Multicall3 faz ate 60 verificacoes de devedor num UNICO eth_call
         // no mesmo bloco do preco do oracle e dos totais. Antes isto eram
         // dezenas de round trips e a fila parava no primeiro HTTP 429.
-        const candidatos=selecionarDevedoresPorRisco(cursores.obter(m.id).devedores,m.lltv,tetoPosicoes,rodada);
+        // Reserve up to a quarter of position reads for the globally riskiest
+        // borrowers, even if the per-market BorrowShares pages missed them.
+        // Address came from API; position(), oracle() and market() decide truth.
+        const urgentes=(riscoGlobal?.candidatos??[])
+            .filter(x=>x.mercado===m.id.toLowerCase())
+            .slice(0,Math.ceil(tetoPosicoes/4))
+            .map(x=>({endereco:x.usuario,borrowSharesDaApi:null,
+                borrowAssetsUsd:null,collateralUsd:null}));
+        const vistosUrgentes=new Set(urgentes.map(x=>x.endereco.toLowerCase()));
+        const outros=selecionarDevedoresPorRisco(
+            cursores.obter(m.id).devedores.filter(x=>!vistosUrgentes.has(x.endereco.toLowerCase())),
+            m.lltv,Math.max(0,tetoPosicoes-urgentes.length),rodada);
+        const candidatos=[...urgentes,...outros];
         const dadosLote=candidatos.length>0
             ?await chamarRpc(codificarAggregate3(candidatos.map(d=>({
                 alvo:morpho,dados:codificarPosition(m.id,d.endereco),
