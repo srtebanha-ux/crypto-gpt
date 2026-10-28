@@ -171,3 +171,20 @@ test('persisting -32029 quota failure never becomes a valid onchain result',asyn
    &&!e.message.includes('private-key-looking-secret'));
  assert.equal(n,3);
 });
+
+test('preflight uses high unique numeric IDs and still rejects stale cached IDs',async()=>{
+ const sent:number[]=[];
+ const rpc=estrito({esperar:async()=>{},fetcher:(async(_u,i)=>{
+   const id=JSON.parse(String(i?.body)).id as number;
+   sent.push(id);
+   return new Response(JSON.stringify({jsonrpc:'2.0',id,result:'0x2105'}));
+ }) as typeof fetch});
+ await rpc('p','eth_chainId',[]);
+ await rpc('p','eth_getBlockByNumber',['latest',false]);
+ assert.ok(sent[0]!>=100000000);
+ assert.equal(sent[1],sent[0]!+1);
+ const bad=estrito({esperar:async()=>{},fetcher:(async()=>new Response(
+  JSON.stringify({jsonrpc:'2.0',id:1,result:'0x2105'}))) as typeof fetch});
+ await assert.rejects(bad('p','eth_chainId',[]),
+  e=>e instanceof Error&&(e as {categoria?:string}).categoria==='id_divergente');
+});
