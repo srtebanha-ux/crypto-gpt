@@ -820,7 +820,7 @@ export async function descobrirMorphoPorApi(
                                 distanciaBps:risco.distanciaBps?.toString()??null,
                                 dividaCrua:risco.dividaCrua?.toString()??null,
                                 confirmadoNaCorrente:m.confirmadoNaCorrente,
-                                estado:'estimado com market() antes do accrual',
+                                estado:'estimado com juros IRM se disponiveis; exige eth_call integral',
                                 regra:'nao e liquidacao real, exige eth_call e recibo',
                             });
                         }
@@ -848,6 +848,7 @@ export async function descobrirMorphoPorApi(
         mercadosComDevedores:mercadosComDevedores.length,
         posicoesComDividaValidadas:validados,
         maximoDePosicoesOnchain:tetoPosicoes*mercadosComDevedores.length,
+        mercadosComTaxaConsultada:irmViewsConsultadas,mercadosComJurosEstimados:jurosAplicados,
         saudesCalculadas:posicoesAvaliadas,
         proximas:pertoDoLimiar,
         cruzadasEstimadas:cruzaramEstimado,
