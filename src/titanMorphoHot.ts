@@ -25,6 +25,14 @@ const MAX_QUENTES=24;
 const TTL_MS=25*60_000;
 const INT_MS=2_250;
 const EXCLUIR_TEMP_MS=45_000;
+/** A busy in-process route gate is not a rejected liquidation: retry at
+ * the next HOT cycle, rather than suppressing a potentially crossed target
+ * for 45 seconds. The director's single-wallet lock remains unchanged. */
+export function cooldownAposPreflightHot(resultado:{status:string;motivo:string}):number{
+ return resultado.status==='descartada'
+   &&resultado.motivo==='outro preflight Morpho ocupa a unica carteira'
+   ?INT_MS:EXCLUIR_TEMP_MS;
+}
 const aguardando=new Map<string,number>();
 // Assets without any verified direct V3 or Aerodrome exit cannot repay the
 // Morpho debt. Block the WHOLE market temporarily, not just one borrower.
@@ -222,6 +230,12 @@ async function verificarBlocoMorphoHot():Promise<void>{
        mercado:a.mercado,usuario:a.usuario,signal:AbortSignal.timeout(20_000),
        rpcUrl:rpcHotUrl??resolverRpcMorphoHot(process.env),
      });
+     // Avoid a false 45s negative caused by another scanner using the
+     // in-process single-wallet probe gate; no paid tx was attempted.
+     if(cooldownAposPreflightHot(result)===INT_MS){
+       aguardando.set(chave(a),Date.now()+INT_MS);
+       continue;
+     }
      // An existent pool is not liquid. If ALL executor sizes reverted from
      // the canonical DEX output floor, give its market a short cooling period.
      // The slow radar keeps discovering other users/markets as usual.
