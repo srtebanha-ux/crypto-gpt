@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {examinarSaudeMorpho,WAD_MORPHO,ORACLE_SCALE_MORPHO} from './titanMorphoRadar';
+import {examinarSaudeMorpho,precisaPreflightIntegralMorpho,WAD_MORPHO,ORACLE_SCALE_MORPHO} from './titanMorphoRadar';
 const base={
  borrowShares:1_000_000_000n,collateral:1000n,
  totalBorrowAssets:1000n,totalBorrowShares:1_000_000_000n,
@@ -47,4 +47,13 @@ test('Morpho official virtual shares prevent false debt estimate in tiny markets
  const r=examinarSaudeMorpho({...base,borrowShares:1_000_000n,
   totalBorrowShares:1_000_000n,totalBorrowAssets:1000n});
  assert.equal(r.dividaCrua,501n); // ceil(1e6*(1000+1)/(1e6+1e6))
+});
+
+test('slow radar leaves distant borrowers to per-block monitor and frees sole signer for near/crossed',()=>{
+ assert.equal(precisaPreflightIntegralMorpho({situacao:'proxima',distanciaBps:238n}),false);
+ assert.equal(precisaPreflightIntegralMorpho({situacao:'proxima',distanciaBps:75n}),true);
+ assert.equal(precisaPreflightIntegralMorpho({situacao:'proxima',distanciaBps:76n}),false);
+ assert.equal(precisaPreflightIntegralMorpho({situacao:'cruzou-estimado',distanciaBps:-1n}),true);
+ assert.equal(precisaPreflightIntegralMorpho({situacao:'segura',distanciaBps:50n}),false);
+ assert.equal(precisaPreflightIntegralMorpho({situacao:'desconhecida',distanciaBps:null}),false);
 });
