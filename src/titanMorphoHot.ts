@@ -134,8 +134,7 @@ async function executarSondaMorphoHot(a:Alvo,block:number):Promise<void>{
      if(result.status==='inviavel'&&result.motivo.includes('position is healthy'))
        aguardando.set(chave(a),Date.now()+PAUSA_POSICAO_SAUDAVEL_MS);
      if(result.status==='inviavel'
-       &&result.motivo.includes('garantia insuficiente para qualquer parcela segura de divida')
-       &&(via==='Aerodrome'||!process.env.CACA_MORPHO_AERO_CONTRATO)){
+       &&result.motivo.includes('garantia insuficiente para qualquer parcela segura de divida')){
        insolventes.set(chave(a),{
          ate:Date.now()+PAUSA_INSOLVENTE_MS,distanciaBps:a.distanciaBps,
        });
