@@ -27,7 +27,8 @@ type Journal={version:1;address:string;pending:Pending|null;
  days:Record<string,{reservedWei:string;creditedWei?:string;attempts:number}>;
  receipts:Array<Pending&{status:number;block:number}>};
 export type PoliticaMegazord={journal:string;maxDailyWei:bigint;maxPerTxWei:bigint;
- maxDailyTx:number;contracts:readonly string[];canaryUntilMs?:number};
+ maxDailyTx:number;contracts:readonly string[];canaryUntilMs?:number;
+ maxUncoveredLifetimeWei?:bigint};
 
 /** Conservatively value USDC earnings in WETH wei using two independently
  * verified 30-minute onchain ETH/USDC TWAPs. Never assume USD peg.
@@ -106,7 +107,10 @@ export class ExecutorMegazord {
    this.signer=new Wallet(normalizarChaveMegazord(key));
    if(policy.maxDailyWei<=0n||policy.maxPerTxWei<=0n||policy.maxPerTxWei>policy.maxDailyWei
      ||!Number.isSafeInteger(policy.maxDailyTx)||policy.maxDailyTx<1
-     ||policy.contracts.length===0||policy.contracts.some(x=>!/^0x[0-9a-f]{40}$/i.test(x)))
+     ||policy.contracts.length===0||policy.contracts.some(x=>!/^0x[0-9a-f]{40}$/i.test(x))
+     ||(policy.maxUncoveredLifetimeWei!==undefined&&
+       (policy.maxUncoveredLifetimeWei<policy.maxPerTxWei||
+         policy.maxUncoveredLifetimeWei>100000000000000n)))
      throw Error('politica Megazord invalida');
    this.lock=policy.journal+'.lock';
    // Missing parent directories can be created. Never use /tmp fallback
@@ -250,6 +254,20 @@ export class ExecutorMegazord {
    const uncovered=BigInt(used.reservedWei)-BigInt(used.creditedWei??'0');
    if(cost>this.policy.maxPerTxWei||uncovered+cost>this.policy.maxDailyWei
      ||used.attempts>=this.policy.maxDailyTx)throw Error('orcamento global Megazord excedido');
+   // Continuous mode is NOT an unlimited spending mandate. Conservatively
+   // sum all unrecovered reservations across UTC days, INCLUDING pending.
+   // Proof of WETH/USDC treasury transfers may credit a reservation ONLY
+   // through the existing dual-RPC receipt reconciliation.
+   if(this.policy.maxUncoveredLifetimeWei!==undefined){
+     let exposure=0n;
+     for(const d of Object.values(this.state.days)){
+       const reserved=BigInt(d.reservedWei),credit=BigInt(d.creditedWei??'0');
+       if(credit>reserved)throw Error('diario financeiro corrompido');
+       exposure+=reserved-credit;
+     }
+     if(exposure+cost>this.policy.maxUncoveredLifetimeWei)
+       throw Error('circuit breaker Megazord: teto acumulado de gas sem lucro comprovado');
+   }
    if(tx.nonce!==await this.nonceLivre())throw Error('nonce mudou no pre-broadcast');
    this.conferirCanario(); // deadline may expire while RPC preflight runs
    const next=structuredClone(this.state),hash=keccak256(raw);
@@ -408,7 +426,10 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
  const s=new JsonRpcProvider(env.MEGAZORD_RPC_SECUNDARIO,undefined,{batchMaxCount:1});
  try{
    active=new ExecutorMegazord(key,p,s,{
-     canaryUntilMs:env.MEGAZORD_CANARIO_ATE_UTC?Date.parse(env.MEGAZORD_CANARIO_ATE_UTC):undefined,
+     canaryUntilMs:env.MEGAZORD_CONTINUO==='1'?undefined:
+       env.MEGAZORD_CANARIO_ATE_UTC?Date.parse(env.MEGAZORD_CANARIO_ATE_UTC):undefined,
+     maxUncoveredLifetimeWei:env.MEGAZORD_CONTINUO==='1'
+       ?BigInt(env.MEGAZORD_PERDA_MAX_TOTAL_WEI??'0'):undefined,
      journal:file,maxDailyWei:BigInt(env.MEGAZORD_GAS_MAX_DIA_WEI??'2000000000000000'),
      maxPerTxWei:BigInt(env.MEGAZORD_GAS_MAX_TX_WEI??'0'),
      maxDailyTx:Number(env.MEGAZORD_MAX_TX_DIA??'0'),
@@ -434,7 +455,19 @@ export function conferirOrcamentoMegazord(env:NodeJS.ProcessEnv):void{
    ||BigInt(perTx)<=0n||BigInt(daily)<=0n||BigInt(perTx)>BigInt(daily)
    ||!Number.isSafeInteger(count)||count<1||count>250)
    throw Error('orcamento Megazord invalido: confira tetos por transacao, por dia e quantidade');
- if(env.MEGAZORD_CANARIO_ATE_UTC!==undefined){
+ // A persistent, explicit continuous authorization replaces the expiring
+ // one-shot canary. All daily, per-TX, lifetime, profit, nonce and receipt
+ // guards still apply on EVERY broadcast. Stale canary is ignored only here.
+ if(env.MEGAZORD_CONTINUO==='1'){
+   const cap=env.MEGAZORD_PERDA_MAX_TOTAL_WEI;
+   if(env.MEGAZORD_MODO!=='execucao'||
+     env.MEGAZORD_CONFIRMAR!=='OPERAR_BASE_REAL'||
+     env.MEGAZORD_EXCLUSIVO!=='1'||env.MEGAZORD_AUTO_DEPLOY==='1'||
+     env.MEGAZORD_GAS_MAX_DIA_WEI===undefined||
+     !cap||!/^\d+$/.test(cap)||
+     BigInt(cap)<BigInt(perTx)||BigInt(cap)>100000000000000n)
+     throw Error('modo continuo exige exclusividade, confirmacao e teto de perda acumulada');
+ }else if(env.MEGAZORD_CANARIO_ATE_UTC!==undefined){
    const deadline=Date.parse(env.MEGAZORD_CANARIO_ATE_UTC);
    const causes:string[]=[];
    if(!Number.isFinite(deadline))causes.push('prazo_invalido');
