@@ -1,5 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {AbiCoder} from 'ethers';
+import {lerMarket,lerMarketComTempo} from './morphoApi';
 import {examinarSaudeMorpho,precisaPreflightIntegralMorpho,totalBorrowComJurosMorpho,WAD_MORPHO,ORACLE_SCALE_MORPHO} from './titanMorphoRadar';
 const base={
  borrowShares:1_000_000_000n,collateral:1000n,
@@ -77,4 +79,17 @@ test('accrued debt can promote a near position into the risk queue without autho
  assert.ok(old.distanciaBps!==null&&updated.distanciaBps!==null
    &&updated.distanciaBps<old.distanciaBps);
  assert.ok(!Object.prototype.hasOwnProperty.call(updated,'podeEnviar'));
+});
+
+test('six-field market view retains lastUpdate and fee without changing original decoder',()=>{
+ const bytes=AbiCoder.defaultAbiCoder().encode(
+   ['uint128','uint128','uint128','uint128','uint128','uint128'],
+   [1000n,2000n,3000n,4000n,53200000n,150000000000000000n]);
+ const original=lerMarket(bytes),withTime=lerMarketComTempo(bytes);
+ assert.deepEqual(original,{
+   totalSupplyAssets:1000n,totalSupplyShares:2000n,
+   totalBorrowAssets:3000n,totalBorrowShares:4000n});
+ assert.equal(withTime?.lastUpdate,53200000n);
+ assert.equal(withTime?.fee,150000000000000000n);
+ assert.equal(lerMarketComTempo('0x'),null);
 });
