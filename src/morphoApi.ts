@@ -704,6 +704,21 @@ export function lerMarket(dados: string): {
     } catch { return null; }
 }
 
+/** Full market struct for bounded interest-accrual hints. The legacy
+ * lerMarket contract stays backward-compatible for the other callers.
+ */
+export function lerMarketComTempo(dados:string):
+ ((NonNullable<ReturnType<typeof lerMarket>>)&{lastUpdate:bigint;fee:bigint})|null{
+ const base=lerMarket(dados);
+ if(!base)return null;
+ try{
+   const decoded=coder.decode(
+     ['uint128','uint128','uint128','uint128','uint128','uint128'],dados,
+   ) as unknown as bigint[];
+   return {...base,lastUpdate:decoded[4]!,fee:decoded[5]!};
+ }catch{return null;}
+}
+
 /**
  * Shares -> ativos, ARREDONDANDO PARA CIMA, como o Morpho faz na divida.
  *
