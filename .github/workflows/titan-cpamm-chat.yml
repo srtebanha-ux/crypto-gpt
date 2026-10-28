@@ -1,7 +1,7 @@
 name: TITAN CPAMM atomic integration (CHAT)
 on:
   pull_request:
-    branches: [CHAT]
+    branches: [CHAT, feat/titan-cpamm-atomico-chat-20261027]
   workflow_dispatch:
 permissions:
   contents: read
