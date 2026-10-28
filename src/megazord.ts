@@ -27,7 +27,7 @@ const boot:DependenciasBootMegazord={
  },
  rede:async env=>await selecionarParRpcMegazord(env) as RedeVerificada,
  preco:async env=>{
-   const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true});
+   const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true,batchMaxCount:1});
    try{return await atualizarPisoUsdMegazord(env,p);}finally{p.destroy();}
  },
  morpho:prepararMorphoMegazord,aave:prepararAaveMultiHopMegazord,
