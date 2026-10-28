@@ -751,6 +751,48 @@ export function apiConfereComACorrente(
         };
 }
 
+/** Global health-factor feed from the Morpho API. This is only an
+ * over-inclusive discovery hint; every market and borrower is rechecked onchain
+ * before any paid transaction. The API does not authorize execution.
+ * Based on the public Morpho Blue bot's marketPositions schema.
+ */
+export type CandidatoGlobalMorpho={mercado:string;usuario:string};
+export function consultaRiscoGlobalMorpho():string{
+ return JSON.stringify({
+   query:`query RiskOnBase($chainIds:[Int!],$hfLte:Float!,$first:Int!,$skip:Int!){
+     marketPositions(
+       where:{chainId_in:$chainIds,healthFactor_lte:$hfLte,marketListed:true}
+       orderBy:HealthFactor,orderDirection:Asc,first:$first,skip:$skip
+     ){pageInfo{count countTotal}items{market{marketId}user{address}}}
+   }`,
+   variables:{chainIds:[8453],hfLte:1.02,first:200,skip:0},
+ });
+}
+export function lerRiscoGlobalMorpho(corpo:unknown):
+ {candidatos:CandidatoGlobalMorpho[];total:number|null}|null {
+ if(!corpo||typeof corpo!=='object')return null;
+ const o=corpo as Record<string,unknown>;
+ if(Array.isArray(o.errors)&&o.errors.length)return null;
+ const data=o.data as Record<string,unknown>|undefined;
+ const mp=data?.marketPositions as Record<string,unknown>|undefined;
+ if(!Array.isArray(mp?.items))return null;
+ const info=mp.pageInfo as Record<string,unknown>|undefined;
+ if(info&&typeof info.count==='number'&&info.count!==mp.items.length)return null;
+ const seen=new Set<string>(),candidatos:CandidatoGlobalMorpho[]=[];
+ for(const raw of mp.items.slice(0,200)){
+   if(!raw||typeof raw!=='object')continue;
+   const item=raw as Record<string,unknown>;
+   const mercado=(item.market as Record<string,unknown>|undefined)?.marketId;
+   const usuario=(item.user as Record<string,unknown>|undefined)?.address;
+   if(typeof mercado!=='string'||!/^0x[0-9a-f]{64}$/i.test(mercado)
+     ||typeof usuario!=='string'||!/^0x[0-9a-f]{40}$/i.test(usuario))continue;
+   const key=mercado.toLowerCase()+'|'+usuario.toLowerCase();
+   if(seen.has(key))continue;
+   seen.add(key);candidatos.push({mercado:mercado.toLowerCase(),usuario:usuario.toLowerCase()});
+ }
+ return{candidatos,total:typeof info?.countTotal==='number'?info.countTotal:null};
+}
+
 // ---------------------------------------------------------------------------
 // OS DEVEDORES, por GraphQL.
 // ---------------------------------------------------------------------------
