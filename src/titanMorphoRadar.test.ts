@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {examinarSaudeMorpho,precisaPreflightIntegralMorpho,WAD_MORPHO,ORACLE_SCALE_MORPHO} from './titanMorphoRadar';
+import {examinarSaudeMorpho,precisaPreflightIntegralMorpho,totalBorrowComJurosMorpho,WAD_MORPHO,ORACLE_SCALE_MORPHO} from './titanMorphoRadar';
 const base={
  borrowShares:1_000_000_000n,collateral:1000n,
  totalBorrowAssets:1000n,totalBorrowShares:1_000_000_000n,
@@ -56,4 +56,25 @@ test('slow radar leaves distant borrowers to per-block monitor and frees sole si
  assert.equal(precisaPreflightIntegralMorpho({situacao:'cruzou-estimado',distanciaBps:-1n}),true);
  assert.equal(precisaPreflightIntegralMorpho({situacao:'segura',distanciaBps:50n}),false);
  assert.equal(precisaPreflightIntegralMorpho({situacao:'desconhecida',distanciaBps:null}),false);
+});
+
+test('Morpho interest estimates use 3-term WAD Taylor with exact integer rounding',()=>{
+ const w=WAD_MORPHO;
+ const one=totalBorrowComJurosMorpho(1000n,w/10n,100n,101n);
+ assert.deepEqual(one,{totalBorrowAssets:1105n,juros:105n});
+ const none=totalBorrowComJurosMorpho(1000n,w/10n,100n,100n);
+ assert.deepEqual(none,{totalBorrowAssets:1000n,juros:0n});
+ assert.equal(totalBorrowComJurosMorpho(1000n,w/10n,0n,101n),null);
+ assert.equal(totalBorrowComJurosMorpho(1000n,w/10n,101n,100n),null);
+ assert.equal(totalBorrowComJurosMorpho(-1n,0n,100n,101n),null);
+});
+test('accrued debt can promote a near position into the risk queue without authorizing a send',()=>{
+ const old=examinarSaudeMorpho({...base,precoOracle:ORACLE_SCALE_MORPHO*13n/10n});
+ const accrued=totalBorrowComJurosMorpho(base.totalBorrowAssets,WAD_MORPHO/100n,100n,105n);
+ assert.ok(accrued);
+ const updated=examinarSaudeMorpho({...base,totalBorrowAssets:accrued!.totalBorrowAssets,
+   precoOracle:ORACLE_SCALE_MORPHO*13n/10n});
+ assert.ok(old.distanciaBps!==null&&updated.distanciaBps!==null
+   &&updated.distanciaBps<old.distanciaBps);
+ assert.ok(!Object.prototype.hasOwnProperty.call(updated,'podeEnviar'));
 });
