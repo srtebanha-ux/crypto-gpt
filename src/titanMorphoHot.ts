@@ -25,6 +25,26 @@ const MAX_QUENTES=24;
 const TTL_MS=25*60_000;
 const INT_MS=2_250;
 const EXCLUIR_TEMP_MS=45_000;
+const PAUSA_MERCADO_SEM_ROTA_MS=15*60_000;
+const PAUSA_POSICAO_SAUDAVEL_MS=90_000;
+const LIMIAR_SONDA_PROXIMA_BPS=75n;
+/** Recheck health every block even when an expensive complete probe is cooling down. */
+export function exigeSondaIntegralMorphoHot(
+ situacao:string,distanciaBps:bigint|null,bloqueadoAte:number,agora:number,
+):boolean {
+ if(situacao==='cruzou-estimado')return true;
+ return situacao==='proxima'&&distanciaBps!==null
+   &&distanciaBps<=LIMIAR_SONDA_PROXIMA_BPS&&bloqueadoAte<=agora;
+}
+export function semRotaExecutavelMorpho(
+ via:'Uniswap V3'|'Aerodrome',status:string,motivo:string,primeiroMotivo?:string,
+):boolean {
+ const semRota=(s:string)=>s.includes('sem rota direta ou multihop comprovada garantia -> divida')
+   ||s.includes('rota_nao_suportada: sem pool direta')
+   ||s.includes('sem pool V3 comprovada')||s.includes('sem pool Aerodrome comprovada');
+ return status==='inviavel'&&semRota(motivo)
+   &&(via==='Uniswap V3'||semRota(primeiroMotivo??''));
+}
 const aguardando=new Map<string,number>();
 // Assets without any verified direct V3 or Aerodrome exit cannot repay the
 // Morpho debt. Block the WHOLE market temporarily, not just one borrower.
@@ -163,8 +183,8 @@ async function verificarBlocoMorphoHot():Promise<void>{
    if(block<=ultimoBloco)return;
    ultimoBloco=block;
    const agora=Date.now();
+   // Cheap snapshot every block for ALL candidates; only full proofs use cooldown.
    const selecionados=[...alvos.values()]
-     .filter(a=>(aguardando.get(chave(a))??0)<=agora)
      .sort((a,b)=>Number(b.distanciaBps<=0n)-Number(a.distanciaBps<=0n)
        ||(aguardando.get(chave(a))??0)-(aguardando.get(chave(b))??0));
    if(!selecionados.length)return;
@@ -200,7 +220,8 @@ async function verificarBlocoMorphoHot():Promise<void>{
        a.mercado.id,a.usuario,state.distanciaBps,agora);
      if(state.situacao==='cruzou-estimado')cruzaram++;
      // Only one V3 transaction candidate at a time: shared wallet/nonce.
-     if(emProva>0)continue;
+     if(emProva>0||!exigeSondaIntegralMorphoHot(state.situacao,
+       state.distanciaBps,aguardando.get(chave(a))??0,agora))continue;
      emProva++;
      aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
      const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
@@ -211,6 +232,16 @@ async function verificarBlocoMorphoHot():Promise<void>{
      // An existent pool is not liquid. If ALL executor sizes reverted from
      // the canonical DEX output floor, give its market a short cooling period.
      // The slow radar keeps discovering other users/markets as usual.
+     if(semRotaExecutavelMorpho(via,result.status,result.motivo,primeiroMotivo)){
+       bloquearMercadoSemSaida(a.mercado.id,Date.now(),PAUSA_MERCADO_SEM_ROTA_MS);
+       log.info('[TITAN/MORPHO-HOT/ROTACAO]',{
+         mercado:a.mercado.id,motivo:'sem caminho DEX executavel no contrato atual',
+         pausaMinutos:PAUSA_MERCADO_SEM_ROTA_MS/60_000,
+         estrategia:'liberar vagas para outros mercados; revalidar depois',
+       });
+     }
+     if(result.status==='inviavel'&&result.motivo.includes('position is healthy'))
+       aguardando.set(chave(a),Date.now()+PAUSA_POSICAO_SAUDAVEL_MS);
      const semLiquidezDeSaida=primeiroMotivo?.includes('nenhuma rota passou')
        &&result.motivo.includes('nenhuma rota passou')
        &&(result.motivo.includes('0x42301c23')
