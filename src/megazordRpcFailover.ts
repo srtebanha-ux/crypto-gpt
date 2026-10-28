@@ -114,7 +114,7 @@ export async function selecionarParRpcMegazord(
  let attempted=0;
  for(const primary of primaries){
    attempted++;
-   const tmp={...env,MEGAZORD_RPC_URL:primary};
+   const tmp:NodeJS.ProcessEnv={...env,MEGAZORD_RPC_URL:primary};
    try{
      const ready=await selecionarRpcSecundarioMegazord(tmp,preflight,esperar);
      env.MEGAZORD_RPC_URL=tmp.MEGAZORD_RPC_URL;
