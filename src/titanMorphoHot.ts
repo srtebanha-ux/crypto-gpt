@@ -196,6 +196,8 @@ async function verificarBlocoMorphoHot():Promise<void>{
      Array<{success:boolean;returnData:string}>;
    let validadas=0,cruzaram=0,emProva=0;
    for(const a of selecionados){
+     // A route proven unavailable earlier in THIS block releases all its remaining slots.
+     if((mercadosSemSaida.get(a.mercado.id.toLowerCase())??0)>agora)continue;
      const idx=lote.indices.get(chave(a));
      if(!idx)continue;
      const mm=decoded[idx.market],oo=decoded[idx.oracle],pp=decoded[idx.position];
