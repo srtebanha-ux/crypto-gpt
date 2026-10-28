@@ -13,6 +13,7 @@ import {prepararAaveMultiHopMegazord,habilitarAaveMultiHopMegazord} from './mega
 import {atualizarPisoUsdMegazord,iniciarAtualizacaoPisoUsd} from './megazordEthUsd';
 import {JsonRpcProvider} from 'ethers';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
+import {auditarAeroImplantadoSomenteLeitura} from './megazordAeroRuntimeAudit';
 type RedeVerificada=Awaited<ReturnType<typeof import('./megazordPreflight').conferirRedeMegazord>>;
 export type DependenciasBootMegazord={
  identidades:(env:NodeJS.ProcessEnv)=>Promise<void>;
@@ -117,6 +118,19 @@ export async function iniciarMegazord(
    env.MEGAZORD_RPC_URL=preliminar.MEGAZORD_RPC_URL;
    env.MEGAZORD_RPC_SECUNDARIO=preliminar.MEGAZORD_RPC_SECUNDARIO;
    await deps.preco(env);
+   // Only a diagnostic: the pre-existing V3 signer stays unchanged.
+   if(env.TITAN_AERO_AUDITAR_READONLY==='1'){
+     try{
+       const report=await auditarAeroImplantadoSomenteLeitura(env);
+       log.info('[TITAN/AERO-RUNTIME-AUDIT-READONLY] Compilacao, immutables e recibos conciliados.',report);
+     }catch(e){
+       const msg=e instanceof Error?e.message:'erro';
+       log.warn('[TITAN/AERO-RUNTIME-AUDIT-READONLY] Auditoria incompleta; rota Aero permanece bloqueada.',{
+         somenteLeitura:true,
+         motivo:/^[a-z0-9-]{5,85}$/.test(msg)?msg:'rpc-ou-manifesto-indisponivel',
+       });
+     }
+   }
    // Deploy is strictly opt-in with a per-contract gas cap. An unresolved
    // marker, unknown nonce or mismatching immutable fails the WHOLE boot.
    const contratos=await deps.morpho(env);
