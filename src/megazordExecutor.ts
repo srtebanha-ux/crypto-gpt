@@ -389,9 +389,15 @@ export function conferirOrcamentoMegazord(env:NodeJS.ProcessEnv):void{
    throw Error('orcamento Megazord invalido: confira tetos por transacao, por dia e quantidade');
  if(env.MEGAZORD_CANARIO_ATE_UTC!==undefined){
    const deadline=Date.parse(env.MEGAZORD_CANARIO_ATE_UTC);
-   if(!Number.isFinite(deadline)||deadline<=Date.now()||deadline>Date.now()+3600000
-     ||count!==1||env.MEGAZORD_AUTO_DEPLOY==='1'||env.MEGAZORD_GAS_MAX_DIA_WEI===undefined)
-     throw Error('canario exige prazo futuro de ate 1h, uma tentativa, teto diario explicito e deploy desligado');
+   const causes:string[]=[];
+   if(!Number.isFinite(deadline))causes.push('prazo_invalido');
+   else if(deadline<=Date.now())causes.push('prazo_expirado');
+   else if(deadline>Date.now()+3600000)causes.push('prazo_maior_que_1h');
+   if(count!==1)causes.push('max_tx_dia_diferente_de_1');
+   if(env.MEGAZORD_AUTO_DEPLOY==='1')causes.push('auto_deploy_ligado');
+   if(env.MEGAZORD_GAS_MAX_DIA_WEI===undefined)causes.push('teto_diario_nao_explicito');
+   if(causes.length)throw Error(
+     'canario exige prazo futuro de ate 1h, uma tentativa, teto diario explicito e deploy desligado; causas='+causes.join(','));
  }
  if(env.TITAN_SNOWBALL_REINVESTIR==='1')
    throw Error('reinvestimento precisa de migracao separada');
