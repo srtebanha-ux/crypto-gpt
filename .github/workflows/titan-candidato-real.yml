@@ -12,6 +12,7 @@ on:
       - 'scripts/titanMorphoV3CustoDeploy.cjs'
       - 'scripts/titanAuditarV3Railway.cjs'
       - 'scripts/titanAuditarV3Railway.test.cjs'
+      - 'scripts/titanRpcEnvelopePublico.cjs'
       - 'src/titanMorphoRadar.ts'
       - 'src/morphoApi.ts'
   workflow_dispatch:
@@ -33,6 +34,14 @@ jobs:
         run: |
           npx hardhat compile
           node --test scripts/titanAuditarV3Railway.test.cjs
+      - name: Verify strict JSON-RPC envelope shape from public Base gateways
+        run: node scripts/titanRpcEnvelopePublico.cjs > rpc-envelope-publico.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: titan-base-rpc-envelope
+          path: rpc-envelope-publico.json
+          retention-days: 7
+          if-no-files-found: error
       - name: Audit V3 executor configured on Railway against two public Base RPCs
         run: node scripts/titanAuditarV3Railway.cjs > executor-v3-railway.json
       - name: Upload V3 executor immutable verification
