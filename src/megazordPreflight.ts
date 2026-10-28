@@ -31,7 +31,21 @@ export async function conferirRedeMegazord(env:NodeJS.ProcessEnv,rpc:Rpc=call){
    // Preflight is infrequent: serialize each method per provider, preserving
    // every invariant and each provider's independent nonce/block witness.
    const chain=await read('eth_chainId',[]);
-   const block=await read('eth_getBlockByNumber',['latest',false]);
+   let block:unknown;
+   try{
+     block=await read('eth_getBlockByNumber',['latest',false]);
+   }catch(e){
+     // Some gateways return HTTP 200 + null for latest while a numbered,
+     // already-mined block is available. Never accept null or skip the
+     // block/timestamp check: retry with a specific height from the SAME RPC.
+     const recoverable=e instanceof FalhaLeituraRede
+       &&e.detalhe.method==='eth_getBlockByNumber'
+       &&['body_invalido','resultado_ausente'].includes(e.detalhe.categoria);
+     if(!recoverable)throw e;
+     const tip=quantity(await read('eth_blockNumber',[]));
+     if(tip<2n)throw Error('RPC '+index+': bloco ausente ou antigo');
+     block=await read('eth_getBlockByNumber',['0x'+(tip-1n).toString(16),false]);
+   }
    const latest=await read('eth_getTransactionCount',[address,'latest']);
    const pending=await read('eth_getTransactionCount',[address,'pending']);
    const balance=await read('eth_getBalance',[address,'latest']);
