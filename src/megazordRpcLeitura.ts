@@ -88,7 +88,7 @@ export function criarRpcPreflight({fetcher=fetch,
          // URLs, actual IDs or upstream error strings in production logs.
          const category=!body||typeof body!=='object'||Array.isArray(body)?'body_invalido'
            :body.jsonrpc!=='2.0'?'versao_invalida'
-           :!Object.hasOwn(body,'id')?'id_ausente'
+           :!Object.prototype.hasOwnProperty.call(body,'id')?'id_ausente'
            :typeof body.id!=='number'?'tipo_id_invalido'
            :body.id!==id?'id_divergente'
            :code!==undefined?'jsonrpc_'+code:'resultado_ausente';
