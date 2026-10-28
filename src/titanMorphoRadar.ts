@@ -28,6 +28,28 @@ export const WAD_MORPHO=10n**18n;
 export const ORACLE_SCALE_MORPHO=10n**36n;
 // Official Morpho Blue SharesMathLib: 1e6 virtual shares and one virtual asset.
 export const VIRTUAL_SHARES_MORPHO=1_000_000n;
+/** 3-term WAD Taylor used by Morpho's MathLib.wTaylorCompounded.
+ * Only a read-only prioritization estimate: the actual liquidate() call
+ * must accrue and check debt itself before paying gas.
+ */
+export function totalBorrowComJurosMorpho(
+ totalBorrowAssets:bigint,borrowRatePerSecondWad:bigint,
+ lastUpdate:bigint,blockTimestamp:bigint,
+):{totalBorrowAssets:bigint;juros:bigint}|null{
+ if([totalBorrowAssets,borrowRatePerSecondWad,lastUpdate,blockTimestamp].some(v=>v<0n)
+   ||blockTimestamp<lastUpdate)return null;
+ if(lastUpdate===0n)return null; // market not created
+ const elapsed=blockTimestamp-lastUpdate;
+ if(elapsed===0n||totalBorrowAssets===0n||borrowRatePerSecondWad===0n)
+   return{totalBorrowAssets,juros:0n};
+ const first=borrowRatePerSecondWad*elapsed;
+ const second=(first*first)/(2n*WAD_MORPHO);
+ const third=(second*first)/(3n*WAD_MORPHO);
+ const rate=first+second+third;
+ const juros=totalBorrowAssets*rate/WAD_MORPHO;
+ return{totalBorrowAssets:totalBorrowAssets+juros,juros};
+}
+
 export const VIRTUAL_ASSETS_MORPHO=1n;
 function divCeil(n:bigint,d:bigint):bigint{
  if(n<0n||d<=0n)throw Error('unidades invalidas');
