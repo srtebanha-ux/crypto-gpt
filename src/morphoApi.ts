@@ -816,18 +816,15 @@ export function lerRiscoGlobalMorpho(corpo:unknown):
    candidatos.push({mercado:mercado.toLowerCase(),usuario:usuario.toLowerCase(),
      ...(Number.isFinite(hf)&&hf>=0&&hf<=1.02?{healthFactor:hf}:{})});
  }
- // Prioritize existing liquidatable borrowers with minimal insolvency
- // (more likely to have safe repay shares), then borrowers that can cross
- // from interest accrual or an oracle move. Unknown HF stays last.
- // Stable ties retain the API ordering. Reads still pin an onchain block.
- const classe=(c:CandidatoGlobalMorpho):number=>
-   c.healthFactor===undefined?3:c.healthFactor<=1?0:1;
+ // Rank by absolute distance to the liquidation line, not merely HF
+ // ascending/descending. Deep bad debt must not outrank a borrower at 1.0001.
+ // At equal distance, a currently below-line borrower is tested first.
+ // Stable ties retain the API order. Unknown HF remains last.
  candidatos.sort((a,b)=>{
-   const ca=classe(a),cb=classe(b);
-   if(ca!==cb)return ca-cb;
-   if(ca===3)return 0;
-   const da=Math.abs(1-a.healthFactor!),db=Math.abs(1-b.healthFactor!);
-   return da-db;
+   if(a.healthFactor===undefined)return b.healthFactor===undefined?0:1;
+   if(b.healthFactor===undefined)return -1;
+   const da=Math.abs(1-a.healthFactor),db=Math.abs(1-b.healthFactor);
+   return da!==db?da-db:Number(a.healthFactor>1)-Number(b.healthFactor>1);
  });
  return{candidatos,total:typeof info?.countTotal==='number'?info.countTotal:null};
 }
