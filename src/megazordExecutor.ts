@@ -378,11 +378,20 @@ export function recuperarLockOrfaoMegazord(
  // ESRCH is the only acceptable proof of process absence; EPERM and any
  // unexpected result fail closed, preserving wallet/nonce exclusivity.
  if(owner.host===hostname){
-   try{
-     process.kill(owner.pid,0);
-     throw Error('recuperacao recusada: processo dono do lock ainda ativo');
-   }catch(e){
-     if((e as NodeJS.ErrnoException).code!=='ESRCH')throw e;
+   // Container PIDs are reused after restart (often PID 1). If the saved
+   // owner PID equals our own, prove the file PREDATES this process boot;
+   // otherwise a live current-process lock must never be removed.
+   if(owner.pid===process.pid){
+     const startMs=agora-process.uptime()*1000;
+     if(s.mtimeMs>=startMs-5_000)
+       throw Error('recuperacao recusada: lock pertence ao processo atual');
+   }else{
+     try{
+       process.kill(owner.pid,0);
+       throw Error('recuperacao recusada: processo dono do lock ainda ativo');
+     }catch(e){
+       if((e as NodeJS.ErrnoException).code!=='ESRCH')throw e;
+     }
    }
  }
  const s2=fs.lstatSync(lock);
