@@ -714,6 +714,7 @@ test('global health-factor feed uses Morpho-documented schema and Base-only disc
  const q=JSON.parse(consultaRiscoGlobalMorpho()) as {query:string;variables:{chainIds:number[];hfLte:number}};
  assert.deepEqual(q.variables.chainIds,[8453]);
  assert.equal(q.variables.hfLte,1.02);
+ assert.equal(JSON.parse(consultaRiscoGlobalMorpho()).variables.first,1000);
  assert.match(q.query,/healthFactor_lte/);
  assert.match(q.query,/orderBy:HealthFactor/);
  const market='0x'+'11'.repeat(32),user='0x'+'22'.repeat(20);
