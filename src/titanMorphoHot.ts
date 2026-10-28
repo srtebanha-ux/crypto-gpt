@@ -54,6 +54,18 @@ export function resolverRpcMorphoHot(env:NodeJS.ProcessEnv):string{
     ||'https://mainnet.base.org';
 }
 function chave(a:Alvo):string {return a.mercado.id.toLowerCase()+'|'+a.usuario.toLowerCase();}
+/** Priority for the one expensive onchain liquidation probe per block.
+ * Prefer proven estimated crossings, then minimum health distance.
+ * A cooldown never authorizes an otherwise healthy position.
+ */
+export function priorizarCandidatosMorphoHot(
+ ativos:readonly Alvo[],bloqueios:ReadonlyMap<string,number>,agora:number,
+):Alvo[]{
+ return ativos.filter(a=>(bloqueios.get(chave(a))??0)<=agora)
+  .sort((a,b)=>Number(b.distanciaBps<=0n)-Number(a.distanciaBps<=0n)
+    ||(a.distanciaBps<b.distanciaBps?-1:a.distanciaBps>b.distanciaBps?1:0)
+    ||(bloqueios.get(chave(a))??0)-(bloqueios.get(chave(b))??0));
+}
 export function registrarQuenteMorpho(
  mercado:MercadoDaApi,usuario:string,distanciaBps:bigint,agora=Date.now(),
 ):boolean{
@@ -163,10 +175,12 @@ async function verificarBlocoMorphoHot():Promise<void>{
    if(block<=ultimoBloco)return;
    ultimoBloco=block;
    const agora=Date.now();
-   const selecionados=[...alvos.values()]
-     .filter(a=>(aguardando.get(chave(a))??0)<=agora)
-     .sort((a,b)=>Number(b.distanciaBps<=0n)-Number(a.distanciaBps<=0n)
-       ||(aguardando.get(chave(a))??0)-(aguardando.get(chave(b))??0));
+   // A single full eth_call is attempted per block. The closest eligible
+   // borrower must go first, regardless of insertion order in the API cache.
+   // This is prioritization only; all candidates still need Morpho's actual
+   // liquidate() proof and the existing fee/profit checks before any send.
+   const selecionados=priorizarCandidatosMorphoHot(
+     [...alvos.values()],aguardando,agora);
    if(!selecionados.length)return;
    const lote=montarLoteMorphoHot(selecionados);
    const retorno=await rpc.send('eth_call',[{
