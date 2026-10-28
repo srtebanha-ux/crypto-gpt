@@ -632,19 +632,23 @@ export function montarTransporteRpc(opcoes: {
     const comRecuo = async (corpo: string, metodos: string[]): Promise<
     { tipo: 'corpo'; texto: string } | { tipo: 'falha'; porque: string }
     > => {
+        // Unknown broadcasts must NOT be repeated after a network timeout:
+        // the chain could have accepted the transaction before the timeout.
+        const limiteTentativas=metodos.some(m=>/^(?:eth_send|personal_send|eth_submit)/i.test(m))
+            ? 1 : tentativas;
         let ultima = 'nenhuma tentativa';
-        for (let t = 0; t < tentativas; t += 1) {
+        for (let t = 0; t < limiteTentativas; t += 1) {
             // eslint-disable-next-line no-await-in-loop
             const r = await umaIda(corpo, metodos);
             if (r.tipo === 'corpo') return r;
             ultima = r.porque;
-            if (t + 1 >= tentativas) break;
+            if (t + 1 >= limiteTentativas) break;
             conta.tentativasExtras += 1;
             // eslint-disable-next-line no-await-in-loop
             await esperar(r.esperarMs ?? recuoBase * 2 ** t);
         }
         conta.desistencias += 1;
-        return { tipo: 'falha', porque: `${ultima} — desisti após ${tentativas} tentativa(s)` };
+        return { tipo: 'falha', porque: `${ultima} — desisti após ${limiteTentativas} tentativa(s)` };
     };
 
     /** O corpo veio: e JSON-RPC de verdade? */
