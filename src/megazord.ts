@@ -1,7 +1,8 @@
 /** Combined scanners with optional shared financial executor. */
 import {auditarContratosMegazord} from './megazordContratosPreflight';
 import {createLogger} from './logger';
-import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord} from './megazordExecutor';
+import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord,
+ recuperarLockOrfaoMegazord} from './megazordExecutor';
 import {normalizarCredenciaisMegazord} from './megazordCredenciais';
 import {diagnosticarFioRpcMegazord} from './megazordRpcWireDiagnostico';
 import {auditarPersistenciaMegazord} from './megazordAuditoriaPersistencia';
@@ -128,6 +129,14 @@ export async function iniciarMegazord(
    await deps.identidades(env); // pinned bytecode and invariants on both RPCs before arming
    // Deploy confirmation can take time: do not arm from the pre-deploy quote.
    const lucroUsd=await deps.preco(env);
+   // Only after two independent providers agreed on nonce/blocks and both
+   // price/contract gates passed, a single explicitly authorized archived-lock
+   // recovery may happen. Never delete a pending journal or a recent lock.
+   if(env.MEGAZORD_RECUPERAR_LOCK_OBSOLETO==='1'){
+     const {journal}=conferirIdentidadeMegazord(env);
+     const recovered=recuperarLockOrfaoMegazord(journal,rede.checks);
+     log.info('[TITAN/LOCK-RECUPERACAO-CONTROLADA]',recovered);
+   }
    log.info('Preflight de execucao aprovado (somente leitura).',{
      endereco:rede.address,
      rpcs:rede.checks.length,
