@@ -32,7 +32,8 @@ export function criarRpcPreflight({fetcher=fetch,
        let response:Response;
        const id=++requestId;
        try{
-         response=await fetcher(url,{method:'POST',headers:{'content-type':'application/json'},
+         response=await fetcher(url,{method:'POST',headers:{'content-type':'application/json','accept':'application/json',
+           'accept-encoding':'identity'},
            body:JSON.stringify({jsonrpc:'2.0',id,method,params}),
            signal:AbortSignal.timeout(10000)});
        }catch{
