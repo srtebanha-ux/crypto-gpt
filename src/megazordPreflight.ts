@@ -17,13 +17,17 @@ export async function conferirRedeMegazord(env:NodeJS.ProcessEnv,rpc:Rpc=call){
  // a time instead of bursting both simultaneously, without skipping any check.
  const results=[] as Array<{rpc:number;block:number;nonce:string;balanceWei:string;contractsWithCode:number}>;
  for(const [index,url] of urls.entries()){
-   const [chain,block,latest,pending,balance,...codes]=await Promise.all([
-     rpc(url!,'eth_chainId',[]),rpc(url!,'eth_getBlockByNumber',['latest',false]),
-     rpc(url!,'eth_getTransactionCount',[address,'latest']),
-     rpc(url!,'eth_getTransactionCount',[address,'pending']),
-     rpc(url!,'eth_getBalance',[address,'latest']),
-     ...contracts.map(a=>rpc(url!,'eth_getCode',[a,'latest'])),
-   ]);
+   // Public Base RPC gateways rate-limit bursts even from one client.
+   // Preflight is infrequent: serialize each method per provider, preserving
+   // every invariant and each provider's independent nonce/block witness.
+   const chain=await rpc(url!,'eth_chainId',[]);
+   const block=await rpc(url!,'eth_getBlockByNumber',['latest',false]);
+   const latest=await rpc(url!,'eth_getTransactionCount',[address,'latest']);
+   const pending=await rpc(url!,'eth_getTransactionCount',[address,'pending']);
+   const balance=await rpc(url!,'eth_getBalance',[address,'latest']);
+   const codes:string[]=[];
+   for(const contract of contracts)
+     codes.push(await rpc(url!,'eth_getCode',[contract,'latest']) as string);
    if(quantity(chain)!==8453n)throw Error('RPC '+index+': rede diferente da Base');
    const b=block as {number?:unknown;timestamp?:unknown}|null;
    if(!b||Math.abs(Date.now()/1000-Number(quantity(b.timestamp)))>20)
