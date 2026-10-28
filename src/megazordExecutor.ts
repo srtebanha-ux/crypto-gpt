@@ -357,7 +357,7 @@ export function instalarExecutorMegazord(env:NodeJS.ProcessEnv):ExecutorMegazord
  if(!env.MEGAZORD_RPC_URL||!env.MEGAZORD_RPC_SECUNDARIO
    ||env.MEGAZORD_RPC_URL===env.MEGAZORD_RPC_SECUNDARIO)throw Error('configuracao Megazord incompleta');
  if(env.TITAN_SNOWBALL_REINVESTIR==='1')throw Error('reinvestimento precisa de migracao separada');
- const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL);
+ const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL,undefined,{batchMaxCount:1});
  const s=new JsonRpcProvider(env.MEGAZORD_RPC_SECUNDARIO);
  try{
    active=new ExecutorMegazord(key,p,s,{
