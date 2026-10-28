@@ -3,7 +3,7 @@ import {auditarContratosMegazord} from './megazordContratosPreflight';
 import {createLogger} from './logger';
 import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord} from './megazordExecutor';
 import {normalizarCredenciaisMegazord} from './megazordCredenciais';
-import {selecionarRpcSecundarioMegazord} from './megazordRpcFailover';
+import {selecionarParRpcMegazord} from './megazordRpcFailover';
 import {prepararMorphoMegazord} from './megazordMorphoBoot';
 import {prepararAaveMultiHopMegazord,habilitarAaveMultiHopMegazord} from './megazordAaveMultiBoot';
 import {atualizarPisoUsdMegazord,iniciarAtualizacaoPisoUsd} from './megazordEthUsd';
@@ -23,7 +23,7 @@ const boot:DependenciasBootMegazord={
    // Pools are candidate-specific and audited again by the atomic CPAMM proof.
    await auditarContratosMegazord({...env,TITAN_CPAMM_ATOMICO:'0'});
  },
- rede:async env=>await selecionarRpcSecundarioMegazord(env) as RedeVerificada,
+ rede:async env=>await selecionarParRpcMegazord(env) as RedeVerificada,
  preco:async env=>{
    const p=new JsonRpcProvider(env.MEGAZORD_RPC_URL!,8453,{staticNetwork:true});
    try{return await atualizarPisoUsdMegazord(env,p);}finally{p.destroy();}
@@ -106,6 +106,8 @@ export async function iniciarMegazord(
    try{await deps.rede(preliminar);}catch(e){
      throw Error('fase=rede_pre_contratos: '+(e instanceof Error?e.message:'falha'));
    }
+   // The selected PRIMARY must be retained for all later price and signer RPCs.
+   env.MEGAZORD_RPC_URL=preliminar.MEGAZORD_RPC_URL;
    env.MEGAZORD_RPC_SECUNDARIO=preliminar.MEGAZORD_RPC_SECUNDARIO;
    await deps.preco(env);
    // Deploy is strictly opt-in with a per-contract gas cap. An unresolved
