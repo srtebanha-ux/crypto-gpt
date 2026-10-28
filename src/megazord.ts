@@ -103,7 +103,9 @@ export async function iniciarMegazord(
    // deploy. The canonical Morpho address is only a readiness witness here,
    // never added to the financial executor's destination allowlist.
    const preliminar:NodeJS.ProcessEnv={...env,MEGAZORD_CONTRATOS:MORPHO_FLASH_BASE};
-   await deps.rede(preliminar);
+   try{await deps.rede(preliminar);}catch(e){
+     throw Error('fase=rede_pre_contratos: '+(e instanceof Error?e.message:'falha'));
+   }
    env.MEGAZORD_RPC_SECUNDARIO=preliminar.MEGAZORD_RPC_SECUNDARIO;
    await deps.preco(env);
    // Deploy is strictly opt-in with a per-contract gas cap. An unresolved
@@ -113,7 +115,9 @@ export async function iniciarMegazord(
    // whitelisted. The complete readiness check still follows before arming.
    const multi=await deps.aave(env);
    if(multi)env.MEGAZORD_CONTRATOS=[env.MEGAZORD_CONTRATOS,multi].filter(Boolean).join(',');
-   const rede=await deps.rede(env);
+   const rede=await deps.rede(env).catch(e=>{
+     throw Error('fase=rede_pos_contratos: '+(e instanceof Error?e.message:'falha'));
+   });
    await deps.identidades(env); // pinned bytecode and invariants on both RPCs before arming
    // Deploy confirmation can take time: do not arm from the pre-deploy quote.
    const lucroUsd=await deps.preco(env);

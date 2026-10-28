@@ -86,3 +86,25 @@ test('persistent invalid JSON-RPC replies fail closed without signer authorizati
  },async()=>{}),/sem fallback inseguro ao principal/);
  assert.equal(attempts,9);
 });
+
+test('aliases on one host cannot serve as independent witness; configured alternatives precede public ones',()=>{
+ assert.deepEqual(candidatosRpcSecundario({MEGAZORD_RPC_URL:'https://private.example/key1',
+  MEGAZORD_RPC_SECUNDARIO:'https://private.example/key2',
+  MEGAZORD_RPC_ALTERNATIVOS:'https://independent.example/key,https://independent.example/other'}).slice(0,2),
+  ['https://independent.example/key','https://mainnet.base.org']);
+});
+test('real boot read gate attributes a persistent primary failure once, not to four secondaries',async()=>{
+ const {criarRpcPreflight}=await import('./megazordRpcLeitura');
+ const {conferirRedeMegazord}=await import('./megazordPreflight');
+ let calls=0;
+ const rpc=criarRpcPreflight({esperar:async()=>{},fetcher:(async(_u,i)=>{
+  calls++;return new Response(JSON.stringify({jsonrpc:'2.0',id:JSON.parse(String(i?.body)).id,
+   error:{code:-32005,message:'https://secret.invalid/KEY'}}));
+ }) as typeof fetch});
+ await assert.rejects(selecionarRpcSecundarioMegazord({MEGAZORD_RPC_URL:'https://p.example/private',
+  MEGAZORD_RPC_SECUNDARIO:'https://s.example/private',MEGAZORD_ENDERECO_PUBLICO:'0x'+'11'.repeat(20),
+  MEGAZORD_CONTRATOS:'0x'+'22'.repeat(20)},e=>conferirRedeMegazord(e,rpc),async()=>{}),
+  e=>e instanceof Error&&e.message.includes('principal')&&e.message.includes('eth_chainId;jsonrpc_-32005')
+   &&!e.message.includes('private')&&!e.message.includes('KEY'));
+ assert.equal(calls,3,'no outer 3x4 retry amplification on the broken primary');
+});

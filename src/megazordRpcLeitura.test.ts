@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {criarRpcPreflight} from './megazordRpcLeitura';
+import {criarRpcPreflight as estrito} from './megazordRpcLeitura';
+const criarRpcPreflight=(options:Parameters<typeof estrito>[0]={})=>{
+ const fetcher=options.fetcher;
+ return estrito({...options,fetcher:fetcher?(async(u,i)=>{
+  const r=await fetcher(u,i);if(!r.ok)return r;
+  const body=await r.json() as object;
+  return new Response(JSON.stringify({jsonrpc:'2.0',id:JSON.parse(String(i?.body)).id,...body}),{status:r.status});
+ }) as typeof fetch:undefined});
+};
 const ok=()=>new Response(JSON.stringify({result:'0x2105'}),{status:200});
 test('429 obeys Retry-After seconds and date before retrying read calls',async()=>{
  for(const header of ['2',new Date(Date.UTC(2026,0,1)+2150).toUTCString()]){
@@ -112,4 +120,28 @@ test('each read request has a distinct JSON-RPC id, including retries',async()=>
  await rpc('https://rpc.invalid','eth_getBalance',['0x'+'11'.repeat(20),'latest']);
  assert.equal(ids.length,3);
  assert.equal(new Set(ids).size,ids.length);
+});
+
+test('strict wire envelope rejects wrong id, missing version and result mixed with error',async()=>{
+ for(const body of [{jsonrpc:'2.0',id:999,result:'0x2105'},
+  {id:1,result:'0x2105'},{jsonrpc:'2.0',id:1,result:'0x2105',error:{code:-32602}}]){
+  const rpc=estrito({esperar:async()=>{},fetcher:(async()=>new Response(JSON.stringify(body))) as typeof fetch});
+  await assert.rejects(rpc('https://rpc.invalid/secret','eth_chainId',[]),/resposta RPC invalida/);
+ }
+});
+test('HTTP 5xx recovers within transport budget; method errors fail immediately with numeric code only',async()=>{
+ let n=0;
+ const rpc=estrito({esperar:async()=>{},fetcher:(async(_u,i)=>{
+  if(++n<3)return new Response('private upstream body',{status:503});
+  return new Response(JSON.stringify({jsonrpc:'2.0',id:JSON.parse(String(i?.body)).id,result:'0x2105'}));
+ }) as typeof fetch});
+ assert.equal(await rpc('a','eth_chainId',[]),'0x2105');assert.equal(n,3);
+ let bad=0;
+ const unsupported=estrito({esperar:async()=>{},fetcher:(async(_u,i)=>{
+  bad++;return new Response(JSON.stringify({jsonrpc:'2.0',id:JSON.parse(String(i?.body)).id,
+   error:{code:-32602,message:'SECRET'}}));
+ }) as typeof fetch});
+ await assert.rejects(unsupported('a','eth_getCode',[]),e=>e instanceof Error
+  &&!e.message.includes('SECRET')&&(e as {rpcCode?:number}).rpcCode===-32602);
+ assert.equal(bad,1);
 });

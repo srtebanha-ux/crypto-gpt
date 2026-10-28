@@ -14,14 +14,15 @@ const fs=require('node:fs');
 const solc=require('solc');
 function executorCompiladoIgual(codigo,diagnostico){
  diagnostico.compiler=solc.version();
+ diagnostico.evmVersion='paris';diagnostico.optimizerRuns=200;
  try{
   const source=fs.readFileSync('contracts/TitanCacadorMorphoV3.sol','utf8');
-  const input={language:'Solidity',sources:{'TitanCacadorMorphoV3.sol':{content:source}},
-   settings:{optimizer:{enabled:true,runs:200},outputSelection:{'*':{'*':[
+  const input={language:'Solidity',sources:{'contracts/TitanCacadorMorphoV3.sol':{content:source}},
+   settings:{evmVersion:'paris',optimizer:{enabled:true,runs:200},outputSelection:{'*':{'*':[
     'evm.deployedBytecode.object','evm.deployedBytecode.immutableReferences']}}}};
   const output=JSON.parse(solc.compile(JSON.stringify(input)));
   if(output.errors?.some(x=>x.severity==='error'))return false;
-  const obj=output.contracts['TitanCacadorMorphoV3.sol'].TitanCacadorMorphoV3.evm.deployedBytecode;
+  const obj=output.contracts['contracts/TitanCacadorMorphoV3.sol'].TitanCacadorMorphoV3.evm.deployedBytecode;
   const refs=Object.values(obj.immutableReferences).flat();
   diagnostico.references=refs.length;
   if(refs.length<5||refs.some(x=>!Number.isSafeInteger(x.start)||x.length!==32)){diagnostico.error='bad_immutables';return false;}
@@ -59,20 +60,23 @@ async function rpc(url,method,params=[]){
  if(data.error||data.result===undefined)throw Error('rpc_unavailable');
  return data.result;
 }
-async function audit(primary,secondary){
- if(BigInt(await rpc(primary,'eth_chainId'))!==8453n||BigInt(await rpc(secondary,'eth_chainId'))!==8453n)
+async function audit(primary,secondary,read=rpc){
+ const urls=[new URL(primary),new URL(secondary)];
+ if(urls.some(u=>u.protocol!=='https:')||urls[0].hostname===urls[1].hostname)
+  throw Error('independent_rpc_required');
+ if(BigInt(await read(primary,'eth_chainId'))!==8453n||BigInt(await read(secondary,'eth_chainId'))!==8453n)
   throw Error('wrong_chain');
- const block=await rpc(primary,'eth_getBlockByNumber',['latest',false]);
- const other=await rpc(secondary,'eth_getBlockByNumber',[block.number,false]);
+ const block=await read(primary,'eth_getBlockByNumber',['latest',false]);
+ const other=await read(secondary,'eth_getBlockByNumber',[block.number,false]);
  if(!block?.hash||other?.hash!==block.hash)throw Error('rpc_block_disagreement');
  const checks=[];
  for(const u of [primary,secondary]){
-  const code=await rpc(u,'eth_getCode',[target,block.number]);
+  const code=await read(u,'eth_getCode',[target,block.number]);
   if(code==='0x')throw Error('contract_not_deployed');
   const values={};
   for(const name of [...Object.keys(expected),'versaoRotas']){
    try{
-    const ret=await rpc(u,'eth_call',[{to:target,data:abi.encodeFunctionData(name)},block.number]);
+    const ret=await read(u,'eth_call',[{to:target,data:abi.encodeFunctionData(name)},block.number]);
     const v=abi.decodeFunctionResult(name,ret)[0];
     values[name]=typeof v==='bigint'?v.toString():getAddress(v);
    }catch{values[name]=null}
@@ -80,6 +84,8 @@ async function audit(primary,secondary){
   checks.push({hash:keccak256(code),sizeBytes:(code.length-2)/2,code,values});
  }
  const equalHashes=checks[0].hash===checks[1].hash;
+ const diagnosticoBytecode={};
+ const artifactMatch=executorCompiladoIgual(checks[0].code,diagnosticoBytecode);
  const compatible=equalHashes&&checks.every(x=>x.values.versaoRotas==='2'&&
   Object.entries(expected).every(([k,v])=>x.values[k]?.toLowerCase()===v.toLowerCase()));
  return {chainId:8453,contract:target,block:Number(BigInt(block.number)),blockHash:block.hash,
@@ -87,16 +93,24 @@ async function audit(primary,secondary){
   version:checks[0].values.versaoRotas,
   checks:Object.fromEntries(Object.keys(expected).map(k=>[k,{expected:expected[k],actual:checks[0].values[k],
    matches:checks.every(x=>x.values[k]?.toLowerCase()===expected[k].toLowerCase())}])),
-  compatibleWithCurrentMegazordRoute:compatible,
+  immutablesCompatible:compatible,
+  compatibleWithCurrentMegazordRoute:compatible&&artifactMatch,
   compiledExecutableMatchesOnchain:artifactMatch,compiledExecutableComparison:diagnosticoBytecode,
   insufficientToAuthorizePaidTx:true,
   note:'Mesmo que os imutaveis coincidam, comparar bytecode com artefato auditado, diario e assinador antes do envio.'};
 }
-(async()=>{
+module.exports={audit,executorCompiladoIgual,target,expected};
+if(require.main===module)(async()=>{
  let result=null;
- for(const pair of [['https://mainnet.base.org','https://base-rpc.publicnode.com'],
+ const configured=process.env.MEGAZORD_RPC_URL&&process.env.MEGAZORD_RPC_SECUNDARIO
+  ?[[process.env.MEGAZORD_RPC_URL,process.env.MEGAZORD_RPC_SECUNDARIO]]:[];
+ for(const pair of [...configured,['https://mainnet.base.org','https://base-rpc.publicnode.com'],
   ['https://base-rpc.publicnode.com','https://mainnet.base.org']]){
-  try{result=await audit(...pair);break}catch{}
+  try{result=await audit(...pair);break}catch(e){
+    if(e instanceof ReferenceError||e instanceof TypeError){
+      console.error('auditoria V3: falha interna, nao classificar como RPC indisponivel');process.exitCode=1;return;
+    }
+  }
  }
  console.log(JSON.stringify(result??{contract:target,status:'public_rpc_unavailable',
   compatibleWithCurrentMegazordRoute:false},null,2));

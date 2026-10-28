@@ -6,8 +6,14 @@
   "environmentId": "dd7ffbb5-0a0d-4aa7-b65a-9384a79d3ed5",
   "wallet": "0x3D310384d674532f5D41cF2D43B03001F3515AE8",
   "knownServices": [
-    {"name": "titan-arbitragem", "id": "3f298314-e80f-419f-bdcc-04e038c59317"},
-    {"name": "renewed-sparkle", "id": "ef919d74-5f8f-4457-9ce5-f769576fa4ed"}
+    {
+      "name": "titan-arbitragem",
+      "id": "3f298314-e80f-419f-bdcc-04e038c59317"
+    },
+    {
+      "name": "renewed-sparkle",
+      "id": "ef919d74-5f8f-4457-9ce5-f769576fa4ed"
+    }
   ],
   "serviceInventoryComplete": false,
   "volume": {
@@ -19,11 +25,12 @@
     "journalReconciled": false
   },
   "morphoV3": {
-    "contract": null,
+    "contract": "0x8F5268D7cBb4597321EB886c4Ef0CE75a6C8C317",
     "codehash": null,
     "marker": "/app/data/titanMorphoV3Deploy.json",
     "status": null,
-    "transactionHash": null
+    "transactionHash": null,
+    "contractSource": "Operador: marcador e invariantes conferidos externamente em dois RPCs; igualdade de executavel onchain ainda pendente"
   },
   "productionReady": false,
   "deploymentAuthorized": false,

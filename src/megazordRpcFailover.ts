@@ -1,23 +1,27 @@
 /** Select a SECOND independent Base RPC by the complete read-only preflight.
  * Never treat the primary as its own second witness for nonce or receipts.
  */
-import {conferirRedeMegazord} from './megazordPreflight';
+import {conferirRedeMegazord,FalhaLeituraRede} from './megazordPreflight';
 type Preflight=(env:NodeJS.ProcessEnv)=>Promise<unknown>;
 export function candidatosRpcSecundario(env:NodeJS.ProcessEnv):string[]{
  const input=[
   env.MEGAZORD_RPC_SECUNDARIO,
+  ...(env.MEGAZORD_RPC_ALTERNATIVOS??'').split(','),
   'https://mainnet.base.org',
   'https://base.llamarpc.com',
   'https://1rpc.io/base',
  ];
  const primary=env.MEGAZORD_RPC_URL?.trim().replace(/\/+$/,'');
  const seen=new Set<string>();
+ const host=(u:string)=>{try{return new URL(u).hostname.toLowerCase();}catch{return '';}};
+ const primaryHost=host(primary??'');
  return input.filter((u):u is string=>!!u)
    .map(u=>u.trim().replace(/\/+$/,''))
    .filter(u=>{
      // Security: no primary self-reference and no non HTTPS fallback.
-     if(!u.startsWith('https://')||u===primary||seen.has(u))return false;
-     seen.add(u);return true;
+     const hostname=host(u);
+     if(!u.startsWith('https://')||!hostname||hostname===primaryHost||seen.has(hostname))return false;
+     seen.add(hostname);return true;
    });
 }
 /** Retry only bounded transport/freshness faults; never weaken quorum, nonce,
@@ -56,6 +60,13 @@ export async function selecionarRpcSecundarioMegazord(
        env.MEGAZORD_RPC_SECUNDARIO=secondary;
        return result;
      }catch(error){
+       // The inner transport already exhausted bounded retries. Rotating the
+       // secondary cannot repair a primary failure and only multiplies load.
+       if(error instanceof FalhaLeituraRede){
+         if(error.rpcIndex===0)throw Error('preflight principal bloqueado: '+error.message);
+         reasons.push('secundario_'+attempted+'_'+error.detalhe.method+'_'+error.detalhe.categoria);
+         break;
+       }
        const kind=erroRpcSeguro(error);
        reasons.push(kind);
        const retryable=new Set(['http429','http5xx','transporte','resposta_rpc','bloco_antigo','divergencia_nonce_bloco']);

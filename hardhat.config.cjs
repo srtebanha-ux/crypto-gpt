@@ -16,7 +16,7 @@ subtask(TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD, async (args, hre, runSuper) => ({
 }));
 
 module.exports = {
-    solidity: { version: '0.8.26', settings: { optimizer: { enabled: true, runs: 200 } } },
+    solidity: { version: '0.8.26', settings: { evmVersion: 'paris', optimizer: { enabled: true, runs: 200 } } },
     paths: { sources: './contracts', tests: './forkTests', cache: './.tmp/hhcache', artifacts: './.tmp/artifacts' },
     networks: {
         hardhat: {
