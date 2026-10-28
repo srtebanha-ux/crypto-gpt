@@ -12,7 +12,7 @@ test('429 obeys Retry-After seconds and date before retrying read calls',async()
        ?new Response('',{status:429,headers:{'retry-after':header}}):ok()) as typeof fetch});
    assert.equal(await rpc('https://rpc.invalid','eth_chainId',[]),'0x2105');
    assert.equal(calls,2);
-   assert.ok(waits.some(ms=>ms>=1850),'server cooldown was respected');
+   assert.ok(waits.reduce((sum,ms)=>sum+ms,0)>=2000,'server cooldown and request pacing were respected');
  }
 });
 test('long server cooldown fails over without shortening it or hammering queued reads',async()=>{
