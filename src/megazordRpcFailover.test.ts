@@ -7,18 +7,20 @@ test('tries separate RPC providers in order, never accepts the primary twice',as
  const env:NodeJS.ProcessEnv={MEGAZORD_RPC_URL:'https://mainnet.base.org',
   MEGAZORD_RPC_SECUNDARIO:'https://mainnet.base.org/'};
  assert.deepEqual(candidatosRpcSecundario(env),
-   ['https://base.llamarpc.com','https://1rpc.io/base',
-    'https://base-rpc.publicnode.com','https://base.drpc.org']);
+   ['https://base.api.pocket.network','https://base.public.blockpi.network/v1/rpc/public',
+    'https://base-mainnet.g.alchemy.com/public','https://base-rpc.publicnode.com',
+    'https://base.drpc.org','https://1rpc.io/base','https://base.llamarpc.com']);
  const seen:string[]=[];
  const response=await selecionarRpcSecundarioMegazord(env,async e=>{
    seen.push(e.MEGAZORD_RPC_SECUNDARIO!);
-   if(e.MEGAZORD_RPC_SECUNDARIO==='https://base.llamarpc.com')
+   if(e.MEGAZORD_RPC_SECUNDARIO==='https://base.api.pocket.network')
      throw Error('RPC HTTP 429');
    return {passed:true};
  },async()=>{});
  assert.deepEqual(response,{passed:true});
- assert.deepEqual(seen,['https://base.llamarpc.com','https://base.llamarpc.com','https://base.llamarpc.com','https://1rpc.io/base']);
- assert.equal(env.MEGAZORD_RPC_SECUNDARIO,'https://1rpc.io/base');
+ assert.deepEqual(seen,['https://base.api.pocket.network','https://base.api.pocket.network',
+    'https://base.api.pocket.network','https://base.public.blockpi.network/v1/rpc/public']);
+ assert.equal(env.MEGAZORD_RPC_SECUNDARIO,'https://base.public.blockpi.network/v1/rpc/public');
 });
 test('preflight disagreement cannot be bypassed by using primary as secondary',async()=>{
  const env:NodeJS.ProcessEnv={MEGAZORD_RPC_URL:'https://mainnet.base.org'};
@@ -26,7 +28,7 @@ test('preflight disagreement cannot be bypassed by using primary as secondary',a
  await assert.rejects(selecionarRpcSecundarioMegazord(env,async()=>{
    calls++;throw Error('nonce divergence or rate limit');
  }),/sem fallback inseguro ao principal/);
- assert.equal(calls,4);
+ assert.equal(calls,7);
  assert.equal(env.MEGAZORD_RPC_SECUNDARIO,undefined);
 });
 test('explicit secure secondary takes priority and never sends raw RPC URL in failure',async()=>{
@@ -85,14 +87,14 @@ test('persistent invalid JSON-RPC replies fail closed without signer authorizati
  await assert.rejects(selecionarRpcSecundarioMegazord(env,async()=>{
   attempts++;throw Error('resposta RPC invalida');
  },async()=>{}),/sem fallback inseguro ao principal/);
- assert.equal(attempts,12);
+ assert.equal(attempts,21);
 });
 
 test('aliases on one host cannot serve as independent witness; configured alternatives precede public ones',()=>{
  assert.deepEqual(candidatosRpcSecundario({MEGAZORD_RPC_URL:'https://private.example/key1',
   MEGAZORD_RPC_SECUNDARIO:'https://private.example/key2',
   MEGAZORD_RPC_ALTERNATIVOS:'https://independent.example/key,https://independent.example/other'}).slice(0,2),
-  ['https://independent.example/key','https://mainnet.base.org']);
+  ['https://independent.example/key','https://base.api.pocket.network']);
 });
 test('real boot read gate attributes a persistent primary failure once, not to four secondaries',async()=>{
  const {criarRpcPreflight}=await import('./megazordRpcLeitura');
@@ -145,7 +147,7 @@ test('primary failover cannot bypass financial nonce disagreement',async()=>{
  assert.equal(env.MEGAZORD_RPC_URL,'https://broken.example/key');
 });
 
-test('eight-primary fallback reaches publicnode + dRPC only after full independent preflight',async()=>{
+test('eleven-primary fallback reaches publicnode + dRPC only after full independent preflight',async()=>{
  const {FalhaLeituraRede}=await import('./megazordPreflight');
  const {FalhaRpcLeitura}=await import('./megazordRpcLeitura');
  const env:NodeJS.ProcessEnv={
@@ -164,7 +166,7 @@ test('eight-primary fallback reaches publicnode + dRPC only after full independe
    return {ready:true,independent:true};
  },async()=>{});
  assert.deepEqual(response,{ready:true,independent:true});
- assert.ok(attempted>=7);
+ assert.ok(attempted>=8);
  assert.equal(env.MEGAZORD_RPC_URL,'https://base-rpc.publicnode.com');
  assert.equal(env.MEGAZORD_RPC_SECUNDARIO,'https://base.drpc.org');
 });
