@@ -69,7 +69,27 @@ let iniciado=false;
 let emCurso=false;
 // The expensive liquidation eth_call must NEVER block the next-block
 // read-only snapshot. Keep exactly ONE proof in flight per signer/wallet.
-let provaEmCurso=false;
+/** One asynchronous complete proof at a time. The block snapshot never
+ * awaits it. Unexpected failures keep the gate consistent and are observable.
+ */
+export function criarPortaoProvaMorphoHot(){
+ let ocupada=false;
+ return {
+   ocupada:()=>ocupada,
+   executar:(trabalho:()=>Promise<void>):boolean=>{
+     if(ocupada)return false;
+     ocupada=true;
+     void Promise.resolve().then(trabalho).catch(e=>{
+       log.warn('[TITAN/MORPHO-HOT/AGENDADOR]',{
+         classe:e instanceof Error?e.name:'erro',
+         desfecho:'desconhecido, exigida conciliacao no executor',
+       });
+     }).finally(()=>{ocupada=false;});
+     return true;
+   },
+ };
+}
+const portaoProvaMorphoHot=criarPortaoProvaMorphoHot();
 async function executarSondaMorphoHot(a:Alvo,block:number):Promise<void>{
  try{
      aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
@@ -138,7 +158,7 @@ async function executarSondaMorphoHot(a:Alvo,block:number):Promise<void>{
      bloco:block,mercado:a.mercado.id,classe:e instanceof Error?e.name:'erro',
      resultado:'desconhecido; consultar diario e recibo antes de nova tentativa',
    });
- }finally{provaEmCurso=false;}
+ }
 }
 let ultimoBloco=0;
 let contagem=0;
@@ -311,7 +331,7 @@ async function verificarBlocoMorphoHot():Promise<void>{
        log.warn('[TITAN/MORPHO-HOT/CRUZAMENTO]',{
          bloco:block,mercado:a.mercado.id,usuario:a.usuario,
          distanciaBps:state.distanciaBps?.toString()??null,
-         provaJaOcupada:provaEmCurso,
+         provaJaOcupada:portaoProvaMorphoHot.ocupada(),
          regra:'estimativa onchain; nao autoriza envio ou lucro',
        });
      }
@@ -324,22 +344,17 @@ async function verificarBlocoMorphoHot():Promise<void>{
    avaliaveis.sort(compararPrioridadeMorphoHot);
    // One signer, one complete proof; new block snapshots run independently
    // while that proof is waiting on RPCs/DEX route discovery.
-   if(!provaEmCurso){
-     const first=avaliaveis.find(({a})=>
-       (mercadosSemSaida.get(a.mercado.id.toLowerCase())??0)<=agora);
-     if(first){
-       provaEmCurso=true;
-       emProva=1;
-       void executarSondaMorphoHot(first.a,block);
-     }
-   }
+   const first=avaliaveis.find(({a})=>
+     (mercadosSemSaida.get(a.mercado.id.toLowerCase())??0)<=agora);
+   if(first&&portaoProvaMorphoHot.executar(()=>
+     executarSondaMorphoHot(first.a,block)))emProva=1;
    contagem++;
    if(cruzaram>0||contagem%30===0||Date.now()-ultimoLog>120_000){
      ultimoLog=Date.now();
      log.info('[TITAN/MORPHO-HOT] Bloco processado, gatilho ativo.',{
        bloco:block,mercados:[...new Set(selecionados.map(a=>token(a.mercado.id)))].length,
        observadas:selecionados.length,validadas,cruzaram,preflightsIniciados:emProva,
-       preflightEmCurso:provaEmCurso,
+       preflightEmCurso:portaoProvaMorphoHot.ocupada(),
        intervaloMs:INT_MS,via:'Multicall3 no bloco; V3 eth_call antes de assinar',
      });
    }
