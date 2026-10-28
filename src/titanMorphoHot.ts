@@ -36,6 +36,16 @@ export function exigeSondaIntegralMorphoHot(
  return situacao==='proxima'&&distanciaBps!==null
    &&distanciaBps<=LIMIAR_SONDA_PROXIMA_BPS&&bloqueadoAte<=agora;
 }
+/** The same-block risk result decides priority, never an API snapshot. */
+export function compararPrioridadeMorphoHot(
+ a:{situacao:string;distanciaBps:bigint|null},
+ b:{situacao:string;distanciaBps:bigint|null},
+):number{
+ const crossed=Number(b.situacao==='cruzou-estimado')-Number(a.situacao==='cruzou-estimado');
+ if(crossed!==0)return crossed;
+ const da=a.distanciaBps??999999n,db=b.distanciaBps??999999n;
+ return da<db?-1:da>db?1:0;
+}
 export function semRotaExecutavelMorpho(
  via:'Uniswap V3'|'Aerodrome',status:string,motivo:string,primeiroMotivo?:string,
 ):boolean {
@@ -195,6 +205,7 @@ async function verificarBlocoMorphoHot():Promise<void>{
    const decoded=multicall.decodeFunctionResult('aggregate3',retorno)[0] as
      Array<{success:boolean;returnData:string}>;
    let validadas=0,cruzaram=0,emProva=0;
+   const avaliaveis:Array<{a:Alvo;situacao:string;distanciaBps:bigint|null}>=[];
    for(const a of selecionados){
      // A route proven unavailable earlier in THIS block releases all its remaining slots.
      if((mercadosSemSaida.get(a.mercado.id.toLowerCase())??0)>agora)continue;
@@ -221,9 +232,16 @@ async function verificarBlocoMorphoHot():Promise<void>{
      if(state.distanciaBps!==null)renovarQuenteMorphoPorLeitura(
        a.mercado.id,a.usuario,state.distanciaBps,agora);
      if(state.situacao==='cruzou-estimado')cruzaram++;
-     // Only one V3 transaction candidate at a time: shared wallet/nonce.
-     if(emProva>0||!exigeSondaIntegralMorphoHot(state.situacao,
-       state.distanciaBps,aguardando.get(chave(a))??0,agora))continue;
+     if(exigeSondaIntegralMorphoHot(state.situacao,state.distanciaBps,
+       aguardando.get(chave(a))??0,agora))
+       avaliaveis.push({a,situacao:state.situacao,distanciaBps:state.distanciaBps});
+   }
+   // Crossed borrowers come first even if another target appeared first
+   // in the old snapshot. The one-wallet gate remains unchanged.
+   avaliaveis.sort(compararPrioridadeMorphoHot);
+   for(const {a} of avaliaveis){
+     if(emProva>0)break;
+     if((mercadosSemSaida.get(a.mercado.id.toLowerCase())??0)>agora)continue;
      emProva++;
      aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
      const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
