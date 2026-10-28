@@ -717,6 +717,11 @@ test('global health-factor feed uses Morpho-documented schema and Base-only disc
  assert.equal(JSON.parse(consultaRiscoGlobalMorpho()).variables.first,1000);
  assert.match(q.query,/healthFactor_lte/);
  assert.match(q.query,/orderBy:HealthFactor/);
+ assert.match(q.query,/orderDirection:Desc/);
+ const proxima=JSON.parse(consultaRiscoGlobalMorpho(1000));
+ assert.equal(proxima.variables.skip,1000);
+ assert.throws(()=>consultaRiscoGlobalMorpho(-1),/offset/);
+ assert.throws(()=>consultaRiscoGlobalMorpho(1_000_001),/offset/);
  const market='0x'+'11'.repeat(32),user='0x'+'22'.repeat(20);
  const parsed=lerRiscoGlobalMorpho({data:{marketPositions:{
    pageInfo:{count:2,countTotal:5},
@@ -756,4 +761,26 @@ test('urgent global Morpho positions rotate across cycles instead of starving ri
    const next=q.selecionarMercados(markets,null,8,ids);
    assert.deepEqual(next.slice(0,2).map(x=>x.id),[ids[0],ids[2]]);
  }finally{rmSync(dir,{force:true,recursive:true});}
+});
+
+test('global risk page cursor persists and wraps without advancing after failure',async()=>{
+ const {mkdtempSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const dir=mkdtempSync(join(tmpdir(),'titan-global-risk-cursor-'));
+ try{
+   const file=join(dir,'cursor.json');
+   const a=new CursoresMorpho(file);
+   assert.equal(a.obterPaginaRiscoGlobal(3100),1000);
+   await a.avancarPaginaRiscoGlobal(1000,3100);
+   assert.equal(a.obterPaginaRiscoGlobal(3100),2000);
+   const restored=new CursoresMorpho(file);
+   await restored.carregar();
+   assert.equal(restored.obterPaginaRiscoGlobal(3100),2000);
+   await restored.avancarPaginaRiscoGlobal(2000,3100);
+   assert.equal(restored.obterPaginaRiscoGlobal(3100),3000);
+   await restored.avancarPaginaRiscoGlobal(3000,3100);
+   assert.equal(restored.obterPaginaRiscoGlobal(3100),1000);
+   assert.equal(restored.obterPaginaRiscoGlobal(1200),1000);
+ }finally{rmSync(dir,{recursive:true,force:true});}
 });
