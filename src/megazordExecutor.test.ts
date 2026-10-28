@@ -330,3 +330,50 @@ test('orphan lock recovery is denied without quorum, recent lock or absent owner
    assert.equal(fs.existsSync(journal),false);
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+
+test('continuous mode refuses unlimited gas, but ignores stale one-shot canary when explicitly capped',async()=>{
+ const {conferirOrcamentoMegazord}=await import('./megazordExecutor');
+ const env:NodeJS.ProcessEnv={
+   MEGAZORD_MODO:'execucao',MEGAZORD_CONFIRMAR:'OPERAR_BASE_REAL',
+   MEGAZORD_EXCLUSIVO:'1',MEGAZORD_AUTO_DEPLOY:'0',
+   MEGAZORD_CONTINUO:'1',MEGAZORD_CANARIO_ATE_UTC:'2020-01-01T00:00:00Z',
+   MEGAZORD_GAS_MAX_DIA_WEI:'10000000000000',
+   MEGAZORD_GAS_MAX_TX_WEI:'10000000000000',
+   MEGAZORD_MAX_TX_DIA:'5',MEGAZORD_PERDA_MAX_TOTAL_WEI:'10000000000000'
+ };
+ assert.doesNotThrow(()=>conferirOrcamentoMegazord(env));
+ assert.throws(()=>conferirOrcamentoMegazord({...env,MEGAZORD_CONTINUO:'0'}),/prazo_expirado/);
+ assert.throws(()=>conferirOrcamentoMegazord({...env,MEGAZORD_PERDA_MAX_TOTAL_WEI:undefined}),/teto de perda acumulada/);
+ assert.throws(()=>conferirOrcamentoMegazord({...env,MEGAZORD_AUTO_DEPLOY:'1'}),/teto de perda acumulada/);
+ assert.throws(()=>conferirOrcamentoMegazord({...env,MEGAZORD_PERDA_MAX_TOTAL_WEI:'9999999999999'}),/teto de perda acumulada/);
+});
+
+test('continuous lifetime uncovered gas cap survives UTC day rollover and restart',async()=>{
+ const f=fixture({maxDailyWei:100000n,maxDailyTx:5,
+   maxUncoveredLifetimeWei:30000n});
+ try{
+   await f.e.run('morpho',async()=>{
+     const tx=await f.e.broadcast(await f.raw(0));await tx.wait();
+   });
+   await f.e.reconcile();
+   f.e.close();
+   const journal=JSON.parse(fs.readFileSync(f.policy.journal,'utf8'));
+   const day=new Date().toISOString().slice(0,10);
+   assert.equal(journal.days[day].reservedWei,'21002');
+   // The previous day's unpaid gas is NOT forgiven at midnight.
+   const prior='2020-10-27';
+   journal.days[prior]=journal.days[day];delete journal.days[day];
+   fs.writeFileSync(f.policy.journal,JSON.stringify(journal));
+   const restarted=f.build();
+   try{
+     await assert.rejects(restarted.run('morpho',async()=>{
+       const raw=await restarted.sign({chainId:8453,type:2,nonce:1,
+         to:target,data:'0x1234',value:0n,gasLimit:21000n,
+         maxFeePerGas:1n,maxPriorityFeePerGas:1n});
+       return restarted.broadcast(raw);
+     }),/teto acumulado de gas sem lucro comprovado/);
+     assert.deepEqual(f.sent,[0]);
+   }finally{restarted.close();}
+ }finally{f.cleanup();}
+});
