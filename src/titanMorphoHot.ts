@@ -56,6 +56,18 @@ export function semRotaExecutavelMorpho(
    &&(via==='Uniswap V3'||semRota(primeiroMotivo??''));
 }
 const aguardando=new Map<string,number>();
+// A liquidation may be past LLTV yet have too few safe repay shares to
+// liquidate economically. Keep scanning every block but rotate expensive
+// full proofs until solvency improves or a bounded cooldown expires.
+const insolventes=new Map<string,{ate:number;distanciaBps:bigint}>();
+const PAUSA_INSOLVENTE_MS=5*60_000;
+export function pausaDeInsolvenciaMorpho(
+  paused:{ate:number;distanciaBps:bigint}|undefined,
+  riscoAtual:bigint|null,agora:number,
+):boolean{
+ return !!paused&&agora<paused.ate&&riscoAtual!==null
+   &&riscoAtual<paused.distanciaBps+100n;
+}
 // Assets without any verified direct V3 or Aerodrome exit cannot repay the
 // Morpho debt. Block the WHOLE market temporarily, not just one borrower.
 const mercadosSemSaida=new Map<string,number>();
@@ -121,6 +133,19 @@ async function executarSondaMorphoHot(a:Alvo,block:number):Promise<void>{
      }
      if(result.status==='inviavel'&&result.motivo.includes('position is healthy'))
        aguardando.set(chave(a),Date.now()+PAUSA_POSICAO_SAUDAVEL_MS);
+     if(result.status==='inviavel'
+       &&result.motivo.includes('garantia insuficiente para qualquer parcela segura de divida')
+       &&(via==='Aerodrome'||!process.env.CACA_MORPHO_AERO_CONTRATO)){
+       insolventes.set(chave(a),{
+         ate:Date.now()+PAUSA_INSOLVENTE_MS,distanciaBps:a.distanciaBps,
+       });
+       log.info('[TITAN/MORPHO-HOT/INSOLVENTE]',{
+         bloco:block,mercado:a.mercado.id,usuario:a.usuario,
+         pausaSegundos:PAUSA_INSOLVENTE_MS/1000,
+         reativacao:'apos prazo ou melhora do LLTV superior a 100 bps',
+         politica:'seguir leitura por bloco e liberar preflight para outros devedores',
+       });
+     }
      const semLiquidezDeSaida=primeiroMotivo?.includes('nenhuma rota passou')
        &&result.motivo.includes('nenhuma rota passou')
        &&(result.motivo.includes('0x42301c23')
@@ -201,7 +226,11 @@ export function renovarQuenteMorphoPorLeitura(
 }
 export function limparQuentesMorpho(agora=Date.now()):number{
  for(const [k,a] of alvos){
-   if(agora-a.atualizadoEm>TTL_MS)alvos.delete(k);
+   if(agora-a.atualizadoEm>TTL_MS){
+     alvos.delete(k);
+     insolventes.delete(k);
+     aguardando.delete(k);
+   }
  }
  const sorted=[...alvos.values()].sort((a,b)=>
    a.distanciaBps<b.distanciaBps?-1:a.distanciaBps>b.distanciaBps?1:b.atualizadoEm-a.atualizadoEm);
@@ -335,8 +364,11 @@ async function verificarBlocoMorphoHot():Promise<void>{
          regra:'estimativa onchain; nao autoriza envio ou lucro',
        });
      }
-     if(exigeSondaIntegralMorphoHot(state.situacao,state.distanciaBps,
-       aguardando.get(chave(a))??0,agora))
+     const paused=insolventes.get(chave(a));
+     const stillInsolvent=pausaDeInsolvenciaMorpho(paused,state.distanciaBps,agora);
+     if(paused&&!stillInsolvent)insolventes.delete(chave(a));
+     if(!stillInsolvent&&exigeSondaIntegralMorphoHot(
+       state.situacao,state.distanciaBps,aguardando.get(chave(a))??0,agora))
        avaliaveis.push({a,situacao:state.situacao,distanciaBps:state.distanciaBps});
    }
    // Crossed borrowers come first even if another target appeared first
