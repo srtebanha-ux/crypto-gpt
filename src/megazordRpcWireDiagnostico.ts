@@ -45,7 +45,7 @@ export async function diagnosticarFioRpcMegazord(env:NodeJS.ProcessEnv,
          const obj=data as Record<string,unknown>;
          p.envelope=obj.jsonrpc==='2.0';
          p.idMatch=obj.id===id;
-         p.resultPresent=Object.hasOwn(obj,'result');
+         p.resultPresent=Object.prototype.hasOwnProperty.call(obj,'result');
          p.resultNull=obj.result===null;
          const error=obj.error;
          p.errorCode=error&&typeof error==='object'
