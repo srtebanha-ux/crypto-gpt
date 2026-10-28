@@ -31,6 +31,15 @@ export class CursoresMorpho {
   if(!Number.isSafeInteger(limite)||limite<=0)return[];
   const ranks=new Map((ranking??[]).map((id,i)=>[id.toLowerCase(),i]));
   const unicos=[...new Map(mercados.map(m=>[m.id.toLowerCase(),m])).values()];
+  const known=new Map(unicos.map(m=>[m.id.toLowerCase(),m]));
+  const urgent:T[]=[];
+  const urgentIds=new Set<string>();
+  for(const raw of riscoGlobal){
+    const id=raw.toLowerCase(),m=known.get(id);
+    if(!m||urgentIds.has(id))continue;
+    urgent.push(m);urgentIds.add(id);
+    if(urgent.length>=Math.floor(limite/4))break;
+  }
   // Reserve 25% of each round for markets with the largest indexed debt.
   // Previously the least-recent-attempted sort dominated every ranking entry,
   // revisiting large active debt only after thousands of other markets.
