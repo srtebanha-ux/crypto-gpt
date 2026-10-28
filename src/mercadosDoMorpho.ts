@@ -27,7 +27,7 @@ import {rotasMorphoHabilitadas} from './titanMorphoDiretorDeRota';
 // (a chave fica na variavel de ambiente; ela nao vai para log nenhum — o unico
 // lugar onde o endereco do RPC aparece e o host, sem o caminho.)
 import { Decimal } from 'decimal.js';
-import { examinarSaudeMorpho } from './titanMorphoRadar';
+import { examinarSaudeMorpho,precisaPreflightIntegralMorpho } from './titanMorphoRadar';
 import { id, AbiCoder } from 'ethers';
 import { MULTICALL3, codificarAggregate3, decodificarAggregate3Rapido } from './multicall';
 import { ProxyAgent, fetch } from 'undici';
@@ -712,7 +712,8 @@ export async function descobrirMorphoPorApi(
                         if(m.confirmadoNaCorrente){
                             const alvo={mercado:m,usuario:d.endereco};
                             if(risco.situacao==='cruzou-estimado')liquidaveisParaPreflight.unshift(alvo);
-                            else if(liquidaveisParaPreflight.length<3)liquidaveisParaPreflight.push(alvo);
+                            else if(precisaPreflightIntegralMorpho(risco)&&liquidaveisParaPreflight.length<3)
+                                liquidaveisParaPreflight.push(alvo);
                             if(liquidaveisParaPreflight.length>3)liquidaveisParaPreflight.pop();
                         }
                         if(risco.situacao==='proxima')pertoDoLimiar+=1;
