@@ -323,6 +323,53 @@ export function conferirIdentidadeMegazord(env:NodeJS.ProcessEnv):{address:strin
    throw Error('chave nao corresponde ao endereco PUBLICO autorizado da carteira existente');
  return {address,journal};
 }
+/** One-shot repair of an orphaned lock, ONLY after a confirmed two-RPC
+ * live/pending nonce quorum. Never touch a journal or a recent/same-host lock.
+ * Keep a hard-link audit copy; no RPC side effects, signing or nonce mutation.
+ */
+export function recuperarLockOrfaoMegazord(
+ journal:string,checks:readonly {nonce:string;block:number}[],
+ agora=Date.now(),hostname=os.hostname()
+):{recuperado:boolean;categoria:string}{
+ if(checks.length!==2||checks[0]?.nonce!==checks[1]?.nonce
+   ||!/^[0-9]+$/.test(checks[0]?.nonce??'')
+   ||!Number.isSafeInteger(checks[0]?.block)
+   ||!Number.isSafeInteger(checks[1]?.block)
+   ||Math.abs(checks[0]!.block-checks[1]!.block)>3)
+   throw Error('recuperacao recusada: quorum de nonce incompleto');
+ const lock=journal+'.lock';
+ if(fs.existsSync(journal))throw Error('recuperacao recusada: diario existente requer reconciliacao');
+ let s:fs.Stats;
+ try{s=fs.lstatSync(lock);}
+ catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')
+   return {recuperado:false,categoria:'sem_lock'};throw e;}
+ if(!s.isFile()||s.nlink!==1||s.size>4096
+   ||s.mtimeMs>agora-180_000||s.mtimeMs>agora)
+   throw Error('recuperacao recusada: lock recente ou formato inseguro');
+ let owner:{pid?:unknown;host?:unknown;token?:unknown};
+ try{owner=JSON.parse(fs.readFileSync(lock,'utf8')) as typeof owner;}
+ catch{throw Error('recuperacao recusada: lock ilegivel');}
+ if(typeof owner.host!=='string'||!owner.host||owner.host===hostname
+   ||!Number.isSafeInteger(owner.pid)||Number(owner.pid)<=0
+   ||typeof owner.token!=='string'||!/^[-0-9a-f]{20,64}$/i.test(owner.token))
+   throw Error('recuperacao recusada: posse do lock nao demonstrada obsoleta');
+ const s2=fs.lstatSync(lock);
+ if(s2.ino!==s.ino||s2.dev!==s.dev||s2.mtimeMs!==s.mtimeMs||s2.size!==s.size)
+   throw Error('recuperacao recusada: lock mudou durante leitura');
+ const backup=lock+'.orphan-'+Math.floor(agora).toString(36)+'-'+randomUUID().slice(0,8);
+ fs.linkSync(lock,backup); // exclusive creation, preserves the original record
+ try{
+   const current=fs.lstatSync(lock);
+   if(current.ino!==s.ino||current.dev!==s.dev||current.mtimeMs!==s.mtimeMs
+     ||fs.existsSync(journal))
+     throw Error('recuperacao recusada: lock ou diario mudou');
+   fs.unlinkSync(lock);
+   const fd=fs.openSync(path.dirname(lock),'r');
+   try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+ }catch(e){try{fs.unlinkSync(backup);}catch{}throw e;}
+ return {recuperado:true,categoria:'lock_obsoleto_arquivado'};
+}
+
 /** Railway terminates workers with SIGTERM, not a normal JS exit.
  * Releasing lock is synchronous and token-checked; when a transaction
  * callback is still running close() retains it for manual reconciliation.
