@@ -13,7 +13,10 @@ export async function conferirRedeMegazord(env:NodeJS.ProcessEnv,rpc:Rpc=call){
  const contracts=(env.MEGAZORD_CONTRATOS??'').split(',').map(x=>x.trim()).filter(Boolean);
  if(!urls[0]||!urls[1]||urls[0]===urls[1]||!address||!isAddress(address)
    ||!contracts.length||contracts.some(x=>!isAddress(x)))throw Error('configuracao publica incompleta');
- const results=await Promise.all(urls.map(async(url,index)=>{
+ // Public RPCs can share egress quotas. Validate one independent witness at
+ // a time instead of bursting both simultaneously, without skipping any check.
+ const results=[] as Array<{rpc:number;block:number;nonce:string;balanceWei:string;contractsWithCode:number}>;
+ for(const [index,url] of urls.entries()){
    const [chain,block,latest,pending,balance,...codes]=await Promise.all([
      rpc(url!,'eth_chainId',[]),rpc(url!,'eth_getBlockByNumber',['latest',false]),
      rpc(url!,'eth_getTransactionCount',[address,'latest']),
@@ -29,9 +32,9 @@ export async function conferirRedeMegazord(env:NodeJS.ProcessEnv,rpc:Rpc=call){
    if(codes.some(c=>typeof c!=='string'||!/^0x[0-9a-f]+$/i.test(c)||c==='0x0'))
      throw Error('RPC '+index+': destino sem bytecode valido');
    if(quantity(balance)===0n)throw Error('RPC '+index+': saldo de gas zerado');
-   return {rpc:index,block:Number(quantity(b.number)),nonce:quantity(latest).toString(),
-     balanceWei:quantity(balance).toString(),contractsWithCode:codes.length};
- }));
+   results.push({rpc:index,block:Number(quantity(b.number)),nonce:quantity(latest).toString(),
+     balanceWei:quantity(balance).toString(),contractsWithCode:codes.length});
+ }
  if(results[0].nonce!==results[1].nonce||Math.abs(results[0].block-results[1].block)>3)
    throw Error('RPCs discordam sobre nonce/bloco');
  return {readOnly:true,address,checks:results,
