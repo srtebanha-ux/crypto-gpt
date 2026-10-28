@@ -3,6 +3,7 @@ import {auditarContratosMegazord} from './megazordContratosPreflight';
 import {createLogger} from './logger';
 import {instalarExecutorMegazord,conferirIdentidadeMegazord,conferirOrcamentoMegazord} from './megazordExecutor';
 import {normalizarCredenciaisMegazord} from './megazordCredenciais';
+import {auditarPersistenciaMegazord} from './megazordAuditoriaPersistencia';
 import {selecionarParRpcMegazord} from './megazordRpcFailover';
 import {prepararMorphoMegazord} from './megazordMorphoBoot';
 import {prepararAaveMultiHopMegazord,habilitarAaveMultiHopMegazord} from './megazordAaveMultiBoot';
@@ -94,6 +95,9 @@ export async function iniciarMegazord(
    // Fails closed if the contract is not deployed, RPCs disagree, wallet differs,
    // gas balance is zero or a non-durable journal was configured.
    conferirIdentidadeMegazord(env);
+   // No signer loaded or transaction sent here. Read-only evidence survives
+   // even when all public RPC gateways reject the subsequent readiness gate.
+   log.info('[TITAN/AUDITORIA-PERSISTENCIA-READONLY]',auditarPersistenciaMegazord(env));
    normalizarCredenciaisMegazord(env);
    // Align BEFORE loading the CACA module, which snapshots its env on import.
    // Invalid quotas abort before deploying contracts or loading signers.
