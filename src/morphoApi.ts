@@ -772,15 +772,20 @@ export function apiConfereComACorrente(
  * Based on the public Morpho Blue bot's marketPositions schema.
  */
 export type CandidatoGlobalMorpho={mercado:string;usuario:string};
-export function consultaRiscoGlobalMorpho():string{
+export function consultaRiscoGlobalMorpho(skip=0):string{
+ // Enumerate from the LIQUIDATION EDGE first: ascending health factor used
+ // to prioritize deeply insolvent bad debt (often impossible to repay).
+ // The durable secondary-page cursor broadens this search every cycle.
+ if(!Number.isSafeInteger(skip)||skip<0||skip>1_000_000)
+   throw Error('offset do feed de risco Morpho invalido');
  return JSON.stringify({
    query:`query RiskOnBase($chainIds:[Int!],$hfLte:Float!,$first:Int!,$skip:Int!){
      marketPositions(
        where:{chainId_in:$chainIds,healthFactor_lte:$hfLte,marketListed:true}
-       orderBy:HealthFactor,orderDirection:Asc,first:$first,skip:$skip
+       orderBy:HealthFactor,orderDirection:Desc,first:$first,skip:$skip
      ){pageInfo{count countTotal}items{market{marketId}user{address}}}
    }`,
-   variables:{chainIds:[8453],hfLte:1.02,first:1000,skip:0},
+   variables:{chainIds:[8453],hfLte:1.02,first:1000,skip},
  });
 }
 export function lerRiscoGlobalMorpho(corpo:unknown):
