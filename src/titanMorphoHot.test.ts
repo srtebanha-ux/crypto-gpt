@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,exigeSondaIntegralMorphoHot,semRotaExecutavelMorpho} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,exigeSondaIntegralMorphoHot,semRotaExecutavelMorpho,compararPrioridadeMorphoHot} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
@@ -191,4 +191,14 @@ test('HOT classifies only structural no-exit errors for market rotation, not hea
   'sem pool Aerodrome comprovada','nenhuma rota passou no liquidar(): healthy'),false);
  assert.equal(semRotaExecutavelMorpho('Aerodrome','inviavel',
   'sem pool Aerodrome comprovada','sem rota direta ou multihop comprovada garantia -> divida'),true);
+});
+
+test('same block crossed borrower outranks a nearer but still healthy candidate',()=>{
+ const candidates=[
+  {id:'first',situacao:'proxima',distanciaBps:5n},
+  {id:'second',situacao:'cruzou-estimado',distanciaBps:-1n},
+  {id:'third',situacao:'proxima',distanciaBps:2n},
+ ];
+ candidates.sort(compararPrioridadeMorphoHot);
+ assert.deepEqual(candidates.map(x=>x.id),['second','third','first']);
 });
