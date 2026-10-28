@@ -32,9 +32,11 @@ const LIMIAR_SONDA_PROXIMA_BPS=75n;
 export function exigeSondaIntegralMorphoHot(
  situacao:string,distanciaBps:bigint|null,bloqueadoAte:number,agora:number,
 ):boolean {
+ // Honor target cooldown for crossed borrowers too; keep per-block reads active.
+ if(bloqueadoAte>agora)return false;
  if(situacao==='cruzou-estimado')return true;
  return situacao==='proxima'&&distanciaBps!==null
-   &&distanciaBps<=LIMIAR_SONDA_PROXIMA_BPS&&bloqueadoAte<=agora;
+   &&distanciaBps<=LIMIAR_SONDA_PROXIMA_BPS;
 }
 /** The same-block risk result decides priority, never an API snapshot. */
 export function compararPrioridadeMorphoHot(

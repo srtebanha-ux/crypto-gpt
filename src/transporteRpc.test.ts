@@ -310,3 +310,48 @@ test('o transporte do caçador NÃO pode voltar a ignorar o status — lido no c
         'ler `r.json()` sem olhar `r.status` foi o defeito medido em 2026-10-16');
     assert.match(fonte, /falhaDeTransporte/, 'o terceiro estado tem de existir no tipo');
 });
+
+test('timeout de lote grande divide uma unica vez e recupera cotacoes sem envio',async()=>{
+ let chamadas=0;
+ const t=montarTransporteRpc({
+   rpc:RPC,tentativas:1,esperar:semEspera,timeoutMs:0,loteMaximo:8,
+   fetchar:(async(_url:string,init:unknown)=>{
+     chamadas++;
+     const req=JSON.parse(String((init as {body:string}).body)) as Array<{id:number;method:string}>;
+     if(req.length>2)throw Error('ETIMEDOUT: batch too large');
+     assert.ok(req.every(x=>x.method==='eth_call'));
+     return resposta(200,JSON.stringify(req.map(x=>({jsonrpc:'2.0',id:x.id,result:'0x01'}))));
+   }) as Fetchador,
+ });
+ const rs=await t.chamarEmLote(Array.from({length:4},()=>UM_PEDIDO[0]!));
+ assert.equal(chamadas,3); // 4 fails once; halves of 2 recover.
+ assert.equal(rs.length,4);
+ assert.ok(rs.every(x=>x.ok&&x.falhaDeTransporte===undefined));
+ assert.equal(t.contabilidade().falhasDeRede,1);
+});
+test('429 nao divide lotes nem multiplica pedidos ao provedor',async()=>{
+ let chamadas=0;
+ const t=montarTransporteRpc({
+   rpc:RPC,tentativas:1,esperar:semEspera,timeoutMs:0,
+   fetchar:(async()=>{
+     chamadas++;return resposta(429,'slow down');
+   }) as Fetchador,
+ });
+ const rs=await t.chamarEmLote(Array.from({length:4},()=>UM_PEDIDO[0]!));
+ assert.equal(chamadas,1);
+ assert.equal(rs.length,4);
+ assert.ok(rs.every(x=>x.falhaDeTransporte?.includes('HTTP 429')));
+});
+test('timeout nao repete eth_sendRawTransaction mesmo em lote',async()=>{
+ let chamadas=0;
+ const t=montarTransporteRpc({
+   rpc:RPC,tentativas:3,esperar:semEspera,timeoutMs:0,
+   fetchar:(async()=>{chamadas++;throw Error('ETIMEDOUT');}) as Fetchador,
+ });
+ const rs=await t.chamarEmLote([
+   {metodo:'eth_call',params:[]},
+   {metodo:'eth_sendRawTransaction',params:['0x']},
+ ]);
+ assert.equal(chamadas,1);
+ assert.ok(rs.every(x=>x.falhaDeTransporte!==undefined));
+});

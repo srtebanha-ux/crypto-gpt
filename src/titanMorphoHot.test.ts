@@ -170,12 +170,13 @@ test('HOT reuses the configured Megazord RPC and avoids public fallback unless n
   configured.MEGAZORD_RPC_URL);
 });
 
-test('HOT only spends full liquidation eth_call near threshold, but crossed candidates bypass cooldown',()=>{
+test('HOT honors cooldown for crossed borrowers while retaining fresh block monitoring',()=>{
  const now=block+12*60*60_000;
  assert.equal(exigeSondaIntegralMorphoHot('proxima',249n,0,now),false);
  assert.equal(exigeSondaIntegralMorphoHot('proxima',75n,0,now),true);
  assert.equal(exigeSondaIntegralMorphoHot('proxima',74n,now+30000,now),false);
- assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-1n,now+90000,now),true);
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-1n,now+90000,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-1n,now,now),true);
  assert.equal(exigeSondaIntegralMorphoHot('segura',10n,0,now),false);
  assert.equal(exigeSondaIntegralMorphoHot('proxima',null,0,now),false);
 });
@@ -249,8 +250,10 @@ test('deeply insolvent crossed borrower rotates out of costly full proofs but re
  assert.equal(pausaDeInsolvenciaMorpho(paused,-6189n,now+300_000),false);
  assert.equal(pausaDeInsolvenciaMorpho(paused,null,now+10),false);
  assert.equal(pausaDeInsolvenciaMorpho(undefined,-6189n,now),false);
- // Ordinary crossed borrower is still preferred over merely near healthy risk.
- assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now),true);
+ // A crossed borrower is high priority only once its cooldown has expired.
+ // Ignoring this gate was monopolizing paid-proof slots with bad debt.
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-10n,now+300_000,now+300_000),true);
 });
 
 test('Morpho director skips second DEX for healthy or no-safe-share protocol rejection',async()=>{

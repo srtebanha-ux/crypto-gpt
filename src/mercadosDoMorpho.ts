@@ -528,23 +528,61 @@ export async function descobrirMorphoPorApi(
                 lerRankingMercadosMorpho(JSON.parse(await resp.text()));
         }catch{/* Sem ranking nunca vira "sem mercado"; existe fallback. */}
     }
-    // Highest-risk global borrower feed: a discovery HINT, never send approval.
-    // It costs at most one API request within the existing HTTP budget.
+    // Always sample the 1000 borrowers closest to the liquidation edge.
+    // A second durable page rotates through deeper results so no position
+    // disappears permanently behind the API's first-page cap.
     let riscoGlobal:ReturnType<typeof lerRiscoGlobalMorpho>=null;
+    let riscoPaginaExtra=0, riscoExtraColetados=0;
+    const endpointRisco='https://api.morpho.org/graphql';
     if(candidatosParaSondagem.length>0&&orcamento.pedir()){
         try{
-            const resp=await buscar('https://api.morpho.org/graphql',{
+            const resp=await buscar(endpointRisco,{
                 method:'POST',
                 headers:{'content-type':'application/json','accept':'application/json'},
                 body:consultaRiscoGlobalMorpho(),signal:orcamento.sinal,
             });
             if(resp.status===200)riscoGlobal=lerRiscoGlobalMorpho(JSON.parse(await resp.text()));
-        }catch{/* Always preserve ordinary market rotation on API failure. */}
+        }catch{/* The read-only risk API must not block normal discovery. */}
+    }
+    let riscoMercadosPriorizados=riscoGlobal?.candidatos.map(x=>x.mercado)??[];
+    if(riscoGlobal?.total!==null && riscoGlobal!==null
+        &&riscoGlobal.total>1000 &&orcamento.pedir()){
+        const offset=cursores.obterPaginaRiscoGlobal(riscoGlobal.total);
+        try{
+            const resp=await buscar(endpointRisco,{
+                method:'POST',
+                headers:{'content-type':'application/json','accept':'application/json'},
+                body:consultaRiscoGlobalMorpho(offset),signal:orcamento.sinal,
+            });
+            if(resp.status===200){
+                const extra=lerRiscoGlobalMorpho(JSON.parse(await resp.text()));
+                if(extra!==null){
+                    riscoPaginaExtra=offset;
+                    riscoExtraColetados=extra.candidatos.length;
+                    const original=riscoGlobal.candidatos;
+                    const seen=new Set(original.map(x=>x.mercado+'|'+x.usuario));
+                    for(const item of extra.candidatos){
+                        const k=item.mercado+'|'+item.usuario;
+                        if(!seen.has(k)){original.push(item);seen.add(k);}
+                    }
+                    // Preserve one first-page priority; reserve another
+                    // chance for markets unseen in that page.
+                    riscoMercadosPriorizados=[
+                        ...original.slice(0,1).map(x=>x.mercado),
+                        ...extra.candidatos.map(x=>x.mercado),
+                        ...original.slice(1).map(x=>x.mercado),
+                    ];
+                    await cursores.avancarPaginaRiscoGlobal(offset,riscoGlobal.total);
+                }
+            }
+        }catch{/* Keep the stored offset for a future, successful request. */}
     }
     log.info('[MORPHO/RISCO-GLOBAL] Sinal priorizado, ainda sem comprovacao onchain.',{
         apiValida:riscoGlobal!==null,
         candidatos:riscoGlobal?.candidatos.length??0,
         totalApi:riscoGlobal?.total??null,
+        paginaExtra:riscoPaginaExtra,
+        candidatosNaPaginaExtra:riscoExtraColetados,
         coberturaParcial:riscoGlobal!==null&&
             riscoGlobal.total!==null&&riscoGlobal.total>riscoGlobal.candidatos.length,
         regra:'API nao autoriza liquidacao; validar cinco parametros, posicao, oracle, eth_call e lucro',
@@ -556,7 +594,7 @@ export async function descobrirMorphoPorApi(
     const rodada=opcoes.indiceDaRodada ?? Math.floor(Date.now()/900_000);
     const escolhidos=cursores.selecionarMercados(candidatosParaSondagem,rankingDeDividas,
         tetoDev===0?tetoValid:Math.min(tetoValid,tetoDev),
-        riscoGlobal?.candidatos.map(x=>x.mercado)??[]);
+        riscoMercadosPriorizados);
     log.info('[MORPHO/API] Selecao de mercados para conferir na Base.',{
         mercadosEnumerados:candidatosParaSondagem.length,
         llTvAte77PorCento:quePagam.length,

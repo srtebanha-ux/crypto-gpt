@@ -7,11 +7,16 @@ export class CursoresMorpho {
  private registros=new Map<string,Registro>();
  private tentativas=new Map<string,number>();
  private sequencia=0;
+ private proximaPaginaRiscoGlobal=1000;
  constructor(private readonly arquivo:string){}
  async carregar():Promise<void>{
   try{
-   const raw=JSON.parse(await fs.readFile(this.arquivo,'utf8')) as {versao?:number;mercados?:Record<string,Registro>;tentativas?:Record<string,number>};
+   const raw=JSON.parse(await fs.readFile(this.arquivo,'utf8')) as {versao?:number;mercados?:Record<string,Registro>;tentativas?:Record<string,number>;proximaPaginaRiscoGlobal?:number};
    if(raw.versao!==1||!raw.mercados)return;
+   if(Number.isSafeInteger(raw.proximaPaginaRiscoGlobal)
+      &&raw.proximaPaginaRiscoGlobal!>=1000
+      &&raw.proximaPaginaRiscoGlobal!<=1_000_000)
+     this.proximaPaginaRiscoGlobal=raw.proximaPaginaRiscoGlobal!;
    for(const [id,n] of Object.entries(raw.tentativas??{})){
     if(/^0x[0-9a-f]{64}$/i.test(id)&&Number.isSafeInteger(n)&&n>0){
      this.tentativas.set(id.toLowerCase(),n);this.sequencia=Math.max(this.sequencia,n);
@@ -23,6 +28,19 @@ export class CursoresMorpho {
       borrowSharesDaApi:d.borrowSharesDaApi===null?null:BigInt(d.borrowSharesDaApi)}))});
    }
   }catch{/* Missing/corrupt cache means explicit rediscovery, never executable API data. */}
+ }
+ /** Always inspect the first near-threshold page; rotate an EXTRA page
+  * beyond the API's first 1000 candidates across rounds and deployments. */
+ obterPaginaRiscoGlobal(total:number):number{
+  if(!Number.isSafeInteger(total)||total<=1000)return 1000;
+  const max=1000*Math.ceil((total-1000)/1000);
+  return this.proximaPaginaRiscoGlobal<=max?this.proximaPaginaRiscoGlobal:1000;
+ }
+ async avancarPaginaRiscoGlobal(offset:number,total:number):Promise<void>{
+  if(!Number.isSafeInteger(offset)||offset<1000||offset>1_000_000
+     ||!Number.isSafeInteger(total)||total<0)return;
+  this.proximaPaginaRiscoGlobal=offset+1000>=total?1000:offset+1000;
+  await this.persistir();
  }
  obter(id:string):Registro{return this.registros.get(id.toLowerCase())??{proximo:0,devedores:[]};}
  /** One durable queue from market validation to borrower collection. Ranking only
@@ -86,7 +104,8 @@ export class CursoresMorpho {
   await fs.mkdir(path.dirname(this.arquivo),{recursive:true});
   const tmp=this.arquivo+'.tmp';
   await fs.writeFile(tmp,JSON.stringify({versao:1,mercados:Object.fromEntries(this.registros),
-    tentativas:Object.fromEntries(this.tentativas)},
+    tentativas:Object.fromEntries(this.tentativas),
+    proximaPaginaRiscoGlobal:this.proximaPaginaRiscoGlobal},
     (_,v)=>typeof v==='bigint'?v.toString():v));
   await fs.rename(tmp,this.arquivo);
  }

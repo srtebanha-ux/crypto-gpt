@@ -1,0 +1,32 @@
+name: TITAN active-hunt regression
+on:
+  pull_request:
+    paths:
+      - "src/morphoApi.ts"
+      - "src/morphoApi.test.ts"
+      - "src/morphoCursores.ts"
+      - "src/mercadosDoMorpho.ts"
+      - "src/titanMorphoHot.ts"
+      - "src/titanMorphoHot.test.ts"
+      - "src/cacarArbitragem.ts"
+      - "src/transporteRpc.test.ts"
+      - ".github/workflows/titan-active-hunt-ci.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run typecheck
+      - run: node --require ts-node/register --test src/morphoApi.test.ts src/titanMorphoHot.test.ts src/transporteRpc.test.ts
