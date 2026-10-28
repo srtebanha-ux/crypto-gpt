@@ -145,3 +145,29 @@ test('HTTP 5xx recovers within transport budget; method errors fail immediately 
   &&!e.message.includes('SECRET')&&(e as {rpcCode?:number}).rpcCode===-32602);
  assert.equal(bad,1);
 });
+
+test('Base HTTP-200 quota error -32029 with null id observes 3s cooldown and recovers',async()=>{
+ let n=0;const waits:number[]=[];
+ const rpc=estrito({esperar:async ms=>{waits.push(ms);},fetcher:(async(_u,i)=>{
+  const id=JSON.parse(String(i?.body)).id;
+  if(++n===1)return new Response(JSON.stringify({jsonrpc:'2.0',id:null,
+   error:{code:-32029,message:'provider quota',data:{retry_after_ms:3000}}}));
+  return new Response(JSON.stringify({jsonrpc:'2.0',id,result:'0x2105'}));
+ }) as typeof fetch});
+ assert.equal(await rpc('https://base.invalid','eth_chainId',[]),'0x2105');
+ assert.equal(n,2);
+ assert.ok(waits.includes(3000));
+});
+
+test('persisting -32029 quota failure never becomes a valid onchain result',async()=>{
+ let n=0;
+ const rpc=estrito({esperar:async()=>{},fetcher:(async()=>{
+  n++;return new Response(JSON.stringify({jsonrpc:'2.0',id:null,
+   error:{code:-32029,data:{retry_after_ms:3000},message:'private-key-looking-secret'}}));
+ }) as typeof fetch});
+ await assert.rejects(rpc('https://rpc.invalid/secret','eth_getBlockByNumber',['latest',false]),
+  e=>e instanceof Error&&(e as {categoria?:string;rpcCode?:number}).categoria==='limite_jsonrpc'
+   &&(e as {rpcCode?:number}).rpcCode===-32029
+   &&!e.message.includes('private-key-looking-secret'));
+ assert.equal(n,3);
+});
