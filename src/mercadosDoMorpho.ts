@@ -27,8 +27,8 @@ import {rotasMorphoHabilitadas} from './titanMorphoDiretorDeRota';
 // (a chave fica na variavel de ambiente; ela nao vai para log nenhum — o unico
 // lugar onde o endereco do RPC aparece e o host, sem o caminho.)
 import { Decimal } from 'decimal.js';
-import { examinarSaudeMorpho,precisaPreflightIntegralMorpho } from './titanMorphoRadar';
-import { id, AbiCoder } from 'ethers';
+import { examinarSaudeMorpho,precisaPreflightIntegralMorpho,totalBorrowComJurosMorpho } from './titanMorphoRadar';
+import { id, AbiCoder, Interface } from 'ethers';
 import { MULTICALL3, codificarAggregate3, decodificarAggregate3Rapido } from './multicall';
 import { ProxyAgent, fetch } from 'undici';
 import { createLogger } from './logger';
@@ -39,6 +39,10 @@ import { incentivoDeLiquidacao, bonusPct, saudeNoMorpho, ESCALA_DO_ORACULO } fro
 
 const log = createLogger('morpho');
 const coder = AbiCoder.defaultAbiCoder();
+const irmBorrowRateView=new Interface([
+    'function borrowRateView((address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) marketParams,(uint128 totalSupplyAssets,uint128 totalSupplyShares,uint128 totalBorrowAssets,uint128 totalBorrowShares,uint128 lastUpdate,uint128 fee) market) view returns(uint256)',
+]);
+
 const sel = (a: string) => id(a).slice(0, 10);
 const MP = '(address,address,address,address,uint256)';
 
@@ -100,7 +104,7 @@ import {
     enumerarMercados, enumerarDevedores, soOsQuePagam, mercadosParaSondagem, soDaBase, codificarIdToMarketParams,
     consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,consultaRiscoGlobalMorpho,lerRiscoGlobalMorpho,
     selecionarDevedoresPorRisco,
-    codificarPosition, codificarMarket, lerMarket, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
+    codificarPosition, codificarMarket, lerMarket, lerMarketComTempo, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, cursorDeCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
 import {
