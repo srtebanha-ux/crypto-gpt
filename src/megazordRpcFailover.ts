@@ -10,6 +10,11 @@ export function candidatosRpcSecundario(env:NodeJS.ProcessEnv):string[]{
   'https://mainnet.base.org',
   'https://base.llamarpc.com',
   'https://1rpc.io/base',
+  // Additional independent read witnesses. Railway's historical logs
+  // confirmed publicnode readable while the official gateway returned null.
+  // This is READ-ONLY discovery and never relaxes chain/nonce/code checks.
+  'https://base-rpc.publicnode.com',
+  'https://base.drpc.org',
  ];
  const primary=env.MEGAZORD_RPC_URL?.trim().replace(/\/+$/,'');
  const seen=new Set<string>();
@@ -99,7 +104,8 @@ export async function selecionarParRpcMegazord(
  if(!env.MEGAZORD_RPC_URL)throw Error('RPC principal ausente');
  const candidates=[env.MEGAZORD_RPC_URL,env.MEGAZORD_RPC_SECUNDARIO,
    ...(env.MEGAZORD_RPC_ALTERNATIVOS??'').split(','),
-   'https://mainnet.base.org','https://1rpc.io/base'];
+   'https://mainnet.base.org','https://1rpc.io/base',
+   'https://base-rpc.publicnode.com','https://base.drpc.org'];
  const hosts=new Set<string>();
  const primaries:string[]=[];
  for(const candidate of candidates){
@@ -109,7 +115,7 @@ export async function selecionarParRpcMegazord(
      if(!h||hosts.has(h))continue;
      hosts.add(h);primaries.push(candidate);
    }catch{/* unsafe URL is never used */}
-   if(primaries.length===4)break;
+   if(primaries.length===8)break;
  }
  let attempted=0;
  const motivos:string[]=[];
