@@ -765,7 +765,7 @@ export function consultaRiscoGlobalMorpho():string{
        orderBy:HealthFactor,orderDirection:Asc,first:$first,skip:$skip
      ){pageInfo{count countTotal}items{market{marketId}user{address}}}
    }`,
-   variables:{chainIds:[8453],hfLte:1.02,first:200,skip:0},
+   variables:{chainIds:[8453],hfLte:1.02,first:1000,skip:0},
  });
 }
 export function lerRiscoGlobalMorpho(corpo:unknown):
@@ -779,7 +779,7 @@ export function lerRiscoGlobalMorpho(corpo:unknown):
  const info=mp.pageInfo as Record<string,unknown>|undefined;
  if(info&&typeof info.count==='number'&&info.count!==mp.items.length)return null;
  const seen=new Set<string>(),candidatos:CandidatoGlobalMorpho[]=[];
- for(const raw of mp.items.slice(0,200)){
+ for(const raw of mp.items.slice(0,1000)){
    if(!raw||typeof raw!=='object')continue;
    const item=raw as Record<string,unknown>;
    const mercado=(item.market as Record<string,unknown>|undefined)?.marketId;
