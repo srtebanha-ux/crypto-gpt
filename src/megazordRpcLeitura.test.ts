@@ -188,3 +188,17 @@ test('preflight uses modest unique numeric IDs and still rejects stale cached ID
  await assert.rejects(bad('p','eth_chainId',[]),
   e=>e instanceof Error&&(e as {categoria?:string}).categoria==='id_divergente');
 });
+
+
+test('readiness requests explicitly disable compression but still require exact wire ID',async()=>{
+ let calls=0;
+ const rpc=estrito({esperar:async()=>{},fetcher:(async(_url,init)=>{
+   calls++;
+   assert.equal(new Headers(init?.headers).get('accept-encoding'),'identity');
+   assert.equal(new Headers(init?.headers).get('accept'),'application/json');
+   const id=JSON.parse(String(init?.body)).id;
+   return new Response(JSON.stringify({jsonrpc:'2.0',id,result:'0x2105'}));
+ }) as typeof fetch});
+ assert.equal(await rpc('https://base-rpc.publicnode.com','eth_chainId',[]),'0x2105');
+ assert.equal(calls,1);
+});
