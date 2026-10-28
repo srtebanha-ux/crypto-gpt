@@ -18,7 +18,7 @@ export function criarRpcPreflight({fetcher=fetch,
        if(cooldown>MAX_RETRY_AFTER_MS)throw Error('RPC HTTP 429');
        if(cooldown>0)await esperar(cooldown);
        // Serialize each endpoint independently; do not burst all readiness reads.
-       await esperar(150);
+       await esperar(300);
        let response:Response;
        try{
          response=await fetcher(url,{method:'POST',headers:{'content-type':'application/json'},
@@ -43,11 +43,16 @@ export function criarRpcPreflight({fetcher=fetch,
          continue;
        }
        if(!response.ok)throw Error('RPC HTTP '+response.status);
-       let body:{result?:unknown;error?:unknown};
-       try{body=await response.json() as typeof body;}
-       catch{throw Error('resposta RPC invalida');}
-       if(!body||typeof body!=='object'||body.error||body.result===undefined)
-         throw Error('resposta RPC invalida');
+       let body:{result?:unknown;error?:unknown}|null=null;
+       try{body=await response.json() as typeof body;}catch{/* no upstream error text */}
+       if(!body||typeof body!=='object'||body.error||body.result===undefined){
+         // Providers sometimes send HTTP 200 containing temporary RPC errors.
+         // Never accept these as valid onchain values: retry the same read
+         // briefly, still bounded to three tries before the outer RPC failover.
+         if(attempt===2)throw Error('resposta RPC invalida');
+         await esperar(400*(attempt+1));
+         continue;
+       }
        return body.result;
      }
      throw Error('RPC HTTP 429');
