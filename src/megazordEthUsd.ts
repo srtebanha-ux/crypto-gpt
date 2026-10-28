@@ -103,7 +103,7 @@ export function iniciarAtualizacaoPisoUsd(
  log:(message:string)=>void=()=>{},
 ):()=>void{
  const timer=setInterval(()=>{
-   const rpc=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true});
+   const rpc=new JsonRpcProvider(rpcUrl,8453,{staticNetwork:true,batchMaxCount:1});
    void atualizarPisoUsdMegazord(env,rpc)
      .catch(()=>log('Referencia ETH/USD indisponivel; novos envios Morpho bloqueados'))
      .finally(()=>rpc.destroy());
