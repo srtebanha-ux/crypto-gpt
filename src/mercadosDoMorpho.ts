@@ -98,7 +98,7 @@ export function julgarMorpho(codigo: string): { eh: boolean; faltando: string[];
  */
 import {
     enumerarMercados, enumerarDevedores, soOsQuePagam, mercadosParaSondagem, soDaBase, codificarIdToMarketParams,
-    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,
+    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,consultaRiscoGlobalMorpho,lerRiscoGlobalMorpho,
     selecionarDevedoresPorRisco,
     codificarPosition, codificarMarket, lerMarket, lerIdToMarketParams, lerPosition, apiConfereComACorrente,
     paraCache, doCache, cursorDeCache, comoLerADescoberta, type MercadoDaApi, type TransporteHttp,
