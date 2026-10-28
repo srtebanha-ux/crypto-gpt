@@ -632,9 +632,13 @@ export function montarTransporteRpc(opcoes: {
     const comRecuo = async (corpo: string, metodos: string[]): Promise<
     { tipo: 'corpo'; texto: string } | { tipo: 'falha'; porque: string }
     > => {
-        // Unknown broadcasts must NOT be repeated after a network timeout:
-        // the chain could have accepted the transaction before the timeout.
-        const limiteTentativas=metodos.some(m=>/^(?:eth_send|personal_send|eth_submit)/i.test(m))
+        // Unknown broadcasts must NOT be repeated after a network timeout.
+        // Large eth_call batches get a fast single attempt; a timed-out
+        // response is recovered with one bounded split, not 3 slow retries
+        // of the same oversized batch.
+        const soLeituraEmLote=metodos.length>1&&metodos.every(m=>m==='eth_call');
+        const limiteTentativas=soLeituraEmLote
+            ||metodos.some(m=>/^(?:eth_send|personal_send|eth_submit)/i.test(m))
             ? 1 : tentativas;
         let ultima = 'nenhuma tentativa';
         for (let t = 0; t < limiteTentativas; t += 1) {
@@ -700,8 +704,10 @@ export function montarTransporteRpc(opcoes: {
                 &&/falha de rede ou timeout/i.test(r.porque)
                 &&!/(?:teto de|HTTP 429|HTTP 5\\d\\d)/i.test(r.porque)) {
                 const meio=Math.floor(pedidos.length/2);
-                const esquerda=await umLote(pedidos.slice(0,meio),1);
-                const direita=await umLote(pedidos.slice(meio),1);
+                const [esquerda,direita]=await Promise.all([
+                    umLote(pedidos.slice(0,meio),1),
+                    umLote(pedidos.slice(meio),1),
+                ]);
                 return [...esquerda,...direita];
             }
             // No proof of EVM execution: never call this a contract revert.
