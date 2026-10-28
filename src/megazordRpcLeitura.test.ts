@@ -62,3 +62,34 @@ test('JSON-RPC error data is never reproduced in diagnostics',async()=>{
    new Response(JSON.stringify({error:{message:'private-secret',code:-1}}))) as typeof fetch});
  await assert.rejects(rpc('a','eth_chainId',[]),/^Error: resposta RPC invalida$/);
 });
+
+test('HTTP 200 with temporary JSON-RPC error retries, then requires valid onchain result',async()=>{
+ let attempts=0;
+ const waits:number[]=[];
+ const rpc=criarRpcPreflight({
+  esperar:async ms=>{waits.push(ms);},
+  fetcher:(async()=>{
+   attempts++;
+   return attempts<3
+    ?new Response(JSON.stringify({error:{code:-32000,message:'backend error'}}),{status:200})
+    :new Response(JSON.stringify({result:'0x2105'}),{status:200});
+  }) as typeof fetch,
+ });
+ assert.equal(await rpc('https://rpc.invalid','eth_chainId',[]),'0x2105');
+ assert.equal(attempts,3);
+ assert.ok(waits.includes(400));
+ assert.ok(waits.includes(800));
+});
+test('persistent HTTP-200 RPC errors fail closed after exactly three read attempts',async()=>{
+ let attempts=0;
+ const rpc=criarRpcPreflight({
+  esperar:async()=>{},
+  fetcher:(async()=>{
+   attempts++;
+   return new Response(JSON.stringify({error:{code:-32005,message:'secrettoken'}}),{status:200});
+  }) as typeof fetch,
+ });
+ await assert.rejects(rpc('https://rpc.invalid','eth_getCode',['0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb','latest']),
+  e=>e instanceof Error&&e.message==='resposta RPC invalida');
+ assert.equal(attempts,3);
+});
