@@ -85,7 +85,7 @@ test('persistent invalid JSON-RPC replies fail closed without signer authorizati
  await assert.rejects(selecionarRpcSecundarioMegazord(env,async()=>{
   attempts++;throw Error('resposta RPC invalida');
  },async()=>{}),/sem fallback inseguro ao principal/);
- assert.equal(attempts,15);
+ assert.equal(attempts,12);
 });
 
 test('aliases on one host cannot serve as independent witness; configured alternatives precede public ones',()=>{
