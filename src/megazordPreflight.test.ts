@@ -45,3 +45,13 @@ test('two RPC witnesses are checked sequentially to avoid shared rate-limit burs
  assert.ok(seen.slice(0,firstOther).every(x=>x==='rpc-a'));
  assert.ok(seen.slice(firstOther).every(x=>x==='rpc-b'));
 });
+
+test('readiness never overlaps calls to a rate-limited Base provider',async()=>{
+ let active=0,maximum=0;
+ await conferirRedeMegazord(env,async(u,m,p)=>{
+  active++;maximum=Math.max(maximum,active);
+  await Promise.resolve();
+  try{return await rpc(u,m);}finally{active--;}
+ });
+ assert.equal(maximum,1);
+});
