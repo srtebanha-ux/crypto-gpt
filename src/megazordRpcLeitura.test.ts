@@ -93,3 +93,23 @@ test('persistent HTTP-200 RPC errors fail closed after exactly three read attemp
   e=>e instanceof Error&&e.message==='resposta RPC invalida');
  assert.equal(attempts,3);
 });
+
+test('each read request has a distinct JSON-RPC id, including retries',async()=>{
+ const ids:number[]=[];
+ let attempts=0;
+ const rpc=criarRpcPreflight({
+  esperar:async()=>{},
+  fetcher:(async(_url,init)=>{
+   const payload=JSON.parse(String(init?.body));
+   ids.push(payload.id);
+   attempts++;
+   return attempts===1
+    ?new Response(JSON.stringify({error:{code:-32000,message:'temporary'}}),{status:200})
+    :ok();
+  }) as typeof fetch,
+ });
+ await rpc('https://rpc.invalid','eth_chainId',[]);
+ await rpc('https://rpc.invalid','eth_getBalance',['0x'+'11'.repeat(20),'latest']);
+ assert.equal(ids.length,3);
+ assert.equal(new Set(ids).size,ids.length);
+});
