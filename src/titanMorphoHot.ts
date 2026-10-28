@@ -67,6 +67,77 @@ export function bloquearMercadoSemSaida(marketId:string,agora=Date.now(),duracao
 }
 let iniciado=false;
 let emCurso=false;
+// The expensive liquidation eth_call must NEVER block the next-block
+// read-only snapshot. Keep exactly ONE proof in flight per signer/wallet.
+let provaEmCurso=false;
+async function executarSondaMorphoHot(a:Alvo,block:number):Promise<void>{
+ try{
+     aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
+     const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
+     const {via,resultado:result,primeiroMotivo}=await avaliarSaidasMorpho({
+       mercado:a.mercado,usuario:a.usuario,signal:AbortSignal.timeout(20_000),
+       rpcUrl:rpcHotUrl??resolverRpcMorphoHot(process.env),
+     });
+     // Losing the single-signer preflight lock is NOT evidence the borrower
+     // is healthy or economically invalid. Retry on the next block instead
+     // of honoring the provisional 45-second per-position cooldown.
+     if(result.status==='descartada'&&result.motivo.includes('outro preflight Morpho ocupa')){
+       aguardando.delete(chave(a));
+       log.info('[TITAN/MORPHO-HOT/REAGENDAR]',{
+         mercado:a.mercado.id,bloco:block,
+         motivo:'executor ocupado; proximo bloco, nenhum gas gasto',
+       });
+     }
+     // An existent pool is not liquid. If ALL executor sizes reverted from
+     // the canonical DEX output floor, give its market a short cooling period.
+     // The slow radar keeps discovering other users/markets as usual.
+     if(semRotaExecutavelMorpho(via,result.status,result.motivo,primeiroMotivo)){
+       bloquearMercadoSemSaida(a.mercado.id,Date.now(),PAUSA_MERCADO_SEM_ROTA_MS);
+       log.info('[TITAN/MORPHO-HOT/ROTACAO]',{
+         mercado:a.mercado.id,motivo:'sem caminho DEX executavel no contrato atual',
+         pausaMinutos:PAUSA_MERCADO_SEM_ROTA_MS/60_000,
+         estrategia:'liberar vagas para outros mercados; revalidar depois',
+       });
+     }
+     if(result.status==='inviavel'&&result.motivo.includes('position is healthy'))
+       aguardando.set(chave(a),Date.now()+PAUSA_POSICAO_SAUDAVEL_MS);
+     const semLiquidezDeSaida=primeiroMotivo?.includes('nenhuma rota passou')
+       &&result.motivo.includes('nenhuma rota passou')
+       &&(result.motivo.includes('0x42301c23')
+           ||result.motivo.includes('InsufficientOutputAmount'));
+     if(semLiquidezDeSaida){
+       bloquearMercadoSemSaida(a.mercado.id,Date.now(),10*60_000);
+       aguardando.set(chave(a),Date.now()+10*60_000);
+       log.warn('[TITAN/MORPHO-HOT] Mercado com saida DEX insuficiente; rotacionar.',{
+         mercado:a.mercado.id,motivo:'todos eth_call falharam por output insuficiente',
+         pausaMinutos:10,
+       });
+     }
+     if(primeiroMotivo?.includes('sem pool V3 comprovada')
+       &&result.motivo.includes('sem pool Aerodrome comprovada')){
+       bloquearMercadoSemSaida(a.mercado.id);
+       aguardando.set(chave(a),Date.now()+30*60_000);
+     }
+     log.warn('[TITAN/MORPHO-HOT/TIRO] Posicao cruzada ou proxima sondada com liquidacao integral.',{
+       bloco:block,mercado:a.mercado.id,usuario:a.usuario,
+       via,resultado:result,
+       primeiroV3:primeiroMotivo,
+     });
+     if(['enviada','confirmada','desconhecida'].includes(result.status)){
+       // Reconciliation must happen before any attempt against same target.
+       aguardando.set(chave(a),Date.now()+30*60_000);
+     }
+
+ }catch(e){
+   // No paid submission in this catch path; keep read-only monitoring alive.
+   // Avoid logging exception strings (provider URLs may contain credentials).
+   aguardando.set(chave(a),Date.now()+10_000);
+   log.warn('[TITAN/MORPHO-HOT/PROVA-FALHOU]',{
+     bloco:block,mercado:a.mercado.id,classe:e instanceof Error?e.name:'erro',
+     proximaSondaEmMs:10_000,envioConfirmado:false,
+   });
+ }finally{provaEmCurso=false;}
+}
 let ultimoBloco=0;
 let contagem=0;
 let ultimoLog=0;
@@ -239,64 +310,15 @@ async function verificarBlocoMorphoHot():Promise<void>{
    // Crossed borrowers come first even if another target appeared first
    // in the old snapshot. The one-wallet gate remains unchanged.
    avaliaveis.sort(compararPrioridadeMorphoHot);
-   for(const {a} of avaliaveis){
-     if(emProva>0)break;
-     if((mercadosSemSaida.get(a.mercado.id.toLowerCase())??0)>agora)continue;
-     emProva++;
-     aguardando.set(chave(a),Date.now()+EXCLUIR_TEMP_MS);
-     const {avaliarSaidasMorpho}=await import('./titanMorphoDiretorDeRota');
-     const {via,resultado:result,primeiroMotivo}=await avaliarSaidasMorpho({
-       mercado:a.mercado,usuario:a.usuario,signal:AbortSignal.timeout(20_000),
-       rpcUrl:rpcHotUrl??resolverRpcMorphoHot(process.env),
-     });
-     // Losing the single-signer preflight lock is NOT evidence the borrower
-     // is healthy or economically invalid. Retry on the next block instead
-     // of honoring the provisional 45-second per-position cooldown.
-     if(result.status==='descartada'&&result.motivo.includes('outro preflight Morpho ocupa')){
-       aguardando.delete(chave(a));
-       log.info('[TITAN/MORPHO-HOT/REAGENDAR]',{
-         mercado:a.mercado.id,bloco:block,
-         motivo:'executor ocupado; proximo bloco, nenhum gas gasto',
-       });
-     }
-     // An existent pool is not liquid. If ALL executor sizes reverted from
-     // the canonical DEX output floor, give its market a short cooling period.
-     // The slow radar keeps discovering other users/markets as usual.
-     if(semRotaExecutavelMorpho(via,result.status,result.motivo,primeiroMotivo)){
-       bloquearMercadoSemSaida(a.mercado.id,Date.now(),PAUSA_MERCADO_SEM_ROTA_MS);
-       log.info('[TITAN/MORPHO-HOT/ROTACAO]',{
-         mercado:a.mercado.id,motivo:'sem caminho DEX executavel no contrato atual',
-         pausaMinutos:PAUSA_MERCADO_SEM_ROTA_MS/60_000,
-         estrategia:'liberar vagas para outros mercados; revalidar depois',
-       });
-     }
-     if(result.status==='inviavel'&&result.motivo.includes('position is healthy'))
-       aguardando.set(chave(a),Date.now()+PAUSA_POSICAO_SAUDAVEL_MS);
-     const semLiquidezDeSaida=primeiroMotivo?.includes('nenhuma rota passou')
-       &&result.motivo.includes('nenhuma rota passou')
-       &&(result.motivo.includes('0x42301c23')
-           ||result.motivo.includes('InsufficientOutputAmount'));
-     if(semLiquidezDeSaida){
-       bloquearMercadoSemSaida(a.mercado.id,Date.now(),10*60_000);
-       aguardando.set(chave(a),Date.now()+10*60_000);
-       log.warn('[TITAN/MORPHO-HOT] Mercado com saida DEX insuficiente; rotacionar.',{
-         mercado:a.mercado.id,motivo:'todos eth_call falharam por output insuficiente',
-         pausaMinutos:10,
-       });
-     }
-     if(primeiroMotivo?.includes('sem pool V3 comprovada')
-       &&result.motivo.includes('sem pool Aerodrome comprovada')){
-       bloquearMercadoSemSaida(a.mercado.id);
-       aguardando.set(chave(a),Date.now()+30*60_000);
-     }
-     log.warn('[TITAN/MORPHO-HOT/TIRO] Posicao cruzada ou proxima sondada com liquidacao integral.',{
-       bloco:block,mercado:a.mercado.id,usuario:a.usuario,
-       via,resultado:result,
-       primeiroV3:primeiroMotivo,
-     });
-     if(['enviada','confirmada','desconhecida'].includes(result.status)){
-       // Reconciliation must happen before any attempt against same target.
-       aguardando.set(chave(a),Date.now()+30*60_000);
+   // One signer, one complete proof; new block snapshots run independently
+   // while that proof is waiting on RPCs/DEX route discovery.
+   if(!provaEmCurso){
+     const first=avaliaveis.find(({a})=>
+       (mercadosSemSaida.get(a.mercado.id.toLowerCase())??0)<=agora);
+     if(first){
+       provaEmCurso=true;
+       emProva=1;
+       void executarSondaMorphoHot(first.a,block);
      }
    }
    contagem++;
@@ -304,7 +326,8 @@ async function verificarBlocoMorphoHot():Promise<void>{
      ultimoLog=Date.now();
      log.info('[TITAN/MORPHO-HOT] Bloco processado, gatilho ativo.',{
        bloco:block,mercados:[...new Set(selecionados.map(a=>token(a.mercado.id)))].length,
-       observadas:selecionados.length,validadas,cruzaram,preflights:emProva,
+       observadas:selecionados.length,validadas,cruzaram,preflightsIniciados:emProva,
+       preflightEmCurso:provaEmCurso,
        intervaloMs:INT_MS,via:'Multicall3 no bloco; V3 eth_call antes de assinar',
      });
    }
