@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,priorizarCandidatosMorphoHot} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,priorizarCandidatosMorphoHot,cooldownAposPreflightHot} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
@@ -190,4 +190,16 @@ test('HOT probes the closest risk first rather than the oldest API entry',()=>{
  );
  // The crossed target must immediately re-enter when its cooldown expires.
  assert.equal(priorizarCandidatosMorphoHot([crossed],waiting,block+45_000)[0],crossed);
+});
+
+test('HOT does not lose crossed candidates for 45 seconds while the wallet preflight is busy',()=>{
+ assert.equal(cooldownAposPreflightHot({
+   status:'descartada',motivo:'outro preflight Morpho ocupa a unica carteira',
+ }),2250);
+ assert.equal(cooldownAposPreflightHot({
+   status:'inviavel',motivo:'position is healthy',
+ }),45000);
+ assert.equal(cooldownAposPreflightHot({
+   status:'descartada',motivo:'mercado sem identidade onchain confirmada',
+ }),45000);
 });
