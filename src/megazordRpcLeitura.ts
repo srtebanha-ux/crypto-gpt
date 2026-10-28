@@ -51,7 +51,7 @@ export function criarRpcPreflight({fetcher=fetch,
          // Providers sometimes send HTTP 200 containing temporary RPC errors.
          // Never accept these as valid onchain values: retry the same read
          // briefly, still bounded to three tries before the outer RPC failover.
-         if(attempt===2)throw Error('resposta RPC invalida');
+         if(attempt===2)throw Error('resposta RPC invalida ['+method+']');
          await esperar(400*(attempt+1));
          continue;
        }
