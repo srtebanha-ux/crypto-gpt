@@ -55,3 +55,37 @@ test('readiness never overlaps calls to a rate-limited Base provider',async()=>{
  });
  assert.equal(maximum,1);
 });
+
+
+test('null latest block must recover only through a valid numbered block on each independent RPC',async()=>{
+ const {FalhaLeituraRede}=await import('./megazordPreflight');
+ const {FalhaRpcLeitura}=await import('./megazordRpcLeitura');
+ const calls:string[]=[];
+ const result=await conferirRedeMegazord(env,async(u,m,p)=>{
+   calls.push(u+':'+m+':'+String(p?.[0]??''));
+   if(m==='eth_getBlockByNumber'&&p[0]==='latest')
+     throw new FalhaLeituraRede(u==='rpc-a'?0:1,
+       new FalhaRpcLeitura('null latest','eth_getBlockByNumber','body_invalido',3));
+   if(m==='eth_blockNumber')return '0x66';
+   if(m==='eth_getBlockByNumber'){
+     assert.equal(p[0],'0x65');
+     return {number:'0x65',timestamp:'0x'+Math.floor(Date.now()/1000).toString(16)};
+   }
+   return rpc(u,m);
+ });
+ assert.equal(result.checks[0].block,101);
+ assert.equal(result.checks[1].block,101);
+ assert.equal(calls.filter(x=>x.includes(':eth_blockNumber:')).length,2);
+});
+test('numbered block fallback cannot legalize an old block or a failed RPC',async()=>{
+ const {FalhaLeituraRede}=await import('./megazordPreflight');
+ const {FalhaRpcLeitura}=await import('./megazordRpcLeitura');
+ await assert.rejects(conferirRedeMegazord(env,async(u,m,p)=>{
+   if(m==='eth_getBlockByNumber'&&p[0]==='latest')
+     throw new FalhaLeituraRede(u==='rpc-a'?0:1,
+       new FalhaRpcLeitura('null','eth_getBlockByNumber','resultado_ausente',3));
+   if(m==='eth_blockNumber')return '0x66';
+   if(m==='eth_getBlockByNumber')return {number:'0x65',timestamp:'0x1'};
+   return rpc(u,m);
+ }),/bloco ausente ou antigo/);
+});
