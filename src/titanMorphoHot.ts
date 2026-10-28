@@ -131,10 +131,12 @@ async function executarSondaMorphoHot(a:Alvo,block:number):Promise<void>{
  }catch(e){
    // No paid submission in this catch path; keep read-only monitoring alive.
    // Avoid logging exception strings (provider URLs may contain credentials).
-   aguardando.set(chave(a),Date.now()+10_000);
+   // An exception is not proof that a transaction was NOT broadcast.
+   // Pause this target until journal/nonce reconciliation has completed.
+   aguardando.set(chave(a),Date.now()+30*60_000);
    log.warn('[TITAN/MORPHO-HOT/PROVA-FALHOU]',{
      bloco:block,mercado:a.mercado.id,classe:e instanceof Error?e.name:'erro',
-     proximaSondaEmMs:10_000,envioConfirmado:false,
+     resultado:'desconhecido; consultar diario e recibo antes de nova tentativa',
    });
  }finally{provaEmCurso=false;}
 }
@@ -302,7 +304,17 @@ async function verificarBlocoMorphoHot():Promise<void>{
      if(state.situacao!=='cruzou-estimado'&&state.situacao!=='proxima')continue;
      if(state.distanciaBps!==null)renovarQuenteMorphoPorLeitura(
        a.mercado.id,a.usuario,state.distanciaBps,agora);
-     if(state.situacao==='cruzou-estimado')cruzaram++;
+     if(state.situacao==='cruzou-estimado'){
+       cruzaram++;
+       // Every crossing is recorded before the slow complete liquidation
+       // proof, even if a single-wallet preflight is already in progress.
+       log.warn('[TITAN/MORPHO-HOT/CRUZAMENTO]',{
+         bloco:block,mercado:a.mercado.id,usuario:a.usuario,
+         distanciaBps:state.distanciaBps?.toString()??null,
+         provaJaOcupada:provaEmCurso,
+         regra:'estimativa onchain; nao autoriza envio ou lucro',
+       });
+     }
      if(exigeSondaIntegralMorphoHot(state.situacao,state.distanciaBps,
        aguardando.get(chave(a))??0,agora))
        avaliaveis.push({a,situacao:state.situacao,distanciaBps:state.distanciaBps});
