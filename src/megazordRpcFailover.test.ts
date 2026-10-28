@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {candidatosRpcSecundario,selecionarRpcSecundarioMegazord}
+import {candidatosRpcSecundario,selecionarRpcSecundarioMegazord,selecionarParRpcMegazord}
  from './megazordRpcFailover';
 
 test('tries separate RPC providers in order, never accepts the primary twice',async()=>{
@@ -107,4 +107,39 @@ test('real boot read gate attributes a persistent primary failure once, not to f
   e=>e instanceof Error&&e.message.includes('principal')&&e.message.includes('eth_chainId;jsonrpc_-32005')
    &&!e.message.includes('private')&&!e.message.includes('KEY'));
  assert.equal(calls,3,'no outer 3x4 retry amplification on the broken primary');
+});
+
+
+test('failed primary block read promotes a healthy independent pair, never self-witness',async()=>{
+ const {FalhaLeituraRede}=await import('./megazordPreflight');
+ const {FalhaRpcLeitura}=await import('./megazordRpcLeitura');
+ const env:NodeJS.ProcessEnv={
+  MEGAZORD_RPC_URL:'https://broken.example/private',
+  MEGAZORD_RPC_SECUNDARIO:'https://healthy.example/private',
+  MEGAZORD_RPC_ALTERNATIVOS:'https://witness.example/secret',
+ };
+ const pairs:string[]=[];
+ const result=await selecionarParRpcMegazord(env,async e=>{
+  pairs.push(e.MEGAZORD_RPC_URL+' '+e.MEGAZORD_RPC_SECUNDARIO);
+  if(e.MEGAZORD_RPC_URL?.includes('broken.example'))
+    throw new FalhaLeituraRede(0,new FalhaRpcLeitura('no block','eth_getBlockByNumber','body_invalido',3));
+  assert.equal(e.MEGAZORD_RPC_URL,'https://healthy.example/private');
+  assert.equal(e.MEGAZORD_RPC_SECUNDARIO,'https://witness.example/secret');
+  return {checks:[{rpc:0},{rpc:1}],scope:'verified'};
+ },async()=>{});
+ assert.deepEqual(result,{checks:[{rpc:0},{rpc:1}],scope:'verified'});
+ assert.equal(pairs.length,2,'never retry a rejected primary against every witness');
+ assert.equal(env.MEGAZORD_RPC_URL,'https://healthy.example/private');
+ assert.equal(env.MEGAZORD_RPC_SECUNDARIO,'https://witness.example/secret');
+});
+
+test('primary failover cannot bypass financial nonce disagreement',async()=>{
+ const env:NodeJS.ProcessEnv={MEGAZORD_RPC_URL:'https://broken.example/key',
+  MEGAZORD_RPC_SECUNDARIO:'https://good.example/key'};
+ let calls=0;
+ await assert.rejects(selecionarParRpcMegazord(env,async()=>{
+  calls++;throw Error('RPCs discordam sobre nonce/bloco');
+ },async()=>{}),/invariante financeira divergente/);
+ assert.equal(calls,1);
+ assert.equal(env.MEGAZORD_RPC_URL,'https://broken.example/key');
 });
