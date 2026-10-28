@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import type {MercadoDaApi} from './morphoApi';
 import {registrarQuenteMorpho,resumoQuentesMorpho,
-  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot} from './titanMorphoHot';
+  montarLoteMorphoHot,limparQuentesMorpho,bloquearMercadoSemSaida,renovarQuenteMorphoPorLeitura,resolverRpcMorphoHot,exigeSondaIntegralMorphoHot,semRotaExecutavelMorpho} from './titanMorphoHot';
 import {MORPHO_FLASH_BASE} from './titanPonteMultiHop';
 const block=1_801_000_000_000;
 const marketId='0x'+'99'.repeat(32);
@@ -167,4 +167,28 @@ test('HOT reuses the configured Megazord RPC and avoids public fallback unless n
  assert.equal(resolverRpcMorphoHot({}), 'https://mainnet.base.org');
  assert.equal(resolverRpcMorphoHot({...configured,CACA_MORPHO_V3_RPC_URL:'  '}),
   configured.MEGAZORD_RPC_URL);
+});
+
+test('HOT only spends full liquidation eth_call near threshold, but crossed candidates bypass cooldown',()=>{
+ const now=block+12*60*60_000;
+ assert.equal(exigeSondaIntegralMorphoHot('proxima',249n,0,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('proxima',75n,0,now),true);
+ assert.equal(exigeSondaIntegralMorphoHot('proxima',74n,now+30000,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('cruzou-estimado',-1n,now+90000,now),true);
+ assert.equal(exigeSondaIntegralMorphoHot('segura',10n,0,now),false);
+ assert.equal(exigeSondaIntegralMorphoHot('proxima',null,0,now),false);
+});
+test('HOT classifies only structural no-exit errors for market rotation, not healthy or transient',()=>{
+ assert.equal(semRotaExecutavelMorpho('Uniswap V3','inviavel',
+  'sem rota direta ou multihop comprovada garantia -> divida'),true);
+ assert.equal(semRotaExecutavelMorpho('Uniswap V3','inviavel',
+  'rota_nao_suportada: sem pool direta; executor implantado sem suporte multihop'),true);
+ assert.equal(semRotaExecutavelMorpho('Uniswap V3','inviavel',
+  'nenhuma rota passou no liquidar(): position is healthy'),false);
+ assert.equal(semRotaExecutavelMorpho('Uniswap V3','descartada',
+  'sem rota direta ou multihop comprovada garantia -> divida'),false);
+ assert.equal(semRotaExecutavelMorpho('Aerodrome','inviavel',
+  'sem pool Aerodrome comprovada','nenhuma rota passou no liquidar(): healthy'),false);
+ assert.equal(semRotaExecutavelMorpho('Aerodrome','inviavel',
+  'sem pool Aerodrome comprovada','sem rota direta ou multihop comprovada garantia -> divida'),true);
 });
