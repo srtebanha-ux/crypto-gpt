@@ -169,7 +169,7 @@ test('full boot can pass preliminary read gate but fail the executor read; repor
  }) as typeof fetch});
  f.deps.rede=async e=>await selecionarRpcSecundarioMegazord(e,x=>conferirRedeMegazord(x,rpc),async()=>{}) as Awaited<ReturnType<typeof conferirRedeMegazord>>;
  await assert.rejects(iniciarMegazord(f.env,f.load,f.deps),e=>e instanceof Error
-  &&e.message.includes('fase=rede_pos_contratos')&&e.message.includes('RPC 0 [eth_getCode;jsonrpc_-32602')
+  &&e.message.includes('fase=rede_pos_contratos')&&e.message.includes('preflight requisicao RPC invalida: sem envio')
   &&!e.message.includes('secret'));
  assert.equal(witnessReads,2);assert.equal(executorReads,1);
  assert.notEqual(f.env.CACA_MORPHO_V3_ENVIAR,'1');assert.ok(!f.events.includes('engines'));
