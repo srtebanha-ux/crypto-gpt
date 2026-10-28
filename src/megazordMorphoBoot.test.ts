@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {prepararMorphoMegazord,type DependenciasMorphoBoot} from './megazordMorphoBoot';
+import {checarBytecodeAero} from './megazordAeroRuntimeAudit';
 
 const key='0x'+'11'.repeat(32);
 const owner=new Wallet(key).address;
@@ -164,4 +165,31 @@ test('default V3 still fails closed if onchain V3 executor is missing',async()=>
  const seen:string[]=[];
  await assert.rejects(prepararMorphoMegazord(e,mocked(seen)),/executor Morpho v3 ausente/);
  assert.deepEqual(seen,[]);
+});
+
+test('Aero runtime manifest accepts only compiler-declared immutable address slots',()=>{
+ const owner='0x'+'11'.repeat(20);
+ const vault='0x'+'22'.repeat(20);
+ const morpho='0x'+'33'.repeat(20);
+ const router='0x'+'44'.repeat(20);
+ const factory='0x'+'55'.repeat(20);
+ const expected=[owner,vault,morpho,router,factory];
+ const offsets=[8,44,80,116,152];
+ const bytes=Buffer.alloc(204,0x65);
+ for(const offset of offsets)bytes.fill(0,offset,offset+32);
+ const live=Buffer.from(bytes);
+ offsets.forEach((offset,i)=>{
+   Buffer.from(expected[i]!.slice(2).padStart(64,'0'),'hex').copy(live,offset);
+ });
+ const manifest={version:'0.8.26',runtime:'0x'+bytes.toString('hex'),
+   immutableReferences:Object.fromEntries(offsets.map((offset,i)=>[
+     String(i),[{start:offset,length:32}]]))};
+ assert.equal(checarBytecodeAero('0x'+live.toString('hex'),manifest,expected).ok,true);
+ live[7]=0x44; // unauthorized non-immutable opcode difference
+ assert.equal(checarBytecodeAero('0x'+live.toString('hex'),manifest,expected).ok,false);
+ live[7]=0x65;
+ live[39]=0x44; // unauthorized immutable value
+ assert.equal(checarBytecodeAero('0x'+live.toString('hex'),manifest,expected).ok,false);
+ assert.equal(checarBytecodeAero('0x'+bytes.toString('hex'),
+   {...manifest,version:'0.8.25'},expected).ok,false);
 });
