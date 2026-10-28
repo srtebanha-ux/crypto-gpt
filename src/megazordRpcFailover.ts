@@ -112,6 +112,7 @@ export async function selecionarParRpcMegazord(
    if(primaries.length===4)break;
  }
  let attempted=0;
+ const motivos:string[]=[];
  for(const primary of primaries){
    attempted++;
    const tmp:NodeJS.ProcessEnv={...env,MEGAZORD_RPC_URL:primary};
@@ -127,8 +128,15 @@ export async function selecionarParRpcMegazord(
      // ownership, gas, profitability or other invariant rejection.
      if(!m.startsWith('preflight principal bloqueado:')
        &&!m.startsWith('preflight bloqueado:'))throw error;
+     // Retain sanitized evidence per primary; never emit URLs or upstream bodies.
+     const match=m.match(/^preflight principal bloqueado: RPC 0 \[(eth_[A-Za-z]+);([a-z0-9_-]+);tentativas=\d+\]$/);
+     const category=match?match[1]+'_'+match[2]
+       :m.startsWith('preflight bloqueado:')?'sem_quorum_secundario'
+       :'falha_primario_indeterminada';
+     motivos.push('p'+attempted+'_'+category);
    }
  }
  throw Error('preflight bloqueado: '+attempted+
-   ' primarios independentes indisponiveis para quorum de dois RPCs; sem envio');
+   ' primarios independentes indisponiveis para quorum de dois RPCs; categorias='+
+   motivos.join(',')+'; sem envio');
 }
