@@ -387,7 +387,7 @@ export function recuperarLockOrfaoMegazord(
        throw Error('recuperacao recusada: lock pertence ao processo atual');
    }else{
      try{
-       process.kill(owner.pid,0);
+       process.kill(Number(owner.pid),0);
        throw Error('recuperacao recusada: processo dono do lock ainda ativo');
      }catch(e){
        if((e as NodeJS.ErrnoException).code!=='ESRCH')throw e;
