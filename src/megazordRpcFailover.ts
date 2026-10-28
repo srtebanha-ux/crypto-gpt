@@ -63,11 +63,15 @@ export async function selecionarRpcSecundarioMegazord(
        // The inner transport already exhausted bounded retries. Rotating the
        // secondary cannot repair a primary failure and only multiplies load.
        if(error instanceof FalhaLeituraRede){
+         if([-32600,-32601,-32602].includes(error.detalhe.rpcCode??0))
+           throw Error('preflight requisicao RPC invalida: sem envio');
          if(error.rpcIndex===0)throw Error('preflight principal bloqueado: '+error.message);
          reasons.push('secundario_'+attempted+'_'+error.detalhe.method+'_'+error.detalhe.categoria);
          break;
        }
        const kind=erroRpcSeguro(error);
+       if(kind==='invariante_rejeitada'||kind==='divergencia_nonce_bloco')
+         throw Error('preflight invariante financeira divergente: sem envio');
        reasons.push(kind);
        const retryable=new Set(['http429','http5xx','transporte','resposta_rpc','bloco_antigo','divergencia_nonce_bloco']);
        if(!(retryable.has(kind)||kind.startsWith('resposta_rpc_eth_'))||tentativa===2)break;
