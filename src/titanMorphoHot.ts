@@ -249,6 +249,16 @@ async function verificarBlocoMorphoHot():Promise<void>{
        mercado:a.mercado,usuario:a.usuario,signal:AbortSignal.timeout(20_000),
        rpcUrl:rpcHotUrl??resolverRpcMorphoHot(process.env),
      });
+     // Losing the single-signer preflight lock is NOT evidence the borrower
+     // is healthy or economically invalid. Retry on the next block instead
+     // of honoring the provisional 45-second per-position cooldown.
+     if(result.status==='descartada'&&result.motivo.includes('outro preflight Morpho ocupa')){
+       aguardando.delete(chave(a));
+       log.info('[TITAN/MORPHO-HOT/REAGENDAR]',{
+         mercado:a.mercado.id,bloco:block,
+         motivo:'executor ocupado; proximo bloco, nenhum gas gasto',
+       });
+     }
      // An existent pool is not liquid. If ALL executor sizes reverted from
      // the canonical DEX output floor, give its market a short cooling period.
      // The slow radar keeps discovering other users/markets as usual.
