@@ -60,7 +60,7 @@ test('one provider is serialized while the independent provider remains usable',
 test('JSON-RPC error data is never reproduced in diagnostics',async()=>{
  const rpc=criarRpcPreflight({esperar:async()=>{},fetcher:(async()=>
    new Response(JSON.stringify({error:{message:'private-secret',code:-1}}))) as typeof fetch});
- await assert.rejects(rpc('a','eth_chainId',[]),/^Error: resposta RPC invalida$/);
+ await assert.rejects(rpc('a','eth_chainId',[]),/^Error: resposta RPC invalida \[eth_chainId\]$/);
 });
 
 test('HTTP 200 with temporary JSON-RPC error retries, then requires valid onchain result',async()=>{
