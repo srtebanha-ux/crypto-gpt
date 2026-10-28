@@ -713,7 +713,7 @@ test('Morpho: mercados com LLTV 94,5% e bonus positivo podem entrar na TRIAGEM, 
 test('global health-factor feed uses Morpho-documented schema and Base-only discovery',()=>{
  const q=JSON.parse(consultaRiscoGlobalMorpho()) as {query:string;variables:{chainIds:number[];hfLte:number}};
  assert.deepEqual(q.variables.chainIds,[8453]);
- assert.equal(q.variables.hfLte,1);
+ assert.equal(q.variables.hfLte,1.02);
  assert.equal(JSON.parse(consultaRiscoGlobalMorpho()).variables.first,1000);
  assert.match(q.query,/healthFactor_lte/);
  assert.match(q.query,/orderBy:HealthFactor/);
@@ -783,4 +783,24 @@ test('global risk page cursor persists and wraps without advancing after failure
    assert.equal(restored.obterPaginaRiscoGlobal(3100),1000);
    assert.equal(restored.obterPaginaRiscoGlobal(1200),1000);
  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('risk ranking near HF=1 does not waste the lead on deep bad debt',()=>{
+ const addr=(n:number)=>'0x'+n.toString(16).padStart(40,'0');
+ const m='0x'+'ab'.repeat(32);
+ const factors=[0.10,0.999,1.01,0.8,1.0001,0.998,0.5,1.019];
+ const rows=factors.map((healthFactor,i)=>({
+   healthFactor,market:{marketId:m},user:{address:addr(i+1)}
+ }));
+ const parsed=lerRiscoGlobalMorpho({data:{marketPositions:{
+   pageInfo:{count:rows.length,countTotal:rows.length},items:rows
+ }}});
+ assert.deepEqual(parsed?.candidatos.map(c=>c.healthFactor),
+   [1.0001,0.999,0.998,1.01,1.019,0.8,0.5,0.10]);
+ // Bad index values do not promote risk, and missing HF keeps former fallback.
+ const noHF=lerRiscoGlobalMorpho({data:{marketPositions:{items:[
+   {market:{marketId:m},user:{address:addr(1)}},
+   {market:{marketId:m},user:{address:addr(2)},healthFactor:'NaN'}
+ ]}}});
+ assert.deepEqual(noHF?.candidatos.map(c=>c.usuario),[addr(1),addr(2)]);
 });

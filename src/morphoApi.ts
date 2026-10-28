@@ -771,11 +771,12 @@ export function apiConfereComACorrente(
  * before any paid transaction. The API does not authorize execution.
  * Based on the public Morpho Blue bot's marketPositions schema.
  */
-export type CandidatoGlobalMorpho={mercado:string;usuario:string};
+export type CandidatoGlobalMorpho={mercado:string;usuario:string;healthFactor?:number};
 export function consultaRiscoGlobalMorpho(skip=0):string{
- // Enumerate from the LIQUIDATION EDGE first: ascending health factor used
- // to prioritize deeply insolvent bad debt (often impossible to repay).
- // The durable secondary-page cursor broadens this search every cycle.
+ // Collect index hints on both sides of the liquidation boundary.
+ // Client-side ranking below favors liquidatable debt *near* HF 1,
+ // then nearly liquidatable debt, ahead of deep insolvent bad debt.
+ // All of these are hints, never permission to transact.
  if(!Number.isSafeInteger(skip)||skip<0||skip>1_000_000)
    throw Error('offset do feed de risco Morpho invalido');
  return JSON.stringify({
@@ -783,9 +784,9 @@ export function consultaRiscoGlobalMorpho(skip=0):string{
      marketPositions(
        where:{chainId_in:$chainIds,healthFactor_lte:$hfLte,marketListed:true}
        orderBy:HealthFactor,orderDirection:Desc,first:$first,skip:$skip
-     ){pageInfo{count countTotal}items{market{marketId}user{address}}}
+     ){pageInfo{count countTotal}items{healthFactor market{marketId}user{address}}}
    }`,
-   variables:{chainIds:[8453],hfLte:1,first:1000,skip},
+   variables:{chainIds:[8453],hfLte:1.02,first:1000,skip},
  });
 }
 export function lerRiscoGlobalMorpho(corpo:unknown):
@@ -808,8 +809,23 @@ export function lerRiscoGlobalMorpho(corpo:unknown):
      ||typeof usuario!=='string'||!/^0x[0-9a-f]{40}$/i.test(usuario))continue;
    const key=mercado.toLowerCase()+'|'+usuario.toLowerCase();
    if(seen.has(key))continue;
-   seen.add(key);candidatos.push({mercado:mercado.toLowerCase(),usuario:usuario.toLowerCase()});
+   seen.add(key);
+   const rawHf=item.healthFactor;
+   const hf=typeof rawHf==='number'?rawHf:
+     typeof rawHf==='string'&&rawHf.trim()!==''?Number(rawHf):NaN;
+   candidatos.push({mercado:mercado.toLowerCase(),usuario:usuario.toLowerCase(),
+     ...(Number.isFinite(hf)&&hf>=0&&hf<=1.02?{healthFactor:hf}:{})});
  }
+ // Rank by absolute distance to the liquidation line, not merely HF
+ // ascending/descending. Deep bad debt must not outrank a borrower at 1.0001.
+ // At equal distance, a currently below-line borrower is tested first.
+ // Stable ties retain the API order. Unknown HF remains last.
+ candidatos.sort((a,b)=>{
+   if(a.healthFactor===undefined)return b.healthFactor===undefined?0:1;
+   if(b.healthFactor===undefined)return -1;
+   const da=Math.abs(1-a.healthFactor),db=Math.abs(1-b.healthFactor);
+   return da!==db?da-db:Number(a.healthFactor>1)-Number(b.healthFactor>1);
+ });
  return{candidatos,total:typeof info?.countTotal==='number'?info.countTotal:null};
 }
 
