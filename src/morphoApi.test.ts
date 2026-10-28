@@ -1,3 +1,4 @@
+import {CursoresMorpho} from './morphoCursores';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
@@ -6,7 +7,7 @@ import {
     soOsQuePagam, mercadosParaSondagem, lerIdToMarketParams, lerPosition, lerMarket, sharesParaAtivos,
     apiConfereComACorrente, codificarIdToMarketParams, codificarPosition, codificarMarket,
     consultaDeDevedores, lerDevedores, paraCache, doCache, cursorDeCache, idadeDoIndice, comoLerADescoberta,
-    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,
+    consultaMercadosMorphoComDivida,lerRankingMercadosMorpho,priorizarMercadosDaLista,consultaRiscoGlobalMorpho,lerRiscoGlobalMorpho,
     selecionarMercadosParaDevedores,selecionarDevedoresParaConferir,
     CHAIN_ID_DA_BASE, POR_PAGINA, TETO_DE_PAGINAS, type MercadoDaApi, type TransporteHttp,
 } from './morphoApi';
@@ -707,4 +708,34 @@ test('Morpho: mercados com LLTV 94,5% e bonus positivo podem entrar na TRIAGEM, 
       'nenhuma cotacao da API torna o mercado comprovado na Base');
     assert.equal(mercadosParaSondagem([{...mercados[0]!,lltv:new Decimal(1)}]).length,0);
     assert.equal(mercadosParaSondagem([{...mercados[0]!,bonusPct:null}]).length,0);
+});
+
+test('global health-factor feed uses Morpho-documented schema and Base-only discovery',()=>{
+ const q=JSON.parse(consultaRiscoGlobalMorpho()) as {query:string;variables:{chainIds:number[];hfLte:number}};
+ assert.deepEqual(q.variables.chainIds,[8453]);
+ assert.equal(q.variables.hfLte,1.02);
+ assert.match(q.query,/healthFactor_lte/);
+ assert.match(q.query,/orderBy:HealthFactor/);
+ const market='0x'+'11'.repeat(32),user='0x'+'22'.repeat(20);
+ const parsed=lerRiscoGlobalMorpho({data:{marketPositions:{
+   pageInfo:{count:2,countTotal:5},
+   items:[
+     {market:{marketId:market},user:{address:user}},
+     {market:{marketId:market.toUpperCase().replace('0X','0x')},user:{address:user}}
+   ]
+ }}});
+ assert.deepEqual(parsed?.candidatos,[{mercado:market,usuario:user}]);
+ assert.equal(parsed?.total,5);
+ assert.equal(lerRiscoGlobalMorpho({errors:[{message:'schema changed'}]}),null);
+ assert.equal(lerRiscoGlobalMorpho({data:{marketPositions:{pageInfo:{count:4},items:[]}}}),null);
+});
+test('risk queue gives precedence to critical markets without starving rotation',()=>{
+ const queue=new CursoresMorpho('/tmp/titan-global-risk-test.json');
+ const ids=[...Array(16)].map((_,i)=>'0x'+(i+1).toString(16).padStart(64,'0'));
+ const markets=ids.map(id=>({id}));
+ const got=queue.selecionarMercados(markets,ids.slice(0,8),8,[ids[15]!,ids[14]!,ids[15]!]);
+ assert.deepEqual(got.slice(0,2).map(m=>m.id),[ids[15],ids[14]]);
+ assert.equal(got.length,8);
+ assert.equal(new Set(got.map(m=>m.id)).size,8);
+ assert.ok(got.some(m=>!new Set([ids[14],ids[15]]).has(m.id)));
 });
