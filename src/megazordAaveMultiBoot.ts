@@ -22,7 +22,7 @@ export async function confirmarMultiHopAave(
  const owner=env.MEGAZORD_ENDERECO_PUBLICO??env.CACA_ENDERECO_PUBLICO;
  const rpc=env.MEGAZORD_RPC_URL;
  if(!owner||!rpc)throw Error('Aave Multi-Hop: carteira publica/RPC ausente');
- const provider=makeReader?makeReader(rpc):new JsonRpcProvider(rpc,8453,{staticNetwork:true});
+ const provider=makeReader?makeReader(rpc):new JsonRpcProvider(rpc,8453,{staticNetwork:true,batchMaxCount:1});
  try {
   if((await provider.getNetwork()).chainId!==8453n
      ||await provider.getCode(contrato)==='0x')
